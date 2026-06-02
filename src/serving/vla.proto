@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package vla;
+
+message Image {
+
+  enum Encoding {
+    JPEG       = 0;
+    RGB_U8     = 1;
+    F32_RGB_01 = 2;
+  }
+  Encoding encoding = 1;
+  uint32   height   = 2;
+  uint32   width    = 3;
+  bytes    data     = 4;
+}
+
+message PredictRequest {
+
+  repeated Image images = 1;
+
+  repeated int32 lang_tokens = 2;
+
+  repeated float state = 3;
+
+  repeated float noise = 4;
+
+  uint64 request_id = 5;
+
+  repeated float precomputed_img_emb         = 6;
+  uint32         precomputed_img_emb_n_views = 7;
+
+  repeated uint32 attention_mask = 8;
+}
+
+message PredictResponse {
+  uint64 request_id = 1;
+
+  repeated float action_chunk = 2;
+  uint32         chunk_size   = 3;
+  uint32         action_dim   = 4;
+
+  float latency_ms_total     = 5;
+  float latency_ms_inference = 6;
+  float latency_ms_prefill   = 8;
+  float latency_ms_denoise   = 9;
+  float latency_ms_vision    = 10;
+
+  string error = 7;
+}

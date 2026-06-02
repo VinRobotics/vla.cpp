@@ -1,0 +1,62 @@
+# Flake8 configuration for vla.cpp.
+#
+# The select / ignore lists below describe what the public release
+# considers a real problem vs. a deliberate style choice. They keep the
+# bug-class checks (pyflakes F-codes, syntax E9xx) firing while turning
+# off the codes the codebase uses on purpose:
+#
+#   * Column-aligned tensor-name maps in the GGUF converters
+#     (E211 / E221 / E222 / E241 / E251 / E271 / E272).
+#   * Single-line script idioms (E701 / E702 / E704) and adjacent
+#     blank-line conventions (E301 / E302 / E303 / E305 / E306).
+#   * Long lines (E501): converters carry long tensor names; W505 keeps
+#     a documentation-line cap separately if/when we enable it.
+#   * Lambda assignment (E731) - short ad-hoc helpers in converters.
+#
+# Everything else - including bare excepts, mutable defaults, and all
+# pyflakes (F) findings - is enforced.
+
+[flake8]
+max-line-length = 100
+extend-ignore =
+    W503,  # line break before binary op (Black-compatible, also Knuth-recommended)
+    E203,  # whitespace before ':' - clashes with PEP 8 slicing
+    E211,  # whitespace before '(' - column alignment in converter maps
+    E221,  # multiple spaces before operator - column alignment
+    E222,  # multiple spaces after operator - column alignment
+    E241,  # multiple spaces after comma - column alignment
+    E251,  # unexpected spaces around keyword arg '=' - kw-aligned tables
+    E271,  # multiple spaces after keyword
+    E272,  # multiple spaces before keyword
+    E301,  # expected 1 blank line - common in tightly-packed dataclasses
+    E302,  # expected 2 blank lines - script-style code
+    E303,  # too many blank lines
+    E305,  # expected 2 blank lines after class/function
+    E306,  # expected 1 blank line before a nested def
+    E501,  # line too long - converters carry long tensor names
+    E701,  # multiple statements on one line (colon)
+    E702,  # multiple statements on one line (semicolon)
+    E704,  # statement on same line as def
+    E731,  # do not assign a lambda - acceptable for short helpers
+    E127,  # continuation line over-indented for visual indent
+    E128,  # continuation line under-indented for visual indent
+exclude =
+    third_party,
+    build,
+    build-*,
+    .git,
+    __pycache__,
+    .venv,
+    *_uv,
+    eval/sim/libero/LIBERO,
+    eval/sim/simpler/SimplerEnv,
+    *_pb2.py,
+    *_pb2_grpc.py,
+per-file-ignores =
+    # eval/ scaffolds insert their own dir on sys.path before importing
+    # local packages; E402 (module-level import not at top) is expected.
+    eval/**/*.py:E402
+    examples/**/*.py:E402
+    # Converters insert .gguf-spec submodule paths on sys.path before
+    # importing; E402 is expected there too.
+    scripts/convert_*.py:E402

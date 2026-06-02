@@ -1,0 +1,55 @@
+# Build
+build/
+build-*/
+out/
+cmake-build-*/
+_workdir*
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# Models / data
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.onnx
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-*/
+venv/
+.env
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+
+# Claude
+.claude/settings.local.json
+outputs/
+weights/
+CLAUDE.md
+
+third_party/llama.cpp/
+eval/sim/libero/LIBERO/
+eval/sim/libero/libero_uv/
+eval/sim/simpler/SimplerEnv/
+eval/sim/simpler/simpler_uv/

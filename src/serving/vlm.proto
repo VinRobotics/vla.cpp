@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package vlm_chat;
+
+message Image {
+
+  enum Encoding {
+    JPEG   = 0;
+    RGB_U8 = 1;
+  }
+  Encoding encoding = 1;
+  uint32   width    = 2;
+  uint32   height   = 3;
+  bytes    data     = 4;
+}
+
+message ChatMessage {
+  string role    = 1;
+  string content = 2;
+}
+
+message SamplingParams {
+  float  temperature = 1;
+  float  top_p       = 2;
+  int32  top_k       = 3;
+  int32  max_tokens  = 4;
+  uint64 seed        = 5;
+}
+
+message ChatRequest {
+
+  repeated ChatMessage messages = 1;
+
+  repeated Image images = 2;
+
+  SamplingParams sampling = 3;
+
+  bool stream = 4;
+
+  uint64 request_id = 5;
+}
+
+message ChatResponse {
+  uint64 request_id = 1;
+
+  string text = 2;
+
+  string finish_reason = 3;
+
+  uint32 prompt_tokens     = 4;
+  uint32 completion_tokens = 5;
+
+  float latency_ms_total   = 6;
+  float latency_ms_prefill = 7;
+  float latency_ms_decode  = 8;
+
+  string error = 9;
+}
+
+message ChatStreamDelta {
+  uint64 request_id = 1;
+  string delta      = 2;
+}
+
+message StreamMessage {
+  oneof kind {
+    ChatStreamDelta delta = 1;
+    ChatResponse    final = 2;
+  }
+}

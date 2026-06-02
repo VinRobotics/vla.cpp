@@ -1,0 +1,491 @@
+diff --git a/convert_hf_to_gguf.py b/convert_hf_to_gguf.py
+index 7f4a4018f..6be188287 100755
+--- a/convert_hf_to_gguf.py
++++ b/convert_hf_to_gguf.py
+@@ -7323,6 +7323,32 @@ class Gemma3VisionModel(MmprojModel):
+         return # skip other tensors
+ 
+ 
++# vla.cpp: PaliGemma vision tower + projector (π0). See patches/PATCH.md.
++@ModelBase.register("PaliGemmaForConditionalGeneration")
++class PaliGemmaVisionModel(MmprojModel):
++    def set_gguf_parameters(self):
++        super().set_gguf_parameters()
++        hparams = self.hparams
++        self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.PALIGEMMA)
++        self.gguf_writer.add_vision_attention_layernorm_eps(hparams.get("layer_norm_eps", 1e-6))
++        self.gguf_writer.add_vision_use_gelu(True)
++
++    def tensor_force_quant(self, name, new_name, bid, n_dims):
++        if ".embeddings." in name:
++            return gguf.GGMLQuantizationType.F32
++        return super().tensor_force_quant(name, new_name, bid, n_dims)
++
++    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
++        if name.startswith("multi_modal_projector.") or name.startswith("vision_tower."):
++            if name.startswith("multi_modal_projector.linear."):
++                name = name.replace(
++                    "multi_modal_projector.linear.",
++                    "multi_modal_projector.mm_input_projection.",
++                )
++            yield from super().modify_tensors(data_torch, name, bid)
++        return
++
++
+ class ConformerAudioModel(MmprojModel):
+     _batch_norm_tensors: list[dict[str, Tensor]] | None = None
+ 
+diff --git a/gguf-py/gguf/constants.py b/gguf-py/gguf/constants.py
+index 83ae51ce9..85209b51a 100644
+--- a/gguf-py/gguf/constants.py
++++ b/gguf-py/gguf/constants.py
+@@ -4158,6 +4158,7 @@ class VisionProjectorType:
+     NEMOTRON_V2_VL = "nemotron_v2_vl"
+     HUNYUANOCR     = "hunyuanocr"
+     HUNYUANVL      = "hunyuanvl"
++    PALIGEMMA      = "paligemma"   # vla.cpp
+ 
+ 
+ # Items here are (block size, type size)
+diff --git a/tools/mtmd/clip-graph.h b/tools/mtmd/clip-graph.h
+index d3e7b1ed0..759246612 100644
+--- a/tools/mtmd/clip-graph.h
++++ b/tools/mtmd/clip-graph.h
+@@ -32,6 +32,8 @@ struct clip_graph {
+     float kq_scale; // TODO: maybe move this to hparams
+     const clip_flash_attn_type flash_attn_type;
+ 
++    bool use_bf16_runtime = false;
++    int batch_size = 1;
+     ggml_context_ptr ctx0_ptr;
+     ggml_context * ctx0;
+     ggml_cgraph * gf;
+diff --git a/tools/mtmd/clip-impl.h b/tools/mtmd/clip-impl.h
+index 7d6484eea..7be74331f 100644
+--- a/tools/mtmd/clip-impl.h
++++ b/tools/mtmd/clip-impl.h
+@@ -108,6 +108,7 @@
+ #define TN_MM_INP_NORM     "mm.input_norm.weight"
+ #define TN_MM_INP_NORM_B   "mm.input_norm.bias"
+ #define TN_MM_INP_PROJ     "mm.input_projection.weight" // gemma3
++#define TN_MM_INP_PROJ_B   "mm.input_projection.bias"   // paligemma
+ #define TN_MM_SOFT_EMB_N   "mm.soft_emb_norm.weight"    // gemma3
+ #define TN_MM_PROJECTOR    "mm.model.fc.%s"             // idefics3, deepseekocr
+ #define TN_MM_PATCH_MERGER "mm.patch_merger.%s"         // mistral small 3.1, glm4v
+@@ -304,6 +305,7 @@ enum projector_type {
+     PROJECTOR_TYPE_NEMOTRON_V2_VL,
+     PROJECTOR_TYPE_HUNYUANOCR,
+     PROJECTOR_TYPE_HUNYUANVL,
++    PROJECTOR_TYPE_PALIGEMMA,    // vla.cpp
+     PROJECTOR_TYPE_UNKNOWN,
+ };
+ 
+@@ -351,6 +353,7 @@ static std::map<projector_type, std::string> PROJECTOR_TYPE_NAMES = {
+     { PROJECTOR_TYPE_NEMOTRON_V2_VL, "nemotron_v2_vl"},
+     { PROJECTOR_TYPE_HUNYUANOCR, "hunyuanocr"},
+     { PROJECTOR_TYPE_HUNYUANVL,  "hunyuanvl"},
++    { PROJECTOR_TYPE_PALIGEMMA,  "paligemma"},    // vla.cpp
+ };
+ 
+ static projector_type clip_projector_type_from_string(const std::string & str) {
+diff --git a/tools/mtmd/clip-model.h b/tools/mtmd/clip-model.h
+index bf8031b55..c39f749fb 100644
+--- a/tools/mtmd/clip-model.h
++++ b/tools/mtmd/clip-model.h
+@@ -407,6 +407,8 @@ struct clip_model {
+     ggml_tensor * mm_input_proj_w = nullptr;
+     ggml_tensor * mm_soft_emb_norm_w = nullptr;
+ 
++    ggml_tensor * mm_input_proj_b = nullptr;    // paligemma (vla.cpp)
++
+     // mobilenetv5 for gemma3n
+     std::vector<mobilenetv5_block> mobilenet_blocks;
+     std::vector<int> mobilenet_stage_ends;
+diff --git a/tools/mtmd/clip.cpp b/tools/mtmd/clip.cpp
+index 45e39898d..4c582d52c 100644
+--- a/tools/mtmd/clip.cpp
++++ b/tools/mtmd/clip.cpp
+@@ -162,6 +162,7 @@ struct clip_ctx {
+ 
+     bool debug_output_embeddings = false;
+ 
++    bool use_bf16_runtime = false;
+     clip_ctx(clip_context_params & ctx_params) {
+         flash_attn_type = ctx_params.flash_attn_type;
+         backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+@@ -254,6 +255,13 @@ clip_graph::clip_graph(clip_ctx * ctx, const clip_image_f32 & img) :
+     ctx0_ptr.reset(ggml_init(params));
+     ctx0 = ctx0_ptr.get();
+     gf = ggml_new_graph_custom(ctx0, ctx->max_nodes, false);
++    use_bf16_runtime = ctx->use_bf16_runtime;
++    static bool logged_once = false;
++    if (!logged_once) {
++        LOG_INF("%s: vision-encoder activation precision = %s\n",
++                __func__, use_bf16_runtime ? "BF16 (HF-matched)" : "F32");
++        logged_once = true;
++    }
+ }
+ 
+ ggml_tensor * clip_graph::build_mm(ggml_tensor * w, ggml_tensor * x) const {
+@@ -394,9 +402,15 @@ ggml_tensor * clip_graph::build_vit(
+                     }
+                 }
+ 
+-                Qcur = ggml_reshape_3d(ctx0, Qcur, d_head, n_head, n_pos);
+-                Kcur = ggml_reshape_3d(ctx0, Kcur, d_head, n_head, n_pos);
+-                Vcur = ggml_reshape_3d(ctx0, Vcur, d_head, n_head, n_pos);
++                if (batch_size == 1) {
++                    Qcur = ggml_reshape_3d(ctx0, Qcur, d_head, n_head, n_pos);
++                    Kcur = ggml_reshape_3d(ctx0, Kcur, d_head, n_head, n_pos);
++                    Vcur = ggml_reshape_3d(ctx0, Vcur, d_head, n_head, n_pos);
++                } else {
++                    Qcur = ggml_reshape_4d(ctx0, Qcur, d_head, n_head, n_pos, batch_size);
++                    Kcur = ggml_reshape_4d(ctx0, Kcur, d_head, n_head, n_pos, batch_size);
++                    Vcur = ggml_reshape_4d(ctx0, Vcur, d_head, n_head, n_pos, batch_size);
++                }
+ 
+                 if (norm_per_head) {
+                     if (layer.q_norm) {
+@@ -505,7 +519,11 @@ ggml_tensor * clip_graph::build_vit(
+ ggml_tensor * clip_graph::build_inp() {
+     ggml_tensor * inp_raw = build_inp_raw();
+     ggml_tensor * inp = ggml_conv_2d(ctx0, model.patch_embeddings_0, inp_raw, patch_size, patch_size, 0, 0, 1, 1);
+-    inp = ggml_reshape_2d(ctx0, inp, n_patches, n_embd);
++    if (batch_size == 1) {
++        inp = ggml_reshape_2d(ctx0, inp, n_patches, n_embd);
++    } else {
++        inp = ggml_reshape_3d(ctx0, inp, n_patches, n_embd, batch_size);
++    }
+     inp = ggml_cont(ctx0, ggml_transpose(ctx0, inp));
+     if (model.patch_bias) {
+         inp = ggml_add(ctx0, inp, model.patch_bias);
+@@ -515,7 +533,9 @@ ggml_tensor * clip_graph::build_inp() {
+ }
+ 
+ ggml_tensor * clip_graph::build_inp_raw(int channels) {
+-    ggml_tensor * inp_raw = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, img.nx, img.ny, channels);
++    ggml_tensor * inp_raw = (batch_size == 1)
++        ? ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, img.nx, img.ny, channels)
++        : ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, img.nx, img.ny, channels, batch_size);
+     ggml_set_name(inp_raw, "inp_raw");
+     ggml_set_input(inp_raw);
+     return inp_raw;
+@@ -666,7 +686,11 @@ ggml_tensor * clip_graph::build_attn(
+         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, 0.0f, 0.0f);
+         ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
+ 
+-        cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
++        if (batch_size == 1) {
++            cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
++        } else {
++            cur = ggml_reshape_3d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2], cur->ne[3]);
++        }
+ 
+     } else {
+         ggml_tensor * v = ggml_permute(ctx0, v_cur, 1, 2, 0, 3);
+@@ -680,7 +704,11 @@ ggml_tensor * clip_graph::build_attn(
+ 
+         ggml_tensor * kqv = ggml_mul_mat(ctx0, v, kq);
+         cur = ggml_permute(ctx0, kqv, 0, 2, 1, 3);
+-        cur = ggml_cont_2d(ctx0, cur, cur->ne[0] * cur->ne[1], cur->ne[2] * cur->ne[3]);
++        if (batch_size == 1) {
++            cur = ggml_cont_2d(ctx0, cur, cur->ne[0] * cur->ne[1], cur->ne[2] * cur->ne[3]);
++        } else {
++            cur = ggml_cont_3d(ctx0, cur, cur->ne[0] * cur->ne[1], cur->ne[2], cur->ne[3]);
++        }
+     }
+ 
+     cb(cur, "kqv_out", il);
+@@ -804,35 +832,48 @@ ggml_tensor * clip_graph::build_patch_merge_permute(ggml_tensor * cur, int scale
+     // pad width and height to factor
+     const int64_t pad_width  = CLIP_ALIGN(width,  scale_factor) - width;
+     const int64_t pad_height = CLIP_ALIGN(height, scale_factor) - height;
+-    cur = ggml_reshape_3d(ctx0, cur, n_embd, width, height);
++    if (batch_size == 1) {
++        cur = ggml_reshape_3d(ctx0, cur, n_embd, width, height);
++    } else {
++        cur = ggml_reshape_4d(ctx0, cur, n_embd, width, height, batch_size);
++    }
+     if (pad_width || pad_height) {
+         cur     = ggml_pad(ctx0, cur, 0, pad_width, pad_height, 0);
+         width  += pad_width;
+         height += pad_height;
+     }
+ 
+-    // unshuffle h
+-    cur = ggml_reshape_3d(ctx0, cur, n_embd * scale_factor, width / scale_factor, height);
+-    cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
++    if (batch_size == 1) {
++        cur = ggml_reshape_3d(ctx0, cur, n_embd * scale_factor, width / scale_factor, height);
++        cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
++        cur = ggml_cont_3d(ctx0, cur, n_embd * scale_factor * scale_factor, height / scale_factor, width / scale_factor);
++        cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
+ 
+-    // unshuffle w
+-    cur = ggml_cont_3d(ctx0, cur, n_embd * scale_factor * scale_factor, height / scale_factor, width / scale_factor);
+-    cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
++        cur = ggml_cont_2d(ctx0, cur, cur->ne[0], cur->ne[1] * cur->ne[2]);
++    } else {
++        cur = ggml_reshape_4d(ctx0, cur, n_embd * scale_factor, width / scale_factor, height, batch_size);
++        cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
++        cur = ggml_cont_4d(ctx0, cur, n_embd * scale_factor * scale_factor, height / scale_factor, width / scale_factor, batch_size);
++        cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
+ 
+-    cur = ggml_cont_2d(ctx0, cur, cur->ne[0], cur->ne[1] * cur->ne[2]);
++        cur = ggml_cont_3d(ctx0, cur, cur->ne[0], cur->ne[1] * cur->ne[2], cur->ne[3]);
++    }
+     cb(cur, "pixel_shuffle", -1);
+ 
+     return cur;
+ }
+ 
+ static ggml_cgraph * clip_image_build_graph(clip_ctx * ctx, const clip_image_f32_batch & imgs) {
+-    GGML_ASSERT(imgs.entries.size() == 1 && "n_batch > 1 is not supported");
++    if (ctx->proj_type() != PROJECTOR_TYPE_IDEFICS3) {
++        GGML_ASSERT(imgs.entries.size() == 1 && "n_batch > 1 is not supported");
++    }
+ 
+     const clip_image_f32 & img = *imgs.entries[0];
+     std::unique_ptr<clip_graph> builder;
+ 
+     switch (ctx->proj_type()) {
+         case PROJECTOR_TYPE_GEMMA3:
++        case PROJECTOR_TYPE_PALIGEMMA: // vla.cpp
+         case PROJECTOR_TYPE_IDEFICS3:
+         case PROJECTOR_TYPE_LFM2:
+         case PROJECTOR_TYPE_JANUS_PRO:
+@@ -956,6 +997,7 @@ static ggml_cgraph * clip_image_build_graph(clip_ctx * ctx, const clip_image_f32
+             GGML_ABORT("missing cgraph builder");
+     }
+ 
++    builder->batch_size = static_cast<int>(imgs.entries.size());
+     return builder->build();
+ }
+ 
+@@ -1331,6 +1373,12 @@ struct clip_model_loader {
+                         get_u32(KEY_PROJ_SCALE_FACTOR, hparams.n_merge, false);
+                     } break;
+ 
++                case PROJECTOR_TYPE_PALIGEMMA: // vla.cpp
++                    {
++                        hparams.n_merge = 1;
++                        hparams.image_resize_algo = RESIZE_ALGO_BILINEAR;
++                    } break;
++
+                 case PROJECTOR_TYPE_GEMMA4V:
+                     {
+                         hparams.rope_theta = 100.0f;
+@@ -1932,6 +1980,11 @@ struct clip_model_loader {
+                     model.mm_input_proj_w = get_tensor(TN_MM_INP_PROJ);
+                     model.mm_soft_emb_norm_w = get_tensor(TN_MM_SOFT_EMB_N);
+                 } break;
++            case PROJECTOR_TYPE_PALIGEMMA: // vla.cpp
++                {
++                    model.mm_input_proj_w = get_tensor(TN_MM_INP_PROJ);
++                    model.mm_input_proj_b = get_tensor(TN_MM_INP_PROJ_B, false);
++                } break;
+             case PROJECTOR_TYPE_GEMMA4V:
+                 {
+                     model.mm_input_proj_w = get_tensor(TN_MM_INP_PROJ);
+@@ -2719,6 +2772,14 @@ struct clip_init_result clip_init(const char * fname, struct clip_context_params
+             ctx_vision = new clip_ctx(ctx_params);
+             loader.load_hparams(ctx_vision->model, CLIP_MODALITY_VISION);
+             loader.load_tensors(*ctx_vision);
++            ctx_vision->use_bf16_runtime =
++                ctx_vision->model.proj_type == PROJECTOR_TYPE_IDEFICS3
++                && !ctx_vision->model.layers.empty()
++                && ctx_vision->model.layers[0].o_w
++                && ctx_vision->model.layers[0].o_w->type == GGML_TYPE_BF16;
++            if (const char * env = std::getenv("MTMD_VISION_BF16")) {
++                ctx_vision->use_bf16_runtime = !(env[0] == '0' && env[1] == '\0');
++            }
+             if (ctx_params.warmup) {
+                 loader.warmup(*ctx_vision);
+             }
+@@ -2978,6 +3039,7 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
+                 n_patches = x_patch * y_patch;
+             } break;
+         case PROJECTOR_TYPE_GEMMA3:
++        case PROJECTOR_TYPE_PALIGEMMA: // vla.cpp
+         case PROJECTOR_TYPE_GEMMA4V:
+         case PROJECTOR_TYPE_IDEFICS3:
+         case PROJECTOR_TYPE_INTERNVL:
+@@ -3125,10 +3187,18 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
+     const clip_image_f32_batch & imgs = *imgs_c_ptr;
+     int batch_size = imgs.entries.size();
+ 
+-    // TODO @ngxson : implement batch size > 1 as a loop
+-    //                we don't need true batching support because the cgraph will gonna be big anyway
+-    if (batch_size != 1) {
+-        return false; // only support batch size of 1
++    if (batch_size != 1 && ctx->proj_type() != PROJECTOR_TYPE_IDEFICS3) {
++        return false;
++    }
++    if (batch_size > 1) {
++        const int nx0 = imgs.entries[0]->nx;
++        const int ny0 = imgs.entries[0]->ny;
++        for (int b = 1; b < batch_size; ++b) {
++            if (imgs.entries[b]->nx != nx0 || imgs.entries[b]->ny != ny0) {
++                LOG_ERR("%s: batched encode requires identical (nx, ny) across images\n", __func__);
++                return false;
++            }
++        }
+     }
+ 
+     // if buffers are not allocated, we need to do a warmup run to allocate them
+@@ -3199,21 +3269,18 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
+         // └─────┘ │
+         //   ──────┘ x B
+ 
+-        for (size_t i = 0; i < imgs.entries.size(); i++) {
+-            const int nx = imgs.entries[i]->nx;
+-            const int ny = imgs.entries[i]->ny;
+-            const int n = nx * ny;
+-
+-            for (int b = 0; b < batch_size; b++) {
+-                float * batch_entry = inp_raw.data() + b * (3*n);
+-                for (int y = 0; y < ny; y++) {
+-                    for (int x = 0; x < nx; x++) {
+-                        size_t base_src = 3*(y * nx + x); // idx of the first channel
+-                        size_t base_dst =    y * nx + x;  // idx of the first channel
+-                        batch_entry[      base_dst] = imgs.entries[b]->buf[base_src    ];
+-                        batch_entry[1*n + base_dst] = imgs.entries[b]->buf[base_src + 1];
+-                        batch_entry[2*n + base_dst] = imgs.entries[b]->buf[base_src + 2];
+-                    }
++        for (int b = 0; b < batch_size; ++b) {
++            const int nx = imgs.entries[b]->nx;
++            const int ny = imgs.entries[b]->ny;
++            const int n  = nx * ny;
++            float * dst  = inp_raw.data() + (size_t)b * 3 * n;
++            for (int y = 0; y < ny; y++) {
++                for (int x = 0; x < nx; x++) {
++                    const size_t base_src = 3 * (y * nx + x);
++                    const size_t base_dst =      y * nx + x;
++                    dst[      base_dst] = imgs.entries[b]->buf[base_src    ];
++                    dst[1*n + base_dst] = imgs.entries[b]->buf[base_src + 1];
++                    dst[2*n + base_dst] = imgs.entries[b]->buf[base_src + 2];
+                 }
+             }
+         }
+@@ -3276,6 +3343,29 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
+                 }
+                 set_input_f32("omega", omega);
+             } break;
++        case PROJECTOR_TYPE_IDEFICS3:
++            {
++                const int n = ctx->model.hparams.image_size / patch_size;
++                std::vector<int32_t> positions(pos_h * pos_w);
++                if (ctx->use_bf16_runtime) {
++                    for (int i = 0, id = 0; i < pos_h; i++) {
++                        for (int j = 0; j < pos_w; j++) {
++                            positions[id++] = i * n + j;
++                        }
++                    }
++                } else {
++                    std::vector<int32_t> bucket(n);
++                    for (int i = 0; i < n; i++) {
++                        bucket[i] = i == 0 ? 0 : i - 1;
++                    }
++                    for (int i = 0, id = 0; i < pos_h; i++) {
++                        for (int j = 0; j < pos_w; j++) {
++                            positions[id++] = bucket[i] * n + bucket[j];
++                        }
++                    }
++                }
++                set_input_i32("positions", positions);
++            } break;
+         case PROJECTOR_TYPE_QWEN2VL:
+         case PROJECTOR_TYPE_QWEN3VL:
+         case PROJECTOR_TYPE_GLM4V:
+@@ -3529,8 +3619,8 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
+                 set_input_i32("rel_pos_indices_global", rel_pos_indices_global);
+             } break;
+         case PROJECTOR_TYPE_GEMMA3:
++        case PROJECTOR_TYPE_PALIGEMMA: // vla.cpp
+         case PROJECTOR_TYPE_GEMMA3NV:
+-        case PROJECTOR_TYPE_IDEFICS3:
+         case PROJECTOR_TYPE_INTERNVL:
+         case PROJECTOR_TYPE_NEMOTRON_V2_VL:
+         case PROJECTOR_TYPE_QWEN2A:
+@@ -3812,6 +3902,8 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
+         case PROJECTOR_TYPE_GEMMA3:
+         case PROJECTOR_TYPE_GEMMA3NV:
+             return ctx->model.mm_input_proj_w->ne[0];
++        case PROJECTOR_TYPE_PALIGEMMA: // vla.cpp: ne(vision, text) → output width = ne[1]
++            return ctx->model.mm_input_proj_w->ne[1];
+         case PROJECTOR_TYPE_GEMMA4V:
+             return ctx->model.mm_input_proj_w->ne[1];
+         case PROJECTOR_TYPE_IDEFICS3:
+@@ -3909,6 +4001,26 @@ bool clip_encode_float_image (struct clip_ctx * ctx, int n_threads, float * img,
+     return true;
+ }
+ 
++bool clip_encode_float_images(struct clip_ctx * ctx, int n_threads,
++                              const float * img, int h, int w, int n_images,
++                              float * vec) {
++    if (n_images < 1) {
++        return false;
++    }
++    if (n_images == 1) {
++        return clip_encode_float_image(ctx, n_threads, const_cast<float *>(img), h, w, vec);
++    }
++    clip_image_f32_batch batch;
++    const size_t per_image = (size_t)h * (size_t)w * 3;
++    for (int b = 0; b < n_images; ++b) {
++        clip_image_f32_ptr p(clip_image_f32_init());
++        p->nx = w;
++        p->ny = h;
++        p->buf.assign(img + b * per_image, img + (b + 1) * per_image);
++        batch.entries.push_back(std::move(p));
++    }
++    return clip_image_batch_encode(ctx, n_threads, &batch, vec);
++}
+ //
+ // API used internally with mtmd
+ //
+diff --git a/tools/mtmd/clip.h b/tools/mtmd/clip.h
+index a859b3865..dbe3a438a 100644
+--- a/tools/mtmd/clip.h
++++ b/tools/mtmd/clip.h
+@@ -110,6 +110,9 @@ bool clip_is_llava(const struct clip_ctx * ctx);
+ 
+ bool clip_encode_float_image (struct clip_ctx * ctx, int n_threads, float * img, int h, int w, float * vec);
+ 
++bool clip_encode_float_images(struct clip_ctx * ctx, int n_threads,
++                              const float * img, int h, int w, int n_images,
++                              float * vec);
+ // use by audio input
+ void clip_image_f32_batch_add_mel(struct clip_image_f32_batch * batch, int n_mel, int n_frames, float * mel);
+ 
+diff --git a/tools/mtmd/models/siglip.cpp b/tools/mtmd/models/siglip.cpp
+index 7ef98eed0..890314699 100644
+--- a/tools/mtmd/models/siglip.cpp
++++ b/tools/mtmd/models/siglip.cpp
+@@ -7,6 +7,12 @@ ggml_cgraph * clip_graph_siglip::build() {
+     if (proj_type == PROJECTOR_TYPE_LFM2 || proj_type == PROJECTOR_TYPE_PHI4) {
+         learned_pos_embd = resize_position_embeddings();
+     }
++    if (proj_type == PROJECTOR_TYPE_IDEFICS3) {
++        ggml_tensor * positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_patches);
++        ggml_set_name(positions, "positions");
++        ggml_set_input(positions);
++        learned_pos_embd = ggml_get_rows(ctx0, model.position_embeddings, positions);
++    }
+ 
+     ggml_tensor * cur = build_vit(
+                             inp, n_patches,
+@@ -38,6 +44,14 @@ ggml_cgraph * clip_graph_siglip::build() {
+             ggml_cont(ctx0, ggml_transpose(ctx0, model.mm_input_proj_w)),
+             cur);
+ 
++    } else if (proj_type == PROJECTOR_TYPE_PALIGEMMA) {
++        // vla.cpp: π0's PaliGemma projector - see patches/PATCH.md.
++        cur = ggml_mul_mat(ctx0, model.mm_input_proj_w, cur);
++        if (model.mm_input_proj_b) {
++            cur = ggml_add(ctx0, cur, model.mm_input_proj_b);
++        }
++        cur = ggml_scale(ctx0, cur, 1.0f / sqrtf((float) cur->ne[0]));
++
+     } else if (proj_type == PROJECTOR_TYPE_IDEFICS3) {
+         // pixel_shuffle
+         // https://github.com/huggingface/transformers/blob/0a950e0bbe1ed58d5401a6b547af19f15f0c195e/src/transformers/models/idefics3/modeling_idefics3.py#L578
