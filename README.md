@@ -153,16 +153,13 @@ Each model ships a combined VLA GGUF (LM + action expert + dataset stats + arch 
 
 | Model       | Converted GGUF | Source ckpt | Client `--arch` flag |
 |---|---|---|---|
-| SmolVLA | [`smolvla-libero-bf16`](https://huggingface.co/<your-hf>/smolvla-libero-bf16-gguf) | [link](https://huggingface.co/HuggingFaceVLA/smolvla_libero) | `smolvla` |
-| π0           | [`pi0-libero-finetuned-v044`](https://huggingface.co/<your-hf>/pi0-libero-finetuned-v044-gguf) | [link](https://huggingface.co/lerobot/pi0_libero_finetuned_v044) | `pi0` |
-| BitVLA       | [`bitvla-libero-object`](https://huggingface.co/<your-hf>/bitvla-libero-object-gguf) | [link](https://huggingface.co/hongyuw/ft-bitvla-bitsiglipL-224px-libero_object-bf16) | `bitvla` |
-| Evo-1        | [`evo1-libero`](https://huggingface.co/<your-hf>/evo1-libero-gguf) | [link](https://huggingface.co/MINT-SJTU/Evo1_LIBERO) | `evo1` |
-| Groot-N1.5   | [`gr00t-n1d5-libero-object`](https://huggingface.co/<your-hf>/gr00t-n1d5-libero-object-gguf) | [link](https://huggingface.co/liorbenhorin-nv/groot-libero_object-64_40000) | `gr00t_n1_5` |
-| Groot-N1.6   | [`gr00t-n1d6-libero`](https://huggingface.co/<your-hf>/gr00t-n1d6-libero-gguf) | [link](https://huggingface.co/0xAnkitSingh/GR00T-N1.6-LIBERO) | `gr00t_n1_6` |
-| Groot-N1.7   | [`gr00t-n1d7-libero-object`](https://huggingface.co/<your-hf>/gr00t-n1d7-libero-object-gguf) | [link](https://huggingface.co/nvidia/GR00T-N1.7-LIBERO) | `gr00t_n1_7` |
-| Groot-N1.6-bridge   | [`gr00t-n1d6-bridge-gguf`](https://huggingface.co/<your-hf>/gr00t-n1d6-bridge-gguf) | [link](https://huggingface.co/nvidia/GR00T-N1.6-bridge) | `gr00t_n1_6` |
+| SmolVLA      | [`smolvla-libero`](https://huggingface.co/vrfai/smolvla-libero-gguf) | [link](https://huggingface.co/HuggingFaceVLA/smolvla_libero) | `smolvla` |
+| π0           | [`pi0-libero`](https://huggingface.co/vrfai/pi0-libero-finetuned-v044-gguf) | [link](https://huggingface.co/lerobot/pi0_libero_finetuned_v044) | `pi0` |
+| BitVLA       | [`bitvla-libero`](https://huggingface.co/vrfai/bitvla-libero-gguf) | [link](https://huggingface.co/hongyuw/ft-bitvla-bitsiglipL-224px-libero_object-bf16) | `bitvla` |
+| Evo-1        | [`evo1-libero`](https://huggingface.co/vrfai/evo1-libero-gguf) | [link](https://huggingface.co/MINT-SJTU/Evo1_LIBERO) | `evo1` |
+| Groot-N1.7   | [`gr00tn1d7-libero`](https://huggingface.co/vrfai/gr00tn1d7-libero-gguf) | [link](https://huggingface.co/nvidia/GR00T-N1.7-LIBERO) | `gr00t_n1_7` |
 
-If you would rather convert a HuggingFace safetensors checkpoint yourself, [`scripts/`](scripts/) provides per-arch GGUF converters. Set up a venv for converter by:
+`vla.cpp` also supports `gr00t_n1_5` and `gr00t_n1_6`. If you would rather convert a HuggingFace safetensors checkpoint yourself, [`scripts/`](scripts/) provides per-arch GGUF converters. Set up a venv for converter by:
 
 ```bash
 # Assume third_party/llama.cpp has been cloned and patched
