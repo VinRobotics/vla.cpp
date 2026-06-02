@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE.md)
 [![Built on llama.cpp](https://img.shields.io/badge/built%20on-llama.cpp-lightgrey)](https://github.com/ggml-org/llama.cpp)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)
-[![Models on HF](https://img.shields.io/badge/%F0%9F%A4%97%20models-Hugging%20Face-yellow)](https://huggingface.co/Vinrobotics)
+[![Models on HF](https://img.shields.io/badge/%F0%9F%A4%97%20models-Hugging%20Face-yellow)](https://huggingface.co/vrfai)
 
 An efficient C++ inference engine for **Vision-Language-Action (VLA) models**, built on top of [`llama.cpp`](https://github.com/ggml-org/llama.cpp).
 It brings today's open VLA policies - SmolVLA, π0, BitVLA, Evo-1, and GR00T N1.5/1.6/1.7 - under one runtime, packaging each as a single self-contained GGUF that needs no Python or PyTorch at inference time.
