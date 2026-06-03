@@ -32,7 +32,7 @@ LLAMA_DIR="$ROOT/third_party/llama.cpp"
 LLAMA_URL="https://github.com/ggml-org/llama.cpp.git"
 LLAMA_TAG="b9016"
 PATCH="$ROOT/patches/llama.cpp-vla.patch"
-PATCH_SHA256_EXPECTED="6210a07bc756ed560e692d5c8c42c4136e715274359fa67826e4722655931758"
+PATCH_SHA256_EXPECTED="6fc133c323caf30f9213d774fb8941f95b504a5a34c7c25397bfa03ef4817c67"
 
 [[ -f "$PATCH" ]] || { echo "patch not found: $PATCH" >&2; exit 1; }
 
