@@ -21,6 +21,9 @@
 #ifdef GGML_USE_CUDA
 #include "ggml-cuda.h"
 #endif
+#ifdef GGML_USE_METAL
+#include "ggml-metal.h"
+#endif
 #include "gguf.h"
 
 #include <chrono>
@@ -156,6 +159,7 @@ struct Evo1ModelArch : public ModelArchBase {
     std::string           gguf_path;
     ggml_backend_t        backend     = nullptr;
     bool                  is_cuda     = false;
+    bool                  is_gpu      = false;
     int                   n_threads   = 4;
     ggml_context *        ctx_weights = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
@@ -378,8 +382,12 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
 
 #ifdef GGML_USE_CUDA
     m->backend = ggml_backend_cuda_init(0);
-    if (m->backend) { m->is_cuda = true; std::printf("vla(evo1): backend = CUDA (device 0)\n"); }
+    if (m->backend) { m->is_cuda = true; m->is_gpu = true; std::printf("vla(evo1): backend = CUDA (device 0)\n"); }
     else            std::fprintf(stderr, "vla(evo1): ggml_backend_cuda_init failed; falling back to CPU\n");
+#elif defined(GGML_USE_METAL)
+    m->backend = ggml_backend_metal_init();
+    if (m->backend) { m->is_gpu = true; std::printf("vla(evo1): backend = Metal\n"); }
+    else            std::fprintf(stderr, "vla(evo1): ggml_backend_metal_init failed; falling back to CPU\n");
 #endif
     if (!m->backend) {
         m->backend = ggml_backend_cpu_init();

@@ -56,4 +56,11 @@ SmolVLA (libero, `mmproj` + 878 MiB BF16 weights), **Apple M4**, steady state:
 | **total/req**|  ~35,250 ms  |         **~324 ms** |
 
 ≈ **108× faster** end-to-end. First request is ~671 ms (Metal pipeline warmup),
-then it settles to ~321–328 ms/req. Raw server log:
+then it settles to ~321–328 ms/req.
+
+### libero_object (10 episodes, Apple M4)
+
+| Model       | SR  | Client/step | Server/step                          |
+|-------------|----:|------------:|--------------------------------------|
+| SmolVLA     | 0.7 |     888 ms  | 324 ms (181 vision + 141 inf + 2)    |
+| Gr00t-n1.7  | 1.0 |     755 ms  | 600 ms (185 vision + 405 inf + 10)   |
