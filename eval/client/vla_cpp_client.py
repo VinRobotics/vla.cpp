@@ -40,6 +40,9 @@ ARCH_PRESETS = {
                 "trust_remote_code": True, "use_fast_tokenizer": False},
 
     "bitvla":  {"image_size": 224, "tokenizer": "khanhnd61/bitvla-libero-object-gguf", "max_state_dim": 32},
+    "vla_adapter": {"image_size": 224,
+                    "tokenizer": "khanhnd61/vla-adapter-libero-object-pro",
+                    "max_state_dim": 8},
 
     "gr00t_n1_7": {"image_size": 256, "tokenizer": "nvidia/Cosmos-Reason2-2B", "max_state_dim": 132},
 
@@ -62,6 +65,12 @@ BITVLA_N_VIEWS            = 2
 BITVLA_IMAGE_PAD_TOKEN    = "<|image_pad|>"
 BITVLA_PROPRIO_PAD_TOKEN  = "<proprio_pad>"
 BITVLA_USER_PROMPT_TPL    = "What action should the robot take to {instruction}?"
+VLA_ADAPTER_N_VIEWS       = 2
+VLA_ADAPTER_PROMPT_TPL    = (
+    "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful "
+    "assistant.<|im_end|>\n<|im_start|>user\nWhat action should the robot take to "
+    "{instruction}?<|im_end|>\n<|im_start|>assistant\n"
+)
 
 def _load_pb():
 
@@ -385,6 +394,8 @@ class VlaCppClient:
         if not self._action_queue:
             if self.arch == "bitvla":
                 chunk = self._predict_chunk_bitvla(observations)
+            elif self.arch == "vla_adapter":
+                chunk = self._predict_chunk_vla_adapter(observations)
             else:
                 chunk = self._predict_chunk(observations)
             for row in chunk[: self.n_action_steps, : self.real_action_dim]:
@@ -623,6 +634,67 @@ class VlaCppClient:
         chunk[..., -1] = np.sign(2.0 * chunk[..., -1] - 1.0)
         chunk[..., -1] *= -1.0
         return chunk
+
+    def _predict_chunk_vla_adapter(self, observations: dict[str, Any]) -> np.ndarray:
+        images_u8: list[np.ndarray] = []
+        for key in self.image_keys[:VLA_ADAPTER_N_VIEWS]:
+            if key not in observations:
+                raise KeyError(f"image key '{key}' missing; got {list(observations.keys())}")
+            img = observations[key]
+            if isinstance(img, torch.Tensor):
+                img = img.numpy()
+            img = np.asarray(img, dtype=np.float32)
+            if img.ndim != 3 or img.shape[0] != 3:
+                raise ValueError(f"{key}: expected CHW float [3, H, W], got {img.shape}")
+            img_u8 = np.clip(np.transpose(img, (1, 2, 0)) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+            if img_u8.shape[0] != self.image_size or img_u8.shape[1] != self.image_size:
+                img_u8 = np.array(Image.fromarray(img_u8, mode="RGB").resize(
+                    (self.image_size, self.image_size), resample=Image.LANCZOS), dtype=np.uint8)
+            h, w = img_u8.shape[:2]
+            s = 0.9 ** 0.5
+            new_h, new_w = int(round(h * s)), int(round(w * s))
+            off_h, off_w = (h - new_h) // 2, (w - new_w) // 2
+            cropped = img_u8[off_h:off_h + new_h, off_w:off_w + new_w]
+            img_u8 = np.array(Image.fromarray(cropped, mode="RGB").resize(
+                (w, h), resample=Image.BILINEAR), dtype=np.uint8)
+            images_u8.append(np.ascontiguousarray(img_u8, dtype=np.uint8))
+
+        st = observations["observation.state"]
+        if isinstance(st, torch.Tensor):
+            st = st.numpy()
+        st = np.asarray(st, dtype=np.float32).reshape(-1)[:8]
+
+        task = observations.get("task", "")
+        if isinstance(task, bytes):
+            task = task.decode()
+        prompt = VLA_ADAPTER_PROMPT_TPL.format(instruction=task.lower())
+        lang_ids = self.tok(prompt, add_special_tokens=False)["input_ids"]
+
+        req = self.pb.PredictRequest()
+        req.request_id = self._step
+        self._step += 1
+        for img in images_u8:
+            ip = req.images.add()
+            ip.encoding = self.pb.Image.RGB_U8
+            ip.height = img.shape[0]
+            ip.width = img.shape[1]
+            ip.data = img.tobytes()
+        req.lang_tokens.extend(int(t) for t in lang_ids)
+        req.state.extend(float(x) for x in st)
+
+        self.sock.send(req.SerializeToString())
+        resp = self.pb.PredictResponse()
+        resp.ParseFromString(self.sock.recv())
+        if resp.error:
+            raise RuntimeError(f"vla-server error: {resp.error}")
+        self._last_response = resp
+
+        chunk = (np.array(resp.action_chunk, dtype=np.float32)
+                   .reshape(resp.chunk_size, resp.action_dim))
+        chunk[..., -1] = np.sign(2.0 * chunk[..., -1] - 1.0)
+        chunk[..., -1] *= -1.0
+        return chunk
+
 
     _GR00T_IMG_PAD_TOKEN  = "<|image_pad|>"
     _GR00T_IMG_PAD_ID     = 151655

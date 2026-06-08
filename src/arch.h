@@ -47,6 +47,7 @@ enum class Arch {
     GR00T_N1_6, ///< NVIDIA Isaac GR00T N1.6 (Eagle Block-2A + DiT).
     GR00T_N1_7, ///< NVIDIA Isaac GR00T N1.7 (Qwen3 backbone + DiT).
     BITVLA,     ///< Microsoft BitVLA (1.58-bit ternary LM/ViT).
+    VLA_ADAPTER,///< OpenHelix VLA-Adapter DINOv2 + SigLIP + Bridge-Attention.
 };
 
 /**
@@ -138,6 +139,14 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
 std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                                              const std::string& ckpt_path,
                                              const std::string& config_path);
+
+/**
+ * @brief Build a VLA-Adapter model. Vision is baked into @p ckpt_path.
+ * @copydetails smolvla_create
+ */
+std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path,
+                                                  const std::string& ckpt_path,
+                                                  const std::string& config_path);
 
 /**
  * @brief Inspect a GGUF and identify the architecture tag.
