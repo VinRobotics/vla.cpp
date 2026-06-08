@@ -63,4 +63,5 @@ then it settles to ~321–328 ms/req.
 | Model       | SR  | Client/step | Server/step                          |
 |-------------|----:|------------:|--------------------------------------|
 | SmolVLA     | 0.7 |     888 ms  | 324 ms (181 vision + 141 inf + 2)    |
+| Pi0         | 0.8 |    1135 ms  | 1129 ms (922 vision + 200 inf + 7)   |
 | Gr00t-n1.7  | 1.0 |     755 ms  | 600 ms (185 vision + 405 inf + 10)   |

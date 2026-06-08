@@ -7,7 +7,7 @@
 
 An efficient C++ inference engine for **Vision-Language-Action (VLA) models**, built on top of [`llama.cpp`](https://github.com/ggml-org/llama.cpp).
 It brings today's open VLA policies - SmolVLA, π0, BitVLA, Evo-1, and GR00T N1.5/1.6/1.7 - under one runtime, packaging each as a single self-contained GGUF that needs no Python or PyTorch at inference time.
-The binary can drive robots across CPU or CUDA, scaling from consumer GPUs down to the Jetson-class boards.
+The binary can drive robots across **CPU**, **Apple Silicon**, or **CUDA**, scaling from consumer GPUs down to the Jetson-class boards.
 
 ## Build the server
 
@@ -61,6 +61,8 @@ If system cannot detect CUDA, declare CUDA explicitly in environment variables
 export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
+
+On Apple Silicon (e.g. Mac Mini M4), Metal is enabled by default and runs both the transformer and vision tower on the GPU. See [docs/backend/metal.md](docs/backend/metal.md) for building `vla.cpp` on macOS.
 
 ## Install simulators
 
