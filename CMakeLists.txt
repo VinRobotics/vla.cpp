@@ -106,7 +106,7 @@ target_include_directories(vla-server PRIVATE
 )
 target_link_libraries(vla-server PRIVATE
     vla_core
-    ${Protobuf_LIBRARIES}
+    protobuf::libprotobuf
     PkgConfig::ZeroMQ
 )
 
@@ -134,6 +134,6 @@ target_include_directories(vlm-server PRIVATE
 )
 target_link_libraries(vlm-server PRIVATE
     vlm_core
-    ${Protobuf_LIBRARIES}
+    protobuf::libprotobuf
     PkgConfig::ZeroMQ
 )
