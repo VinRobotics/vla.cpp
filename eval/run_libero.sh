@@ -28,7 +28,7 @@ usage() {
 Usage: $(basename "$0") -i <MODELS_ROOT> [-o <OUTPUT_ROOT>] [-n <N_EPISODES>] [-m <MODEL>]
 
   -i MODELS_ROOT   directory holding the per-model GGUF folders
-                   (e.g. /home/khanh/data/khanhnd61) [required]
+                   (e.g. $HOME/data/vrfai) [required]
   -o OUTPUT_ROOT   destination for client outputs + server logs
                    (default: ${REPO_ROOT}/outputs/libero_object_sweep)
   -n N_EPISODES    episodes per task-id (default: 1)

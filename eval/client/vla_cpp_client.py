@@ -39,7 +39,7 @@ ARCH_PRESETS = {
     "evo1":    {"image_size": 448, "tokenizer": "OpenGVLab/InternVL3-1B", "max_state_dim": 24,
                 "trust_remote_code": True, "use_fast_tokenizer": False},
 
-    "bitvla":  {"image_size": 224, "tokenizer": "khanhnd61/bitvla-libero-object-gguf", "max_state_dim": 32},
+    "bitvla":  {"image_size": 224, "tokenizer": "hongyuw/ft-bitvla-bitsiglipL-224px-libero_object-bf16", "max_state_dim": 32},
 
     "gr00t_n1_7": {"image_size": 256, "tokenizer": "nvidia/Cosmos-Reason2-2B", "max_state_dim": 132},
 
