@@ -21,9 +21,6 @@
 #ifdef GGML_USE_CUDA
 #include "ggml-cuda.h"
 #endif
-#ifdef GGML_USE_METAL
-#include "ggml-metal.h"
-#endif
 #include "gguf.h"
 
 #include <chrono>
@@ -135,7 +132,6 @@ struct Gr00tN1d6ModelArch : public ModelArchBase {
     std::string           gguf_path;
     ggml_backend_t        backend     = nullptr;
     bool                  is_cuda     = false;
-    bool                  is_gpu      = false;
     int                   n_threads   = 4;
     ggml_context *        ctx_weights = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
@@ -368,7 +364,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
                                                  const std::string& ckpt_path,
                                                  const std::string& ) {
     if (!mmproj_path.empty())
-        std::printf("vla(gr00tn1d6): note — mmproj '%s' is ignored (the vision tower is bundled in the combined GGUF)\n", mmproj_path.c_str());
+        std::printf("vla(gr00tn1d6): note - mmproj '%s' is ignored (the vision tower is bundled in the combined GGUF)\n", mmproj_path.c_str());
 
     auto m = std::make_unique<Gr00tN1d6ModelArch>();
     m->gguf_path   = ckpt_path;
@@ -389,12 +385,8 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
 
 #ifdef GGML_USE_CUDA
     m->backend = ggml_backend_cuda_init(0);
-    if (m->backend) { m->is_cuda = true; m->is_gpu = true; std::printf("vla(gr00tn1d6): backend = CUDA (device 0)\n"); }
+    if (m->backend) { m->is_cuda = true; std::printf("vla(gr00tn1d6): backend = CUDA (device 0)\n"); }
     else            std::fprintf(stderr, "vla(gr00tn1d6): ggml_backend_cuda_init failed; falling back to CPU\n");
-#elif defined(GGML_USE_METAL)
-    m->backend = ggml_backend_metal_init();
-    if (m->backend) { m->is_gpu = true; std::printf("vla(gr00tn1d6): backend = Metal\n"); }
-    else            std::fprintf(stderr, "vla(gr00tn1d6): ggml_backend_metal_init failed; falling back to CPU\n");
 #endif
     if (!m->backend) {
         m->backend = ggml_backend_cpu_init();
@@ -481,7 +473,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
         }
         ggml_backend_tensor_set(t, bytes.data(), 0, bytes.size());
     }
-    std::printf("vla(gr00tn1d6): weights resident in %.2f GiB (%s) — incl. SigLIP2 vision tower; embodiment id %lld\n",
+    std::printf("vla(gr00tn1d6): weights resident in %.2f GiB (%s) - incl. SigLIP2 vision tower; embodiment id %lld\n",
                 ggml_backend_buffer_get_size(m->weight_buf) / (1024.0 * 1024.0 * 1024.0), m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16", (long long) m->embodiment_id);
     return m;
 }
