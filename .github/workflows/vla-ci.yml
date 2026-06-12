@@ -1,0 +1,63 @@
+# Cross-platform VLA regression CI.
+# Fires when a PR from `dev` targets `main`. Runs on the self-hosted runner
+# labelled `vla-ci-orchestrator` (register your orchestrator host with that
+# label - the actual hostname stays out of the repo, in ci/config/hosts.env).
+# Every platform is a remote server: the orchestrator drives the LIBERO client
+# and SSHes out to the rtx3060 / orin / m4 servers to build + serve there.
+name: vla-ci
+
+on:
+  pull_request:
+    branches: [main]
+
+# All three jobs use the single orchestrator runner (it drives every client and
+# SSHes out to the servers), so serialise them to avoid host contention.
+concurrency:
+  group: vla-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rtx3060:
+    # Only PRs whose source branch is `dev`.
+    if: github.head_ref == 'dev'
+    runs-on: [self-hosted, vla-ci-orchestrator]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sweep + gate (rtx3060)
+        run: bash ci/orchestrate.sh rtx3060
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-rtx3060
+          path: outputs/ci/rtx3060/
+
+  orin:
+    if: github.head_ref == 'dev'
+    needs: rtx3060
+    runs-on: [self-hosted, vla-ci-orchestrator]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sweep + gate (orin)
+        run: bash ci/orchestrate.sh orin
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-orin
+          path: outputs/ci/orin/
+
+  m4:
+    if: github.head_ref == 'dev'
+    needs: orin
+    runs-on: [self-hosted, vla-ci-orchestrator]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sweep + gate (m4)
+        run: bash ci/orchestrate.sh m4
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-m4
+          path: outputs/ci/m4/

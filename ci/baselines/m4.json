@@ -1,0 +1,13 @@
+{
+  "platform": "m4",
+  "source": "docs/backend/metal.md",
+  "note": "Apple M4 (Metal). Latency = server/step ms (per vla-server call). NO memory baseline exists for the M4, and macOS has no /proc or nvidia-smi - server memory is recorded best-effort (RSS + system-used) but NOT gated (mem_metric=null).",
+  "tolerance": 1.10,
+  "latency_metric": "server_total_ms",
+  "mem_metric": null,
+  "models": {
+    "smolvla":    {"server_total_ms": 324.0,  "client_call_ms": 888.0,  "sr_reported": 0.700},
+    "pi0":        {"server_total_ms": 1129.0, "client_call_ms": 1135.0, "sr_reported": 0.800},
+    "gr00t_n1_7": {"server_total_ms": 600.0,  "client_call_ms": 755.0,  "sr_reported": 1.000}
+  }
+}
