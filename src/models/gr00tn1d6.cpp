@@ -229,19 +229,26 @@ ggml_tensor * build_qwen3_layer(ggml_context * C, const Gr00tN1d6ModelArch & m, 
     return ggml_add(C, h_attn, ggml_mul_mat(C, w.Wdown, ggml_mul(C, gate, up)));
 }
 
+void dit_kv(ggml_context * C, const Gr00tN1d6ModelArch & m, const DitLayerW & w, ggml_tensor * kv,
+            ggml_tensor ** K_out, ggml_tensor ** V_out) {
+    const int64_t hd = m.dit_head_dim, heads = m.dit_heads, Tkv = kv->ne[1];
+    ggml_tensor * k = ggml_add(C, ggml_mul_mat(C, w.Wk, kv), w.bk);
+    ggml_tensor * v = ggml_add(C, ggml_mul_mat(C, w.Wv, kv), w.bv);
+    *K_out = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, hd, heads, Tkv), 0, 2, 1, 3));
+    *V_out = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, heads, Tkv), 1, 2, 0, 3));
+}
+
 ggml_tensor * build_dit_block(ggml_context * C, const Gr00tN1d6ModelArch & m, const DitLayerW & w,
-                              ggml_tensor * h, ggml_tensor * temb, ggml_tensor * enc ) {
+                              ggml_tensor * h, ggml_tensor * temb, ggml_tensor * enc ,
+                              ggml_tensor * K_pre = nullptr, ggml_tensor * V_pre = nullptr) {
     const int64_t hd = m.dit_head_dim, heads = m.dit_heads, dim = m.dit_hidden, Tk = h->ne[1];
     const float scale = 1.0f / std::sqrt((float) hd);
     ggml_tensor * n = adaln(C, h, temb, w.adaln_w, w.adaln_b, dim, m.ln_eps);
-    ggml_tensor * kv = enc ? enc : n;
-    const int64_t Tkv = kv->ne[1];
     ggml_tensor * q = ggml_add(C, ggml_mul_mat(C, w.Wq, n),  w.bq);
-    ggml_tensor * k = ggml_add(C, ggml_mul_mat(C, w.Wk, kv), w.bk);
-    ggml_tensor * v = ggml_add(C, ggml_mul_mat(C, w.Wv, kv), w.bv);
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, hd, heads, Tk),  0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, hd, heads, Tkv), 0, 2, 1, 3));
-    ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, heads, Tkv), 1, 2, 0, 3));
+    ggml_tensor * K, * V;
+    if (K_pre) { K = K_pre; V = V_pre; }
+    else       { dit_kv(C, m, w, enc ? enc : n, &K, &V); }
     ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
     ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
     ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), dim, Tk);
@@ -357,7 +364,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
                                                  const std::string& ckpt_path,
                                                  const std::string& ) {
     if (!mmproj_path.empty())
-        std::printf("vla(gr00tn1d6): note — mmproj '%s' is ignored (the vision tower is bundled in the combined GGUF)\n", mmproj_path.c_str());
+        std::printf("vla(gr00tn1d6): note - mmproj '%s' is ignored (the vision tower is bundled in the combined GGUF)\n", mmproj_path.c_str());
 
     auto m = std::make_unique<Gr00tN1d6ModelArch>();
     m->gguf_path   = ckpt_path;
@@ -466,7 +473,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
         }
         ggml_backend_tensor_set(t, bytes.data(), 0, bytes.size());
     }
-    std::printf("vla(gr00tn1d6): weights resident in %.2f GiB (%s) — incl. SigLIP2 vision tower; embodiment id %lld\n",
+    std::printf("vla(gr00tn1d6): weights resident in %.2f GiB (%s) - incl. SigLIP2 vision tower; embodiment id %lld\n",
                 ggml_backend_buffer_get_size(m->weight_buf) / (1024.0 * 1024.0 * 1024.0), m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16", (long long) m->embodiment_id);
     return m;
 }
@@ -626,6 +633,13 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
 
     const float dt = 1.0f / (float) num_steps;
     const int64_t every2 = 2 * attend_text_every_n;
+
+    std::vector<ggml_tensor *> Kc(dit_layers, nullptr), Vc(dit_layers, nullptr);
+    for (int64_t i = 0; i < dit_layers; ++i) {
+        if (dit_interleave && (i % 2 == 1)) continue;
+        ggml_tensor * enc = (i % every2 == 0) ? vl_txt : vl_img;
+        dit_kv(C, *this, dit[i], enc, &Kc[i], &Vc[i]);
+    }
     ggml_tensor * actions = t_x0;
     for (int64_t s = 0; s < num_steps; ++s) {
 
@@ -643,7 +657,7 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
             if (dit_interleave && (i % 2 == 1)) enc = nullptr;
             else if (i % every2 == 0)           enc = vl_txt;
             else                                enc = vl_img;
-            hh = build_dit_block(C, *this, dit[i], hh, temb, enc);
+            hh = build_dit_block(C, *this, dit[i], hh, temb, enc, Kc[i], Vc[i]);
         }
 
         ggml_tensor * po = ggml_add(C, ggml_mul_mat(C, po1W, ggml_silu(C, temb)), po1b);
