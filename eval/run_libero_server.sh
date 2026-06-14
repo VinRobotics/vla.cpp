@@ -36,7 +36,7 @@ Usage: $(basename "$0") -m MODEL [-i MODELS_ROOT] [-a BIND_ADDR] [-o LOG_DIR] [-
 
   -m MODEL         pi0 | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7  [required]
   -i MODELS_ROOT   dir holding the per-model GGUF folders
-                   (default: /home/khanh/data/khanhnd61)
+                   (default: $HOME/data/vrfai)
   -a BIND_ADDR     ZMQ bind address (default: tcp://*:5555)
                    accepts a port, *:port, host:port, or a full tcp:// URL.
                    Use tcp://*:PORT (not localhost) so the remote client can reach it.
@@ -49,7 +49,7 @@ Env overrides: BIND_ADDR, SERVER_BIN, VLA_GR00T_BF16_WEIGHTS, VLA_GR00T_EMBODIME
 EOF
 }
 
-MODELS_ROOT="/home/khanh/data/khanhnd61"
+MODELS_ROOT="$HOME/data/vrfai"
 MODEL=""
 BIND_ADDR="${BIND_ADDR:-tcp://*:5555}"
 LOG_DIR=""
