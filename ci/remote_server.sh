@@ -17,11 +17,12 @@ REPO_ROOT="$(cd "${CI_DIR}/.." && pwd)"
 source "${CI_DIR}/lib/common.sh"
 source "${CI_DIR}/config/matrix.env"
 
-ARCH=""; MODELS_ROOT=""; BIND="5555"; LOG_DIR=""; PIDFILE=""
+ARCH=""; MODELS_ROOT=""; SUITE="${DEFAULT_SUITE:-libero_object}"; BIND="5555"; LOG_DIR=""; PIDFILE=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --arch)        ARCH="$2"; shift 2 ;;
         --models-root) MODELS_ROOT="$2"; shift 2 ;;
+        --suite)       SUITE="$2"; shift 2 ;;
         --bind)        BIND="$2"; shift 2 ;;
         --logdir)      LOG_DIR="$2"; shift 2 ;;
         --pidfile)     PIDFILE="$2"; shift 2 ;;
@@ -34,9 +35,12 @@ SERVER_BIN="${SERVER_BIN:-${REPO_ROOT}/build/vla-server}"
 [[ -x "$SERVER_BIN" ]] || { echo "ERROR: ${SERVER_BIN} not built on this host" >&2; exit 1; }
 BIND_ADDR="$(normalize_bind "$BIND")"
 LOG_DIR="${LOG_DIR:-${REPO_ROOT}/outputs/ci/_server_logs}"; mkdir -p "$LOG_DIR"
-LOG="${LOG_DIR}/${ARCH}.log"; : > "$LOG"
+# One server run per (arch, suite): tag the log so the orchestrator fetches and
+# the gate aggregates each suite's run independently (per-suite weights mean a
+# fresh process per suite for bitvla / gr00t_n1_7; single-suite archs => one).
+LOG="${LOG_DIR}/${ARCH}.${SUITE}.log"; : > "$LOG"
 
-mapfile -t SARGS < <(server_args_for "$ARCH" "$MODELS_ROOT")
+mapfile -t SARGS < <(server_args_for "$ARCH" "$MODELS_ROOT" "$SUITE")
 for f in "${SARGS[@]}"; do [[ -f "$f" ]] || { echo "ERROR: missing $f" >&2; exit 1; }; done
 apply_gr00t_env "$ARCH"
 

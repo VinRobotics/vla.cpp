@@ -30,10 +30,31 @@ normalize_bind() {
     esac
 }
 
+# ---- per-suite model layout -------------------------------------------------
+# Most archs ship ONE suite-agnostic checkpoint (a flat <repo>/<file>.gguf dir).
+# bitvla and gr00t_n1_7 instead partition weights per LIBERO suite, one GGUF +
+# dataset_statistics.json under <repo>/<suite-subdir>/. Those two MUST be served
+# per-suite (the runner respawns vla-server for each suite they cover).
+is_per_suite_model() { case "$1" in bitvla|gr00t_n1_7) return 0 ;; *) return 1 ;; esac; }
+
+# Map a suite key to the (subdir, filename-token) a per-suite model uses. The
+# token is the suite minus the "libero_" prefix (spatial/object/goal/10), EXCEPT
+# bitvla names the long suite "libero_long/...-long" while gr00t_n1_7 uses the
+# canonical "libero_10/...-10". Echoes "<subdir> <token>".
+suite_dir_token() {
+    local arch="$1" suite="$2"
+    if [[ "$arch" == "bitvla" && "$suite" == "libero_10" ]]; then
+        echo "libero_long long"
+    else
+        echo "${suite} ${suite#libero_}"
+    fi
+}
+
 # ---- per-arch GGUF positional args (paths live where the SERVER runs) -------
-# Echoes the positional args for `vla-server`, one per line.
+# Echoes the positional args for `vla-server`, one per line. For per-suite models
+# the suite selects the checkpoint; single-checkpoint models ignore it.
 server_args_for() {
-    local arch="$1" root="$2"
+    local arch="$1" root="$2" suite="${3:-${DEFAULT_SUITE:-libero_object}}" sd tok
     case "$arch" in
         pi0)
             echo "${root}/pi0-libero-finetuned-v044-gguf/mmproj-pi0-libero-finetuned-v044.gguf"
@@ -44,25 +65,30 @@ server_args_for() {
         evo1)
             echo "${root}/evo1-libero-gguf/evo1-libero.gguf" ;;
         bitvla)
-            echo "${root}/bitvla-libero-object-gguf/bitvla-libero-object-int2.gguf" ;;
+            read -r sd tok <<<"$(suite_dir_token bitvla "$suite")"
+            echo "${root}/bitvla-libero-gguf/${sd}/bitvla-libero-${tok}.gguf" ;;
         gr00t_n1_5)
             echo "${root}/gr00t-n1d5-libero-object-gguf/gr00t-n1d5-libero-object.gguf" ;;
         gr00t_n1_6)
             echo "${root}/gr00t-n1d6-libero-gguf/gr00t-n1d6-libero.gguf" ;;
         gr00t_n1_7)
-            echo "${root}/gr00t-n1d7-libero-object-gguf/gr00t-n1d7-libero-object.gguf" ;;
+            read -r sd tok <<<"$(suite_dir_token gr00t_n1_7 "$suite")"
+            echo "${root}/gr00tn1d7-libero-gguf/${sd}/gr00tn1d7-libero-${tok}.gguf" ;;
         *) echo "ERROR: unknown arch '$arch'" >&2; return 1 ;;
     esac
 }
 
 # Client-side dataset_statistics.json for the GR00T family ("" otherwise).
 # This is a CLIENT arg (un-normalisation) so it is read on the orchestrator.
+# gr00t_n1_7 is per-suite, so its stats live under the suite subdir.
 stats_json_for() {
-    local arch="$1" root="$2"
+    local arch="$1" root="$2" suite="${3:-${DEFAULT_SUITE:-libero_object}}" sd tok
     case "$arch" in
         gr00t_n1_5) echo "${root}/gr00t-n1d5-libero-object-gguf/dataset_statistics.json" ;;
         gr00t_n1_6) echo "${root}/gr00t-n1d6-libero-gguf/dataset_statistics.json" ;;
-        gr00t_n1_7) echo "${root}/gr00t-n1d7-libero-object-gguf/dataset_statistics.json" ;;
+        gr00t_n1_7)
+            read -r sd tok <<<"$(suite_dir_token gr00t_n1_7 "$suite")"
+            echo "${root}/gr00tn1d7-libero-gguf/${sd}/dataset_statistics.json" ;;
         *) echo "" ;;
     esac
 }

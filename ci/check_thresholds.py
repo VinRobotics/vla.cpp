@@ -15,8 +15,9 @@
 """CI gate for a vla.cpp sweep.
 
 Reads a sweep directory produced by the CI runners (per-task ``summary.txt``,
-``_server_logs/<arch>.log``, ``_server_logs/<arch>.mem.json``), compares each
-model against the committed baseline for the platform, and emits a verdict.
+``_server_logs/<arch>.<suite>.log``, ``_server_logs/<arch>.<suite>.mem.json``),
+compares each model against the committed baseline for the platform, and emits a
+verdict.
 
 Gates (all must pass for exit 0):
   * SR > 0                          per (model, suite)   - "must be a positive number"
@@ -26,9 +27,11 @@ Gates (all must pass for exit 0):
                                                            baseline mem_metric is
                                                            null, e.g. the M4).
 
-Latency/memory are per *model* (one server process serves all that model's
-suites); SR is per (model, suite) because an off-suite checkpoint may legitimately
-differ. "In range (or better)" => actual <= tol*baseline; lower always passes.
+Latency/memory gate per *model* against one committed baseline, but per-suite
+models (bitvla, gr00t_n1_7) run a separate server per suite, so latency is the
+sample-weighted mean across those runs and memory is the peak across them. SR is
+per (model, suite). "In range (or better)" => actual <= tol*baseline; lower
+always passes.
 
 The per-file parsers are reused from eval/collect_libero_results.py so this stays
 in lock-step with how the reports are generated.
@@ -60,6 +63,35 @@ def discover_suites(model_dir: Path) -> list[str]:
         if list(model_dir.glob(f"**/{suite}/task_*/summary.txt")):
             found.append(suite)
     return found
+
+
+def _server_logs(logs_dir: Path, name: str) -> list[Path]:
+    """A model's server logs. Per-suite models emit one ``<arch>.<suite>.log``
+    per suite (a fresh process serves each suite's weights); single-suite models
+    emit one. A legacy flat ``<arch>.log`` is honoured for old sweeps."""
+    legacy = logs_dir / f"{name}.log"
+    suite_logs = sorted(p for p in logs_dir.glob(f"{name}.*.log")
+                        if not p.name.endswith(".launch.log"))
+    return ([legacy] if legacy.is_file() else []) + suite_logs
+
+
+def aggregate_server_latency(logs_dir: Path, name: str) -> dict | None:
+    """Sample-weighted mean ``total`` ms across all of a model's server logs."""
+    weighted, n = 0.0, 0
+    for lp in _server_logs(logs_dir, name):
+        srv = parse_server_log(lp)
+        if srv:
+            weighted += srv["total"] * srv["n_samples"]
+            n += srv["n_samples"]
+    return {"total": weighted / n, "n_samples": n} if n else None
+
+
+def aggregate_server_mem(logs_dir: Path, name: str) -> list[dict]:
+    """Parsed mem.json for every server run of a model (one per suite)."""
+    legacy = logs_dir / f"{name}.mem.json"
+    paths = ([legacy] if legacy.is_file() else []) + sorted(
+        logs_dir.glob(f"{name}.*.mem.json"))
+    return [m for m in (parse_mem_json(p) for p in paths) if m is not None]
 
 
 def suite_sr(model_dir: Path, suite: str) -> tuple[int, int, list[int]]:
@@ -100,10 +132,12 @@ def check_model(name: str, model_dir: Path, logs_dir: Path, base: dict,
              f"{succ}/{eps} success ({sr:.1%}) over {len(seen)} tasks")
 
     # ---- server latency (gate: <= tol * baseline) -------------------------
-    srv = parse_server_log(logs_dir / f"{name}.log")
+    # Per-suite models run several server processes; aggregate (sample-weighted)
+    # so the gate stays per-model against the single committed baseline.
+    srv = aggregate_server_latency(logs_dir, name)
     base_lat = base.get(latency_metric)
     if srv is None:
-        gate(False, "latency", f"no parsable server log at {logs_dir / (name + '.log')}")
+        gate(False, "latency", f"no parsable server log for {name} under {logs_dir}")
     else:
         res["server_total_ms"] = round(srv["total"], 2)
         res["server_samples"] = srv["n_samples"]
@@ -116,17 +150,20 @@ def check_model(name: str, model_dir: Path, logs_dir: Path, base: dict,
                  f"{srv['total']:.2f} ms vs {base_lat:.2f}*{tol:g}={limit:.2f} ms baseline")
 
     # ---- server memory (gate: <= tol * baseline; skip if no metric) -------
-    mem = parse_mem_json(logs_dir / f"{name}.mem.json")
+    # Peak across all of a model's server runs (one per suite for per-suite models).
+    mems = aggregate_server_mem(logs_dir, name)
     if mem_metric is None:
-        if mem is not None:
-            res["mem"] = {k: mem.get(k) for k in
-                          ("peak_rss_mib", "peak_sys_used_mib", "sys_used_delta_mib")}
+        if mems:
+            res["mem"] = {k: max((m.get(k) for m in mems if m.get(k) is not None),
+                                 default=None)
+                          for k in ("peak_rss_mib", "peak_sys_used_mib", "sys_used_delta_mib")}
         res["checks"].append({"ok": True, "label": "memory",
                               "detail": "not gated on this platform (no baseline)"})
-    elif mem is None:
-        gate(False, "memory", f"no mem.json at {logs_dir / (name + '.mem.json')}")
+    elif not mems:
+        gate(False, "memory", f"no mem.json for {name} under {logs_dir}")
     else:
-        actual = mem.get(mem_metric)
+        vals = [m.get(mem_metric) for m in mems if m.get(mem_metric) is not None]
+        actual = max(vals) if vals else None
         res["mem"] = {mem_metric: actual}
         base_mem = base.get(mem_metric)
         if actual is None:

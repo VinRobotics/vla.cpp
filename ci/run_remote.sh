@@ -80,19 +80,24 @@ trap 'stop_remote' EXIT INT TERM
 run_model() {
     local arch="$1"
     echo "==================== [${PLATFORM}/${arch}]"
-    stop_remote; sleep 1
-    # Spawn the server detached on the target; the agent owns its lifecycle.
-    ctl spawn --name "${SERVER_NAME}" --cwd "${RROOT}" --log "${RLOG_DIR}/${arch}.launch.log" \
-        -- bash ci/remote_server.sh --arch "${arch}" --models-root "${RMODELS}" \
-            --bind "${SRV_PORT}" --logdir "${RLOG_DIR}"
-    wait_ready_tcp "${SRV_HOST}" "${SRV_PORT}" 600
-
-    local stats; stats="$(stats_json_for "$arch" "${ORCH_MODELS_ROOT}")"  # client-side, on the orchestrator
-    local extra=(); [[ -n "$stats" && -f "$stats" ]] && extra+=(--stats-json "$stats")
     local nact; nact="$(nact_for "$arch")"
     local out_dir="${OUT}/${arch}"; mkdir -p "${out_dir}"
 
+    # One server process per suite: bitvla / gr00t_n1_7 carry per-suite weights,
+    # so the checkpoint (and gr00t stats) must be selected per suite. Single-suite
+    # archs iterate once, so this is identical to the old per-model spawn for them.
     for suite in $(suites_for "${PLATFORM}" "$arch"); do
+        echo "-------------------- [${PLATFORM}/${arch}] suite=${suite}"
+        stop_remote; sleep 1
+        # Spawn the server detached on the target; the agent owns its lifecycle.
+        ctl spawn --name "${SERVER_NAME}" --cwd "${RROOT}" --log "${RLOG_DIR}/${arch}.${suite}.launch.log" \
+            -- bash ci/remote_server.sh --arch "${arch}" --suite "${suite}" --models-root "${RMODELS}" \
+                --bind "${SRV_PORT}" --logdir "${RLOG_DIR}"
+        wait_ready_tcp "${SRV_HOST}" "${SRV_PORT}" 600
+
+        local stats; stats="$(stats_json_for "$arch" "${ORCH_MODELS_ROOT}" "$suite")"  # client-side, on the orchestrator
+        local extra=(); [[ -n "$stats" && -f "$stats" ]] && extra+=(--stats-json "$stats")
+
         for task_id in $(seq 0 9); do
             echo "[${PLATFORM}/${arch}] suite=${suite} task=${task_id}"
             "${LIBERO_VENV_PY}" "${CLIENT}" \
@@ -101,12 +106,12 @@ run_model() {
                 --n-episodes "${N_EPISODES}" --n-action-steps "${nact}" \
                 --output-dir "${out_dir}" "${extra[@]}"
         done
-    done
 
-    stop_remote; sleep 2
-    echo "[${PLATFORM}/${arch}] fetch server log + mem.json"
-    ctl get --remote "${RLOG_DIR}/${arch}.log"      --local "${LOG_DIR}/${arch}.log"      || echo "WARN: no ${arch}.log fetched" >&2
-    ctl get --remote "${RLOG_DIR}/${arch}.mem.json" --local "${LOG_DIR}/${arch}.mem.json" || echo "WARN: no ${arch}.mem.json fetched" >&2
+        stop_remote; sleep 2
+        echo "[${PLATFORM}/${arch}] fetch server log + mem.json (${suite})"
+        ctl get --remote "${RLOG_DIR}/${arch}.${suite}.log"      --local "${LOG_DIR}/${arch}.${suite}.log"      || echo "WARN: no ${arch}.${suite}.log fetched" >&2
+        ctl get --remote "${RLOG_DIR}/${arch}.${suite}.mem.json" --local "${LOG_DIR}/${arch}.${suite}.mem.json" || echo "WARN: no ${arch}.${suite}.mem.json fetched" >&2
+    done
     echo "[${PLATFORM}/${arch}] done"
 }
 

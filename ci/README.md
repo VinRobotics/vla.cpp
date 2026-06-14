@@ -102,7 +102,9 @@ For each `(platform, model, suite)` the run records:
 - **SR** (client side) - `successes / n_episodes`, parsed from each
   `summary.txt`. **Gate: SR > 0.**
 - **Server latency** - `total` ms per `vla-server` call, parsed from
-  `_server_logs/<arch>.log` (`vla-server: rid=… total=… ms vision=… inf=… other=…`).
+  `_server_logs/<arch>.<suite>.log` (`vla-server: rid=… total=… ms vision=… inf=… other=…`).
+  Per-suite models (**bitvla**, **gr00t_n1_7**) serve each suite from its own
+  checkpoint, so one log per suite; the gate takes the sample-weighted mean.
   **Gate: ≤ 1.10× baseline.**
 - **Server memory** - peak, sampled by a sidecar while `vla-server` is alive:
   - `rtx3060` → **peak VRAM** (`nvidia-smi --query-compute-apps`).
@@ -139,7 +141,7 @@ python ci/check_thresholds.py --platform rtx3060 \
 ```
 
 Results land under `outputs/ci/<platform>/` (client `summary.txt` per task,
-`_server_logs/<arch>.log`, `_server_logs/<arch>.mem.json`) plus a
+`_server_logs/<arch>.<suite>.log`, `_server_logs/<arch>.<suite>.mem.json`) plus a
 `verdict.json` / `verdict.md` from the gate. CI uploads these as artifacts and
 fails the job on any gate violation.
 
