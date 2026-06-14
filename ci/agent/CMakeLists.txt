@@ -37,6 +37,6 @@ add_custom_command(
 foreach(tool vla-ci-agent vla-ci-ctl)
     string(REPLACE "vla-ci-" "" src ${tool})
     add_executable(${tool} ${src}.cpp ${GEN}/vla_ctl.pb.cc)
-    target_include_directories(${tool} PRIVATE ${GEN})
-    target_link_libraries(${tool} PRIVATE ${Protobuf_LIBRARIES} PkgConfig::ZeroMQ)
+    target_include_directories(${tool} PRIVATE ${GEN} ${Protobuf_INCLUDE_DIRS})
+    target_link_libraries(${tool} PRIVATE protobuf::libprotobuf PkgConfig::ZeroMQ)
 endforeach()

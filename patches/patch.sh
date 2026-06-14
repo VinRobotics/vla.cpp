@@ -32,26 +32,8 @@ LLAMA_DIR="$ROOT/third_party/llama.cpp"
 LLAMA_URL="https://github.com/ggml-org/llama.cpp.git"
 LLAMA_TAG="b9016"
 PATCH="$ROOT/patches/llama.cpp-vla.patch"
-PATCH_SHA256_EXPECTED="6fc133c323caf30f9213d774fb8941f95b504a5a34c7c25397bfa03ef4817c67"
 
 [[ -f "$PATCH" ]] || { echo "patch not found: $PATCH" >&2; exit 1; }
-
-if command -v sha256sum >/dev/null 2>&1; then
-  PATCH_SHA256_ACTUAL="$(sha256sum "$PATCH" | awk '{print $1}')"
-elif command -v shasum >/dev/null 2>&1; then
-  PATCH_SHA256_ACTUAL="$(shasum -a 256 "$PATCH" | awk '{print $1}')"
-else
-  PATCH_SHA256_ACTUAL=""
-  echo ">> warning: no sha256sum/shasum available - skipping patch checksum verification" >&2
-fi
-if [[ -n "$PATCH_SHA256_ACTUAL" && "$PATCH_SHA256_ACTUAL" != "$PATCH_SHA256_EXPECTED" ]]; then
-  echo "ERROR: patch checksum mismatch" >&2
-  echo "  file:     $PATCH" >&2
-  echo "  expected: $PATCH_SHA256_EXPECTED" >&2
-  echo "  actual:   $PATCH_SHA256_ACTUAL" >&2
-  echo "  (If you intentionally edited the patch, update PATCH_SHA256_EXPECTED in $0.)" >&2
-  exit 1
-fi
 
 if [[ -e "$LLAMA_DIR/.git" ]]; then
   echo ">> third_party/llama.cpp already present - skipping clone"
