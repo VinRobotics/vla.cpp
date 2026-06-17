@@ -90,7 +90,7 @@ server_args_for() {
         gr00t_n1_5)
             echo "${root}/gr00t-n1d5-libero-object-gguf/gr00t-n1d5-libero-object.gguf" ;;
         gr00t_n1_6)
-            echo "${root}/gr00t-n1d6-libero-gguf/gr00t-n1d6-libero.gguf" ;;
+            echo "${root}/gr00tn1d6-libero-gguf/gr00tn1d6-libero.gguf" ;;
         gr00t_n1_7)
             read -r sd tok <<<"$(suite_dir_token gr00t_n1_7 "$suite")"
             echo "${root}/gr00tn1d7-libero-gguf/${sd}/gr00tn1d7-libero-${tok}.gguf" ;;
@@ -105,10 +105,22 @@ stats_json_for() {
     local arch="$1" root="$2" suite="${3:-${DEFAULT_SUITE:-libero_object}}" sd tok
     case "$arch" in
         gr00t_n1_5) echo "${root}/gr00t-n1d5-libero-object-gguf/dataset_statistics.json" ;;
-        gr00t_n1_6) echo "${root}/gr00t-n1d6-libero-gguf/dataset_statistics.json" ;;
+        gr00t_n1_6) echo "${root}/gr00tn1d6-libero-gguf/dataset_statistics.json" ;;
         gr00t_n1_7)
             read -r sd tok <<<"$(suite_dir_token gr00t_n1_7 "$suite")"
             echo "${root}/gr00tn1d7-libero-gguf/${sd}/dataset_statistics.json" ;;
+        *) echo "" ;;
+    esac
+}
+
+# Client-side local tokenizer DIR for archs that vendor their tokenizer alongside
+# the GGUF instead of using an HF repo. Only gr00t_n1_6 does (its Eagle tokenizer
+# lives in the model dir); "" => use the client's preset/HF tokenizer. Read on the
+# orchestrator and passed to the client via --tokenizer.
+tokenizer_for() {
+    local arch="$1" root="$2"
+    case "$arch" in
+        gr00t_n1_6) echo "${root}/gr00tn1d6-libero-gguf" ;;
         *) echo "" ;;
     esac
 }
