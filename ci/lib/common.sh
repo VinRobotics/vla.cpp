@@ -80,8 +80,8 @@ server_args_for() {
             echo "${root}/pi0-libero-finetuned-v044-gguf/mmproj-pi0-libero-finetuned-v044.gguf"
             echo "${root}/pi0-libero-finetuned-v044-gguf/pi0-libero-finetuned-v044.gguf" ;;
         smolvla)
-            echo "${root}/smolvla-libero-bf16-gguf/mmproj-smolvla-libero.gguf"
-            echo "${root}/smolvla-libero-bf16-gguf/smolvla-libero.gguf" ;;
+            echo "${root}/smolvla-libero-gguf/mmproj-smolvla-libero.gguf"
+            echo "${root}/smolvla-libero-gguf/smolvla-libero.gguf" ;;
         evo1)
             echo "${root}/evo1-libero-gguf/evo1-libero.gguf" ;;
         bitvla)
