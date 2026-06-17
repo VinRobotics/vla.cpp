@@ -132,7 +132,7 @@ case "${MODEL}" in
         )
         ;;
     gr00t_n1_5)
-        SERVER_ARGS=("${MODELS_ROOT}/gr00t-n1d5-libero-object-gguf/gr00t-n1d5-libero-object.gguf")
+        SERVER_ARGS=("${MODELS_ROOT}/gr00tn1d5-libero-object-gguf/gr00tn1d5-libero-object.gguf")
         ;;
     gr00t_n1_6)
         SERVER_ARGS=("${MODELS_ROOT}/gr00t-n1d6-libero-gguf/gr00t-n1d6-libero.gguf")

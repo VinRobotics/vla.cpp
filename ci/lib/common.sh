@@ -88,7 +88,7 @@ server_args_for() {
             read -r sd tok <<<"$(suite_dir_token bitvla "$suite")"
             echo "${root}/bitvla-libero-gguf/${sd}/bitvla-libero-${tok}.gguf" ;;
         gr00t_n1_5)
-            echo "${root}/gr00t-n1d5-libero-object-gguf/gr00t-n1d5-libero-object.gguf" ;;
+            echo "${root}/gr00tn1d5-libero-object-gguf/gr00tn1d5-libero-object.gguf" ;;
         gr00t_n1_6)
             echo "${root}/gr00tn1d6-libero-gguf/gr00tn1d6-libero.gguf" ;;
         gr00t_n1_7)
@@ -107,7 +107,7 @@ stats_json_for() {
         bitvla)
             read -r sd tok <<<"$(suite_dir_token bitvla "$suite")"
             echo "${root}/bitvla-libero-gguf/${sd}/dataset_statistics.json" ;;
-        gr00t_n1_5) echo "${root}/gr00t-n1d5-libero-object-gguf/dataset_statistics.json" ;;
+        gr00t_n1_5) echo "${root}/gr00tn1d5-libero-object-gguf/dataset_statistics.json" ;;
         gr00t_n1_6) echo "${root}/gr00tn1d6-libero-gguf/dataset_statistics.json" ;;
         gr00t_n1_7)
             read -r sd tok <<<"$(suite_dir_token gr00t_n1_7 "$suite")"

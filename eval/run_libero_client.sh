@@ -145,7 +145,7 @@ EOF
             cat <<EOF
     VLA_GR00T_BF16_WEIGHTS=1 VLA_GR00T_EMBODIMENT=new_embodiment \\
     ./build/vla-server --bind tcp://*:${PORT} \\
-        \${MODELS_ROOT}/gr00t-n1d5-libero-object-gguf/gr00t-n1d5-libero-object.gguf
+        \${MODELS_ROOT}/gr00tn1d5-libero-object-gguf/gr00tn1d5-libero-object.gguf
 EOF
             ;;
         gr00t_n1_6)
@@ -227,7 +227,7 @@ if should_run pi0; then
 fi
 if should_run gr00t_n1_5; then
     run_arch gr00t_n1_5 "${N_ACTION_STEPS_GR00T_N1_5}" \
-        "${MODELS_ROOT}/gr00t-n1d5-libero-object-gguf/dataset_statistics.json"
+        "${MODELS_ROOT}/gr00tn1d5-libero-object-gguf/dataset_statistics.json"
 fi
 if should_run gr00t_n1_6; then
     run_arch gr00t_n1_6 "${N_ACTION_STEPS_GR00T_N1_6}" \
