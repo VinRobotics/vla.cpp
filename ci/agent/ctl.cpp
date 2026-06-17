@@ -8,6 +8,7 @@
 //     ping
 //     put   --src DIR --dst DIR [--prune] [--protect P]...   (general; CI no longer deploys with it)
 //     exec  --cwd DIR -- ARGV...                              (general; CI no longer builds with it)
+//     build --cwd DIR [--flags "<cmake>"] [--jobs N] [--no-patch]   # build vla-server in the server's checkout
 //     spawn --name N --cwd DIR --log FILE -- ARGV...
 //     stop  --name N
 //     get   --remote PATH --local PATH
@@ -149,6 +150,21 @@ int main(int argc, char** argv) {
         e->set_cwd(rest("--cwd"));
         for (auto& s : a) e->add_argv(s);
         def_timeout_ms = 3600000;   // 60 min: remote build
+    } else if (cmd == "build") {
+        // Convenience over `exec`: build vla-server in the server's own checkout.
+        std::string cwd = rest("--cwd");
+        if (cwd.empty()) die("build needs --cwd <server repo root>");
+        std::string flags = rest("--flags");                 // cmake flags (may be empty -> Metal auto)
+        std::string jobs = rest("--jobs");                   // optional -j value
+        std::string jexpr = jobs.empty() ? "$(getconf _NPROCESSORS_ONLN)" : jobs;
+        std::string patch = has("--no-patch") ? "" : "bash patches/patch.sh; ";
+        std::string script = "set -e; " + patch +
+            "cmake -B build -DCMAKE_BUILD_TYPE=Release " + flags + "; "
+            "cmake --build build -j" + jexpr;
+        auto* e = req.mutable_exec();
+        e->set_cwd(cwd);
+        e->add_argv("bash"); e->add_argv("-lc"); e->add_argv(script);
+        def_timeout_ms = 3600000;   // 60 min: remote build
     } else if (cmd == "spawn") {
         auto a = after_ddash();
         if (a.empty()) die("spawn needs `-- ARGV...`");
@@ -178,7 +194,7 @@ int main(int argc, char** argv) {
     int timeout_ms = timeout_s > 0 ? timeout_s * 1000 : def_timeout_ms;
     Reply rep = call(endpoint, timeout_ms, req);
 
-    if (cmd == "exec") {
+    if (cmd == "exec" || cmd == "build") {
         std::fwrite(rep.exec().output().data(), 1, rep.exec().output().size(), stdout);
         std::fflush(stdout);
         if (!rep.ok()) { std::fprintf(stderr, "vla-ci-ctl: %s\n", rep.error().c_str()); return 1; }
