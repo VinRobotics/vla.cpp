@@ -104,6 +104,9 @@ server_args_for() {
 stats_json_for() {
     local arch="$1" root="$2" suite="${3:-${DEFAULT_SUITE:-libero_object}}" sd tok
     case "$arch" in
+        bitvla)
+            read -r sd tok <<<"$(suite_dir_token bitvla "$suite")"
+            echo "${root}/bitvla-libero-gguf/${sd}/dataset_statistics.json" ;;
         gr00t_n1_5) echo "${root}/gr00t-n1d5-libero-object-gguf/dataset_statistics.json" ;;
         gr00t_n1_6) echo "${root}/gr00tn1d6-libero-gguf/dataset_statistics.json" ;;
         gr00t_n1_7)
