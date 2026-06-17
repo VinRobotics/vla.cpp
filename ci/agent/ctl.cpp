@@ -6,11 +6,12 @@
 //
 //   vla-ci-ctl --endpoint tcp://192.168.1.10:5600 [--token S] <cmd> ...
 //     ping
-//     put   --src DIR --dst DIR [--prune] [--protect P]...
-//     exec  --cwd DIR -- ARGV...
+//     put   --src DIR --dst DIR [--prune] [--protect P]...   (general; CI no longer deploys with it)
+//     exec  --cwd DIR -- ARGV...                              (general; CI no longer builds with it)
 //     spawn --name N --cwd DIR --log FILE -- ARGV...
 //     stop  --name N
 //     get   --remote PATH --local PATH
+//     rev   --path DIR        # prints `git -C DIR rev-parse HEAD` (server's real commit)
 //
 // `exec` prints the remote stdout+stderr and exits with the remote exit code, so
 // a failed remote build fails the shell pipeline under `set -e`.
@@ -166,6 +167,10 @@ int main(int argc, char** argv) {
         std::string remote = rest("--remote");
         if (remote.empty()) die("get needs --remote");
         req.mutable_get()->set_path(remote);
+    } else if (cmd == "rev") {
+        std::string path = rest("--path");
+        if (path.empty()) die("rev needs --path");
+        req.mutable_rev()->set_path(path);
     } else {
         die("unknown command: " + cmd);
     }
@@ -198,6 +203,10 @@ int main(int argc, char** argv) {
         if (!f) die("cannot write " + local);
         f.write(rep.get().data().data(), rep.get().data().size());
         std::printf("ok: %zu bytes -> %s\n", rep.get().data().size(), local.c_str());
+    } else if (cmd == "rev") {
+        std::printf("%s\n", rep.rev().commit().c_str());   // bare commit, capturable by callers
+        if (rep.rev().dirty())
+            std::fprintf(stderr, "vla-ci-ctl: warning: server repo has uncommitted changes\n");
     }
     return 0;
 }

@@ -1,7 +1,7 @@
 {
-  "platform": "rtx3060",
+  "platform": "rtx3090",
   "source": "eval/reports/report-rtx-3060.md",
-  "note": "Server-side latency = mean `total` ms per vla-server call. Memory = peak VRAM (discrete GPU, nvidia-smi --query-compute-apps).",
+  "note": "Server-side latency = mean `total` ms per vla-server call. Memory = peak VRAM (discrete GPU, nvidia-smi --query-compute-apps). NUMBERS ARE THE PRIOR CONSUMER-GPU (RTX 3060) SWEEP - the only RTX report on record - used as the regression bar for the rtx3090 server: a faster card should meet-or-beat latency, and peak VRAM is model-bound (same weights/graph) so it should be ~equal. Regenerate from a real RTX 3090 sweep once available.",
   "tolerance": 1.10,
   "latency_metric": "server_total_ms",
   "mem_metric": "peak_vram_mib",

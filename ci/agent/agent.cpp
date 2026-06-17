@@ -256,6 +256,23 @@ void handle(const Request& req, Reply& rep) {
             rep.mutable_get()->set_data(data);
             break;
         }
+        case Request::kRev: {
+            const std::string& path = req.rev().path();
+            google::protobuf::RepeatedPtrField<std::string> noenv;
+            std::string sha;
+            int rc = run_capture("", {"git", "-C", path, "rev-parse", "HEAD"}, noenv, sha);
+            while (!sha.empty() && (sha.back() == '\n' || sha.back() == '\r' || sha.back() == ' ')) sha.pop_back();
+            if (rc != 0 || sha.empty()) {
+                rep.set_ok(false);
+                rep.set_error("git rev-parse HEAD failed at " + path + " (not a git repo?): " + sha);
+                break;
+            }
+            std::string st;
+            run_capture("", {"git", "-C", path, "status", "--porcelain"}, noenv, st);
+            rep.mutable_rev()->set_commit(sha);
+            rep.mutable_rev()->set_dirty(!st.empty());
+            break;
+        }
         default:
             rep.set_ok(false);
             rep.set_error("no op set");

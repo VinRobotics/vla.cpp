@@ -9,6 +9,7 @@
 //   spawn - launch a detached background process (the server), return its pid
 //   stop  - terminate a previously-spawned process group by name
 //   get   - download a file (server log / mem.json) back to the orchestrator
+//   rev   - report this repo's real git HEAD (+ dirty), for commit-consistency
 syntax = "proto3";
 
 package vla_ctl;
@@ -20,6 +21,8 @@ message PingReply {
   string cwd     = 3;
 }
 
+// NOTE: put/exec remain as general agent primitives but the CI no longer uses
+// them for deploy - each server self-manages its own git checkout + build.
 message PutRequest {
   string          dst     = 1;   // absolute dir to extract into (created if absent)
   bytes           targz   = 2;   // gzip-tar stream of the source tree
@@ -50,6 +53,9 @@ message StopReply   { bool stopped = 1; int32 pid = 2; }
 message GetRequest { string path = 1; }
 message GetReply   { bytes data = 1; }
 
+message RevRequest { string path = 1; }   // repo dir; runs `git -C path rev-parse HEAD`
+message RevReply   { string commit = 1; bool dirty = 2; }
+
 message Request {
   string token = 1;              // optional shared secret (see --token); "" if disabled
   oneof op {
@@ -59,6 +65,7 @@ message Request {
     SpawnRequest spawn = 5;
     StopRequest  stop  = 6;
     GetRequest   get   = 7;
+    RevRequest   rev   = 8;
   }
 }
 
@@ -72,5 +79,6 @@ message Reply {
     SpawnReply spawn = 6;
     StopReply  stop  = 7;
     GetReply   get   = 8;
+    RevReply   rev   = 9;
   }
 }

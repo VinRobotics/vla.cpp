@@ -76,14 +76,21 @@ def _server_logs(logs_dir: Path, name: str) -> list[Path]:
 
 
 def aggregate_server_latency(logs_dir: Path, name: str) -> dict | None:
-    """Sample-weighted mean ``total`` ms across all of a model's server logs."""
-    weighted, n = 0.0, 0
+    """Sample-weighted mean latency breakdown (total/vision/inf/other) across all
+    of a model's server logs."""
+    acc = {"total": 0.0, "vision": 0.0, "inf": 0.0, "other": 0.0}
+    n = 0
     for lp in _server_logs(logs_dir, name):
         srv = parse_server_log(lp)
         if srv:
-            weighted += srv["total"] * srv["n_samples"]
+            for k in acc:
+                acc[k] += srv[k] * srv["n_samples"]
             n += srv["n_samples"]
-    return {"total": weighted / n, "n_samples": n} if n else None
+    if not n:
+        return None
+    out = {k: acc[k] / n for k in acc}
+    out["n_samples"] = n
+    return out
 
 
 def aggregate_server_mem(logs_dir: Path, name: str) -> list[dict]:
@@ -141,6 +148,9 @@ def check_model(name: str, model_dir: Path, logs_dir: Path, base: dict,
     else:
         res["server_total_ms"] = round(srv["total"], 2)
         res["server_samples"] = srv["n_samples"]
+        # Full server-side breakdown the orchestrator obtained, for the report.
+        res["server_breakdown_ms"] = {k: round(srv[k], 2)
+                                      for k in ("total", "vision", "inf", "other")}
         if base_lat is None:
             res["checks"].append({"ok": True, "label": "latency",
                                   "detail": f"{srv['total']:.2f} ms (no baseline - recorded only)"})

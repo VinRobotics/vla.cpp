@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Copyright 2026 VinRobotics - Apache-2.0
 #
-# Runs ON the target server (the rtx3060 / orin / m4 host). Launches vla-server
+# Runs ON the target server (the rtx3090 / orin / m4 host). Launches vla-server
 # for ONE arch, bound on all interfaces so the orchestrator's client can reach
 # it, with the sidecar mem sampler (Tegra-aware on orin; macOS variant on m4;
-# discrete-GPU on rtx3060). Blocks on the server until killed (SIGINT/TERM) -
+# discrete-GPU on rtx3090). Blocks on the server until killed (SIGINT/TERM) -
 # run_remote.sh on the orchestrator starts it (nohup), waits for the port, drives
 # the client, then kills it and scp's the logs back.
 #
@@ -40,7 +40,9 @@ LOG_DIR="${LOG_DIR:-${REPO_ROOT}/outputs/ci/_server_logs}"; mkdir -p "$LOG_DIR"
 # fresh process per suite for bitvla / gr00t_n1_7; single-suite archs => one).
 LOG="${LOG_DIR}/${ARCH}.${SUITE}.log"; : > "$LOG"
 
-mapfile -t SARGS < <(server_args_for "$ARCH" "$MODELS_ROOT" "$SUITE")
+# Portable array read (no `mapfile`: macOS ships bash 3.2, which lacks it).
+SARGS=()
+while IFS= read -r _line; do SARGS+=("$_line"); done < <(server_args_for "$ARCH" "$MODELS_ROOT" "$SUITE")
 for f in "${SARGS[@]}"; do [[ -f "$f" ]] || { echo "ERROR: missing $f" >&2; exit 1; }; done
 apply_gr00t_env "$ARCH"
 
