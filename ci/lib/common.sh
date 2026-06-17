@@ -31,17 +31,21 @@ normalize_bind() {
 }
 
 # ---- platform -> connection vars (orchestrator side) -----------------------
-# Resolve a platform key to its hosts.env settings, setting the globals
-# RROOT / RMODELS / SRV_HOST / SRV_PORT / CTRL_PORT / CMAKE_FLAGS. Sourced from
-# ci/config/hosts.env (orchestrator only). Used by run_remote.sh + check_commits.sh.
+# Resolve a platform key to its hosts.env settings, setting the globals RROOT /
+# RMODELS / SRV_HOST / SRV_PORT / CTRL_PORT / CMAKE_FLAGS / BUILD_ENV. Sourced
+# from ci/config/hosts.env (orchestrator only). Used by run_remote.sh,
+# check_commits.sh, build_servers.sh.
 resolve_platform() {
     case "$1" in
         rtx3090) RROOT="${RTX_REPO_ROOT}"; RMODELS="${RTX_MODELS_ROOT}"; SRV_HOST="${RTX_SERVER_HOST}"
-                 SRV_PORT="${RTX_DATA_PORT}"; CTRL_PORT="${RTX_CTRL_PORT}"; CMAKE_FLAGS="${RTX_CMAKE_FLAGS:-}" ;;
+                 SRV_PORT="${RTX_DATA_PORT}"; CTRL_PORT="${RTX_CTRL_PORT}"; CMAKE_FLAGS="${RTX_CMAKE_FLAGS:-}"
+                 BUILD_ENV="${RTX_BUILD_ENV:-}" ;;
         orin)    RROOT="${ORIN_REPO_ROOT}"; RMODELS="${ORIN_MODELS_ROOT}"; SRV_HOST="${ORIN_SERVER_HOST}"
-                 SRV_PORT="${ORIN_DATA_PORT}"; CTRL_PORT="${ORIN_CTRL_PORT}"; CMAKE_FLAGS="${ORIN_CMAKE_FLAGS:-}" ;;
+                 SRV_PORT="${ORIN_DATA_PORT}"; CTRL_PORT="${ORIN_CTRL_PORT}"; CMAKE_FLAGS="${ORIN_CMAKE_FLAGS:-}"
+                 BUILD_ENV="${ORIN_BUILD_ENV:-}" ;;
         m4)      RROOT="${M4_REPO_ROOT}"; RMODELS="${M4_MODELS_ROOT}"; SRV_HOST="${M4_SERVER_HOST}"
-                 SRV_PORT="${M4_DATA_PORT}"; CTRL_PORT="${M4_CTRL_PORT}"; CMAKE_FLAGS="${M4_CMAKE_FLAGS:-}" ;;
+                 SRV_PORT="${M4_DATA_PORT}"; CTRL_PORT="${M4_CTRL_PORT}"; CMAKE_FLAGS="${M4_CMAKE_FLAGS:-}"
+                 BUILD_ENV="${M4_BUILD_ENV:-}" ;;
         *) echo "ERROR: unknown platform '$1'" >&2; return 1 ;;
     esac
 }

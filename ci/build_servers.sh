@@ -29,8 +29,8 @@ declare -A PID
 for p in ${PLATFORMS}; do
     resolve_platform "${p}" || exit 1
     ep="tcp://${SRV_HOST}:${CTRL_PORT}"
-    echo "[build] ${p} -> ${ep}  cwd=${RROOT}  flags=[${CMAKE_FLAGS:-<Metal auto>}]  log=${CI_OUTPUT_ROOT}/${p}.build.log"
-    ( "${CTL}" --endpoint "${ep}" build --cwd "${RROOT}" --flags "${CMAKE_FLAGS}" ) \
+    echo "[build] ${p} -> ${ep}  cwd=${RROOT}  flags=[${CMAKE_FLAGS:-<Metal auto>}]  prelude=[${BUILD_ENV:+set}]  log=${CI_OUTPUT_ROOT}/${p}.build.log"
+    ( "${CTL}" --endpoint "${ep}" build --cwd "${RROOT}" --flags "${CMAKE_FLAGS}" --prelude "${BUILD_ENV:-}" ) \
         >"${CI_OUTPUT_ROOT}/${p}.build.log" 2>&1 &
     PID[$p]=$!
 done

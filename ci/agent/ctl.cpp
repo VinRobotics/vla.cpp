@@ -8,7 +8,7 @@
 //     ping
 //     put   --src DIR --dst DIR [--prune] [--protect P]...   (general; CI no longer deploys with it)
 //     exec  --cwd DIR -- ARGV...                              (general; CI no longer builds with it)
-//     build --cwd DIR [--flags "<cmake>"] [--jobs N] [--no-patch]   # build vla-server in the server's checkout
+//     build --cwd DIR [--flags "<cmake>"] [--jobs N] [--no-patch] [--prelude "<shell>"]  # build vla-server
 //     spawn --name N --cwd DIR --log FILE -- ARGV...
 //     stop  --name N
 //     get   --remote PATH --local PATH
@@ -157,8 +157,9 @@ int main(int argc, char** argv) {
         std::string flags = rest("--flags");                 // cmake flags (may be empty -> Metal auto)
         std::string jobs = rest("--jobs");                   // optional -j value
         std::string jexpr = jobs.empty() ? "$(getconf _NPROCESSORS_ONLN)" : jobs;
+        std::string prelude = rest("--prelude");             // shell run first, e.g. CUDA exports (Jetson)
         std::string patch = has("--no-patch") ? "" : "bash patches/patch.sh; ";
-        std::string script = "set -e; " + patch +
+        std::string script = "set -e; " + (prelude.empty() ? std::string() : prelude + " ") + patch +
             "cmake -B build -DCMAKE_BUILD_TYPE=Release " + flags + "; "
             "cmake --build build -j" + jexpr;
         auto* e = req.mutable_exec();

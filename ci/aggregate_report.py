@@ -52,7 +52,7 @@ def main() -> int:
         if v is None:
             report["ok"] = False
             report["platforms"][p] = {"ok": False, "error": "no verdict.json"}
-            body += [f"## `{p}` - ❌ no verdict.json (sweep did not complete)", ""]
+            body += [f"## `{p}` - FAIL: no verdict.json (sweep did not complete)", ""]
             continue
         report["platforms"][p] = {"ok": v.get("ok", False), "commit": deployed,
                                   "results": v.get("results", [])}
@@ -62,7 +62,7 @@ def main() -> int:
         # machines agree; it may differ from the orchestrator's - that's a warning,
         # not a failure).
         cnote = f"  · server commit `{deployed[:12]}`" if deployed else ""
-        body += [f"## `{p}` - {'PASS ✅' if v.get('ok') else 'FAIL ❌'}{cnote}", "",
+        body += [f"## `{p}` - {'PASS' if v.get('ok') else 'FAIL'}{cnote}", "",
                  "| model | per-suite SR | server ms total (vision/inf/other) | peak mem |",
                  "|---|---|---|---|"]
         for r in v.get("results", []):
@@ -76,7 +76,7 @@ def main() -> int:
             body += [f"| `{r['model']}` | {sr} | {lat} | {mems} |"]
         body += [""]
 
-    header = [f"# vla-ci cross-platform report - {'PASS ✅' if report['ok'] else 'FAIL ❌'}",
+    header = [f"# vla-ci cross-platform report - {'PASS' if report['ok'] else 'FAIL'}",
               "", f"Orchestrator commit: `{args.commit or 'unknown'}` "
               "(servers self-manage their own checkout; their commits are shown per platform "
               "and were verified consistent across tested machines before the run).",
