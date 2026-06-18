@@ -44,6 +44,9 @@ ARCH_PRESETS = {
     "vla_adapter": {"image_size": 224,
                     "tokenizer": "VLA-Adapter/LIBERO-Object-Pro",
                     "max_state_dim": 8},
+    "openvla_oft": {"image_size": 224,
+                    "tokenizer": "moojink/openvla-7b-oft-finetuned-libero-spatial-object-goal-10",
+                    "max_state_dim": 8},
 
     "gr00t_n1_7": {"image_size": 256, "tokenizer": "nvidia/Cosmos-Reason2-2B", "max_state_dim": 132},
 
@@ -64,6 +67,9 @@ VLA_ADAPTER_PROMPT_TPL    = (
     "assistant.<|im_end|>\n<|im_start|>user\nWhat action should the robot take to "
     "{instruction}?<|im_end|>\n<|im_start|>assistant\n"
 )
+OPENVLA_OFT_N_VIEWS    = 2
+OPENVLA_OFT_PROMPT_TPL = "In: What action should the robot take to {instruction}?\nOut:"
+OPENVLA_OFT_EMPTY_TOKEN = 29871
 
 def _load_pb():
 
@@ -210,6 +216,33 @@ class VlaCppClient:
             self._bitvla_proprio_norm = _norm
             print(f"vla-cpp-direct[arch=bitvla]: proprio normalizer "
                   f"BOUNDS_Q99 via {stats_path}::{key}.proprio", flush=True)
+
+        self._oft_proprio_norm = None
+        if arch == "openvla_oft":
+            if stats_json:
+                stats_path = Path(stats_json)
+            else:
+                stats_path = Path(tokenizer_name) / "dataset_statistics.json"
+            if not stats_path.exists():
+                raise FileNotFoundError(
+                    f"OpenVLA-OFT dataset_statistics.json not found at {stats_path}. "
+                    f"Pass --stats-json or point --tokenizer at the ckpt dir.")
+            blob = json.loads(stats_path.read_text())
+            key = os.environ.get("VLA_OPENVLA_OFT_UNNORM_KEY", "libero_object_no_noops")
+            if key not in blob:
+                raise ValueError(f"{stats_path} has no suite {key!r}; available {list(blob)}")
+            p = blob[key]["proprio"]
+            q01 = np.asarray(p["q01"], dtype=np.float32)
+            q99 = np.asarray(p["q99"], dtype=np.float32)
+            mask = (np.ones_like(q01, dtype=bool)
+                    if p.get("mask", None) is None else np.asarray(p["mask"], dtype=bool))
+            def _oft_norm(x, q01=q01, q99=q99, mask=mask):
+                y = x.astype(np.float32)
+                out = np.where(mask, 2.0 * (y - q01) / (q99 - q01 + 1e-8) - 1.0, y)
+                return np.clip(out, -1.0, 1.0).astype(np.float32)
+            self._oft_proprio_norm = _oft_norm
+            print(f"vla-cpp-direct[arch=openvla_oft]: proprio BOUNDS_Q99 via "
+                  f"{stats_path}::{key}.proprio", flush=True)
 
         self._pi05_state_q01 = None
         self._pi05_state_q99 = None
@@ -416,6 +449,8 @@ class VlaCppClient:
                 chunk = self._predict_chunk_bitvla(observations)
             elif self.arch == "vla_adapter":
                 chunk = self._predict_chunk_vla_adapter(observations)
+            elif self.arch == "openvla_oft":
+                chunk = self._predict_chunk_openvla_oft(observations)
             else:
                 chunk = self._predict_chunk(observations)
             for row in chunk[: self.n_action_steps, : self.real_action_dim]:
@@ -751,6 +786,69 @@ class VlaCppClient:
             task = task.decode()
         prompt = VLA_ADAPTER_PROMPT_TPL.format(instruction=task.lower())
         lang_ids = self.tok(prompt, add_special_tokens=False)["input_ids"]
+
+        req = self.pb.PredictRequest()
+        req.request_id = self._step
+        self._step += 1
+        for img in images_u8:
+            ip = req.images.add()
+            ip.encoding = self.pb.Image.RGB_U8
+            ip.height = img.shape[0]
+            ip.width = img.shape[1]
+            ip.data = img.tobytes()
+        req.lang_tokens.extend(int(t) for t in lang_ids)
+        req.state.extend(float(x) for x in st)
+
+        self.sock.send(req.SerializeToString())
+        resp = self.pb.PredictResponse()
+        resp.ParseFromString(self.sock.recv())
+        if resp.error:
+            raise RuntimeError(f"vla-server error: {resp.error}")
+        self._last_response = resp
+
+        chunk = (np.array(resp.action_chunk, dtype=np.float32)
+                   .reshape(resp.chunk_size, resp.action_dim))
+        chunk[..., -1] = np.sign(2.0 * chunk[..., -1] - 1.0)
+        chunk[..., -1] *= -1.0
+        return chunk
+
+    def _predict_chunk_openvla_oft(self, observations: dict[str, Any]) -> np.ndarray:
+        images_u8: list[np.ndarray] = []
+        for key in self.image_keys[:OPENVLA_OFT_N_VIEWS]:
+            if key not in observations:
+                raise KeyError(f"image key '{key}' missing; got {list(observations.keys())}")
+            img = observations[key]
+            if isinstance(img, torch.Tensor):
+                img = img.numpy()
+            img = np.asarray(img, dtype=np.float32)
+            if img.ndim != 3 or img.shape[0] != 3:
+                raise ValueError(f"{key}: expected CHW float [3, H, W], got {img.shape}")
+            img_u8 = np.clip(np.transpose(img, (1, 2, 0)) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+            if img_u8.shape[0] != self.image_size or img_u8.shape[1] != self.image_size:
+                img_u8 = np.array(Image.fromarray(img_u8, mode="RGB").resize(
+                    (self.image_size, self.image_size), resample=Image.LANCZOS), dtype=np.uint8)
+            h, w = img_u8.shape[:2]
+            s = 0.9 ** 0.5
+            new_h, new_w = int(round(h * s)), int(round(w * s))
+            off_h, off_w = (h - new_h) // 2, (w - new_w) // 2
+            cropped = img_u8[off_h:off_h + new_h, off_w:off_w + new_w]
+            img_u8 = np.array(Image.fromarray(cropped, mode="RGB").resize(
+                (w, h), resample=Image.BILINEAR), dtype=np.uint8)
+            images_u8.append(np.ascontiguousarray(img_u8, dtype=np.uint8))
+
+        st = observations["observation.state"]
+        if isinstance(st, torch.Tensor):
+            st = st.numpy()
+        st = np.asarray(st, dtype=np.float32).reshape(-1)[:8]
+        st = self._oft_proprio_norm(st)
+
+        task = observations.get("task", "")
+        if isinstance(task, bytes):
+            task = task.decode()
+        prompt = OPENVLA_OFT_PROMPT_TPL.format(instruction=task.lower())
+        lang_ids = self.tok(prompt, add_special_tokens=True)["input_ids"]
+        if not lang_ids or lang_ids[-1] != OPENVLA_OFT_EMPTY_TOKEN:
+            lang_ids = list(lang_ids) + [OPENVLA_OFT_EMPTY_TOKEN]
 
         req = self.pb.PredictRequest()
         req.request_id = self._step
