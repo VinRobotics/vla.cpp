@@ -22,6 +22,7 @@ add_library(vla_core
     src/model.cpp
     src/models/smolvla.cpp
     src/models/pi0.cpp
+    src/models/pi05.cpp
     src/models/evo1.cpp
     src/models/gr00tn1d5.cpp
     src/models/gr00tn1d6.cpp
