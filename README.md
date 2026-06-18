@@ -207,33 +207,24 @@ Columns report `client/call (ms)` and `Peak RAM (MiB)` for each hardware target.
 
 ## Roadmap
 
-Work in progress and planned directions (🚧 in progress · ⬜ planned · ✅ done):
+Support matrix of models (rows) against platforms (columns). Legend: `Y` =
+supported (released and benchmarked), `~` = in progress, `-` = planned.
 
-**Platforms**
+| Model | CPU (x86-64 / ARM) | CUDA | Metal | OpenVINO | Hexagon |
+|---|:--:|:--:|:--:|:--:|:--:|
+| SmolVLA     | Y | Y | Y | - | - |
+| π0          | Y | Y | Y | - | - |
+| BitVLA      | Y | Y | ~ | - | - |
+| Evo-1       | Y | Y | ~ | - | - |
+| GR00T N1.5  | Y | Y | ~ | - | - |
+| GR00T N1.6  | Y | Y | ~ | - | - |
+| GR00T N1.7  | Y | Y | Y | - | - |
+| VLA-Adapter | - | - | - | - | - |
+| OpenVLA-OFT | - | - | - | - | - |
+| π0.5        | - | - | - | - | - |
 
-- [x] ✅ CPU (x86-64 / ARM)
-- [x] ✅ CUDA (consumer GPUs → Jetson-class boards)
-- [ ] 🚧 Apple Silicon
-- [ ] ⬜ Qualcomm Hexagon
-- [ ] ⬜ OpenVINO
-- [ ] ⬜ …and more
-
-**Models**
-
-- [x] ✅ SmolVLA
-- [x] ✅ π0
-- [x] ✅ BitVLA
-- [x] ✅ Evo-1
-- [x] ✅ GR00T N1.5 / N1.6 / N1.7
-- [ ] 🚧 VLA-Adapter
-- [ ] ⬜ Qwen-VLA
-- [ ] ⬜ …and more
-
-**Engineering**
-
-- [ ] 🚧 Optimize models
-- [ ] 🚧 Refactor codebase
-- [ ] ⬜ Implement quantization profile
+Looking ahead, we will support more models, more platforms, and continue to
+optimize the framework.
 
 ## Contributors
 
