@@ -41,7 +41,7 @@ namespace vla {
 enum class Arch {
     SMOLVLA,    ///< Hugging Face SmolVLA (mmproj + LM + flow-matching head).
     PI0,        ///< Physical Intelligence pi0 (PaliGemma + flow-matching).
-    PI05,       ///< pi0.5 variant; reserved.
+    PI05,       ///< PaliGemma-3B + SigLIP-So400m + Gemma-300m + FM.
     EVO1,       ///< MINT-SJTU Evo-1 (InternVL3 + cross-attention head).
     GR00T_N1_5, ///< NVIDIA Isaac GR00T N1.5 (Eagle VLM + DiT action head).
     GR00T_N1_6, ///< NVIDIA Isaac GR00T N1.6 (Eagle Block-2A + DiT).
@@ -98,6 +98,14 @@ std::unique_ptr<ModelArchBase> smolvla_create(const std::string& mmproj_path,
 std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
                                           const std::string& ckpt_path,
                                           const std::string& config_path);
+
+/**
+ * @brief Build a pi0.5 model from its mmproj and checkpoint GGUFs.
+ * @copydetails smolvla_create
+ */
+std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
+                                           const std::string& ckpt_path,
+                                           const std::string& config_path);
 
 /**
  * @brief Build an Evo-1 model. Vision is baked into @p ckpt_path; pass

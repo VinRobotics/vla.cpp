@@ -139,10 +139,9 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
             impl = pi0_create(mmproj_path, ckpt_path, config_path);
             break;
         case Arch::PI05:
-            std::fprintf(stderr,
-                         "vla: arch = pi05 - not yet implemented "
-                         "(optional companion to pi0)\n");
-            return nullptr;
+            std::printf("vla: arch = pi05\n");
+            impl = pi05_create(mmproj_path, ckpt_path, config_path);
+            break;
         case Arch::EVO1:
             std::printf("vla: arch = evo1\n");
             impl = evo1_create(mmproj_path, ckpt_path, config_path);

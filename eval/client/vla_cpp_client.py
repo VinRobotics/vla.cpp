@@ -35,6 +35,7 @@ from transformers import AutoTokenizer
 ARCH_PRESETS = {
     "smolvla": {"image_size": 512, "tokenizer": "HuggingFaceTB/SmolVLM2-500M-Instruct", "max_state_dim": 32},
     "pi0":     {"image_size": 224, "tokenizer": "google/paligemma-3b-pt-224",           "max_state_dim": 32},
+    "pi05":    {"image_size": 224, "tokenizer": "google/paligemma-3b-pt-224",           "max_state_dim": 32},
 
     "evo1":    {"image_size": 448, "tokenizer": "OpenGVLab/InternVL3-1B", "max_state_dim": 24,
                 "trust_remote_code": True, "use_fast_tokenizer": False},
@@ -209,6 +210,33 @@ class VlaCppClient:
             self._bitvla_proprio_norm = _norm
             print(f"vla-cpp-direct[arch=bitvla]: proprio normalizer "
                   f"BOUNDS_Q99 via {stats_path}::{key}.proprio", flush=True)
+
+        self._pi05_state_q01 = None
+        self._pi05_state_q99 = None
+        if arch == "pi05":
+            if stats_json:
+                stats_path = Path(stats_json)
+            else:
+                from huggingface_hub import hf_hub_download
+                stats_path = Path(hf_hub_download(
+                    repo_id="lerobot/libero", filename="meta/stats.json",
+                    repo_type="dataset"))
+            if not stats_path.exists():
+                raise FileNotFoundError(
+                    f"π0.5 state stats not found at {stats_path}. Pass --stats-json "
+                    f"<LIBERO meta/stats.json>.")
+            blob = json.loads(stats_path.read_text())
+            st = blob["observation.state"]
+            if "q01" not in st or "q99" not in st:
+                raise ValueError(
+                    f"{stats_path}::observation.state lacks q01/q99 (π0.5 uses QUANTILES). "
+                    f"Use a meta/stats.json with quantile stats.")
+            self._pi05_state_q01 = np.asarray(st["q01"], dtype=np.float32).reshape(-1)
+            self._pi05_state_q99 = np.asarray(st["q99"], dtype=np.float32).reshape(-1)
+            print(f"vla-cpp-direct[arch=pi05]: state QUANTILES via "
+                  f"{stats_path}::observation.state ({self._pi05_state_q01.shape[0]}-D)",
+                  flush=True)
+
 
         self._gr00t_action_unnorm = None
         self._gr00t_state_norm = None
@@ -404,6 +432,8 @@ class VlaCppClient:
             return self._predict_chunk_gr00t_n1_5(observations)
         if self.arch == "gr00t_n1_6":
             return self._predict_chunk_gr00t_n1_6(observations)
+        if self.arch == "pi05":
+            return self._predict_chunk_pi05(observations)
 
         images_f32: list[np.ndarray] = []
         for key in self.image_keys:
@@ -458,6 +488,66 @@ class VlaCppClient:
 
         self._last_response = resp
 
+        return (np.array(resp.action_chunk, dtype=np.float32)
+                  .reshape(resp.chunk_size, resp.action_dim))
+
+    def _predict_chunk_pi05(self, observations: dict[str, Any]) -> np.ndarray:
+        if self._pi05_state_q01 is None:
+            raise RuntimeError("arch=pi05 needs state stats; pass --stats-json "
+                               "<LIBERO meta/stats.json> (or allow the lerobot/libero fetch).")
+        images_f32: list[np.ndarray] = []
+        for key in self.image_keys:
+            if key not in observations:
+                raise KeyError(
+                    f"image key '{key}' missing; got {list(observations.keys())}")
+            img = observations[key]
+            if isinstance(img, torch.Tensor):
+                img = img.numpy()
+            img = np.asarray(img, dtype=np.float32)
+            if img.ndim != 3 or img.shape[0] != 3:
+                raise ValueError(f"{key}: expected CHW float32 [3, H, W], got {img.shape}")
+            img = _resize_with_pad(img, self.image_size, self.image_size, pad_value=0.0)
+            img_hwc = np.transpose(img, (1, 2, 0))
+            images_f32.append(np.ascontiguousarray(img_hwc, dtype=np.float32))
+
+        s = observations["observation.state"]
+        if isinstance(s, torch.Tensor):
+            s = s.numpy()
+        s = np.asarray(s, dtype=np.float32).reshape(-1)
+        d = self._pi05_state_q01.shape[0]
+        normed = 2.0 * (s[:d] - self._pi05_state_q01) / (self._pi05_state_q99 - self._pi05_state_q01) - 1.0
+        bins = np.linspace(-1.0, 1.0, 256 + 1)[:-1]
+        disc = np.digitize(normed, bins=bins) - 1
+
+        task = observations.get("task", "")
+        if isinstance(task, bytes):
+            task = task.decode()
+        cleaned = task.strip().replace("_", " ").replace("\n", " ")
+        state_str = " ".join(map(str, disc.tolist()))
+        prompt = f"Task: {cleaned}, State: {state_str};\nAction: "
+        toks = self.tok(prompt, padding=False, truncation=True,
+                        max_length=self.max_length, return_tensors="np")
+        lang = toks["input_ids"][0].astype(np.int32)
+
+        req = self.pb.PredictRequest()
+        req.request_id = self._step
+        self._step += 1
+        for img in images_f32:
+            ip = req.images.add()
+            ip.encoding = self.pb.Image.F32_RGB_01
+            ip.height = img.shape[0]
+            ip.width  = img.shape[1]
+            ip.data   = img.tobytes()
+        req.lang_tokens.extend(lang.tolist())
+        req.state.extend([0.0] * self.max_state_dim)
+
+        self.sock.send(req.SerializeToString())
+        body = self.sock.recv()
+        resp = self.pb.PredictResponse()
+        resp.ParseFromString(body)
+        if resp.error:
+            raise RuntimeError(f"vla-server error: {resp.error}")
+        self._last_response = resp
         return (np.array(resp.action_chunk, dtype=np.float32)
                   .reshape(resp.chunk_size, resp.action_dim))
 
