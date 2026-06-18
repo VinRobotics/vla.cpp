@@ -68,6 +68,9 @@ run_model() {
 
         local stats; stats="$(stats_json_for "$arch" "${ORCH_MODELS_ROOT}" "$suite")"  # client-side, on the orchestrator
         local extra=(); [[ -n "$stats" && -f "$stats" ]] && extra+=(--stats-json "$stats")
+        # Some archs (gr00t_n1_6) vendor their tokenizer in the model dir; point the client at it.
+        local tok; tok="$(tokenizer_for "$arch" "${ORCH_MODELS_ROOT}")"
+        [[ -n "$tok" && -d "$tok" ]] && extra+=(--tokenizer "$tok")
 
         for task_id in $(seq 0 9); do
             echo "[${PLATFORM}/${arch}] suite=${suite} task=${task_id}"

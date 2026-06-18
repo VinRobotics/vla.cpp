@@ -190,12 +190,12 @@ def check_model(name: str, model_dir: Path, logs_dir: Path, base: dict,
 
 def render_md(platform: str, tol: float, results: list[dict]) -> str:
     overall = all(r["ok"] for r in results)
-    out = [f"# CI gate - `{platform}`  {'PASS ✅' if overall else 'FAIL ❌'}",
+    out = [f"# CI gate - `{platform}`  {'PASS' if overall else 'FAIL'}",
            "", f"Tolerance: actual ≤ {tol:g}× reported baseline. SR gate: > 0.", ""]
     for r in results:
-        out.append(f"## `{r['model']}`  {'✅' if r['ok'] else '❌'}")
+        out.append(f"## `{r['model']}`  {'PASS' if r['ok'] else 'FAIL'}")
         for c in r["checks"]:
-            out.append(f"- {'✅' if c['ok'] else '❌'} **{c['label']}** - {c['detail']}")
+            out.append(f"- [{'PASS' if c['ok'] else 'FAIL'}] **{c['label']}** - {c['detail']}")
         out.append("")
     return "\n".join(out)
 

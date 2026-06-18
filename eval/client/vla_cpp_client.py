@@ -46,15 +46,7 @@ ARCH_PRESETS = {
     "gr00t_n1_5": {"image_size": 224, "tokenizer": "lerobot/eagle2hg-processor-groot-n1p5",
                    "max_state_dim": 64, "trust_remote_code": True},
 
-    "gr00t_n1_6": {
-
-        "image_size": 224,
-        "tokenizer": str(Path(__file__).resolve().parents[1]
-                         / "policies" / "gr00t_n16" / "model" / "modules"
-                         / "nvidia" / "Eagle-Block2A-2B-v2"),
-        "max_state_dim": 128,
-        "trust_remote_code": True,
-    },
+    "gr00t_n1_6": {"image_size": 224, "tokenizer": None, "max_state_dim": 128, "trust_remote_code": True},
 }
 
 BITVLA_N_PATCHES_PER_VIEW = 256

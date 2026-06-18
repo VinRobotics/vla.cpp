@@ -1,6 +1,6 @@
 # vla.cpp cross-platform CI
 
-Per-PR regression gate for `vla.cpp` across the three target platforms — RTX 3090
+Per-PR regression gate for `vla.cpp` across the three target platforms - RTX 3090
 (`rtx3090`), Jetson Orin Nano (`orin`), Apple M4 (`m4`). On a PR from `dev` into
 `main`, each platform's `vla-server` is evaluated in LIBERO and gated on success
 rate (client side) + latency / memory (server side).
@@ -37,8 +37,8 @@ Every cell is **10 tasks × 1 episode**.
 
 ## Gating
 
-- **SR** (client side) — must be **> 0**.
-- **Server latency & memory** — must be **≤ 1.10× baseline**
+- **SR** (client side) - must be **> 0**.
+- **Server latency & memory** - must be **≤ 1.10× baseline**
   (`ci/baselines/<platform>.json`). M4 memory has no baseline (recorded, not gated).
 
 Per-platform verdict → `outputs/ci/<platform>/verdict.{json,md}`; combined →
@@ -75,6 +75,13 @@ From the orchestrator, confirm each server is reachable:
 
 ```bash
 ci/agent/build/vla-ci-ctl --endpoint tcp://<server-lan-ip>:5600 ping
+```
+
+Build `vla-server` on the servers (each builds its own checkout, once per commit):
+
+```bash
+bash ci/build_servers.sh                 # all servers, in parallel (uses *_CMAKE_FLAGS)
+# or one:  vla-ci-ctl --endpoint tcp://<ip>:5600 build --cwd <server-repo> --flags "<cmake flags>"
 ```
 
 ### 4. Run the three platforms simultaneously

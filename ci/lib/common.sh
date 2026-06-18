@@ -31,17 +31,21 @@ normalize_bind() {
 }
 
 # ---- platform -> connection vars (orchestrator side) -----------------------
-# Resolve a platform key to its hosts.env settings, setting the globals
-# RROOT / RMODELS / SRV_HOST / SRV_PORT / CTRL_PORT / CMAKE_FLAGS. Sourced from
-# ci/config/hosts.env (orchestrator only). Used by run_remote.sh + check_commits.sh.
+# Resolve a platform key to its hosts.env settings, setting the globals RROOT /
+# RMODELS / SRV_HOST / SRV_PORT / CTRL_PORT / CMAKE_FLAGS / BUILD_ENV. Sourced
+# from ci/config/hosts.env (orchestrator only). Used by run_remote.sh,
+# check_commits.sh, build_servers.sh.
 resolve_platform() {
     case "$1" in
         rtx3090) RROOT="${RTX_REPO_ROOT}"; RMODELS="${RTX_MODELS_ROOT}"; SRV_HOST="${RTX_SERVER_HOST}"
-                 SRV_PORT="${RTX_DATA_PORT}"; CTRL_PORT="${RTX_CTRL_PORT}"; CMAKE_FLAGS="${RTX_CMAKE_FLAGS:-}" ;;
+                 SRV_PORT="${RTX_DATA_PORT}"; CTRL_PORT="${RTX_CTRL_PORT}"; CMAKE_FLAGS="${RTX_CMAKE_FLAGS:-}"
+                 BUILD_ENV="${RTX_BUILD_ENV:-}" ;;
         orin)    RROOT="${ORIN_REPO_ROOT}"; RMODELS="${ORIN_MODELS_ROOT}"; SRV_HOST="${ORIN_SERVER_HOST}"
-                 SRV_PORT="${ORIN_DATA_PORT}"; CTRL_PORT="${ORIN_CTRL_PORT}"; CMAKE_FLAGS="${ORIN_CMAKE_FLAGS:-}" ;;
+                 SRV_PORT="${ORIN_DATA_PORT}"; CTRL_PORT="${ORIN_CTRL_PORT}"; CMAKE_FLAGS="${ORIN_CMAKE_FLAGS:-}"
+                 BUILD_ENV="${ORIN_BUILD_ENV:-}" ;;
         m4)      RROOT="${M4_REPO_ROOT}"; RMODELS="${M4_MODELS_ROOT}"; SRV_HOST="${M4_SERVER_HOST}"
-                 SRV_PORT="${M4_DATA_PORT}"; CTRL_PORT="${M4_CTRL_PORT}"; CMAKE_FLAGS="${M4_CMAKE_FLAGS:-}" ;;
+                 SRV_PORT="${M4_DATA_PORT}"; CTRL_PORT="${M4_CTRL_PORT}"; CMAKE_FLAGS="${M4_CMAKE_FLAGS:-}"
+                 BUILD_ENV="${M4_BUILD_ENV:-}" ;;
         *) echo "ERROR: unknown platform '$1'" >&2; return 1 ;;
     esac
 }
@@ -76,17 +80,17 @@ server_args_for() {
             echo "${root}/pi0-libero-finetuned-v044-gguf/mmproj-pi0-libero-finetuned-v044.gguf"
             echo "${root}/pi0-libero-finetuned-v044-gguf/pi0-libero-finetuned-v044.gguf" ;;
         smolvla)
-            echo "${root}/smolvla-libero-bf16-gguf/mmproj-smolvla-libero.gguf"
-            echo "${root}/smolvla-libero-bf16-gguf/smolvla-libero.gguf" ;;
+            echo "${root}/smolvla-libero-gguf/mmproj-smolvla-libero.gguf"
+            echo "${root}/smolvla-libero-gguf/smolvla-libero.gguf" ;;
         evo1)
             echo "${root}/evo1-libero-gguf/evo1-libero.gguf" ;;
         bitvla)
             read -r sd tok <<<"$(suite_dir_token bitvla "$suite")"
             echo "${root}/bitvla-libero-gguf/${sd}/bitvla-libero-${tok}.gguf" ;;
         gr00t_n1_5)
-            echo "${root}/gr00t-n1d5-libero-object-gguf/gr00t-n1d5-libero-object.gguf" ;;
+            echo "${root}/gr00tn1d5-libero-object-gguf/gr00tn1d5-libero-object.gguf" ;;
         gr00t_n1_6)
-            echo "${root}/gr00t-n1d6-libero-gguf/gr00t-n1d6-libero.gguf" ;;
+            echo "${root}/gr00tn1d6-libero-gguf/gr00tn1d6-libero.gguf" ;;
         gr00t_n1_7)
             read -r sd tok <<<"$(suite_dir_token gr00t_n1_7 "$suite")"
             echo "${root}/gr00tn1d7-libero-gguf/${sd}/gr00tn1d7-libero-${tok}.gguf" ;;
@@ -100,11 +104,26 @@ server_args_for() {
 stats_json_for() {
     local arch="$1" root="$2" suite="${3:-${DEFAULT_SUITE:-libero_object}}" sd tok
     case "$arch" in
-        gr00t_n1_5) echo "${root}/gr00t-n1d5-libero-object-gguf/dataset_statistics.json" ;;
-        gr00t_n1_6) echo "${root}/gr00t-n1d6-libero-gguf/dataset_statistics.json" ;;
+        bitvla)
+            read -r sd tok <<<"$(suite_dir_token bitvla "$suite")"
+            echo "${root}/bitvla-libero-gguf/${sd}/dataset_statistics.json" ;;
+        gr00t_n1_5) echo "${root}/gr00tn1d5-libero-object-gguf/dataset_statistics.json" ;;
+        gr00t_n1_6) echo "${root}/gr00tn1d6-libero-gguf/dataset_statistics.json" ;;
         gr00t_n1_7)
             read -r sd tok <<<"$(suite_dir_token gr00t_n1_7 "$suite")"
             echo "${root}/gr00tn1d7-libero-gguf/${sd}/dataset_statistics.json" ;;
+        *) echo "" ;;
+    esac
+}
+
+# Client-side local tokenizer DIR for archs that vendor their tokenizer alongside
+# the GGUF instead of using an HF repo. Only gr00t_n1_6 does (its Eagle tokenizer
+# lives in the model dir); "" => use the client's preset/HF tokenizer. Read on the
+# orchestrator and passed to the client via --tokenizer.
+tokenizer_for() {
+    local arch="$1" root="$2"
+    case "$arch" in
+        gr00t_n1_6) echo "${root}/gr00tn1d6-libero-gguf" ;;
         *) echo "" ;;
     esac
 }

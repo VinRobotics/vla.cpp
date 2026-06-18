@@ -19,6 +19,7 @@
 #include <zmq.hpp>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -68,6 +69,8 @@ int run_capture(const std::string& cwd, const std::vector<std::string>& argv,
         dup2(fd[1], STDOUT_FILENO);
         dup2(fd[1], STDERR_FILENO);
         close(fd[1]);
+        int dn = open("/dev/null", O_RDONLY);     // never block on a stdin read
+        if (dn >= 0) { dup2(dn, STDIN_FILENO); close(dn); }
         if (!cwd.empty() && chdir(cwd.c_str()) != 0) { perror("chdir"); _exit(126); }
         apply_env(env);
         std::vector<char*> a;
@@ -78,12 +81,23 @@ int run_capture(const std::string& cwd, const std::vector<std::string>& argv,
         _exit(127);
     }
     close(fd[1]);
+    // Read until the CHILD exits, not until pipe EOF: a grandchild daemon that
+    // inherits the stdout pipe (common in shell login profiles) would otherwise
+    // hold it open forever and wedge this single-threaded agent. Non-blocking
+    // read + WNOHANG waitpid; once the child is gone, drain and stop.
+    fcntl(fd[0], F_SETFL, fcntl(fd[0], F_GETFL) | O_NONBLOCK);
     char buf[8192];
-    ssize_t n;
-    while ((n = read(fd[0], buf, sizeof buf)) > 0) out.append(buf, n);
-    close(fd[0]);
     int st = 0;
-    waitpid(pid, &st, 0);
+    bool reaped = false;
+    while (true) {
+        struct pollfd pfd { fd[0], POLLIN, 0 };
+        poll(&pfd, 1, 200);
+        ssize_t n;
+        while ((n = read(fd[0], buf, sizeof buf)) > 0) out.append(buf, n);
+        if (reaped) break;                         // child gone + drained this pass
+        if (waitpid(pid, &st, WNOHANG) == pid) reaped = true;  // loop once more to drain
+    }
+    close(fd[0]);
     if (WIFEXITED(st)) return WEXITSTATUS(st);
     if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
     return -1;
