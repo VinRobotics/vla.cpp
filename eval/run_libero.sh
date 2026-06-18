@@ -28,7 +28,7 @@ usage() {
 Usage: $(basename "$0") -i <MODELS_ROOT> [-o <OUTPUT_ROOT>] [-n <N_EPISODES>] [-m <MODEL>]
 
   -i MODELS_ROOT   directory holding the per-model GGUF folders
-                   (e.g. /home/khanh/data/khanhnd61) [required]
+                   (e.g. $HOME/data/vrfai) [required]
   -o OUTPUT_ROOT   destination for client outputs + server logs
                    (default: ${REPO_ROOT}/outputs/libero_object_sweep)
   -n N_EPISODES    episodes per task-id (default: 1)
@@ -370,14 +370,14 @@ fi
 # (flat min/max, emitted next to the GGUF by scripts/convert_gr00t_n1_5_to_gguf.py).
 # embodiment new_embodiment=31 is set in run_model().
 if should_run gr00t_n1_5; then
-    g5_stats_default="${MODELS_ROOT}/gr00t-n1d5-libero-object-gguf/dataset_statistics.json"
+    g5_stats_default="${MODELS_ROOT}/gr00tn1d5-libero-object-gguf/dataset_statistics.json"
     g5_stats="${GR00T_N1_5_STATS:-${g5_stats_default}}"
     if [[ -f "${g5_stats}" ]]; then
         run_model gr00t_n1_5 \
-            "${MODELS_ROOT}/gr00t-n1d5-libero-object-gguf" \
+            "${MODELS_ROOT}/gr00tn1d5-libero-object-gguf" \
             "${N_ACTION_STEPS_GR00T_N1_5}" \
             "${g5_stats}" \
-            "${MODELS_ROOT}/gr00t-n1d5-libero-object-gguf/gr00t-n1d5-libero-object.gguf"
+            "${MODELS_ROOT}/gr00tn1d5-libero-object-gguf/gr00tn1d5-libero-object.gguf"
     else
         echo "[skip] gr00t_n1_5: dataset_statistics.json not found at ${g5_stats}; set GR00T_N1_5_STATS to override"
     fi

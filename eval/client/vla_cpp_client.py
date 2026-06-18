@@ -39,9 +39,9 @@ ARCH_PRESETS = {
     "evo1":    {"image_size": 448, "tokenizer": "OpenGVLab/InternVL3-1B", "max_state_dim": 24,
                 "trust_remote_code": True, "use_fast_tokenizer": False},
 
-    "bitvla":  {"image_size": 224, "tokenizer": "khanhnd61/bitvla-libero-object-gguf", "max_state_dim": 32},
+    "bitvla":  {"image_size": 224, "tokenizer": "hongyuw/ft-bitvla-bitsiglipL-224px-libero_object-bf16", "max_state_dim": 32},
     "vla_adapter": {"image_size": 224,
-                    "tokenizer": "khanhnd61/vla-adapter-libero-object-pro",
+                    "tokenizer": "VLA-Adapter/LIBERO-Object-Pro",
                     "max_state_dim": 8},
 
     "gr00t_n1_7": {"image_size": 256, "tokenizer": "nvidia/Cosmos-Reason2-2B", "max_state_dim": 132},
@@ -49,15 +49,7 @@ ARCH_PRESETS = {
     "gr00t_n1_5": {"image_size": 224, "tokenizer": "lerobot/eagle2hg-processor-groot-n1p5",
                    "max_state_dim": 64, "trust_remote_code": True},
 
-    "gr00t_n1_6": {
-
-        "image_size": 224,
-        "tokenizer": str(Path(__file__).resolve().parents[1]
-                         / "policies" / "gr00t_n16" / "model" / "modules"
-                         / "nvidia" / "Eagle-Block2A-2B-v2"),
-        "max_state_dim": 128,
-        "trust_remote_code": True,
-    },
+    "gr00t_n1_6": {"image_size": 224, "tokenizer": None, "max_state_dim": 128, "trust_remote_code": True},
 }
 
 BITVLA_N_PATCHES_PER_VIEW = 256

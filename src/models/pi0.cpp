@@ -24,6 +24,9 @@
 #ifdef GGML_USE_CUDA
 #include "ggml-cuda.h"
 #endif
+#ifdef GGML_USE_METAL
+#include "ggml-metal.h"
+#endif
 #include "gguf.h"
 
 #include <algorithm>
@@ -194,6 +197,7 @@ struct Pi0ModelArch : public ModelArchBase {
     clip_ctx *            cctx        = nullptr;
     ggml_backend_t        backend     = nullptr;
     bool                  is_cuda     = false;
+    bool                  is_gpu      = false;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_context *        ctx_weights = nullptr;
     std::string           ckpt_path_;
@@ -404,8 +408,12 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
 
 #ifdef GGML_USE_CUDA
     m->backend = ggml_backend_cuda_init( 0);
-    if (m->backend) { m->is_cuda = true; std::printf("vla(pi0): backend = CUDA (device 0)\n"); }
+    if (m->backend) { m->is_cuda = true; m->is_gpu = true; std::printf("vla(pi0): backend = CUDA (device 0)\n"); }
     else            { std::fprintf(stderr, "vla(pi0): ggml_backend_cuda_init failed; falling back to CPU\n"); }
+#elif defined(GGML_USE_METAL)
+    m->backend = ggml_backend_metal_init();
+    if (m->backend) { m->is_gpu = true; std::printf("vla(pi0): backend = Metal\n"); }
+    else            { std::fprintf(stderr, "vla(pi0): ggml_backend_metal_init failed; falling back to CPU\n"); }
 #endif
     {
         const unsigned hw = std::thread::hardware_concurrency();
@@ -420,11 +428,11 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
 
     {
         clip_context_params cp = {};
-        cp.use_gpu           = m->is_cuda;
-        cp.flash_attn_type   = m->is_cuda ? CLIP_FLASH_ATTN_TYPE_AUTO : CLIP_FLASH_ATTN_TYPE_DISABLED;
+        cp.use_gpu           = m->is_gpu;
+        cp.flash_attn_type   = m->is_gpu ? CLIP_FLASH_ATTN_TYPE_AUTO : CLIP_FLASH_ATTN_TYPE_DISABLED;
         cp.image_min_tokens  = -1;
         cp.image_max_tokens  = -1;
-        cp.warmup            = m->is_cuda;
+        cp.warmup            = m->is_gpu;
         cp.cb_eval           = nullptr;
         cp.cb_eval_user_data = nullptr;
         clip_init_result r = clip_init(mmproj_path.c_str(), cp);

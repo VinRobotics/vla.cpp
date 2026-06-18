@@ -40,7 +40,7 @@ usage() {
 Usage: $(basename "$0") -i <MODELS_ROOT> [-o <OUTPUT_ROOT>] [-n <N_EPISODES>] [-t <TASKS>] [-m <MODEL>]
 
   -i MODELS_ROOT   directory holding the per-model GGUF folders
-                   (e.g. /home/khanhnd61/data/khanhnd61, which holds
+                   (e.g. $HOMEnd61/data/vrfai, which holds
                    gr00t-n1d6-bridge-gguf/) [required]
   -o OUTPUT_ROOT   destination for client outputs + server logs
                    (default: ${REPO_ROOT}/outputs/simpler_widowx)

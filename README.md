@@ -1,13 +1,16 @@
+
 # vla.cpp
+
+![logo](assets/logo_vlacpp_white.png)
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE.md)
 [![Built on llama.cpp](https://img.shields.io/badge/built%20on-llama.cpp-lightgrey)](https://github.com/ggml-org/llama.cpp)
-![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)
 [![Models on HF](https://img.shields.io/badge/%F0%9F%A4%97%20models-Hugging%20Face-yellow)](https://huggingface.co/vrfai)
+[![arXiv](https://img.shields.io/badge/arXiv-2606.08094-b31b1b.svg)](http://arxiv.org/abs/2606.08094)
 
 An efficient C++ inference engine for **Vision-Language-Action (VLA) models**, built on top of [`llama.cpp`](https://github.com/ggml-org/llama.cpp).
 It brings today's open VLA policies - SmolVLA, π0, BitVLA, Evo-1, and GR00T N1.5/1.6/1.7 - under one runtime, packaging each as a single self-contained GGUF that needs no Python or PyTorch at inference time.
-The binary can drive robots across CPU or CUDA, scaling from consumer GPUs down to the Jetson-class boards.
+The binary can drive robots across **CPU**, **Apple Silicon**, or **CUDA**, scaling from consumer GPUs down to the Jetson-class boards.
 
 ## Build the server
 
@@ -61,6 +64,8 @@ If system cannot detect CUDA, declare CUDA explicitly in environment variables
 export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
+
+On Apple Silicon (e.g. Mac Mini M4), Metal is enabled by default and runs both the transformer and vision tower on the GPU. See [docs/backend/metal.md](docs/backend/metal.md) for building `vla.cpp` on macOS.
 
 ## Install simulators
 
@@ -180,55 +185,46 @@ python scripts/convert_smolvla_to_gguf.py \
 ## Benchmarks
 
 Full `libero_object` sweep - all 10 tasks × 20 episodes (200 episodes per arch),
-run on an **RTX 3060** (sm_86) via `vla-server` + `eval/client/run_sim_client_direct.py`.
+run via `vla-server` + `eval/client/run_sim_client_direct.py` across three deployment
+targets: an **RTX 3060** (sm_86), an **NVIDIA Jetson AGX Orin** (sm_87, Jetson-class
+deployment hardware), and an **NVIDIA Jetson Orin Nano (8 GB)** (sm_87, the cheapest
+Jetson and the project's primary deployment target). On the Orin Nano, the 8 GB budget
+forces the ~6 GB servers (`gr00t_n1_5`, `pi0`) to run split - server on the Nano, client
+(sim) on the RTX 3060 - while lighter models run co-located; GR00T-N1.6 and GR00T-N1.7
+could not be loaded on 8 GB and are omitted there.
 
-| Model | n_act | SR (/200) | client/step (ms) | client/call (ms) | Peak VRAM (MiB) |
-|---|---:|---:|---:|---:|---:|
-| `smolvla`    |  4 |   90.5%    |  28.16 |   113 | 1410 |
-| `bitvla`     |  8 |   100.0%   |  37.85 |   303 | 1312 |
-| `evo1`       |  8 |   94.5%    |  63.60 |   509 | 1564 |
-| `pi0`        | 32 |   87.5%    |   9.74 |   312 | 5548 |
-| `gr00t_n1_5` | 16 |   96.0%    |  14.17 |   227 | 4866 |
-| `gr00t_n1_6` | 16 |   86.5%    |  10.29 |   165 | 6048 |
-| `gr00t_n1_7` | 16 |   98.0%    |  10.26 |   164 | 6302 |
+Columns report `client/call (ms)` and `Peak RAM (MiB)` for each hardware target.
 
-The same sweep on an **NVIDIA Jetson AGX Orin** (sm_87) - Jetson-class deployment
-hardware.
+| Model | 3060 call (ms) | 3060 RAM (MiB) | AGX Orin call (ms) | AGX Orin RAM (MiB) | Orin Nano call (ms) | Orin Nano RAM (MiB) |
+|---|---:|---:|---:|---:|---:|---:|
+| `smolvla`    |  113 | 1410 |  262 |  689.4 |  567 | 2031.2 |
+| `bitvla`     |  303 | 1312 |  809 | 1148.8 | 2845 | 2199.0 |
+| `evo1`       |  509 | 1564 | 1048 |  637.5 | 3671 | 2135.0 |
+| `pi0`        |  312 | 5548 |  893 |  640.4 | 1955 | 6067.7 |
+| `gr00t_n1_5` |  227 | 4866 |  461 | 1331.3 | 1356 | 5974.9 |
+| `gr00t_n1_6` |  165 | 6048 |  427 | 1340.5 |    - |      - |
+| `gr00t_n1_7` |  164 | 6302 |  429 | 1316.5 |    - |      - |
 
-| Model | n_act | SR (/200) | client/step (ms) | client/call (ms) | Peak RAM (MiB) |
-|---|---:|---:|---:|---:|---:|
-| `smolvla`    |  4 |   90.5%    |  65.41 |   262 |   689.4 |
-| `bitvla`     |  8 |  100.0%    | 101.11 |   809 |  1148.8 |
-| `evo1`       |  8 |   95.5%    | 131.01 |  1048 |   637.5 |
-| `pi0`        | 32 |   85.5%    |  27.90 |   893 |   640.4 |
-| `gr00t_n1_5` | 16 |   97.5%    |  28.78 |   461 |  1331.3 |
-| `gr00t_n1_7` | 16 |   98.5%    |  26.84 |   429 |  1316.5 |
-| `gr00t_n1_6` | 16 |   90.0%    |  26.70 |   427 |  1340.5 |
+## Roadmap
 
-The same sweep on an **NVIDIA Jetson Orin Nano (8 GB)** (sm_87) - the cheapest
-Jetson and the project's primary deployment target. The 8 GB budget sets the
-`config`: light models run server **+** client `co-located` on the Nano; for the
-~6 GB servers (`gr00t_n1_5`, `pi0`) the co-resident LIBERO sim overflows 8 GB, so
-the server runs on the Nano and the client (sim) on the RTX 3060 (`split`).
-GR00T-N1.6 and GR00T-N1.7 could not be loaded on 8 GB and are omitted.
+Support matrix of models (rows) against platforms (columns). Legend: `Y` =
+supported (released and benchmarked), `~` = in progress, `-` = planned.
 
-| Model | n_act | SR (/200) | client/step (ms) | client/call (ms) | Peak RAM (MiB) | config |
-|---|---:|---:|---:|---:|---:|---|
-| `smolvla`    |  4 |   88.0%    | 141.81 |   567 | 2031.2 | co-located |
-| `bitvla`     |  8 |  100.0%    | 355.65 |  2845 | 2199.0 | co-located |
-| `evo1`       |  8 |   97.5%    | 458.84 |  3671 | 2135.0 | co-located |
-| `pi0`        | 50 |   80.5%    |  39.10 |  1955 | 6067.7 | split |
-| `gr00t_n1_5` | 16 |   96.0%    |  84.76 |  1356 | 5974.9 | split |
+| Model | CPU (x86-64 / ARM) | CUDA | Metal | OpenVINO | Hexagon |
+|---|:--:|:--:|:--:|:--:|:--:|
+| SmolVLA     | Y | Y | Y | - | - |
+| π0          | Y | Y | Y | - | - |
+| BitVLA      | Y | Y | ~ | - | - |
+| Evo-1       | Y | Y | ~ | - | - |
+| GR00T N1.5  | Y | Y | ~ | - | - |
+| GR00T N1.6  | Y | Y | ~ | - | - |
+| GR00T N1.7  | Y | Y | Y | - | - |
+| VLA-Adapter | - | - | - | - | - |
+| OpenVLA-OFT | - | - | - | - | - |
+| π0.5        | - | - | - | - | - |
 
-GR00T-N1.6 on SimplerEnv's WidowX (bridge) suite - 4 tasks × 20 episodes, served
-from the `gr00t-n1d6-bridge` GGUF on the RTX 3060 at ~124 ms/step.
-
-| Task | SR (/20) | client/step (ms) |
-|---|---:|---:|
-| widowx_carrot_on_plate        | 80.00% | 124.26 |
-| widowx_spoon_on_towel         | 70.00% | 124.38 |
-| widowx_put_eggplant_in_basket | 20.00% | 124.15 |
-| widowx_stack_cube             | 10.00% | 124.64 |
+Looking ahead, we will support more models, more platforms, and continue to
+optimize the framework.
 
 ## Contributors
 

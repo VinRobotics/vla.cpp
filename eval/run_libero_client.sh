@@ -22,7 +22,7 @@
 #
 # This script touches NO model weights locally - those live on the server. The only
 # files it needs locally are the per-arch dataset_statistics.json (GR00T un-norm),
-# which it reads from MODELS_ROOT (-i, default /home/khanh/data/khanhnd61).
+# which it reads from MODELS_ROOT (-i, default $HOME/data/vrfai).
 
 set -euo pipefail
 
@@ -34,7 +34,7 @@ usage() {
 Usage: $(basename "$0") [-i MODELS_ROOT] [-o OUTPUT_ROOT] [-n N_EPISODES] [-m MODEL] [-a ADDR] [-y]
 
   -i MODELS_ROOT   dir holding the per-model GGUF folders (for the GR00T
-                   dataset_statistics.json) (default: /home/khanh/data/khanhnd61)
+                   dataset_statistics.json) (default: $HOME/data/vrfai)
   -o OUTPUT_ROOT   destination for client outputs
                    (default: ${REPO_ROOT}/outputs/libero_object_sweep)
   -n N_EPISODES    episodes per task-id (default: 20)
@@ -49,7 +49,7 @@ Env overrides: CLIENT_ADDR, N_ACTION_STEPS_PI0, N_ACTION_STEPS_GR00T_N1_5,
 EOF
 }
 
-MODELS_ROOT="/home/khanh/data/khanhnd61"
+MODELS_ROOT="$HOME/data/vrfai"
 OUTPUT_ROOT=""
 N_EPISODES="20"
 MODEL="all"
@@ -145,7 +145,7 @@ EOF
             cat <<EOF
     VLA_GR00T_BF16_WEIGHTS=1 VLA_GR00T_EMBODIMENT=new_embodiment \\
     ./build/vla-server --bind tcp://*:${PORT} \\
-        \${MODELS_ROOT}/gr00t-n1d5-libero-object-gguf/gr00t-n1d5-libero-object.gguf
+        \${MODELS_ROOT}/gr00tn1d5-libero-object-gguf/gr00tn1d5-libero-object.gguf
 EOF
             ;;
         gr00t_n1_6)
@@ -227,7 +227,7 @@ if should_run pi0; then
 fi
 if should_run gr00t_n1_5; then
     run_arch gr00t_n1_5 "${N_ACTION_STEPS_GR00T_N1_5}" \
-        "${MODELS_ROOT}/gr00t-n1d5-libero-object-gguf/dataset_statistics.json"
+        "${MODELS_ROOT}/gr00tn1d5-libero-object-gguf/dataset_statistics.json"
 fi
 if should_run gr00t_n1_6; then
     run_arch gr00t_n1_6 "${N_ACTION_STEPS_GR00T_N1_6}" \

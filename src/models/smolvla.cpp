@@ -27,6 +27,9 @@
 #ifdef GGML_USE_CUDA
 #include "ggml-cuda.h"
 #endif
+#ifdef GGML_USE_METAL
+#include "ggml-metal.h"
+#endif
 
 #include "nlohmann/json.hpp"
 
@@ -280,6 +283,7 @@ struct SmolVLAModelArch : public ModelArchBase {
     ggml_backend_t        backend     = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
     bool                  is_cuda     = false;
+    bool                  is_gpu      = false;
 
     ggml_type             weight_dtype = GGML_TYPE_BF16;
 
@@ -836,9 +840,18 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
     m->backend = ggml_backend_cuda_init( 0);
     if (m->backend) {
         m->is_cuda = true;
+        m->is_gpu  = true;
         std::printf("vla: backend = CUDA (device 0)\n");
     } else {
         std::fprintf(stderr, "vla: ggml_backend_cuda_init failed; falling back to CPU\n");
+    }
+#elif defined(GGML_USE_METAL)
+    m->backend = ggml_backend_metal_init();
+    if (m->backend) {
+        m->is_gpu = true;
+        std::printf("vla: backend = Metal\n");
+    } else {
+        std::fprintf(stderr, "vla: ggml_backend_metal_init failed; falling back to CPU\n");
     }
 #endif
     if (!m->backend) {
@@ -857,7 +870,7 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
     std::printf("vla: tower weights resident as %s\n", ggml_type_name(m->weight_dtype));
 
     clip_context_params cparams = {};
-    cparams.use_gpu          = m->is_cuda;
+    cparams.use_gpu          = m->is_gpu;
 
     cparams.flash_attn_type  = CLIP_FLASH_ATTN_TYPE_AUTO;
     cparams.image_min_tokens = -1;
