@@ -79,6 +79,13 @@ server_args_for() {
         pi0)
             echo "${root}/pi0-libero-finetuned-v044-gguf/mmproj-pi0-libero-finetuned-v044.gguf"
             echo "${root}/pi0-libero-finetuned-v044-gguf/pi0-libero-finetuned-v044.gguf" ;;
+        pi05)
+            echo "${root}/pi05-libero-gguf/mmproj-pi05-libero.gguf"
+            echo "${root}/pi05-libero-gguf/pi05-libero.gguf" ;;
+        vla_adapter)
+            echo "${root}/vla-adapter-libero-object-gguf/libero_object/vla-adapter-libero-object.gguf" ;;
+        openvla_oft)
+            echo "${root}/openvla-oft-libero-gguf/openvla-oft-libero.gguf" ;;
         smolvla)
             echo "${root}/smolvla-libero-gguf/mmproj-smolvla-libero.gguf"
             echo "${root}/smolvla-libero-gguf/smolvla-libero.gguf" ;;
@@ -109,6 +116,7 @@ stats_json_for() {
             echo "${root}/bitvla-libero-gguf/${sd}/dataset_statistics.json" ;;
         gr00t_n1_5) echo "${root}/gr00tn1d5-libero-object-gguf/dataset_statistics.json" ;;
         gr00t_n1_6) echo "${root}/gr00tn1d6-libero-gguf/dataset_statistics.json" ;;
+        openvla_oft) echo "${root}/openvla-oft-libero-gguf/dataset_statistics.json" ;;
         gr00t_n1_7)
             read -r sd tok <<<"$(suite_dir_token gr00t_n1_7 "$suite")"
             echo "${root}/gr00tn1d7-libero-gguf/${sd}/dataset_statistics.json" ;;
@@ -141,6 +149,23 @@ apply_gr00t_env() {
         gr00t_n1_6) export VLA_GR00T_EMBODIMENT="${VLA_GR00T_EMBODIMENT:-libero_panda}" ;;
         gr00t_n1_7) : ;;  # N1.7 LIBERO uses the GGUF's baked default embodiment
     esac
+}
+
+# OpenVLA-OFT selects its action-unnorm (server side) and proprio-norm (client
+# side) stats by suite key; the two ends MUST agree and match the suite under
+# test. Echo the key for an (arch, suite) ("" for every other arch).
+openvla_unnorm_key() {
+    local arch="$1" suite="${2:-${DEFAULT_SUITE:-libero_object}}"
+    [[ "$arch" == openvla_oft ]] && echo "${suite}_no_noops" || echo ""
+}
+
+# Export the suite-matched unnorm key for the SERVER (no-op for other archs).
+# Honours a pre-set VLA_OPENVLA_OFT_UNNORM_KEY.
+apply_openvla_env() {
+    local k; k="$(openvla_unnorm_key "$1" "${2:-}")"
+    if [[ -n "$k" ]]; then
+        export VLA_OPENVLA_OFT_UNNORM_KEY="${VLA_OPENVLA_OFT_UNNORM_KEY:-$k}"
+    fi
 }
 
 # ---- ready-waits ------------------------------------------------------------

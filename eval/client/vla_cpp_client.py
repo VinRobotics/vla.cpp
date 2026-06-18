@@ -35,7 +35,7 @@ from transformers import AutoTokenizer
 ARCH_PRESETS = {
     "smolvla": {"image_size": 512, "tokenizer": "HuggingFaceTB/SmolVLM2-500M-Instruct", "max_state_dim": 32},
     "pi0":     {"image_size": 224, "tokenizer": "google/paligemma-3b-pt-224",           "max_state_dim": 32},
-    "pi05":    {"image_size": 224, "tokenizer": "google/paligemma-3b-pt-224",           "max_state_dim": 32},
+    "pi05":    {"image_size": 224, "tokenizer": "google/paligemma-3b-pt-224",           "max_state_dim": 32, "max_length": 200},
 
     "evo1":    {"image_size": 448, "tokenizer": "OpenGVLab/InternVL3-1B", "max_state_dim": 24,
                 "trust_remote_code": True, "use_fast_tokenizer": False},
@@ -126,7 +126,7 @@ class VlaCppClient:
             "observation.images.image",
             "observation.images.image2",
         ),
-        max_length: int = 48,
+        max_length: int | None = None,
         recv_timeout_ms: int = DEFAULT_RECV_TIMEOUT_MS,
         n_action_steps: int = 1,
 
@@ -139,6 +139,7 @@ class VlaCppClient:
         tokenizer_name = tokenizer_name if tokenizer_name is not None else preset["tokenizer"]
         image_size     = image_size     if image_size     is not None else preset["image_size"]
         max_state_dim  = max_state_dim  if max_state_dim  is not None else preset.get("max_state_dim", 32)
+        max_length     = max_length     if max_length     is not None else preset.get("max_length", 48)
         if tokenizer_name is None:
             raise ValueError(
                 f"arch={arch} has no default tokenizer; pass --tokenizer "

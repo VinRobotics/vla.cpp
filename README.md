@@ -9,7 +9,8 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2606.08094-b31b1b.svg)](http://arxiv.org/abs/2606.08094)
 
 An efficient C++ inference engine for **Vision-Language-Action (VLA) models**, built on top of [`llama.cpp`](https://github.com/ggml-org/llama.cpp).
-It brings today's open VLA policies - SmolVLA, π0, BitVLA, Evo-1, and GR00T N1.5/1.6/1.7 - under one runtime, packaging each as a single self-contained GGUF that needs no Python or PyTorch at inference time.
+It brings today's open VLA policies - SmolVLA, π0, BitVLA, Evo-1, and GR00T N1.5/1.6/1.7
+and more - under one runtime, packaging each as a single self-contained GGUF that needs no Python or PyTorch at inference time.
 The binary can drive robots across **CPU**, **Apple Silicon**, or **CUDA**, scaling from consumer GPUs down to the Jetson-class boards.
 
 ## Build the server
@@ -154,17 +155,17 @@ python eval/client/run_simpler_client_direct.py \
 
 ## Models
 
-Each model ships a combined VLA GGUF (LM + action expert + dataset stats + arch config) and, where applicable, a matching mmproj GGUF (vision tower). BitVLA bakes its vision tower into the combined GGUF, so no mmproj file is needed.
+Each model ships a combined VLA GGUF (LM + action expert + dataset stats + arch config) and, where applicable, a matching mmproj GGUF (vision tower). SmolVLA, π0 and π0.5 ship a separate mmproj; BitVLA, Evo-1, VLA-Adapter and OpenVLA-OFT bake their vision tower into the combined GGUF, so no mmproj file is needed.
 
 | Model       | Converted GGUF | Source ckpt | Client `--arch` flag |
 |---|---|---|---|
 | SmolVLA      | [`smolvla-libero`](https://huggingface.co/vrfai/smolvla-libero-gguf) | [link](https://huggingface.co/HuggingFaceVLA/smolvla_libero) | `smolvla` |
 | π0           | [`pi0-libero`](https://huggingface.co/vrfai/pi0-libero-finetuned-v044-gguf) | [link](https://huggingface.co/lerobot/pi0_libero_finetuned_v044) | `pi0` |
 | BitVLA       | [`bitvla-libero`](https://huggingface.co/vrfai/bitvla-libero-gguf) | [link](https://huggingface.co/hongyuw/ft-bitvla-bitsiglipL-224px-libero_object-bf16) | `bitvla` |
-| Evo-1        | [`evo1-libero`](https://huggingface.co/vrfai/evo1-libero-gguf) | [link](https://huggingface.co/MINT-SJTU/Evo1_LIBERO) | `evo1` |
+| OpenVLA-OFT  | [`openvla-oft-libero`](https://huggingface.co/vrfai/openvla-oft-libero-gguf) | [link](https://huggingface.co/moojink/openvla-7b-oft-finetuned-libero-spatial-object-goal-10) | `openvla_oft` |
 | Groot-N1.7   | [`gr00tn1d7-libero`](https://huggingface.co/vrfai/gr00tn1d7-libero-gguf) | [link](https://huggingface.co/nvidia/GR00T-N1.7-LIBERO) | `gr00t_n1_7` |
 
-`vla.cpp` also supports `gr00t_n1_5` and `gr00t_n1_6`. If you would rather convert a HuggingFace safetensors checkpoint yourself, [`scripts/`](scripts/) provides per-arch GGUF converters. Set up a venv for converter by:
+`vla.cpp` also supports `gr00t_n1_5`, `gr00t_n1_6`, `evo1`, `vla_adapter` and `pi05`. If you would rather convert a HuggingFace safetensors checkpoint yourself, [`scripts/`](scripts/) provides per-arch GGUF converters. Set up a venv for converter by:
 
 ```bash
 # Assume third_party/llama.cpp has been cloned and patched
@@ -214,14 +215,14 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 |---|:--:|:--:|:--:|:--:|:--:|
 | SmolVLA     | Y | Y | Y | - | - |
 | π0          | Y | Y | Y | - | - |
-| BitVLA      | Y | Y | ~ | - | - |
-| Evo-1       | Y | Y | ~ | - | - |
+| π0.5        | Y | Y | ~ | - | - |
 | GR00T N1.5  | Y | Y | ~ | - | - |
 | GR00T N1.6  | Y | Y | ~ | - | - |
 | GR00T N1.7  | Y | Y | Y | - | - |
-| VLA-Adapter | - | - | - | - | - |
-| OpenVLA-OFT | - | - | - | - | - |
-| π0.5        | - | - | - | - | - |
+| BitVLA      | Y | Y | ~ | - | - |
+| Evo-1       | Y | Y | ~ | - | - |
+| VLA-Adapter | Y | Y | ~ | - | - |
+| OpenVLA-OFT | Y | Y | ~ | - | - |
 
 Looking ahead, we will support more models, more platforms, and continue to
 optimize the framework.
@@ -243,8 +244,11 @@ Supported VLA models:
 
 - [SmolVLA](https://huggingface.co/lerobot/smolvla_base) - Hugging Face LeRobot team.
 - [π0](https://github.com/Physical-Intelligence/openpi) - Physical Intelligence
+- [π0.5](https://github.com/Physical-Intelligence/openpi) - Physical Intelligence (PaliGemma + Gemma-300m adaRMS action expert; state-in-prompt flow-matching).
 - [BitVLA](https://github.com/ustcwhy/BitVLA) - Hongyu Wang et al. (1.58-bit ternary VLA).
 - [Evo-1](https://github.com/MINT-SJTU/Evo-1/tree/main) - MINT-SJTU (InternVL3 + cross-attention flow-matching head).
+- [VLA-Adapter](https://github.com/OpenHelix-Team/VLA-Adapter) - OpenHelix (Qwen2.5-0.5B + Bridge-Attention policy head).
+- [OpenVLA-OFT](https://github.com/moojink/openvla-oft) - Moo Jin Kim et al. (Llama-2-7B + parallel MLPResNet L1 action head).
 - [GR00T N1.x](https://github.com/NVIDIA/Isaac-GR00T) - NVIDIA Isaac (Eagle / Cosmos-Reason VLM + AlternateVLDiT action head; N1.5, N1.6, N1.7).
 
 Behavioural evaluation is built on:

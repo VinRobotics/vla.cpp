@@ -45,6 +45,7 @@ SARGS=()
 while IFS= read -r _line; do SARGS+=("$_line"); done < <(server_args_for "$ARCH" "$MODELS_ROOT" "$SUITE")
 for f in "${SARGS[@]}"; do [[ -f "$f" ]] || { echo "ERROR: missing $f" >&2; exit 1; }; done
 apply_gr00t_env "$ARCH"
+apply_openvla_env "$ARCH" "$SUITE"
 
 SERVER_PID=""; SAMPLER_PID=""
 cleanup() {

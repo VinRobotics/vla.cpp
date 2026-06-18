@@ -32,7 +32,8 @@ Usage: $(basename "$0") -i <MODELS_ROOT> [-o <OUTPUT_ROOT>] [-n <N_EPISODES>] [-
   -o OUTPUT_ROOT   destination for client outputs + server logs
                    (default: ${REPO_ROOT}/outputs/libero_object_sweep)
   -n N_EPISODES    episodes per task-id (default: 1)
-  -m MODEL         which model to run: smol | pi0 | bit | evo1 |
+  -m MODEL         which model to run: smol | pi0 | pi05 | bit | evo1 |
+                                       vla_adapter | openvla_oft |
                                        gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | all
                    (default: all)
   -h               show this help
@@ -61,9 +62,9 @@ done
 shift $((OPTIND - 1))
 
 case "${MODEL}" in
-    smol|pi0|bit|evo1|gr00t_n1_5|gr00t_n1_6|gr00t_n1_7|all) ;;
+    smol|pi0|pi05|bit|evo1|vla_adapter|openvla_oft|gr00t_n1_5|gr00t_n1_6|gr00t_n1_7|all) ;;
     *)
-        echo "ERROR: -m must be one of: smol | pi0 | bit | evo1 | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | all (got '${MODEL}')" >&2
+        echo "ERROR: -m must be one of: smol | pi0 | pi05 | bit | evo1 | vla_adapter | openvla_oft | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | all (got '${MODEL}')" >&2
         exit 1
         ;;
 esac
@@ -107,6 +108,9 @@ _USER_VLA_GR00T_EMBODIMENT="${VLA_GR00T_EMBODIMENT-}"
 # before re-querying vla-server). Defaults below match the configurations that
 # closed each arch's LIBERO sweep at the highest reported success rate.
 N_ACTION_STEPS_PI0="${N_ACTION_STEPS_PI0:-50}"               # pi0_libero_finetuned_v044 cfg
+N_ACTION_STEPS_PI05="${N_ACTION_STEPS_PI05:-10}"             # pi0.5 n_action_steps (chunk 50, 10 denoise steps)
+N_ACTION_STEPS_VLA_ADAPTER="${N_ACTION_STEPS_VLA_ADAPTER:-8}" # VLA-Adapter action chunk
+N_ACTION_STEPS_OPENVLA_OFT="${N_ACTION_STEPS_OPENVLA_OFT:-8}" # OpenVLA-OFT parallel 8-step chunk
 N_ACTION_STEPS_SMOL="${N_ACTION_STEPS_SMOL:-1}"              # SmolVLA golden path (re-predict each step)
 N_ACTION_STEPS_EVO1="${N_ACTION_STEPS_EVO1:-8}"              # Evo-1 (chunk replay)
 N_ACTION_STEPS_BIT="${N_ACTION_STEPS_BIT:-8}"                # BitVLA NUM_ACTIONS_CHUNK
@@ -299,6 +303,16 @@ run_model() {
         echo "[${arch}] VLA_GR00T_EMBODIMENT=${VLA_GR00T_EMBODIMENT}"
     fi
 
+    # openvla_oft picks its action-unnorm (server) and proprio-norm (client) stats
+    # by suite key; it must be identical on both and match the suite under test.
+    # The export below is inherited by the server (start_server) and the client.
+    if [[ "${arch}" == openvla_oft ]]; then
+        export VLA_OPENVLA_OFT_UNNORM_KEY="${VLA_OPENVLA_OFT_UNNORM_KEY:-${TASK_SUITE}_no_noops}"
+        echo "[${arch}] VLA_OPENVLA_OFT_UNNORM_KEY=${VLA_OPENVLA_OFT_UNNORM_KEY}"
+    else
+        unset VLA_OPENVLA_OFT_UNNORM_KEY
+    fi
+
     local log="${LOG_DIR}/${arch}.log"
     echo "===================="
     echo "[${arch}] model_dir=${model_dir}"
@@ -338,6 +352,19 @@ if should_run pi0; then
         "${MODELS_ROOT}/pi0-libero-finetuned-v044-gguf/pi0-libero-finetuned-v044.gguf"
 fi
 
+# pi05: PaliGemma + Gemma-300m adaRMS expert; mmproj + ckpt (same layout as pi0).
+# State quantiles auto-load from the lerobot/libero dataset; the pi05 client preset
+# sets max_length=200 automatically. Pass --stats-json via PI05_STATS to pin a
+# local LIBERO meta/stats.json (offline).
+if should_run pi05; then
+    run_model pi05 \
+        "${MODELS_ROOT}/pi05-libero-gguf" \
+        "${N_ACTION_STEPS_PI05}" \
+        "${PI05_STATS:-}" \
+        "${MODELS_ROOT}/pi05-libero-gguf/mmproj-pi05-libero.gguf" \
+        "${MODELS_ROOT}/pi05-libero-gguf/pi05-libero.gguf"
+fi
+
 if should_run smol; then
     run_model smolvla \
         "${MODELS_ROOT}/smolvla-libero-bf16-gguf" \
@@ -364,6 +391,32 @@ if should_run bit; then
         "${N_ACTION_STEPS_BIT}" \
         "" \
         "${MODELS_ROOT}/bitvla-libero-object-gguf/bitvla-libero-object-int2.gguf"
+fi
+
+# vla_adapter: Qwen2.5-0.5B + Bridge-Attention; vision baked in (no mmproj),
+# tokenizer auto-loads from the base ckpt on the Hub, stats baked into the GGUF.
+if should_run vla_adapter; then
+    run_model vla_adapter \
+        "${MODELS_ROOT}/vla-adapter-libero-object-gguf" \
+        "${N_ACTION_STEPS_VLA_ADAPTER}" \
+        "" \
+        "${MODELS_ROOT}/vla-adapter-libero-object-gguf/libero_object/vla-adapter-libero-object.gguf"
+fi
+
+# openvla_oft: Llama-2-7B + MLPResNet head; vision baked in (no mmproj). Needs the
+# client-side dataset_statistics.json (proprio norm) and VLA_OPENVLA_OFT_UNNORM_KEY
+# (set per-suite in run_model) on both server and client.
+if should_run openvla_oft; then
+    oft_stats="${MODELS_ROOT}/openvla-oft-libero-gguf/dataset_statistics.json"
+    if [[ -f "${oft_stats}" ]]; then
+        run_model openvla_oft \
+            "${MODELS_ROOT}/openvla-oft-libero-gguf" \
+            "${N_ACTION_STEPS_OPENVLA_OFT}" \
+            "${oft_stats}" \
+            "${MODELS_ROOT}/openvla-oft-libero-gguf/openvla-oft-libero.gguf"
+    else
+        echo "[skip] openvla_oft: dataset_statistics.json not found at ${oft_stats}"
+    fi
 fi
 
 # gr00t_n1_5: lerobot finetune; vision baked in; needs dataset_statistics.json

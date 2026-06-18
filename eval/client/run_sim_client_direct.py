@@ -71,7 +71,8 @@ if __name__ == "__main__":
     parser.add_argument("--real-action-dim", type=int, default=7)
     parser.add_argument("--image-keys", nargs="+",
         default=["observation.images.image", "observation.images.image2"])
-    parser.add_argument("--max-length", type=int, default=48)
+    parser.add_argument("--max-length", type=int, default=None,
+        help="prompt token budget; default = arch preset's max_length (pi05=200) or 48.")
     parser.add_argument("--recv-timeout-ms", type=int, default=120_000,
         help="ZMQ receive timeout. π0 CPU inference is slow (~5–10 s/step with 2 views).")
     parser.add_argument(

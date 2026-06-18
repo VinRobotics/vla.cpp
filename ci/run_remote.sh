@@ -72,9 +72,14 @@ run_model() {
         local tok; tok="$(tokenizer_for "$arch" "${ORCH_MODELS_ROOT}")"
         [[ -n "$tok" && -d "$tok" ]] && extra+=(--tokenizer "$tok")
 
+        # openvla_oft: the client's proprio-norm key must match the server's
+        # action-unnorm key (and the suite); set the same env on this end.
+        local cenv=(); local oft_key; oft_key="$(openvla_unnorm_key "$arch" "$suite")"
+        [[ -n "$oft_key" ]] && cenv=(env "VLA_OPENVLA_OFT_UNNORM_KEY=${oft_key}")
+
         for task_id in $(seq 0 9); do
             echo "[${PLATFORM}/${arch}] suite=${suite} task=${task_id}"
-            "${LIBERO_VENV_PY}" "${CLIENT}" \
+            "${cenv[@]}" "${LIBERO_VENV_PY}" "${CLIENT}" \
                 --arch "${arch}" --vla-addr "${CLIENT_ADDR}" \
                 --task "${suite}" --task-id "${task_id}" \
                 --n-episodes "${N_EPISODES}" --n-action-steps "${nact}" \
