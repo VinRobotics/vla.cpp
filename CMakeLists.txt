@@ -28,6 +28,7 @@ add_library(vla_core
     src/models/gr00tn1d7.cpp
     src/models/bitvla.cpp
     src/models/vla_adapter.cpp
+    src/models/openvla_oft.cpp
 )
 target_include_directories(vla_core
     PUBLIC

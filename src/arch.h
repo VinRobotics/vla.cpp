@@ -48,6 +48,7 @@ enum class Arch {
     GR00T_N1_7, ///< NVIDIA Isaac GR00T N1.7 (Qwen3 backbone + DiT).
     BITVLA,     ///< Microsoft BitVLA (1.58-bit ternary LM/ViT).
     VLA_ADAPTER,///< OpenHelix VLA-Adapter DINOv2 + SigLIP + Bridge-Attention.
+    OPENVLA_OFT,///< DINOv2-L/14-reg4 + SigLIP-so400m/14 +Llama-2-7B + MLPResNet.
 };
 
 /**
@@ -145,6 +146,14 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
  * @copydetails smolvla_create
  */
 std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path,
+                                                  const std::string& ckpt_path,
+                                                  const std::string& config_path);
+
+/**
+ * @brief Build a OpenVLA-OFT model. Vision is baked into @p ckpt_path.
+ * @copydetails smolvla_create
+ */
+std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path,
                                                   const std::string& ckpt_path,
                                                   const std::string& config_path);
 
