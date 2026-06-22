@@ -39,16 +39,17 @@ namespace vla {
  * (@ref detect_arch_from_ckpt) and routed to the corresponding factory.
  */
 enum class Arch {
-    SMOLVLA,    ///< Hugging Face SmolVLA (mmproj + LM + flow-matching head).
-    PI0,        ///< Physical Intelligence pi0 (PaliGemma + flow-matching).
-    PI05,       ///< PaliGemma-3B + SigLIP-So400m + Gemma-300m + FM.
-    EVO1,       ///< MINT-SJTU Evo-1 (InternVL3 + cross-attention head).
-    GR00T_N1_5, ///< NVIDIA Isaac GR00T N1.5 (Eagle VLM + DiT action head).
-    GR00T_N1_6, ///< NVIDIA Isaac GR00T N1.6 (Eagle Block-2A + DiT).
-    GR00T_N1_7, ///< NVIDIA Isaac GR00T N1.7 (Qwen3 backbone + DiT).
-    BITVLA,     ///< Microsoft BitVLA (1.58-bit ternary LM/ViT).
-    VLA_ADAPTER,///< OpenHelix VLA-Adapter DINOv2 + SigLIP + Bridge-Attention.
-    OPENVLA_OFT,///< DINOv2-L/14-reg4 + SigLIP-so400m/14 +Llama-2-7B + MLPResNet.
+    SMOLVLA,    // Hugging Face SmolVLA (mmproj + LM + flow-matching head).
+    PI0,        // Physical Intelligence pi0 (PaliGemma + flow-matching).
+    PI05,       // PaliGemma-3B + SigLIP-So400m + Gemma-300m + FM.
+    EVO1,       // MINT-SJTU Evo-1 (InternVL3 + cross-attention head).
+    GR00T_N1_5, // NVIDIA Isaac GR00T N1.5 (Eagle VLM + DiT action head).
+    GR00T_N1_6, // NVIDIA Isaac GR00T N1.6 (Eagle Block-2A + DiT).
+    GR00T_N1_7, // NVIDIA Isaac GR00T N1.7 (Qwen3 backbone + DiT).
+    BITVLA,     // Microsoft BitVLA (1.58-bit ternary LM/ViT).
+    VLA_ADAPTER,// OpenHelix VLA-Adapter DINOv2 + SigLIP + Bridge-Attention.
+    OPENVLA_OFT,// DINOv2-L/14-reg4 + SigLIP-so400m/14 +Llama-2-7B + MLPResNet.
+    VLA_JEPA,   // LeRobot Qwen3-VL-2B-Instruct+V-JEPÀ+DiT-B FM.
 };
 
 /**
@@ -162,6 +163,14 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
  * @copydetails smolvla_create
  */
 std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path,
+                                                  const std::string& ckpt_path,
+                                                  const std::string& config_path);
+
+/**
+ * @brief Build a VLA-JEPA model. Vision is baked into @p ckpt_path.
+ * @copydetails smolvla_create
+ */
+std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
                                                   const std::string& ckpt_path,
                                                   const std::string& config_path);
 

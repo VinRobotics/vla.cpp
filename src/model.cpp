@@ -65,6 +65,7 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
         try_str("gr00t_n1_7.architecture", arch_str) ||
         try_str("bitvla.architecture",     arch_str) ||
         try_str("openvla_oft.architecture", arch_str) ||
+        try_str("vla_jepa.architecture",   arch_str) ||
         try_str("vla_adapter.architecture", arch_str)) {
         if      (arch_str == "smolvla")    { *out = Arch::SMOLVLA;    ok = true; }
         else if (arch_str == "pi0")        { *out = Arch::PI0;        ok = true; }
@@ -76,6 +77,7 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
         else if (arch_str == "bitvla")     { *out = Arch::BITVLA;     ok = true; }
         else if (arch_str == "vla_adapter"){ *out = Arch::VLA_ADAPTER;ok = true; }
         else if (arch_str == "openvla_oft"){ *out = Arch::OPENVLA_OFT;ok = true; }
+        else if (arch_str == "vla_jepa")   { *out = Arch::VLA_JEPA;   ok = true; }
     }
 
     gguf_free(gctx);
@@ -171,6 +173,10 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
         case Arch::OPENVLA_OFT:
             std::printf("vla: arch = openvla_oft\n");
             impl = openvla_oft_create(mmproj_path, ckpt_path, config_path);
+            break;
+        case Arch::VLA_JEPA:
+            std::printf("vla: arch = vla_jepa\n");
+            impl = vla_jepa_create(mmproj_path, ckpt_path, config_path);
             break;
     }
     if (!impl) return nullptr;
