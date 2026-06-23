@@ -68,6 +68,8 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 On Apple Silicon (e.g. Mac Mini M4), Metal is enabled by default and runs both the transformer and vision tower on the GPU. See [docs/backend/metal.md](docs/backend/metal.md) for building `vla.cpp` on macOS.
 
+On Windows, build inside WSL2 (Ubuntu). See [docs/backend/windows-wsl.md](docs/backend/windows-wsl.md) for the WSL2 + CUDA setup, including the GPU/toolkit prerequisites.
+
 ## Install simulators
 
 The eval scaffold under [`eval/`](eval/) supports two simulators end-to-end. Each setup script bootstraps an isolated Python 3.10 `uv` venv next to itself and clones the upstream sim repo. Both require [`uv`](https://github.com/astral-sh/uv) on `PATH`.
