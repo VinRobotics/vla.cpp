@@ -165,7 +165,9 @@ Each model ships a combined VLA GGUF (LM + action expert + dataset stats + arch 
 | OpenVLA-OFT  | [`openvla-oft-libero`](https://huggingface.co/vrfai/openvla-oft-libero-gguf) | [link](https://huggingface.co/moojink/openvla-7b-oft-finetuned-libero-spatial-object-goal-10) | `openvla_oft` |
 | Groot-N1.7   | [`gr00tn1d7-libero`](https://huggingface.co/vrfai/gr00tn1d7-libero-gguf) | [link](https://huggingface.co/nvidia/GR00T-N1.7-LIBERO) | `gr00t_n1_7` |
 
-`vla.cpp` also supports `gr00t_n1_5`, `gr00t_n1_6`, `evo1`, `vla_adapter` and `pi05`. If you would rather convert a HuggingFace safetensors checkpoint yourself, [`scripts/`](scripts/) provides per-arch GGUF converters. Set up a venv for converter by:
+`vla.cpp` also supports `gr00t_n1_5`, `gr00t_n1_6`, `evo1`, `vla_adapter`, `vla_jepa` and `pi05`.
+If you would rather convert a HuggingFace safetensors checkpoint yourself, [`scripts/`](scripts/) provides per-arch GGUF converters.
+Set up a venv for converter by:
 
 ```bash
 # Assume third_party/llama.cpp has been cloned and patched
@@ -223,6 +225,7 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | Evo-1       | Y | Y | ~ | - | - |
 | VLA-Adapter | Y | Y | ~ | - | - |
 | OpenVLA-OFT | Y | Y | ~ | - | - |
+| VLA-JEPA    | Y | Y | ~ | - | - |
 
 Looking ahead, we will support more models, more platforms, and continue to
 optimize the framework.
@@ -249,6 +252,7 @@ Supported VLA models:
 - [VLA-Adapter](https://github.com/OpenHelix-Team/VLA-Adapter) - Yihao Wang et al.
 - [OpenVLA-OFT](https://github.com/moojink/openvla-oft) - Moo Jin Kim et al.
 - [GR00T N1.x](https://github.com/NVIDIA/Isaac-GR00T) - NVIDIA Isaac.
+- [VLA-JEPA](https://github.com/ginwind/VLA-JEPA) - Jingwen Sun et al.
 
 Behavioural evaluation is built on:
 

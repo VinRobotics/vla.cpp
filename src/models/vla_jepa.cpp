@@ -410,7 +410,7 @@ std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
                                                const std::string& ckpt_path,
                                                const std::string& ) {
     if (!mmproj_path.empty())
-        std::printf("vla(vla_jepa): note — mmproj '%s' is ignored (the vision tower is bundled in the combined GGUF)\n", mmproj_path.c_str());
+        std::printf("vla(vla_jepa): note - mmproj '%s' is ignored (the vision tower is bundled in the combined GGUF)\n", mmproj_path.c_str());
 
     auto m = std::make_unique<VlaJepaModelArch>();
     m->gguf_path   = ckpt_path;
@@ -524,7 +524,7 @@ std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
         }
         ggml_backend_tensor_set(t, bytes.data(), 0, bytes.size());
     }
-    std::printf("vla(vla_jepa): weights resident in %.2f GiB (%s) — Qwen3-VL backbone + deepstack + DiT-B head\n",
+    std::printf("vla(vla_jepa): weights resident in %.2f GiB (%s) - Qwen3-VL backbone + deepstack + DiT-B head\n",
                 ggml_backend_buffer_get_size(m->weight_buf) / (1024.0 * 1024.0 * 1024.0), m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
     if (!m->build_caches()) { std::fprintf(stderr, "vla(vla_jepa): build_caches failed\n"); return nullptr; }
     return m;

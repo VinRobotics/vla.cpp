@@ -237,7 +237,7 @@ def main() -> int:
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file()
     writer.close()
-    print(f"done. {out} ({out.stat().st_size / (1024*1024):.1f} MiB) — combined GGUF "
+    print(f"done. {out} ({out.stat().st_size / (1024*1024):.1f} MiB) - combined GGUF "
           f"(Qwen3-VL backbone + deepstack + DiT-B action head + cfg)")
     return 0
 
