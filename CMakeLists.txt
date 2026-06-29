@@ -30,6 +30,7 @@ add_library(vla_core
     src/models/bitvla.cpp
     src/models/vla_adapter.cpp
     src/models/openvla_oft.cpp
+    src/models/vla_jepa.cpp
 )
 target_include_directories(vla_core
     PUBLIC

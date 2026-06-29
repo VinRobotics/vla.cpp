@@ -47,7 +47,8 @@ ARCH_PRESETS = {
     "openvla_oft": {"image_size": 224,
                     "tokenizer": "moojink/openvla-7b-oft-finetuned-libero-spatial-object-goal-10",
                     "max_state_dim": 8},
-
+    "vla_jepa": {"image_size": 256, "tokenizer": "Qwen/Qwen3-VL-2B-Instruct",
+                 "max_state_dim": 8, "use_processor": True},
     "gr00t_n1_7": {"image_size": 256, "tokenizer": "nvidia/Cosmos-Reason2-2B", "max_state_dim": 132},
 
     "gr00t_n1_5": {"image_size": 224, "tokenizer": "lerobot/eagle2hg-processor-groot-n1p5",
@@ -70,6 +71,15 @@ VLA_ADAPTER_PROMPT_TPL    = (
 OPENVLA_OFT_N_VIEWS    = 2
 OPENVLA_OFT_PROMPT_TPL = "In: What action should the robot take to {instruction}?\nOut:"
 OPENVLA_OFT_EMPTY_TOKEN = 29871
+VLA_JEPA_REPLACE_PROMPT = "".join("<|action_{}|>".format(i) * 8 for i in range(3))
+VLA_JEPA_EMBODIED_PROMPT = "<|embodied_action|>" * 32
+VLA_JEPA_PROMPT_TPL = (
+    "Your task is {instruction}. Infer the temporal dynamics from frames "
+    + VLA_JEPA_REPLACE_PROMPT
+    + " and produce the corresponding policy actions "
+    + VLA_JEPA_EMBODIED_PROMPT
+    + "."
+)
 
 def _load_pb():
 
@@ -435,6 +445,53 @@ class VlaCppClient:
                   f"(flat min/max, no clip) via {stats_path}::{key}.state "
                   f"[min={s_min.tolist()}, max={s_max.tolist()}]", flush=True)
 
+        self._vlajepa_proc = None
+        self._vlajepa_state_norm = None
+        self._vlajepa_action_unnorm = None
+        if arch == "vla_jepa":
+            from transformers import AutoProcessor
+            proc = AutoProcessor.from_pretrained(tokenizer_name, trust_remote_code=trust_remote)
+            proc.tokenizer.padding_side = "left"
+            # expand_tokenizer: chunk_size*4 = 28 action tokens + 1 embodied token (special).
+            proc.tokenizer.add_tokens([f"<|action_{i}|>" for i in range(28)], special_tokens=True)
+            proc.tokenizer.add_tokens(["<|embodied_action|>"], special_tokens=True)
+            self._vlajepa_proc = proc
+            # stats: prefer --stats-json = ckpt dir (has policy_{pre,post}processor safetensors).
+            from safetensors.numpy import load_file as _sf_load
+            sdir = Path(stats_json) if stats_json else Path(tokenizer_name)
+            pre = sdir / "policy_preprocessor_step_3_normalizer_processor.safetensors"
+            post = sdir / "policy_postprocessor_step_2_unnormalizer_processor.safetensors"
+            if not pre.exists() or not post.exists():
+                raise FileNotFoundError(
+                    f"vla_jepa needs the policy_{{pre,post}}processor safetensors; pass --stats-json "
+                    f"<ckpt dir>. Looked in {sdir}")
+            pst, post_st = _sf_load(str(pre)), _sf_load(str(post))
+            s_mean = pst["observation.state.mean"].astype(np.float32)
+            s_std = pst["observation.state.std"].astype(np.float32)
+            a_min = post_st["action.min"].astype(np.float32)
+            a_max = post_st["action.max"].astype(np.float32)
+            a_rng = np.where((a_max - a_min) == 0, 1e-8, a_max - a_min).astype(np.float32)
+
+            def _state_norm(state_8d, mean=s_mean, std=s_std):   # MEAN_STD, eps=1e-8
+                return ((state_8d - mean) / (std + 1e-8)).astype(np.float32)
+
+            def _action_unnorm(chunk, mn=a_min, rng=a_rng):
+                # postproc order: clip[-1,1] -> pre_snap_gripper(dim6 >=0.5->1 else 0)
+                # -> MIN_MAX unnormalize -> binarize_gripper(dim6 >0.5->-1 else 1).
+                a = np.clip(chunk.astype(np.float32), -1.0, 1.0)
+                gd = 6
+                if a.shape[-1] > gd:
+                    a[..., gd] = (a[..., gd] >= 0.5).astype(np.float32)
+                a = (a + 1.0) * 0.5 * rng[None, :] + mn[None, :]
+                if a.shape[-1] > gd:
+                    a[..., gd] = 1.0 - 2.0 * (a[..., gd] > 0.5).astype(np.float32)
+                return a.astype(np.float32)
+
+            self._vlajepa_state_norm = _state_norm
+            self._vlajepa_action_unnorm = _action_unnorm
+            print(f"vla-cpp-direct[arch=vla_jepa]: Qwen3-VL processor + MEAN_STD state / "
+                  f"MIN_MAX action stats via {sdir}", flush=True)
+
     def ping(self) -> bool:
 
         return True
@@ -470,6 +527,8 @@ class VlaCppClient:
             return self._predict_chunk_gr00t_n1_6(observations)
         if self.arch == "pi05":
             return self._predict_chunk_pi05(observations)
+        if self.arch == "vla_jepa":
+            return self._predict_chunk_vla_jepa(observations)
 
         images_f32: list[np.ndarray] = []
         for key in self.image_keys:
@@ -526,6 +585,92 @@ class VlaCppClient:
 
         return (np.array(resp.action_chunk, dtype=np.float32)
                   .reshape(resp.chunk_size, resp.action_dim))
+
+    _VJ_PS, _VJ_TPS, _VJ_MERGE, _VJ_SIDE = 16, 2, 2, 256
+
+    @classmethod
+    def _vj_merge_block_coords(cls):
+        ps, mg = cls._VJ_PS, cls._VJ_MERGE
+        grid = cls._VJ_SIDE // ps   # 16
+        n = grid * grid
+        rows = np.empty(n, np.int64); cols = np.empty(n, np.int64)
+        for s in range(n):
+            t = s; wj = t % mg; t //= mg; wi = t % mg; t //= mg
+            bc = t % (grid // mg); t //= (grid // mg); br = t
+            rows[s] = br * mg + wi; cols[s] = bc * mg + wj
+        return rows, cols
+
+    @classmethod
+    def _vj_unpatchify(cls, pv: np.ndarray) -> np.ndarray:
+        ps, tps, side = cls._VJ_PS, cls._VJ_TPS, cls._VJ_SIDE
+        rows, cols = cls._vj_merge_block_coords()
+        img = np.empty((side, side, 3), np.float32)
+        pv = pv.reshape(-1, 3 * tps * ps * ps)
+        for s in range(rows.shape[0]):
+            for ch in range(3):
+                base = ch * tps * ps * ps  # t=0
+                blk = pv[s, base: base + ps * ps].reshape(ps, ps)
+                img[rows[s]*ps:(rows[s]+1)*ps, cols[s]*ps:(cols[s]+1)*ps, ch] = blk * 0.5 + 0.5
+        return np.ascontiguousarray(img, np.float32)
+
+    def _predict_chunk_vla_jepa(self, observations: dict[str, Any]) -> np.ndarray:
+        from PIL import Image as _PILImage
+        proc = self._vlajepa_proc
+        pil_imgs = []
+        for key in self.image_keys[:2]:
+            if key not in observations:
+                raise KeyError(f"vla_jepa image key '{key}' missing; got {list(observations.keys())}")
+            img = observations[key]
+            if isinstance(img, torch.Tensor):
+                img = img.numpy()
+            img = np.asarray(img, dtype=np.float32)
+            if img.ndim != 3 or img.shape[0] != 3:
+                raise ValueError(f"{key}: expected CHW float [3,H,W], got {img.shape}")
+            hwc_u8 = np.clip(np.transpose(img, (1, 2, 0)) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+            pil = _PILImage.fromarray(hwc_u8, mode="RGB").resize(
+                (224, 224), resample=getattr(_PILImage, "Resampling", _PILImage).BOX)
+            pil_imgs.append(pil)
+
+        content = [{"type": "image", "image": im} for im in pil_imgs]
+        content.append({"type": "text", "text": VLA_JEPA_PROMPT_TPL.format(
+            instruction=(observations.get("task", "") or ""))})
+        qi = proc.apply_chat_template(
+            [[{"role": "user", "content": content}]], tokenize=True, add_generation_prompt=True,
+            return_dict=True, processor_kwargs={"padding": True, "return_tensors": "pt"})
+        lang = qi["input_ids"][0].cpu().numpy().astype(np.int32)
+        pv = qi["pixel_values"].cpu().float().numpy()          # [n_views*256, 1536]
+        n_views = len(pil_imgs)
+        per = pv.shape[0] // n_views
+        images_f32 = [self._vj_unpatchify(pv[v*per:(v+1)*per]) for v in range(n_views)]
+
+        st = observations["observation.state"]
+        if isinstance(st, torch.Tensor):
+            st = st.numpy()
+        st = np.asarray(st, dtype=np.float32).reshape(-1)[: self.max_state_dim]
+        st = self._vlajepa_state_norm(st)
+        state_padded = np.zeros(self.max_state_dim, dtype=np.float32)
+        state_padded[: st.shape[0]] = st
+
+        req = self.pb.PredictRequest()
+        req.request_id = self._step
+        self._step += 1
+        for img in images_f32:
+            ip = req.images.add()
+            ip.encoding = self.pb.Image.F32_RGB_01
+            ip.height = img.shape[0]; ip.width = img.shape[1]
+            ip.data = img.tobytes()
+        req.lang_tokens.extend(int(t) for t in lang)
+        req.state.extend(float(x) for x in state_padded)
+
+        self.sock.send(req.SerializeToString())
+        resp = self.pb.PredictResponse()
+        resp.ParseFromString(self.sock.recv())
+        if resp.error:
+            raise RuntimeError(f"vla-server error: {resp.error}")
+        self._last_response = resp
+        chunk = (np.array(resp.action_chunk, dtype=np.float32)
+                   .reshape(resp.chunk_size, resp.action_dim))
+        return self._vlajepa_action_unnorm(chunk)
 
     def _predict_chunk_pi05(self, observations: dict[str, Any]) -> np.ndarray:
         if self._pi05_state_q01 is None:
