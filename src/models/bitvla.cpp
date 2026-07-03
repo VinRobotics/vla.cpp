@@ -178,6 +178,8 @@ struct BitvlaModelArch : public ModelArchBase {
     ~BitvlaModelArch() override;
 
     std::string           gguf_path;
+    gguf_reader           emb_reader;   // stays open for per-step token-embedding row fetches
+    std::vector<float>    stop_embed;   // cached constant stop-token embedding row
     ggml_backend_t        backend     = nullptr;
     bool                  is_cuda     = false;
     int                   n_threads   = 4;
@@ -461,12 +463,14 @@ namespace {
 
 static void recover_ternary_and_scale(const float* W, int64_t n,
                                        std::vector<int8_t>& ternary, float& absmean) {
-
-    float amax = 0.0f;
-    for (int64_t i = 0; i < n; ++i) amax = std::max(amax, std::fabs(W[i]));
-    if (amax < 1e-5f) amax = 1e-5f;
-    absmean = amax;
-    const float inv = 1.0f / amax;
+    // Per-tensor absmean scale (1/mean|W|), matching scripts/bitvla_int2_pack.py;
+    // the int2-packed path bakes the same scale.
+    double s = 0.0;
+    for (int64_t i = 0; i < n; ++i) s += std::fabs((double) W[i]);
+    float mean = n > 0 ? (float) (s / (double) n) : 0.0f;
+    if (mean < 1e-5f) mean = 1e-5f;
+    absmean = mean;
+    const float inv = 1.0f / mean;
     ternary.resize(n);
     for (int64_t i = 0; i < n; ++i) {
         float q = std::nearbyintf(W[i] * inv);
@@ -604,6 +608,17 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
         std::fprintf(stderr, "vla(bitvla): %s is not a bitvla GGUF\n", ckpt_path.c_str()); return nullptr;
     }
     if (!load_config(g, *m, m->cfg)) return nullptr;
+
+    // Keep one reader open for the per-step token-embedding fetches (token_embd
+    // stays on disk under int2 packing) and cache the constant stop-token row,
+    // so predict() no longer re-opens and re-parses the GGUF twice per call.
+    if (!m->emb_reader.open(ckpt_path)) return nullptr;
+    m->stop_embed.resize((size_t) m->lm_hidden);
+    {
+        std::vector<int32_t> sid{ m->stop_id };
+        if (!m->emb_reader.fetch_rows_f32("token_embd.weight", sid,
+                                          m->stop_embed.data(), m->lm_hidden)) return nullptr;
+    }
     std::printf("vla(bitvla): vit=BitSigLIP-L %lldd×%lldL×%lldh@%lld  ⇒ %lld patches  mm=%lld→%lld  "
                 "lm=BitNet %lldd×%lldL (%lldq/%lldkv×%lld) rope=%g  chunk×dim=%lld×%lld  vocab=%lld  resident=%s\n",
                 (long long) m->vit_hidden, (long long) m->vit_layers, (long long) m->vit_heads, (long long) m->image_size,
@@ -1195,9 +1210,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
                 std::fprintf(stderr, "vla(bitvla): prompt token %d out of vocab\n", id); return {};
             }
         }
-        gguf_reader g_re;
-        if (!g_re.open(gguf_path)) return {};
-        if (!g_re.fetch_rows_f32("token_embd.weight", ids, inputs_embeds.data(), hidden_l)) return {};
+        if (!emb_reader.fetch_rows_f32("token_embd.weight", ids, inputs_embeds.data(), hidden_l)) return {};
 
         int64_t k_img = 0;
         for (int64_t i = 0; i < n_lang_in; ++i) {
@@ -1214,11 +1227,8 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
             }
         }
 
-        gguf_reader g_re2;
-        if (!g_re2.open(gguf_path)) return {};
-        std::vector<int32_t> stop_id_v{ stop_id };
-        if (!g_re2.fetch_rows_f32("token_embd.weight", stop_id_v,
-                                   inputs_embeds.data() + (size_t) (seq - 1) * hidden_l, hidden_l)) return {};
+        std::memcpy(inputs_embeds.data() + (size_t) (seq - 1) * hidden_l,
+                    stop_embed.data(), (size_t) hidden_l * sizeof(float));
     } else {
 
         const int64_t n_prompt = n_lang_in;
@@ -1229,19 +1239,14 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
                     std::fprintf(stderr, "vla(bitvla): prompt token %d out of vocab\n", id); return {};
                 }
             }
-            gguf_reader g_re;
-            if (!g_re.open(gguf_path)) return {};
-            if (!g_re.fetch_rows_f32("token_embd.weight", ids, inputs_embeds.data(), hidden_l)) return {};
+            if (!emb_reader.fetch_rows_f32("token_embd.weight", ids, inputs_embeds.data(), hidden_l)) return {};
         }
         std::memcpy(inputs_embeds.data() + (size_t) n_prompt * hidden_l,
                     img_embeds_host.data(), (size_t) n_img_tok * hidden_l * sizeof(float));
         std::memcpy(inputs_embeds.data() + (size_t) (n_prompt + n_img_tok) * hidden_l,
                     proprio_embed_host.data(), (size_t) hidden_l * sizeof(float));
-        gguf_reader g_re2;
-        if (!g_re2.open(gguf_path)) return {};
-        std::vector<int32_t> stop_id_v{ stop_id };
-        if (!g_re2.fetch_rows_f32("token_embd.weight", stop_id_v,
-                                   inputs_embeds.data() + (size_t) (seq - 1) * hidden_l, hidden_l)) return {};
+        std::memcpy(inputs_embeds.data() + (size_t) (seq - 1) * hidden_l,
+                    stop_embed.data(), (size_t) hidden_l * sizeof(float));
     }
 
     _dump_bin("inputs_embeds", inputs_embeds.data(), inputs_embeds.size());

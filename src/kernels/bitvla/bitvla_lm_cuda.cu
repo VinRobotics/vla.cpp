@@ -410,26 +410,12 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
                           ctx->d_act_s, lr.v_ws, seq, hkv, hidden, stream);
     l0_dump("L0_02_qkv_proj", ctx->d_qkv, (size_t)seq * (hq + 2*hkv));
 
-    const int q_stride_bytes = hq  * (int)sizeof(__nv_bfloat16);
-    const int k_stride_bytes = hkv * (int)sizeof(__nv_bfloat16);
-    for (int h = 0; h < n_q; ++h) {
-        CUDA_OK(cudaMemcpy2DAsync(
-            ctx->d_q_HShd + (size_t)h * seq * hd, hd * sizeof(__nv_bfloat16),
-            q_dense + (size_t)h * hd,             q_stride_bytes,
-            hd * sizeof(__nv_bfloat16), seq, cudaMemcpyDeviceToDevice, stream));
-    }
-    for (int h = 0; h < n_kv; ++h) {
-        CUDA_OK(cudaMemcpy2DAsync(
-            ctx->d_k_HShd + (size_t)h * seq * hd, hd * sizeof(__nv_bfloat16),
-            k_dense + (size_t)h * hd,             k_stride_bytes,
-            hd * sizeof(__nv_bfloat16), seq, cudaMemcpyDeviceToDevice, stream));
-    }
-    for (int h = 0; h < n_kv; ++h) {
-        CUDA_OK(cudaMemcpy2DAsync(
-            ctx->d_v_HShd + (size_t)h * seq * hd, hd * sizeof(__nv_bfloat16),
-            v_dense + (size_t)h * hd,             k_stride_bytes,
-            hd * sizeof(__nv_bfloat16), seq, cudaMemcpyDeviceToDevice, stream));
-    }
+    // Split the interleaved [seq, H*hd] projections into head-major [H, seq, hd]
+    // with one kernel per tensor instead of a cudaMemcpy2DAsync per head (30 tiny
+    // launches per layer). Same transpose the ViT head-split already uses.
+    bitvla_transpose_sNhd_to_NshHd_bf16(q_dense, ctx->d_q_HShd, seq, n_q,  hd, stream);
+    bitvla_transpose_sNhd_to_NshHd_bf16(k_dense, ctx->d_k_HShd, seq, n_kv, hd, stream);
+    bitvla_transpose_sNhd_to_NshHd_bf16(v_dense, ctx->d_v_HShd, seq, n_kv, hd, stream);
 
     bitvla_rope_neox_bf16(ctx->d_q_HShd, ctx->d_cos, ctx->d_sin, n_q,  seq, hd, stream);
     bitvla_rope_neox_bf16(ctx->d_k_HShd, ctx->d_cos, ctx->d_sin, n_kv, seq, hd, stream);
