@@ -541,7 +541,9 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         ggml_gallocr_t vga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
         if (!vga || !ggml_gallocr_alloc_graph(vga, vg)) {
             std::fprintf(stderr, "vla(evo1): vision ggml_gallocr_alloc_graph failed\n");
-            if (vga) ggml_gallocr_free(vga); ggml_free(VC); return {};
+            if (vga) ggml_gallocr_free(vga);
+            ggml_free(VC);
+            return {};
         }
         img_emb_host.assign((size_t) n_views * num_image_token * lm_hidden, 0.0f);
         std::vector<float> chw;
@@ -627,7 +629,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     for (int64_t i = 0; i < per_a; ++i) {
         const float lo = state_min[i], hi = state_max[i];
         float xn = 2.0f * (in.state[i] - lo) / (hi - lo + norm_eps_denom) - 1.0f;
-        if (xn < -1.0f) xn = -1.0f; if (xn > 1.0f) xn = 1.0f;
+        if (xn < -1.0f) xn = -1.0f;
+        if (xn >  1.0f) xn =  1.0f;
         state_norm[i] = xn;
     }
 
@@ -635,16 +638,28 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     if (in.noise) {
         std::memcpy(x_init.data(), in.noise, x_init.size() * sizeof(float));
     } else {
-
+        // Flow matching samples the base action from N(0,1). Box-Muller over a
+        // simple LCG keeps this dependency-free; it runs only when the caller
+        // omits noise, which the eval client does (noise is sampled here).
         uint64_t s = 0xE701ACE5ULL ^ (uint64_t) std::chrono::steady_clock::now().time_since_epoch().count();
-        for (auto & v : x_init) { s = s * 6364136223846793005ULL + 1442695040888963407ULL; v = ((float) (uint32_t)(s >> 32) / 2147483648.0f) - 1.0f; }
+        auto next_u01 = [&s]() -> double {
+            s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+            return ((double) (uint32_t) (s >> 32) + 1.0) / 4294967297.0; // in (0,1)
+        };
+        for (size_t i = 0; i < x_init.size(); i += 2) {
+            const double u1 = next_u01(), u2 = next_u01();
+            const double r  = std::sqrt(-2.0 * std::log(u1));
+            const double th = 6.283185307179586 * u2;
+            x_init[i] = (float) (r * std::cos(th));
+            if (i + 1 < x_init.size()) x_init[i + 1] = (float) (r * std::sin(th));
+        }
     }
 
     ggml_init_params cp = {  (size_t) 96 * 1024 * 1024,  nullptr,  true };
     ggml_context * C = ggml_init(cp);
     if (!C) { std::fprintf(stderr, "vla(evo1): ggml_init(ctx_compute) failed\n"); return {}; }
 
-    const int64_t E = embed_dim, hd_dit = E / dit_heads, inner_dit = 4 * E;
+    const int64_t E = embed_dim, hd_dit = E / dit_heads;
     const float   scale_dit = 1.0f / std::sqrt((float) hd_dit);
     const int64_t Nctx = SEQ + 1;
 
@@ -653,6 +668,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_tensor * t_lmmask   = ggml_new_tensor_2d(C, GGML_TYPE_F32, SEQ, SEQ);           ggml_set_input(t_lmmask);
 
     ggml_tensor * t_qmask    = ggml_new_tensor_2d(C, GGML_TYPE_F32, 1, SEQ);              ggml_set_input(t_qmask);
+    ggml_tensor * t_ctxmask  = ggml_new_tensor_2d(C, GGML_TYPE_F32, Nctx, horizon);       ggml_set_input(t_ctxmask);
     ggml_tensor * t_state    = ggml_new_tensor_1d(C, GGML_TYPE_F32, per_a);              ggml_set_input(t_state);
     ggml_tensor * t_x        = ggml_new_tensor_1d(C, GGML_TYPE_F32, action_dim);         ggml_set_input(t_x);
     ggml_tensor * t_amask    = ggml_new_tensor_1d(C, GGML_TYPE_F32, per_a);              ggml_set_input(t_amask);
@@ -693,7 +709,9 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             ggml_tensor * qp = ggml_add(C, ggml_mul_mat(C, c.Wq, x_q), c.bq);
             ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, qp, hd_dit, dit_heads, horizon), 0, 2, 1, 3));
             ggml_tensor * kq = ggml_mul_mat(C, c.K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-            ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale_dit, 0.0f);
+            // Mask the padded LM context so the action queries never attend to
+            // pad positions (their hidden states are non-zero after the LM).
+            ggml_tensor * aw = ggml_soft_max_ext(C, kq, t_ctxmask, scale_dit, 0.0f);
             ggml_tensor * kqv = ggml_mul_mat(C, c.V, aw);
             ggml_tensor * att_pre = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), E, horizon);
             ggml_tensor * attn_out = ggml_add(C, ggml_mul_mat(C, w.Wo, att_pre), w.bo);
@@ -730,7 +748,9 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
     if (!galloc || !ggml_gallocr_alloc_graph(galloc, gf)) {
         std::fprintf(stderr, "vla(evo1): ggml_gallocr_alloc_graph failed\n");
-        if (galloc) ggml_gallocr_free(galloc); ggml_free(C); return {};
+        if (galloc) ggml_gallocr_free(galloc);
+        ggml_free(C);
+        return {};
     }
     ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
     { std::vector<int32_t> pp(SEQ); for (int64_t i = 0; i < SEQ; ++i) pp[i] = (int32_t) i; ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos)); }
@@ -743,6 +763,15 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
       ggml_backend_tensor_set(t_amask, am.data(), 0, ggml_nbytes(t_amask)); }
     { std::vector<float> qm(SEQ, 0.0f); for (int64_t p = 0; p < SEQ; ++p) qm[p] = attn_ok[p] ? 1.0f : 0.0f;
       ggml_backend_tensor_set(t_qmask, qm.data(), 0, ggml_nbytes(t_qmask)); }
+    { // Key mask for the DiT cross-attention: real LM context tokens [0,n_real)
+      // and the appended state token (index SEQ) are visible; padded positions
+      // [n_real,SEQ) are blocked. Same mask for every action query row.
+      const float NEG = -std::numeric_limits<float>::infinity();
+      std::vector<float> cm((size_t) Nctx * horizon);
+      for (int64_t q = 0; q < horizon; ++q)
+          for (int64_t kv = 0; kv < Nctx; ++kv)
+              cm[q * Nctx + kv] = (kv < n_real || kv == SEQ) ? 0.0f : NEG;
+      ggml_backend_tensor_set(t_ctxmask, cm.data(), 0, ggml_nbytes(t_ctxmask)); }
 
     const auto tc0 = std::chrono::steady_clock::now();
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
