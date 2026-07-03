@@ -42,10 +42,9 @@ Identify your machine CUDA architecture:
 
 Configure and build the source:
 
-```bash
-# Fetch llama.cpp at pinned tag and apply local patch
-bash ./patches/patch.sh
+CMake fetches and pins `llama.cpp` automatically (no patch, no submodule):
 
+```bash
 # CPU build:
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
@@ -170,11 +169,9 @@ If you would rather convert a HuggingFace safetensors checkpoint yourself, [`scr
 Set up a venv for converter by:
 
 ```bash
-# Assume third_party/llama.cpp has been cloned and patched
 python3 -m venv .venv-converter
 source .venv-converter/bin/activate
-pip install -r third_party/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt
-pip install safetensors
+pip install -e ".[convert]"   # torch, safetensors, gguf, numpy (see pyproject.toml)
 ```
 
 Then run any of the per-arch converters (`--help` for the full flag list):

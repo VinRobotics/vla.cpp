@@ -133,7 +133,7 @@ bool Engine::decode_image_file(const std::string & path, Image & out) const {
     if (!loaded()) {
         return false;
     }
-    mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_file(impl_->vision.get(), path.c_str()));
+    mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_file(impl_->vision.get(), path.c_str(), false).bitmap);
     return bitmap_to_image(bmp, out);
 }
 
@@ -141,7 +141,7 @@ bool Engine::decode_image_buf(const uint8_t * data, size_t len, Image & out) con
     if (!loaded() || !data || len == 0) {
         return false;
     }
-    mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(impl_->vision.get(), data, len));
+    mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(impl_->vision.get(), data, len, false).bitmap);
     return bitmap_to_image(bmp, out);
 }
 

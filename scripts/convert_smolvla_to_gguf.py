@@ -105,6 +105,55 @@ def _try_load_stats(model_dir: Path,
           "action",             "action_mean", "action_std", real_action_dim)
     return out
 
+PFX_VIS  = "model.vlm_with_expert.vlm.model.vision_model"
+PFX_CONN = "model.vlm_with_expert.vlm.model.connector.modality_projection.proj.weight"
+
+
+def _probe_vision(sf, keys, cfg_json) -> dict:
+    if f"{PFX_VIS}.embeddings.patch_embedding.weight" not in keys or PFX_CONN not in keys:
+        raise SystemExit(f"vision_model / connector not found under {PFX_VIS}")
+    conv = sf.get_slice(f"{PFX_VIS}.embeddings.patch_embedding.weight").get_shape()  # [OC, IC, KH, KW]
+    pos  = sf.get_slice(f"{PFX_VIS}.embeddings.position_embedding.weight").get_shape()  # [n_patches, OC]
+    fc1  = sf.get_slice(f"{PFX_VIS}.encoder.layers.0.mlp.fc1.weight").get_shape()  # [inter, OC]
+    n_vit = 0
+    while f"{PFX_VIS}.encoder.layers.{n_vit}.layer_norm1.weight" in keys:
+        n_vit += 1
+    vcfg = cfg_json.get("vision_config") or {}
+    scale = int(cfg_json.get("scale_factor", vcfg.get("scale_factor", 4)))
+    patch = int(conv[2]); grid = int(round(int(pos[0]) ** 0.5))
+    return dict(vit_hidden=int(conv[0]), vit_layers=n_vit,
+                vit_heads=int(vcfg.get("num_attention_heads", 12)), vit_inter=int(fc1[0]),
+                image_size=grid * patch, patch_size=patch, vit_pixel_shuffle=scale,
+                n_img_tokens=(grid // scale) ** 2,
+                vit_ln_eps=float(vcfg.get("layer_norm_eps", 1e-6)))
+
+
+def _add_vision_tensors(writer: gguf.GGUFWriter, sf) -> None:
+    af32  = lambda dst, src: _add_one_tensor(writer, dst, sf.get_tensor(src).float())
+    akeep = lambda dst, src: _add_one_tensor(writer, dst, sf.get_tensor(src))
+    af32("vit.patch_embd.weight", f"{PFX_VIS}.embeddings.patch_embedding.weight")  # 4-D conv, as-is
+    af32("vit.patch_embd.bias",   f"{PFX_VIS}.embeddings.patch_embedding.bias")
+    af32("vit.pos_embd",          f"{PFX_VIS}.embeddings.position_embedding.weight")
+    i = 0
+    while True:
+        L = f"{PFX_VIS}.encoder.layers.{i}."
+        try:
+            sf.get_slice(L + "layer_norm1.weight")
+        except Exception:
+            break
+        af32(f"vit.blk.{i}.ln1.weight", L + "layer_norm1.weight"); af32(f"vit.blk.{i}.ln1.bias", L + "layer_norm1.bias")
+        af32(f"vit.blk.{i}.ln2.weight", L + "layer_norm2.weight"); af32(f"vit.blk.{i}.ln2.bias", L + "layer_norm2.bias")
+        for q in ("q", "k", "v"):
+            akeep(f"vit.blk.{i}.attn_{q}.weight", L + f"self_attn.{q}_proj.weight")
+            af32 (f"vit.blk.{i}.attn_{q}.bias",   L + f"self_attn.{q}_proj.bias")
+        akeep(f"vit.blk.{i}.attn_o.weight", L + "self_attn.out_proj.weight"); af32(f"vit.blk.{i}.attn_o.bias", L + "self_attn.out_proj.bias")
+        akeep(f"vit.blk.{i}.fc1.weight", L + "mlp.fc1.weight"); af32(f"vit.blk.{i}.fc1.bias", L + "mlp.fc1.bias")
+        akeep(f"vit.blk.{i}.fc2.weight", L + "mlp.fc2.weight"); af32(f"vit.blk.{i}.fc2.bias", L + "mlp.fc2.bias")
+        i += 1
+    af32("vit.post_ln.weight", f"{PFX_VIS}.post_layernorm.weight"); af32("vit.post_ln.bias", f"{PFX_VIS}.post_layernorm.bias")
+    akeep("mm.fc.weight", PFX_CONN)   # single bias-free pixel-shuffle connector linear
+
+
 def _add_kv(writer: gguf.GGUFWriter, cfg: dict) -> None:
 
     writer.add_string  (KV("architecture"),                ARCH)
@@ -129,6 +178,17 @@ def _add_kv(writer: gguf.GGUFWriter, cfg: dict) -> None:
     writer.add_float64 (KV("max_period"),                  cfg["max_period"])
     writer.add_float64 (KV("expert_width_multiplier"),     cfg["expert_width_multiplier"])
     writer.add_float32 (KV("norm_eps"),                    cfg["norm_eps"])
+    if "vit" in cfg:
+        v = cfg["vit"]
+        writer.add_uint32 (KV("vit_hidden"),        v["vit_hidden"])
+        writer.add_uint32 (KV("vit_layers"),        v["vit_layers"])
+        writer.add_uint32 (KV("vit_heads"),         v["vit_heads"])
+        writer.add_uint32 (KV("vit_inter"),         v["vit_inter"])
+        writer.add_uint32 (KV("image_size"),        v["image_size"])
+        writer.add_uint32 (KV("patch_size"),        v["patch_size"])
+        writer.add_uint32 (KV("vit_pixel_shuffle"), v["vit_pixel_shuffle"])
+        writer.add_uint32 (KV("n_img_tokens"),      v["n_img_tokens"])
+        writer.add_float32(KV("vit_ln_eps"),        v["vit_ln_eps"])
 
 def _add_one_tensor(writer: gguf.GGUFWriter, dst_name: str, t: torch.Tensor) -> None:
 
@@ -242,6 +302,11 @@ def main() -> int:
     print("loading normalizer stats...")
     stats = _try_load_stats(ckpt, cfg["real_state_dim"], cfg["real_action_dim"])
 
+    cfg["vit"] = _probe_vision(sf, set(sf.keys()), cfg_json)
+    print(f"vision: SigLIP hidden={cfg['vit']['vit_hidden']} layers={cfg['vit']['vit_layers']} "
+          f"heads={cfg['vit']['vit_heads']} inter={cfg['vit']['vit_inter']} image={cfg['vit']['image_size']} "
+          f"patch={cfg['vit']['patch_size']} shuffle={cfg['vit']['vit_pixel_shuffle']} tokens={cfg['vit']['n_img_tokens']}")
+
     out.parent.mkdir(parents=True, exist_ok=True)
     print(f"writing {out}")
     writer = gguf.GGUFWriter(str(out), arch=ARCH)
@@ -271,6 +336,8 @@ def main() -> int:
         ("action_out_proj.bias",       "action_out_proj.bias"),
     ]:
         _add_one_tensor(writer, dst_name, sf.get_tensor(f"{PFX_PROJ}.{src_suf}"))
+
+    _add_vision_tensors(writer, sf)
 
     for k, v in stats.items():
         writer.add_tensor(k, v, raw_dtype=gguf.GGMLQuantizationType.F32)

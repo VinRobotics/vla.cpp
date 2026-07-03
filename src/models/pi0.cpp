@@ -15,8 +15,6 @@
 #include "arch.h"
 #include "model.h"
 
-#include "clip.h"
-#include "mtmd.h"
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include "ggml-backend.h"
@@ -166,7 +164,15 @@ struct GemmaLayerW {
     ggml_tensor * Wdown   = nullptr;
 };
 
-bool is_gemma_norm(const std::string & name) { return name.find("norm.weight") != std::string::npos; }
+// SigLIP-So400m vision block weights (PaliGemma tower, built in-tree like gr00tn1d5).
+struct SigLipLayerW { ggml_tensor *ln1w,*ln1b,*ln2w,*ln2b,*Wq,*bq,*Wk,*bk,*Wv,*bv,*Wo,*bo,*Wfc1,*bfc1,*Wfc2,*bfc2; };
+
+// The +1 RMSNorm fixup is a Gemma quirk that must only touch the language towers,
+// never the SigLIP LayerNorms (whose names would otherwise never match anyway).
+bool is_gemma_norm(const std::string & name) {
+    const bool lm = name.rfind("vlm.", 0) == 0 || name.rfind("aex.", 0) == 0;
+    return lm && name.find("norm.weight") != std::string::npos;
+}
 
 std::vector<float> sinusoidal_time_emb(double t, int64_t dim, double min_p, double max_p) {
     const int64_t half = dim / 2;
@@ -194,7 +200,6 @@ struct Pi0ModelArch : public ModelArchBase {
 
     std::vector<float> predict(const Inputs& in) override;
 
-    clip_ctx *            cctx        = nullptr;
     ggml_backend_t        backend     = nullptr;
     bool                  is_cuda     = false;
     bool                  is_gpu      = false;
@@ -202,6 +207,15 @@ struct Pi0ModelArch : public ModelArchBase {
     ggml_context *        ctx_weights = nullptr;
     std::string           ckpt_path_;
     ggml_type             matmul_type = GGML_TYPE_BF16;
+
+    // In-tree SigLIP-So400m/14 vision tower (was llama.cpp clip.cpp mmproj).
+    int64_t vit_hidden = 1152, vit_layers = 27, vit_heads = 16;
+    int64_t vit_image_size = 224, vit_patch_size = 14, vit_n_tokens = 256;
+    float   vit_ln_eps = 1e-6f;
+    ggml_tensor * vit_patch_w = nullptr, * vit_patch_b = nullptr, * vit_pos = nullptr;
+    ggml_tensor * vit_post_ln_w = nullptr, * vit_post_ln_b = nullptr;
+    std::vector<SigLipLayerW> vit;
+    ggml_tensor * mm_proj_w = nullptr, * mm_proj_b = nullptr;
 
     std::vector<GemmaLayerW> pl_layers;
 
@@ -221,6 +235,47 @@ struct Pi0ModelArch : public ModelArchBase {
 };
 
 namespace {
+
+// One pre-norm SigLIP encoder block, identical to gr00tn1d5's in-tree tower
+// (the PaliGemma vision tower is the same SigLIP-So400m/14). Bidirectional
+// attention (nullptr mask), F32 score accumulation, tanh GELU FFN.
+ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_tensor * x,
+                                 int64_t seq, int64_t heads, int64_t head_dim, int64_t hidden, float ln_eps) {
+    const float scale = 1.0f / std::sqrt((float) head_dim);
+    ggml_tensor * n1 = ggml_add(C, ggml_mul(C, ggml_norm(C, x, ln_eps), w.ln1w), w.ln1b);
+    ggml_tensor * q = ggml_add(C, ggml_mul_mat(C, w.Wq, n1), w.bq);
+    ggml_tensor * k = ggml_add(C, ggml_mul_mat(C, w.Wk, n1), w.bk);
+    ggml_tensor * v = ggml_add(C, ggml_mul_mat(C, w.Wv, n1), w.bv);
+    ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, head_dim, heads, seq), 0, 2, 1, 3));
+    ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, head_dim, heads, seq), 0, 2, 1, 3));
+    ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
+    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+    ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
+    ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
+    ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
+    ggml_tensor * n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.ln2w), w.ln2b);
+    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, ggml_gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);
+    return ggml_add(C, h1, ff);
+}
+
+// CHW-planar float image in [-1,1] for ggml_conv_2d (SigLIP mean/std 0.5).
+bool preprocess_image_chw(const ImageView & v, int64_t side, std::vector<float> & out) {
+    if (v.w != (int) side || v.h != (int) side || !v.data) {
+        std::fprintf(stderr, "vla(pi0): image view is %dx%d, expected %lldx%lld\n",
+                     v.w, v.h, (long long) side, (long long) side);
+        return false;
+    }
+    out.assign((size_t) 3 * side * side, 0.0f);
+    for (int64_t h = 0; h < side; ++h)
+        for (int64_t w = 0; w < side; ++w)
+            for (int64_t c = 0; c < 3; ++c) {
+                float px;
+                if (v.format == PixelFormat::U8) px = ((const uint8_t *) v.data)[(h * side + w) * 3 + c] / 255.0f;
+                else                              px = ((const float  *) v.data)[(h * side + w) * 3 + c];
+                out[c * side * side + h * side + w] = px * 2.0f - 1.0f;
+            }
+    return true;
+}
 
 ggml_tensor * build_gemma_layer(
         ggml_context * ctx, const GemmaLayerW & w,
@@ -368,7 +423,6 @@ Pi0ModelArch::~Pi0ModelArch() {
     if (weight_buf)  ggml_backend_buffer_free(weight_buf);
     if (ctx_weights) ggml_free(ctx_weights);
     if (backend)     ggml_backend_free(backend);
-    if (cctx)        clip_free(cctx);
 }
 
 std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
@@ -426,26 +480,18 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
         std::printf("vla(pi0): backend = CPU (%d threads)\n", m->n_threads);
     }
 
+    // The SigLIP tower is now bundled in the ckpt GGUF; mmproj_path is ignored.
+    (void) mmproj_path;
     {
-        clip_context_params cp = {};
-        cp.use_gpu           = m->is_gpu;
-        cp.flash_attn_type   = m->is_gpu ? CLIP_FLASH_ATTN_TYPE_AUTO : CLIP_FLASH_ATTN_TYPE_DISABLED;
-        cp.image_min_tokens  = -1;
-        cp.image_max_tokens  = -1;
-        cp.warmup            = m->is_gpu;
-        cp.cb_eval           = nullptr;
-        cp.cb_eval_user_data = nullptr;
-        clip_init_result r = clip_init(mmproj_path.c_str(), cp);
-        if (!r.ctx_v) {
-            std::fprintf(stderr, "vla(pi0): clip_init failed for %s\n", mmproj_path.c_str());
-            return nullptr;
-        }
-        m->cctx = r.ctx_v;
-        const int img_sz  = clip_get_image_size(m->cctx);
-        const int mm_embd = clip_n_mmproj_embd(m->cctx);
-        if (img_sz != 224 || mm_embd != (int) cfg.hidden) {
-            std::fprintf(stderr, "vla(pi0): mmproj mismatch (image_size=%d mmproj_embd=%d; want 224 / %lld)\n",
-                         img_sz, mm_embd, (long long) cfg.hidden);
+        auto vu = [&](const char * k, int64_t & d) { if (g.has_key(k)) d = (int64_t) g.u32(k); };
+        vu("pi0.vit_hidden", m->vit_hidden); vu("pi0.vit_layers", m->vit_layers);
+        vu("pi0.vit_heads",  m->vit_heads);  vu("pi0.image_size", m->vit_image_size);
+        vu("pi0.patch_size", m->vit_patch_size); vu("pi0.n_img_tokens", m->vit_n_tokens);
+        if (g.has_key("pi0.vit_ln_eps")) m->vit_ln_eps = g.f32("pi0.vit_ln_eps");
+        const int64_t grid = m->vit_image_size / m->vit_patch_size;
+        if (grid * grid != m->vit_n_tokens || m->vit_n_tokens != cfg.n_img) {
+            std::fprintf(stderr, "vla(pi0): vit geometry mismatch (grid^2=%lld n_img_tokens=%lld cfg.n_img=%lld)\n",
+                         (long long) (grid * grid), (long long) m->vit_n_tokens, (long long) cfg.n_img);
             return nullptr;
         }
     }
@@ -492,6 +538,25 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
         lw.Wdown   = mk_mm (suf("ffn_down.weight"));
         return lw.ln_in && lw.Wq && lw.Wk && lw.Wv && lw.Wo && lw.ln_post && lw.Wgate && lw.Wup && lw.Wdown;
     };
+
+    // Vision tower weights (SigLIP-So400m + PaliGemma projector), bundled in the ckpt GGUF.
+    m->vit_patch_w   = mk_f32("vit.patch_embd.weight");
+    m->vit_patch_b   = mk_f32("vit.patch_embd.bias");
+    m->vit_pos       = mk_f32("vit.pos_embd");
+    m->vit_post_ln_w = mk_f32("vit.post_ln.weight");
+    m->vit_post_ln_b = mk_f32("vit.post_ln.bias");
+    m->vit.resize(m->vit_layers);
+    for (int64_t i = 0; i < m->vit_layers; ++i) {
+        char p[64];
+        auto N = [&](const char * s) { std::snprintf(p, sizeof(p), "vit.blk.%lld.%s", (long long) i, s); return (const char *) p; };
+        auto & w = m->vit[i];
+        w.ln1w=mk_f32(N("ln1.weight")); w.ln1b=mk_f32(N("ln1.bias")); w.ln2w=mk_f32(N("ln2.weight")); w.ln2b=mk_f32(N("ln2.bias"));
+        w.Wq=mk_mm(N("attn_q.weight")); w.bq=mk_f32(N("attn_q.bias")); w.Wk=mk_mm(N("attn_k.weight")); w.bk=mk_f32(N("attn_k.bias"));
+        w.Wv=mk_mm(N("attn_v.weight")); w.bv=mk_f32(N("attn_v.bias")); w.Wo=mk_mm(N("attn_o.weight")); w.bo=mk_f32(N("attn_o.bias"));
+        w.Wfc1=mk_mm(N("fc1.weight")); w.bfc1=mk_f32(N("fc1.bias")); w.Wfc2=mk_mm(N("fc2.weight")); w.bfc2=mk_f32(N("fc2.bias"));
+    }
+    m->mm_proj_w = mk_mm("mm.proj.weight");
+    m->mm_proj_b = g.meta("mm.proj.bias") ? mk_f32("mm.proj.bias") : nullptr;  // PaliGemma projector bias (optional)
 
     m->pl_layers.resize(cfg.n_layers);
     m->ex_layers.resize(cfg.n_layers);
@@ -558,35 +623,48 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
             std::fprintf(stderr, "vla(pi0): predict: no images and no precomputed_img_emb\n");
             return {};
         }
-        const int    img_sz  = clip_get_image_size(cctx);
-        const size_t per_pix = (size_t) 3 * img_sz * img_sz;
-        const size_t per_out = clip_embd_nbytes_by_img(cctx, img_sz, img_sz) / sizeof(float);
-        img_emb_host.resize(per_out * (size_t) in.n_images);
-        std::vector<float> hwc(per_pix);
-        const auto tv0 = clk::now();
-        for (int v = 0; v < in.n_images; ++v) {
-            const ImageView & view = in.images[v];
-            if (view.w != img_sz || view.h != img_sz) {
-                std::fprintf(stderr, "vla(pi0): image[%d] is %dx%d; π₀ requires %dx%d\n",
-                             v, view.w, view.h, img_sz, img_sz);
-                return {};
-            }
-            if (view.format == PixelFormat::U8) {
-                const uint8_t * src = static_cast<const uint8_t *>(view.data);
-                for (size_t i = 0; i < per_pix; ++i) hwc[i] = (float) src[i] / 127.5f - 1.0f;
-            } else {
-                const float * src = static_cast<const float *>(view.data);
-                for (size_t i = 0; i < per_pix; ++i) hwc[i] = src[i] * 2.0f - 1.0f;
-            }
+        const int64_t K = vit_n_tokens, H = hidden_pl, grid = vit_image_size / vit_patch_size;
+        n_img_tokens = (int64_t) in.n_images * K;
+        img_emb_host.assign((size_t) in.n_images * K * H, 0.0f);
 
-            if (!clip_encode_float_image(cctx, n_threads, hwc.data(), img_sz, img_sz,
-                                         img_emb_host.data() + (size_t) v * per_out)) {
-                std::fprintf(stderr, "vla(pi0): clip_encode_float_image failed (view %d)\n", v);
-                return {};
+        ggml_init_params vp = { (size_t) 128 * 1024 * 1024, nullptr, true };
+        ggml_context * VC = ggml_init(vp);
+        if (!VC) { std::fprintf(stderr, "vla(pi0): ggml_init(vision ctx) failed\n"); return {}; }
+        ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vit_image_size, vit_image_size, 3); ggml_set_input(t_px);
+        ggml_tensor * conv = ggml_conv_2d(VC, vit_patch_w, t_px, (int) vit_patch_size, (int) vit_patch_size, 0, 0, 1, 1);
+        ggml_tensor * patches = ggml_cont(VC, ggml_transpose(VC, ggml_reshape_2d(VC, conv, grid * grid, vit_hidden)));
+        ggml_tensor * h = ggml_add(VC, ggml_add(VC, patches, vit_patch_b), vit_pos);
+        for (int64_t i = 0; i < vit_layers; ++i)
+            h = build_siglip_layer(VC, vit[i], h, K, vit_heads, vit_hidden / vit_heads, vit_hidden, vit_ln_eps);
+        h = ggml_add(VC, ggml_mul(VC, ggml_norm(VC, h, vit_ln_eps), vit_post_ln_w), vit_post_ln_b);
+        // PaliGemma projector: linear (+ optional bias), then 1/sqrt(hidden) scale (matches clip.cpp siglip.cpp).
+        ggml_tensor * proj = ggml_mul_mat(VC, mm_proj_w, h);
+        if (mm_proj_b) proj = ggml_add(VC, proj, mm_proj_b);
+        ggml_tensor * vit_emb = ggml_scale(VC, proj, 1.0f / std::sqrt((float) proj->ne[0]));
+        ggml_set_output(vit_emb);
+
+        ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
+        ggml_build_forward_expand(vg, vit_emb);
+        ggml_gallocr_t vga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+        if (!vga || !ggml_gallocr_alloc_graph(vga, vg)) {
+            std::fprintf(stderr, "vla(pi0): vision gallocr alloc failed\n");
+            if (vga) ggml_gallocr_free(vga);
+            ggml_free(VC);
+            return {};
+        }
+        const auto tv0 = clk::now();
+        std::vector<float> chw;
+        for (int v = 0; v < in.n_images; ++v) {
+            if (!preprocess_image_chw(in.images[v], vit_image_size, chw)) { ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+            ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
+            if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
+                std::fprintf(stderr, "vla(pi0): vision compute failed (view %d)\n", v);
+                ggml_gallocr_free(vga); ggml_free(VC); return {};
             }
+            ggml_backend_tensor_get(vit_emb, img_emb_host.data() + (size_t) v * K * H, 0, ggml_nbytes(vit_emb));
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now() - tv0).count();
-        n_img_tokens = (int64_t) ((per_out / (size_t) hidden_pl) * (size_t) in.n_images);
+        ggml_gallocr_free(vga); ggml_free(VC);
     }
 
     if (in.n_lang < 1 || !in.lang_tokens) {
