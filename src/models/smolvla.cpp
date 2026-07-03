@@ -1542,6 +1542,18 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         return {};
     }
 
+    // The language tokens index E_lang via ggml_get_rows, which does not bound
+    // its indices. Reject any token id outside the embedding table before the
+    // gather so an out-of-range id cannot read past the weights.
+    const int64_t vocab_rows = m->E_lang ? m->E_lang->ne[1] : 0;
+    for (int i = 0; i < in.n_lang; ++i) {
+        if (in.lang_tokens[i] < 0 || in.lang_tokens[i] >= vocab_rows) {
+            std::fprintf(stderr, "vla: lang_tokens[%d]=%d out of vocab range [0, %lld)\n",
+                         i, in.lang_tokens[i], (long long) vocab_rows);
+            return {};
+        }
+    }
+
     if (in.timing_detail == TimingDetail::NONE) {
 
         if (m->gf_cached == nullptr || m->cached_n_views != n_views) {
