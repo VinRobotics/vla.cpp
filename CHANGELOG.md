@@ -1,0 +1,24 @@
+# Changelog
+
+Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://keepachangelog.com).
+
+## [0.1.0] - 2026-07-03
+
+First tagged release. One self-contained GGUF per model (vision tower + LM + action
+expert + dataset stats), CPU or CUDA, no external mmproj and no patch to llama.cpp.
+
+### Added
+- Seven VLA policies auto-detected from the GGUF: SmolVLA, pi0, BitVLA, Evo-1, GR00T N1.5/N1.6/N1.7.
+- In-tree vision towers (SigLIP, BitSigLIP, InternViT, RADIO) on stable public ggml/llama APIs.
+- ZeroMQ + protobuf `vla-server`; a separate `vlm-server` for VLM chat.
+- BitVLA 1.58-bit custom ternary CUDA kernels.
+- Per-arch HuggingFace -> GGUF converters and mmproj-merge helpers (`scripts/`).
+- Robot eval harness for LIBERO, SimplerEnv, and ALOHA (`eval/`), with device benchmark reports.
+- Minimal CI: pixel-shuffle unit test, converter-remap test, CPU build gate.
+- `pyproject.toml` for the Python tooling and a CUDA `Dockerfile` for `vla-server`.
+
+### Changed
+- llama.cpp is fetched + pinned via CMake `FetchContent` (tag `b9866`); bumping is a
+  one-line `GIT_TAG` change. Removed the `patches/` fetch script.
+
+[0.1.0]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.1.0

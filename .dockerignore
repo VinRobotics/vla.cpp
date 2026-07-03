@@ -1,0 +1,10 @@
+# Keep the build context small: llama.cpp is fetched inside the image, models
+# are mounted at runtime, and build/output dirs are host artifacts.
+.git/
+models/
+build/
+build-*/
+outputs/
+third_party/
+eval/sim/
+*.gguf

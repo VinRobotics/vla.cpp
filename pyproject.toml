@@ -1,0 +1,32 @@
+[project]
+name = "vla-cpp-tooling"
+version = "0.1.0"
+description = "Python tooling for vla.cpp: HuggingFace -> GGUF converters and the ZeroMQ eval client."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+# scripts/convert_*_to_gguf.py, scripts/merge_*_mmproj_to_gguf.py, scripts/bitvla_int2_pack.py
+convert = [
+    "torch>=2.5",
+    "safetensors>=0.4",
+    "gguf>=0.10",
+    "numpy>=1.24",
+]
+# eval/client/* talks to vla-server over ZeroMQ. The simulators (LIBERO, SimplerEnv,
+# ALOHA) keep their own pinned venvs - see eval/sim/*/setup_*.sh - and are not packaged here.
+client = [
+    "pyzmq>=25",
+    "msgpack>=1.1",
+    "msgpack-numpy>=0.4.8",
+    "pillow>=10",
+    "torch>=2.5",
+    "transformers>=4.51,<4.52",
+    "numpy>=1.24",
+]
+
+# Deps-only project: the code lives in scripts/ and eval/, not an importable package.
+[tool.uv]
+package = false
