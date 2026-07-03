@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -70,9 +72,7 @@ def weight_quant(W: torch.Tensor) -> torch.Tensor:
     return Wq.to(dtype)
 
 def _bf16_u16(t: torch.Tensor) -> np.ndarray:
-    if t.dtype != torch.bfloat16:
-        print(f"  warn: casting non-BF16 tensor (dtype={t.dtype}) to BF16 for storage")
-        t = t.to(torch.bfloat16)
+    assert t.dtype == torch.bfloat16, t.dtype
     return t.contiguous().view(torch.uint16).cpu().numpy()
 
 def _add(writer: gguf.GGUFWriter, name: str, t: torch.Tensor) -> None:
@@ -165,10 +165,18 @@ def main() -> int:
     W = _load_sharded(ckpt)
     print(f"  {len(W)} main tensors")
 
-    ah_path = ckpt / "action_head--10000_checkpoint.pt"
-    pp_path = ckpt / "proprio_projector--10000_checkpoint.pt"
-    if not ah_path.exists() or not pp_path.exists():
+    def _find_sidecar(stem: str) -> Path | None:
+        cands = sorted(
+            ckpt.glob(f"{stem}--*_checkpoint.pt"),
+            key=lambda p: int(m.group(1)) if (m := re.search(r"--(\d+)_checkpoint\.pt$", p.name)) else -1,
+        )
+        return cands[-1] if cands else None
+
+    ah_path = _find_sidecar("action_head")
+    pp_path = _find_sidecar("proprio_projector")
+    if ah_path is None or pp_path is None:
         raise SystemExit(f"missing action_head/proprio_projector sidecars in {ckpt}")
+    print(f"  sidecars: {ah_path.name}, {pp_path.name}")
     AH = _load_pt_sidecar(ah_path)
     PP = _load_pt_sidecar(pp_path)
     print(f"  +{len(AH)} action_head tensors, +{len(PP)} proprio_projector tensors")

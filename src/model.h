@@ -38,7 +38,8 @@ namespace vla {
  * Populated from the GGUF metadata at load time. Sequence counts are in
  * tokens; @c hidden / @c expert_h / @c intermediate refer to model widths.
  * The action chunk returned by @ref predict has shape
- * @c [num_steps, real_action_dim] in row-major order.
+ * @c [num_steps, max_action_dim] in row-major order; only the first
+ * @c real_action_dim columns are valid, the rest are zero padding.
  */
 struct Config {
     int64_t n_img;            ///< Image-token count fed to the LM.
@@ -177,8 +178,8 @@ const Config& model_config(const Model* m);
  *
  * @param m  A handle from @ref model_load.
  * @param in Filled-in @ref Inputs struct.
- * @return Action chunk of length @c num_steps * real_action_dim, in
- *         row-major order.
+ * @return Action chunk of length @c num_steps * max_action_dim, in
+ *         row-major order (first @c real_action_dim columns valid).
  */
 std::vector<float> predict(Model* m, const Inputs& in);
 

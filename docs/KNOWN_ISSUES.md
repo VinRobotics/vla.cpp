@@ -22,3 +22,7 @@ N(0,1), and switching it to the reference's uniform[-1,1] also gives 0%.
 Double-check: diff the released GGUF's tensors and config against a fresh
 `convert_evo1_to_gguf.py` from `MINT-SJTU/Evo1_LIBERO`, and compare one denoise step's
 `v_t` against the Evo-1 reference on identical inputs.
+
+Status: the N(0,1) base noise and the DiT context mask are in the tree, so the code
+path matches the reference. The tensor/config diff above is the open step and needs the
+upstream safetensors checkpoint, which is not bundled here.
