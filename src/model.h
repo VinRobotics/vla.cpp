@@ -127,7 +127,8 @@ struct Inputs {
     const int32_t*   lang_tokens;     ///< Tokenised language instruction.
     int              n_lang;          ///< Length of @ref lang_tokens.
 
-    const float*     state;           ///< Proprioception, length @c real_state_dim.
+    const float*     state;           ///< Proprioception, length @c max_state_dim
+                                      ///  (pad @c real_state_dim..max with zeros).
     const float*     noise;           ///< Initial noise for the action expert.
 
     /// Optional override for the language attention mask (per-token).

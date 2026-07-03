@@ -517,7 +517,11 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     const float * img_emb_ptr = nullptr;
     std::vector<float> img_emb_host;
     if (in.precomputed_img_emb) {
-        n_views = in.n_img_views > 0 ? in.n_img_views : n_images;
+        if (in.n_img_views < 1) {
+            std::fprintf(stderr, "vla(evo1): precomputed_img_emb set but n_img_views=%d; cannot infer view count\n", in.n_img_views);
+            return {};
+        }
+        n_views = in.n_img_views;
         img_emb_ptr = in.precomputed_img_emb;
     } else if (in.images && in.n_images > 0) {
         if (!have_vision) {
@@ -601,7 +605,10 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
                 ++img_idx;
             }
         }
-        if (img_idx != n_img_tokens) std::fprintf(stderr, "vla(evo1): warning - spliced %lld of %lld ViT embeds\n", (long long) img_idx, (long long) n_img_tokens);
+        if (img_idx != n_img_tokens) {
+            std::fprintf(stderr, "vla(evo1): spliced %lld of %lld ViT embeds - IMG_CTX slot count does not match the images\n", (long long) img_idx, (long long) n_img_tokens);
+            return {};
+        }
     }
 
     std::vector<int32_t> attn_ok(SEQ, 0);
