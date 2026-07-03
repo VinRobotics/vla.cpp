@@ -510,7 +510,8 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
 
     { std::vector<int32_t> ids(NPROMPT+num_tokens+1);
       for(int64_t i=0;i<NPROMPT;++i) ids[i]=in.lang_tokens[i];
-      for(int64_t i=0;i<num_tokens;++i) ids[NPROMPT+i]=1; ids[NPROMPT+num_tokens]=(int32_t)stop_id;
+      for(int64_t i=0;i<num_tokens;++i) ids[NPROMPT+i]=1;
+      ids[NPROMPT+num_tokens]=(int32_t)stop_id;
       ggml_backend_tensor_set(t_ids,ids.data(),0,ggml_nbytes(t_ids)); }
     ggml_backend_tensor_set(t_proj,proj_host.data(),0,ggml_nbytes(t_proj));
     { std::vector<int32_t> pp(SEQ); for(int64_t i=0;i<SEQ;++i)pp[i]=(int32_t)i; ggml_backend_tensor_set(t_pos,pp.data(),0,ggml_nbytes(t_pos)); }

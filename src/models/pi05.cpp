@@ -774,7 +774,6 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     }
     const int64_t n_lang   = in.n_lang;
     const int64_t n_prefix = n_img_tokens + n_lang;
-    const int64_t n_total  = n_prefix + n_suf;
 
     std::vector<int32_t> lang_ids(in.lang_tokens, in.lang_tokens + n_lang);
     std::vector<float> lang_rows((size_t) n_lang * hidden_pl);

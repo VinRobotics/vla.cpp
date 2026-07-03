@@ -234,6 +234,7 @@ ggml_tensor * head_view(ggml_context * C, ggml_tensor * proj, int64_t hd, int64_
 
 ggml_tensor * flash_attn(ggml_context * C, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
                          ggml_tensor * mask, float scale, int64_t hidden) {
+    (void) hidden;
     ggml_tensor * kf = (k->type == GGML_TYPE_F16) ? k : ggml_cast(C, k, GGML_TYPE_F16);
     ggml_tensor * vf = (v->type == GGML_TYPE_F16) ? v : ggml_cast(C, v, GGML_TYPE_F16);
     ggml_tensor * o  = ggml_flash_attn_ext(C, q, kf, vf, mask, scale, 0.0f, 0.0f);
