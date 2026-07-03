@@ -23,6 +23,9 @@ Double-check: diff the released GGUF's tensors and config against a fresh
 `convert_evo1_to_gguf.py` from `MINT-SJTU/Evo1_LIBERO`, and compare one denoise step's
 `v_t` against the Evo-1 reference on identical inputs.
 
-Status: the N(0,1) base noise and the DiT context mask are in the tree, so the code
-path matches the reference. The tensor/config diff above is the open step and needs the
-upstream safetensors checkpoint, which is not bundled here.
+Status: the N(0,1) base noise matches the reference and is in the tree. The DiT
+cross-attention is left unmasked to match the Evo-1 reference (its `flow_matching.py`
+attends over the full padded context with no key mask). Both masked and unmasked score
+0/3 on `libero_object` task_0 here, so the attention mask is not the cause. The released
+GGUF is the remaining suspect; the tensor/config diff above is the open step and needs
+the upstream safetensors checkpoint, which is not bundled here.

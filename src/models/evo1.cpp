@@ -668,7 +668,6 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_tensor * t_lmmask   = ggml_new_tensor_2d(C, GGML_TYPE_F32, SEQ, SEQ);           ggml_set_input(t_lmmask);
 
     ggml_tensor * t_qmask    = ggml_new_tensor_2d(C, GGML_TYPE_F32, 1, SEQ);              ggml_set_input(t_qmask);
-    ggml_tensor * t_ctxmask  = ggml_new_tensor_2d(C, GGML_TYPE_F32, Nctx, horizon);       ggml_set_input(t_ctxmask);
     ggml_tensor * t_state    = ggml_new_tensor_1d(C, GGML_TYPE_F32, per_a);              ggml_set_input(t_state);
     ggml_tensor * t_x        = ggml_new_tensor_1d(C, GGML_TYPE_F32, action_dim);         ggml_set_input(t_x);
     ggml_tensor * t_amask    = ggml_new_tensor_1d(C, GGML_TYPE_F32, per_a);              ggml_set_input(t_amask);
@@ -709,9 +708,9 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             ggml_tensor * qp = ggml_add(C, ggml_mul_mat(C, c.Wq, x_q), c.bq);
             ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, qp, hd_dit, dit_heads, horizon), 0, 2, 1, 3));
             ggml_tensor * kq = ggml_mul_mat(C, c.K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-            // Mask the padded LM context so the action queries never attend to
-            // pad positions (their hidden states are non-zero after the LM).
-            ggml_tensor * aw = ggml_soft_max_ext(C, kq, t_ctxmask, scale_dit, 0.0f);
+            // The Evo-1 reference cross-attends over the full padded context
+            // (no key mask), so the action queries see every LM position.
+            ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale_dit, 0.0f);
             ggml_tensor * kqv = ggml_mul_mat(C, c.V, aw);
             ggml_tensor * att_pre = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), E, horizon);
             ggml_tensor * attn_out = ggml_add(C, ggml_mul_mat(C, w.Wo, att_pre), w.bo);
@@ -763,15 +762,6 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
       ggml_backend_tensor_set(t_amask, am.data(), 0, ggml_nbytes(t_amask)); }
     { std::vector<float> qm(SEQ, 0.0f); for (int64_t p = 0; p < SEQ; ++p) qm[p] = attn_ok[p] ? 1.0f : 0.0f;
       ggml_backend_tensor_set(t_qmask, qm.data(), 0, ggml_nbytes(t_qmask)); }
-    { // Key mask for the DiT cross-attention: real LM context tokens [0,n_real)
-      // and the appended state token (index SEQ) are visible; padded positions
-      // [n_real,SEQ) are blocked. Same mask for every action query row.
-      const float NEG = -std::numeric_limits<float>::infinity();
-      std::vector<float> cm((size_t) Nctx * horizon);
-      for (int64_t q = 0; q < horizon; ++q)
-          for (int64_t kv = 0; kv < Nctx; ++kv)
-              cm[q * Nctx + kv] = (kv < n_real || kv == SEQ) ? 0.0f : NEG;
-      ggml_backend_tensor_set(t_ctxmask, cm.data(), 0, ggml_nbytes(t_ctxmask)); }
 
     const auto tc0 = std::chrono::steady_clock::now();
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
