@@ -17,11 +17,17 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
+// stb ships its full implementation here; silence its unused-function noise so
+// our own -Wall -Wextra output stays meaningful.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
 #include "stb_image.h"
+#pragma GCC diagnostic pop
 
 #include <zmq.hpp>
 
 #include <atomic>
+#include <climits>
 #include <cmath>
 #include <csignal>
 #include <cstdio>
@@ -35,6 +41,10 @@ std::atomic<bool> g_shutdown{false};
 
 void on_signal(int) { g_shutdown.store(true, std::memory_order_relaxed); }
 
+// Reject absurd image dimensions before any size arithmetic, so an untrusted
+// width or height cannot overflow size_t or truncate to a negative int.
+constexpr unsigned kMaxImageDim = 8192;
+
 bool decode_image(const vla::Image & img,
                   std::vector<uint8_t> & u8,
                   std::vector<float> & f32,
@@ -42,6 +52,11 @@ bool decode_image(const vla::Image & img,
     if (img.encoding() == vla::Image::JPEG) {
         int w = 0, h = 0, ch = 0;
         const auto & data = img.data();
+        if (data.size() > size_t(INT_MAX)) {
+            std::fprintf(stderr, "vla-server: JPEG payload too large (%zu bytes)\n",
+                         data.size());
+            return false;
+        }
         unsigned char * px = stbi_load_from_memory(
             reinterpret_cast<const unsigned char *>(data.data()),
             static_cast<int>(data.size()),
@@ -51,11 +66,23 @@ bool decode_image(const vla::Image & img,
                          stbi_failure_reason());
             return false;
         }
+        if (w <= 0 || h <= 0 || w > int(kMaxImageDim) || h > int(kMaxImageDim)) {
+            std::fprintf(stderr, "vla-server: decoded JPEG dims %dx%d out of range (max %u)\n",
+                         w, h, kMaxImageDim);
+            stbi_image_free(px);
+            return false;
+        }
         u8.assign(px, px + size_t(3) * w * h);
         stbi_image_free(px);
         view = { u8.data(), w, h, vla::PixelFormat::U8 };
         return true;
     } else if (img.encoding() == vla::Image::RGB_U8) {
+        if (img.width() == 0 || img.height() == 0 ||
+            img.width() > kMaxImageDim || img.height() > kMaxImageDim) {
+            std::fprintf(stderr, "vla-server: RGB_U8 dims %ux%u out of range (max %u)\n",
+                         img.width(), img.height(), kMaxImageDim);
+            return false;
+        }
         const size_t expected = size_t(3) * img.width() * img.height();
         if (img.data().size() != expected) {
             std::fprintf(stderr, "vla-server: RGB_U8 size %zu != 3*%u*%u = %zu\n",
@@ -67,6 +94,12 @@ bool decode_image(const vla::Image & img,
         view = { u8.data(), int(img.width()), int(img.height()), vla::PixelFormat::U8 };
         return true;
     } else if (img.encoding() == vla::Image::F32_RGB_01) {
+        if (img.width() == 0 || img.height() == 0 ||
+            img.width() > kMaxImageDim || img.height() > kMaxImageDim) {
+            std::fprintf(stderr, "vla-server: F32_RGB_01 dims %ux%u out of range (max %u)\n",
+                         img.width(), img.height(), kMaxImageDim);
+            return false;
+        }
         const size_t pixels   = size_t(3) * img.width() * img.height();
         const size_t expected = pixels * sizeof(float);
         if (img.data().size() != expected) {
@@ -200,6 +233,27 @@ int main(int argc, char ** argv) {
     sock.bind(bind_addr);
     std::printf("vla-server: bound to %s. ready.\n", bind_addr.c_str());
 
+    if (bind_addr.find("127.0.0.1") == std::string::npos &&
+        bind_addr.find("localhost") == std::string::npos) {
+        std::fprintf(stderr,
+            "vla-server: WARNING: bound to %s with no authentication. Any host that\n"
+            "            can reach this address may submit requests. Restrict access to a\n"
+            "            trusted network, or bind tcp://127.0.0.1:PORT for local use.\n",
+            bind_addr.c_str());
+    }
+
+    // A failed reply desyncs the REP recv/send lockstep, so this socket cannot
+    // recover; log and shut down cleanly rather than crash (the old unguarded
+    // send) or spin forever on the wedged socket.
+    auto send_reply = [&sock](const std::string & body) {
+        try {
+            sock.send(zmq::buffer(body), zmq::send_flags::none);
+        } catch (const zmq::error_t & e) {
+            std::fprintf(stderr, "vla-server: reply send failed (%s); shutting down\n", e.what());
+            g_shutdown.store(true, std::memory_order_relaxed);
+        }
+    };
+
     std::signal(SIGINT,  on_signal);
     std::signal(SIGTERM, on_signal);
 
@@ -212,7 +266,9 @@ int main(int argc, char ** argv) {
             zmq::poll(poll, 1, std::chrono::milliseconds(200));
         } catch (const zmq::error_t & e) {
             if (e.num() == EINTR) continue;
-            throw;
+            if (e.num() == ETERM) break;
+            std::fprintf(stderr, "vla-server: zmq error: %s\n", e.what());
+            continue;
         }
         if (!(poll[0].revents & ZMQ_POLLIN)) continue;
 
@@ -222,7 +278,9 @@ int main(int argc, char ** argv) {
             if (!rr) continue;
         } catch (const zmq::error_t & e) {
             if (e.num() == EINTR) continue;
-            throw;
+            if (e.num() == ETERM) break;
+            std::fprintf(stderr, "vla-server: zmq error: %s\n", e.what());
+            continue;
         }
 
         vla::PredictRequest req;
@@ -230,7 +288,7 @@ int main(int argc, char ** argv) {
             std::fprintf(stderr, "vla-server: PredictRequest parse failed (size=%zu)\n",
                          req_msg.size());
             const std::string body = make_error_response(0, "request parse failed");
-            sock.send(zmq::buffer(body), zmq::send_flags::none);
+            send_reply(body);
             continue;
         }
 
@@ -239,14 +297,14 @@ int main(int argc, char ** argv) {
         if (req.images_size() < 1 && req.precomputed_img_emb_size() == 0) {
             const std::string body = make_error_response(rid,
                 "PredictRequest must contain images or precomputed_img_emb");
-            sock.send(zmq::buffer(body), zmq::send_flags::none);
+            send_reply(body);
             continue;
         }
         if (req.lang_tokens_size() < 1 || req.lang_tokens_size() > int(cfg.n_lang)) {
             char buf[128]; std::snprintf(buf, sizeof(buf),
                 "lang_tokens length %d out of range [1, %lld]",
                 req.lang_tokens_size(), (long long) cfg.n_lang);
-            sock.send(zmq::buffer(make_error_response(rid, buf)), zmq::send_flags::none);
+            send_reply(make_error_response(rid, buf));
             continue;
         }
         {
@@ -255,7 +313,7 @@ int main(int argc, char ** argv) {
                 if (req.lang_tokens(t) < 0) {
                     char buf[128]; std::snprintf(buf, sizeof(buf),
                         "lang_tokens[%d] = %d is negative", t, req.lang_tokens(t));
-                    sock.send(zmq::buffer(make_error_response(rid, buf)), zmq::send_flags::none);
+                    send_reply(make_error_response(rid, buf));
                     tokens_ok = false;
                     break;
                 }
@@ -266,7 +324,7 @@ int main(int argc, char ** argv) {
             char buf[128]; std::snprintf(buf, sizeof(buf),
                 "state length %d != expected %lld",
                 req.state_size(), (long long) cfg.max_state_dim);
-            sock.send(zmq::buffer(make_error_response(rid, buf)), zmq::send_flags::none);
+            send_reply(make_error_response(rid, buf));
             continue;
         }
         const int expected_noise_n = int(cfg.n_suffix * cfg.max_action_dim);
@@ -274,7 +332,7 @@ int main(int argc, char ** argv) {
             char buf[128]; std::snprintf(buf, sizeof(buf),
                 "noise length %d != 0 or %d (chunk_size * action_dim)",
                 req.noise_size(), expected_noise_n);
-            sock.send(zmq::buffer(make_error_response(rid, buf)), zmq::send_flags::none);
+            send_reply(make_error_response(rid, buf));
             continue;
         }
 
@@ -289,15 +347,15 @@ int main(int argc, char ** argv) {
 
         if (use_precomputed) {
             precomputed_n_views = static_cast<int>(req.precomputed_img_emb_n_views());
-            const int per_view = int(cfg.n_img * cfg.hidden);
-            const int expected = per_view * precomputed_n_views;
-            if (precomputed_n_views < 1 || req.precomputed_img_emb_size() != expected) {
+            const int64_t per_view = cfg.n_img * cfg.hidden;
+            const int64_t expected = per_view * static_cast<int64_t>(precomputed_n_views);
+            if (precomputed_n_views < 1 ||
+                static_cast<int64_t>(req.precomputed_img_emb_size()) != expected) {
                 char buf[160]; std::snprintf(buf, sizeof(buf),
-                    "precomputed_img_emb size %d != %d (n_views=%d * n_img_per_view=%lld * hidden=%lld)",
-                    req.precomputed_img_emb_size(), expected, precomputed_n_views,
+                    "precomputed_img_emb size %d != %lld (n_views=%d * n_img_per_view=%lld * hidden=%lld)",
+                    req.precomputed_img_emb_size(), (long long) expected, precomputed_n_views,
                     (long long) cfg.n_img, (long long) cfg.hidden);
-                sock.send(zmq::buffer(make_error_response(rid, buf)),
-                          zmq::send_flags::none);
+                send_reply(make_error_response(rid, buf));
                 continue;
             }
             precomputed_emb.assign(req.precomputed_img_emb().begin(),
@@ -308,7 +366,7 @@ int main(int argc, char ** argv) {
                 char buf[128]; std::snprintf(buf, sizeof(buf),
                     "precomputed_img_emb[%d] = %g is not finite (NaN/Inf)",
                     bad, precomputed_emb[bad]);
-                sock.send(zmq::buffer(make_error_response(rid, buf)), zmq::send_flags::none);
+                send_reply(make_error_response(rid, buf));
                 continue;
             }
         } else {
@@ -317,8 +375,7 @@ int main(int argc, char ** argv) {
             for (int v = 0; v < n_views; ++v) {
                 if (!decode_image(req.images(v), u8_bufs[v], f32_bufs[v], img_views[v])) {
                     char buf[64]; std::snprintf(buf, sizeof(buf), "image[%d] decode failed", v);
-                    sock.send(zmq::buffer(make_error_response(rid, buf)),
-                              zmq::send_flags::none);
+                    send_reply(make_error_response(rid, buf));
                     decode_ok = false;
                     break;
                 }
@@ -333,7 +390,7 @@ int main(int argc, char ** argv) {
             if (bad >= 0) {
                 char buf[128]; std::snprintf(buf, sizeof(buf),
                     "state[%d] = %g is not finite (NaN/Inf)", bad, state_vec[bad]);
-                sock.send(zmq::buffer(make_error_response(rid, buf)), zmq::send_flags::none);
+                send_reply(make_error_response(rid, buf));
                 continue;
             }
         }
@@ -344,7 +401,7 @@ int main(int argc, char ** argv) {
             if (bad >= 0) {
                 char buf[128]; std::snprintf(buf, sizeof(buf),
                     "noise[%d] = %g is not finite (NaN/Inf)", bad, noise_vec[bad]);
-                sock.send(zmq::buffer(make_error_response(rid, buf)), zmq::send_flags::none);
+                send_reply(make_error_response(rid, buf));
                 continue;
             }
         }
@@ -378,8 +435,7 @@ int main(int argc, char ** argv) {
         const auto & st = vla::last_stats(model);
 
         if (action_chunk.empty()) {
-            sock.send(zmq::buffer(make_error_response(rid, "predict failed")),
-                      zmq::send_flags::none);
+            send_reply(make_error_response(rid, "predict failed"));
             continue;
         }
 
@@ -396,7 +452,7 @@ int main(int argc, char ** argv) {
         resp.set_latency_ms_denoise(st.ms_denoise);
 
         const std::string body = resp.SerializeAsString();
-        sock.send(zmq::buffer(body), zmq::send_flags::none);
+        send_reply(body);
 
         ++served;
         if (served % 10 == 1) {
