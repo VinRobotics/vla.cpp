@@ -6,6 +6,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 - `vla-cli`: one-shot inference from the command line (image + tokens to action), no server needed.
+- `scripts/quantize_gguf.py`: repack LM weights to Q8_0/Q4_0. The loader runs quantized GGUFs directly (Q8_0 roughly halves the LM, near-lossless).
+
+### Changed
+- One shared GGUF reader across the model loaders, replacing the per-arch copies.
 
 ### Fixed
 - Reject out-of-range language tokens in OpenVLA-OFT and VLA-Adapter.

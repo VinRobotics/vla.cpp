@@ -199,6 +199,21 @@ python scripts/convert_smolvla_to_gguf.py \
     --out  /path/to/smolvla-libero-bf16.gguf
 ```
 
+### Quantization
+
+The shipped GGUFs are bf16. `scripts/quantize_gguf.py` repacks the LM-backbone weight
+matrices to a smaller type and copies everything else unchanged; the loader keeps the
+packed weights and lets `ggml_mul_mat` dequantize at compute, so the file just loads and
+runs like the bf16 one.
+
+```bash
+python scripts/quantize_gguf.py --in model-bf16.gguf --out model-q8_0.gguf --type Q8_0
+```
+
+`Q8_0` is near-lossless and roughly halves the LM. `Q4_0` is 4-bit for a bigger cut.
+Embeddings, the output head, norms and the action expert stay float; pass `--vision` to
+pack the vision tower too (smaller, but more accuracy loss).
+
 ## Benchmarks
 
 Full `libero_object` sweep - all 10 tasks × 20 episodes (200 episodes per arch),
