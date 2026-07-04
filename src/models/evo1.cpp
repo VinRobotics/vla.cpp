@@ -223,6 +223,12 @@ bool load_config(const gguf_reader & g, Evo1ModelArch & m, Config & cfg) {
         std::fprintf(stderr, "vla(evo1): embed_dim (%lld) != lm_hidden (%lld) - not handled\n",
                      (long long) m.embed_dim, (long long) m.lm_hidden); return false;
     }
+    // predict() reads action_dim noise floats; the server sizes noise as
+    // horizon*per_action_dim, so they must agree or a client noise buffer underruns.
+    if (m.action_dim != m.horizon * m.per_a) {
+        std::fprintf(stderr, "vla(evo1): action_dim (%lld) != horizon (%lld) * per_action_dim (%lld)\n",
+                     (long long) m.action_dim, (long long) m.horizon, (long long) m.per_a); return false;
+    }
 
     cfg = Config{};
     cfg.n_suffix       = m.horizon;

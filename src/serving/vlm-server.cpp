@@ -101,6 +101,8 @@ int main(int argc, char ** argv) {
     zmq::context_t zctx( 1);
     zmq::socket_t  sock(zctx, zmq::socket_type::router);
     sock.set(zmq::sockopt::linger, 0);
+    // cap inbound messages so one oversized request cannot exhaust memory.
+    sock.set(zmq::sockopt::maxmsgsize, int64_t(256) * 1024 * 1024);
     sock.bind(bind_addr);
     std::printf("vlm-server: bound to %s. ready.\n", bind_addr.c_str());
 

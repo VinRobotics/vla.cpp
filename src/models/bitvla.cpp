@@ -715,24 +715,28 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                     __nv_bfloat16* onorm = upload_bf16_from_f32((const float*) m->lm_output_norm->data, m->lm_hidden, m->cuda_devptrs);
                     bitvla_lm_cuda_set_output_norm(m->lm_cuda_ctx, onorm);
 
-                    cudaMalloc(&m->d_inputs_embeds, (size_t) max_seq * m->lm_hidden * sizeof(__nv_bfloat16));
-                    cudaMalloc(&m->d_last_hidden,   (size_t) max_seq * m->lm_hidden * sizeof(__nv_bfloat16));
-                    cudaMalloc(&m->d_action_hidden, (size_t) (m->num_actions_chunk * m->action_dim) * m->lm_hidden * sizeof(__nv_bfloat16));
-                    cudaMalloc(&m->d_action_ids,    (size_t) (m->num_actions_chunk * m->action_dim) * sizeof(int32_t));
-                    m->cuda_lm_ready = true;
-                    size_t packed_bytes = 0;
-                    for (void* p : m->cuda_devptrs) {
-                        (void) p;
-
+                    cudaError_t lm_ce = cudaMalloc(&m->d_inputs_embeds, (size_t) max_seq * m->lm_hidden * sizeof(__nv_bfloat16));
+                    if (lm_ce == cudaSuccess) lm_ce = cudaMalloc(&m->d_last_hidden,   (size_t) max_seq * m->lm_hidden * sizeof(__nv_bfloat16));
+                    if (lm_ce == cudaSuccess) lm_ce = cudaMalloc(&m->d_action_hidden, (size_t) (m->num_actions_chunk * m->action_dim) * m->lm_hidden * sizeof(__nv_bfloat16));
+                    if (lm_ce == cudaSuccess) lm_ce = cudaMalloc(&m->d_action_ids,    (size_t) (m->num_actions_chunk * m->action_dim) * sizeof(int32_t));
+                    // only enable the CUDA LM once every work buffer is really allocated.
+                    if (lm_ce != cudaSuccess) {
+                        std::fprintf(stderr, "vla(bitvla): CUDA LM buffer alloc failed (%s); using CPU LM\n",
+                                     cudaGetErrorString(lm_ce));
+                        cudaFree(m->d_inputs_embeds); cudaFree(m->d_last_hidden);
+                        cudaFree(m->d_action_hidden); cudaFree(m->d_action_ids);
+                        m->d_inputs_embeds = nullptr; m->d_last_hidden = nullptr;
+                        m->d_action_hidden = nullptr; m->d_action_ids = nullptr;
+                    } else {
+                        m->cuda_lm_ready = true;
+                        const size_t packed_bytes = (size_t) m->lm_layers * (
+                            (size_t)(m->lm_q + 2*m->lm_kv) * m->lm_head_dim * m->lm_hidden / 4 +
+                            (size_t) m->lm_hidden * m->lm_hidden / 4 +
+                            (size_t) 2 * m->lm_inter * m->lm_hidden / 4 +
+                            (size_t) m->lm_hidden * m->lm_inter / 4);
+                        std::printf("vla(bitvla): CUDA LM forward ENABLED - packed int2 weights = %.2f MiB, max_seq=%d\n",
+                                    packed_bytes / (1024.0 * 1024.0), max_seq);
                     }
-
-                    packed_bytes = (size_t) m->lm_layers * (
-                        (size_t)(m->lm_q + 2*m->lm_kv) * m->lm_head_dim * m->lm_hidden / 4 +
-                        (size_t) m->lm_hidden * m->lm_hidden / 4 +
-                        (size_t) 2 * m->lm_inter * m->lm_hidden / 4 +
-                        (size_t) m->lm_hidden * m->lm_inter / 4);
-                    std::printf("vla(bitvla): CUDA LM forward ENABLED - packed int2 weights = %.2f MiB, max_seq=%d\n",
-                                packed_bytes / (1024.0 * 1024.0), max_seq);
 
                     const int patch_flat = 3 * m->patch_size * m->patch_size;
                     const int mm_out     = (int) m->lm_hidden;

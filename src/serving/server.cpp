@@ -230,6 +230,8 @@ int main(int argc, char ** argv) {
     zmq::context_t zctx( 1);
     zmq::socket_t  sock(zctx, zmq::socket_type::rep);
     sock.set(zmq::sockopt::linger, 0);
+    // cap inbound messages so one oversized request cannot exhaust memory.
+    sock.set(zmq::sockopt::maxmsgsize, int64_t(256) * 1024 * 1024);
     sock.bind(bind_addr);
     std::printf("vla-server: bound to %s. ready.\n", bind_addr.c_str());
 
@@ -298,6 +300,10 @@ int main(int argc, char ** argv) {
             const std::string body = make_error_response(rid,
                 "PredictRequest must contain images or precomputed_img_emb");
             send_reply(body);
+            continue;
+        }
+        if (req.images_size() > 16) {
+            send_reply(make_error_response(rid, "too many image views (max 16)"));
             continue;
         }
         if (req.lang_tokens_size() < 1 || req.lang_tokens_size() > int(cfg.n_lang)) {
