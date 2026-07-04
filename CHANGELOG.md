@@ -2,6 +2,15 @@
 
 Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Added
+- `vla-cli`: one-shot inference from the command line (image + tokens to action), no server needed.
+
+### Fixed
+- Reject out-of-range language tokens in OpenVLA-OFT and VLA-Adapter.
+- Zero the padded action dimensions so only real action dims carry values.
+
 ## [0.1.0] - 2026-07-03
 
 First tagged release. One self-contained GGUF per model (vision tower + LM + action
