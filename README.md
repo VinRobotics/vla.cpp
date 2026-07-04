@@ -67,6 +67,29 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 On Apple Silicon (e.g. Mac Mini M4), Metal is enabled by default and runs both the transformer and vision tower on the GPU. See [docs/backend/metal.md](docs/backend/metal.md) for building `vla.cpp` on macOS.
 
+## Quickstart
+
+Once the binaries are built, run one CPU prediction without a server or simulator:
+
+```bash
+pip install -U "huggingface_hub[cli]" gguf
+hf download vrfai/smolvla-libero-gguf --local-dir models/smolvla
+
+# SmolVLA ships its SigLIP tower as a separate mmproj; merge it in once.
+python scripts/merge_smolvla_mmproj_to_gguf.py \
+    models/smolvla/smolvla-libero.gguf \
+    models/smolvla/mmproj-smolvla-libero.gguf \
+    models/smolvla/smolvla.gguf
+
+# front.jpg must already be the model input size (512x512 for this checkpoint).
+./build/vla-cli --ckpt models/smolvla/smolvla.gguf \
+    --image front.jpg --tokens 1,100,200,2 --pretty
+```
+
+`--tokens` are language token ids from the client tokenizer. For the design overview
+see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); for the server path and other models
+see [Models](#models).
+
 ## Install simulators
 
 The eval scaffold under [`eval/`](eval/) supports two simulators end-to-end. Each setup script bootstraps an isolated Python 3.10 `uv` venv next to itself and clones the upstream sim repo. Both require [`uv`](https://github.com/astral-sh/uv) on `PATH`.
