@@ -177,8 +177,17 @@ target_link_libraries(vlm-server PRIVATE
     PkgConfig::ZeroMQ
 )
 
+# One-shot inference CLI: image + tokens -> action, no server or simulator.
+add_executable(vla-cli
+    src/serving/vla-cli.cpp
+)
+target_include_directories(vla-cli PRIVATE
+    ${llama_SOURCE_DIR}/vendor/stb
+)
+target_link_libraries(vla-cli PRIVATE vla_core)
+
 # --- First-party build hygiene (never applied to the vendored llama.cpp subtree) --
-set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla-server vlm-server)
+set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla-server vlm-server vla-cli)
 
 foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)
     # Warn on our own C++ only; nvcc device code keeps its own diagnostics.

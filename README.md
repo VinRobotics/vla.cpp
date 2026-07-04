@@ -107,6 +107,23 @@ vla-server: bound to tcp://*:5555. ready.
 
 Bound address and port can be configured by `--bind` flag. Stop server with `Ctrl-C`.
 
+## One-shot CLI
+
+`vla-cli` runs a single prediction without a server or simulator: give it a model,
+an image, and the tokenized instruction, and it prints the action chunk. Handy for
+smoke-testing a GGUF or scripting a quick inference.
+
+```bash
+# SmolVLA / π0 (mmproj + ckpt):
+./build/vla-cli --mmproj "$VLA_MMPROJ" --ckpt "$VLA_GGUF" \
+    --image front.jpg --image wrist.jpg --tokens 1,100,200,2 --pretty
+
+# BitVLA / Evo-1 / GR00T (vision baked in):
+./build/vla-cli --ckpt "$VLA_GGUF" --image front.jpg --tokens 1,100,200,2 --pretty
+```
+
+Tokenization stays in the Python client, so the instruction is passed as token ids.
+`--pretty` prints one action row per line; `--state` sets proprioception (defaults to zeros).
 
 ## Running the client
 
