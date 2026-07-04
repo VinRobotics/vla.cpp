@@ -395,6 +395,12 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     }
 
     const int64_t L = in.n_lang;
+    // ggml_get_rows does not bound-check, so reject out-of-range tokens here.
+    for (int64_t i = 0; i < L; ++i)
+        if (in.lang_tokens[i] < 0 || in.lang_tokens[i] >= vocab) {
+            std::fprintf(stderr, "vla(openvla_oft): token %d out of vocab\n", in.lang_tokens[i]);
+            return {};
+        }
     const int64_t n_act = chunk * action_dim;
     const int64_t NUM_PATCHES = NPATCH + 1;
     const int64_t NUM_PROMPT_TOKENS = L - 1;

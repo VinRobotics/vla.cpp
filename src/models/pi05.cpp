@@ -880,8 +880,10 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     if (!std::getenv("VLA_PI05_SKIP_UNNORM")) {
         for (int64_t t = 0; t < chunk; ++t) {
             float * row = out.data() + (size_t) t * max_ad;
-            for (int64_t j = 0; j < cfg.real_action_dim && j < max_ad; ++j) {
-                if (quantile_norm)
+            for (int64_t j = 0; j < max_ad; ++j) {
+                if (j >= cfg.real_action_dim)
+                    row[j] = 0.0f;
+                else if (quantile_norm)
                     row[j] = (row[j] + 1.0f) * (action_q99[j] - action_q01[j]) * 0.5f + action_q01[j];
                 else
                     row[j] = row[j] * (action_std[j] + cfg.norm_eps) + action_mean[j];

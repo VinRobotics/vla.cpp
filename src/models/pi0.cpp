@@ -802,8 +802,8 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     ggml_free(C);
     for (int64_t t = 0; t < chunk; ++t) {
         float * row = out.data() + (size_t) t * max_ad;
-        for (int64_t j = 0; j < cfg.real_action_dim && j < max_ad; ++j)
-            row[j] = row[j] * (action_std[j] + cfg.norm_eps) + action_mean[j];
+        for (int64_t j = 0; j < max_ad; ++j)
+            row[j] = j < cfg.real_action_dim ? row[j] * (action_std[j] + cfg.norm_eps) + action_mean[j] : 0.0f;
     }
 
     stats.ms_total = std::chrono::duration<float, std::milli>(clk::now() - t0).count();

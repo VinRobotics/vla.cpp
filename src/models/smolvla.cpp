@@ -1659,8 +1659,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         ggml_backend_tensor_get(m->out_x_t, out.data(), 0, out.size() * sizeof(float));
         for (int64_t r = 0; r < cfg.n_suffix; ++r) {
             float * row = out.data() + r * cfg.max_action_dim;
-            for (int64_t j = 0; j < cfg.real_action_dim; ++j) {
-                row[j] = row[j] * (m->action_std[j] + cfg.norm_eps) + m->action_mean[j];
+            for (int64_t j = 0; j < cfg.max_action_dim; ++j) {
+                row[j] = j < cfg.real_action_dim ? row[j] * (m->action_std[j] + cfg.norm_eps) + m->action_mean[j] : 0.0f;
             }
         }
 
@@ -1889,8 +1889,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
 
     for (int64_t r = 0; r < cfg.n_suffix; ++r) {
         float * row = out.data() + r * cfg.max_action_dim;
-        for (int64_t j = 0; j < cfg.real_action_dim; ++j) {
-            row[j] = row[j] * (m->action_std[j] + cfg.norm_eps) + m->action_mean[j];
+        for (int64_t j = 0; j < cfg.max_action_dim; ++j) {
+            row[j] = j < cfg.real_action_dim ? row[j] * (m->action_std[j] + cfg.norm_eps) + m->action_mean[j] : 0.0f;
         }
     }
 

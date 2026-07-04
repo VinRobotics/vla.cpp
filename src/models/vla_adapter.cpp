@@ -417,6 +417,12 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     }
 
     const int64_t NPROMPT = in.n_lang;
+    // ggml_get_rows does not bound-check, so reject out-of-range tokens here.
+    for (int64_t i = 0; i < NPROMPT; ++i)
+        if (in.lang_tokens[i] < 0 || in.lang_tokens[i] >= vocab) {
+            std::fprintf(stderr, "vla(vla_adapter): token %d out of vocab\n", in.lang_tokens[i]);
+            return {};
+        }
     const int64_t NUM_PROMPT_TOKENS = NPROMPT - 1;
     const int64_t NPATCH = NP * n_views;
     const int64_t SEQ = 1 + NPATCH + (NPROMPT-1) + num_tokens + 1;
