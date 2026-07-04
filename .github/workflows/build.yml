@@ -46,7 +46,7 @@ jobs:
         with:
           path: build/_deps
           key: llama-b9866-${{ runner.os }}
-      - name: build vla-server + vlm-server (CPU, -Wall -Wextra)
+      - name: build vla-server + vlm-server + vla-cli (CPU, -Wall -Wextra)
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF
-          cmake --build build -j"$(nproc)" --target vla-server vlm-server
+          cmake --build build -j"$(nproc)" --target vla-server vlm-server vla-cli

@@ -32,8 +32,8 @@ RUN set -eux; \
     else \
         cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF; \
     fi; \
-    cmake --build build -j"${JOBS:-$(nproc)}" --target vla-server; \
-    cp build/vla-server /usr/local/bin/vla-server
+    cmake --build build -j"${JOBS:-$(nproc)}" --target vla-server vla-cli; \
+    cp build/vla-server build/vla-cli /usr/local/bin/
 
 EXPOSE 5555
 ENTRYPOINT ["vla-server"]
