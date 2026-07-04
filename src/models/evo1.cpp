@@ -307,7 +307,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
     auto mk = [&](const char * name, ggml_type type) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
         if (!gt) { std::fprintf(stderr, "vla(evo1): missing tensor %s\n", name); return nullptr; }
-        ggml_tensor * t = ggml_new_tensor(W, type, ggml_n_dims(gt), gt->ne);
+        ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), ggml_n_dims(gt), gt->ne);
         ggml_set_name(t, name);
         return t;
     };

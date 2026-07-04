@@ -236,7 +236,7 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
     bool ok = true;
     auto mk=[&](const char*name, ggml_type ty)->ggml_tensor*{ const ggml_tensor*gt=g.meta(name);
         if(!gt){ std::fprintf(stderr,"vla(vla_adapter): missing %s\n",name); ok=false; return nullptr; }
-        ggml_tensor*t=ggml_new_tensor(W,ty,ggml_n_dims(gt),gt->ne); ggml_set_name(t,name); return t; };
+        ggml_tensor*t=ggml_new_tensor(W,g.resident_type(gt,ty),ggml_n_dims(gt),gt->ne); ggml_set_name(t,name); return t; };
     auto mm=[&](const char*n){ return mk(n,m->mt); };
     auto f32=[&](const char*n){ return mk(n,GGML_TYPE_F32); };
     char nm[96];

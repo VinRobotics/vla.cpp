@@ -401,7 +401,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     auto mk = [&](const char * name, ggml_type type, int n_dims, const int64_t * ne) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
         if (!gt) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); return nullptr; }
-        ggml_tensor * t = ggml_new_tensor(W, type, n_dims, ne);
+        ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), n_dims, ne);
         ggml_set_name(t, name);
         weights.push_back(t);
         return t;

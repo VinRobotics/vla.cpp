@@ -493,7 +493,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
     auto mk = [&](const char * name, ggml_type type) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
         if (!gt) { std::fprintf(stderr, "vla(gr00tn1d7): missing tensor %s\n", name); return nullptr; }
-        ggml_tensor * t = ggml_new_tensor(W, type, ggml_n_dims(gt), gt->ne);
+        ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), ggml_n_dims(gt), gt->ne);
         ggml_set_name(t, name); return t;
     };
     auto mk_mm  = [&](const char * name) { return mk(name, m->matmul_type); };

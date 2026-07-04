@@ -65,6 +65,13 @@ struct gguf_reader {
     std::string str(const char * k) const { const int64_t id = gguf_find_key(gctx, k); return id < 0 ? std::string() : std::string(gguf_get_val_str(gctx, id)); }
     const ggml_tensor * meta(const char * name) const { return ggml_get_tensor(meta_ctx, name); }
 
+    // Resident type for a weight: keep a quantized source type (Q8_0, Q4_0, ...)
+    // so it stays packed and ggml_mul_mat dequantizes at compute; otherwise use
+    // prefer (the model's F32/BF16 matmul type, or an explicit packed type).
+    ggml_type resident_type(const ggml_tensor * src, ggml_type prefer) const {
+        return (src && ggml_is_quantized(src->type)) ? src->type : prefer;
+    }
+
     bool read_raw(const char * name, void * buf) {
         const int64_t id = gguf_find_tensor(gctx, name);
         if (id < 0) { std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name); return false; }
@@ -85,11 +92,11 @@ struct gguf_reader {
         return out;
     }
 
-    // F32/BF16 targets dequantize to that resident type. A non-float target (I8,
-    // and the packed quant types once converters emit them) is stored raw so
-    // ggml_mul_mat dequantizes at compute. gemma_norm adds 1.0 per weight.
+    // F32/BF16 targets dequantize to that resident type. Any other target (I8,
+    // Q8_0, Q4_0, ...) is stored raw so ggml_mul_mat dequantizes at compute.
+    // gemma_norm adds 1.0 per weight.
     std::vector<uint8_t> read_convert(const char * name, ggml_type target, bool gemma_norm = false) {
-        if (target == GGML_TYPE_I8) {
+        if (target != GGML_TYPE_F32 && target != GGML_TYPE_BF16) {
             const ggml_tensor * t = meta(name);
             if (!t) { std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name); return {}; }
             std::vector<uint8_t> o(ggml_nbytes(t));
