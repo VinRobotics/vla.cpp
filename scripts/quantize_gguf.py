@@ -34,7 +34,9 @@ SKIP = ("token_embd", "output.weight", "patch_embd", "norm", "pos", "embed",
         "cls", "action", "state", "expert", "dit", "adaln", "ada_", "time")
 SKIP_VISION = ("vit", "vision")
 
-QK = {"Q8_0": 32, "Q4_0": 32, "Q5_0": 32, "Q4_K": 256, "Q5_K": 256, "Q6_K": 256}
+# Block size per row (ne0 must divide this). Only the types the gguf writer can
+# pack are offered; Q8_0 is near-lossless, Q4_0/Q4_1 are 4-bit.
+QK = {"Q8_0": 32, "Q4_0": 32, "Q5_0": 32, "Q4_1": 32, "Q5_1": 32}
 
 
 def bf16_to_f32(u8: np.ndarray) -> np.ndarray:
