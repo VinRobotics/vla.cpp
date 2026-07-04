@@ -26,6 +26,7 @@
 #include "ggml-metal.h"
 #endif
 #include "gguf.h"
+#include "models/gguf_reader.h"
 
 #include <algorithm>
 #include <chrono>
@@ -44,113 +45,6 @@ namespace vla {
 
 namespace {
 
-struct gguf_reader {
-    gguf_context * gctx     = nullptr;
-    ggml_context * meta_ctx = nullptr;
-    FILE *         fp       = nullptr;
-    size_t         data_off = 0;
-
-    bool open(const std::string & path) {
-        gguf_init_params p{};
-        p.no_alloc = true;
-        p.ctx      = &meta_ctx;
-        gctx = gguf_init_from_file(path.c_str(), p);
-        if (!gctx) {
-            std::fprintf(stderr, "vla(pi0): gguf_init_from_file failed for %s\n", path.c_str());
-            return false;
-        }
-        fp = std::fopen(path.c_str(), "rb");
-        if (!fp) {
-            std::fprintf(stderr, "vla(pi0): fopen failed for %s\n", path.c_str());
-            return false;
-        }
-        data_off = gguf_get_data_offset(gctx);
-        return true;
-    }
-    ~gguf_reader() {
-        if (fp)       std::fclose(fp);
-        if (gctx)     gguf_free(gctx);
-        if (meta_ctx) ggml_free(meta_ctx);
-    }
-    gguf_reader() = default;
-    gguf_reader(const gguf_reader &) = delete;
-    gguf_reader & operator=(const gguf_reader &) = delete;
-
-    bool has_key(const char * k) const { return gguf_find_key(gctx, k) >= 0; }
-    uint32_t    u32(const char * k) const { return gguf_get_val_u32(gctx, gguf_find_key(gctx, k)); }
-    float       f32(const char * k) const { return gguf_get_val_f32(gctx, gguf_find_key(gctx, k)); }
-    double      f64(const char * k) const { return gguf_get_val_f64(gctx, gguf_find_key(gctx, k)); }
-    std::string str(const char * k) const { return gguf_get_val_str(gctx, gguf_find_key(gctx, k)); }
-
-    const ggml_tensor * meta(const char * name) const { return ggml_get_tensor(meta_ctx, name); }
-
-    bool read_raw(const char * name, void * buf) {
-        const int64_t id = gguf_find_tensor(gctx, name);
-        if (id < 0) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); return false; }
-        const size_t off = data_off + gguf_get_tensor_offset(gctx, id);
-        const size_t nb  = gguf_get_tensor_size(gctx, id);
-        if (std::fseek(fp, (long) off, SEEK_SET) != 0) return false;
-        return std::fread(buf, 1, nb, fp) == nb;
-    }
-
-    std::vector<uint8_t> read_convert(const char * name, ggml_type target, bool gemma_norm) {
-        const ggml_tensor * t = meta(name);
-        if (!t) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); return {}; }
-        const int64_t n = ggml_nelements(t);
-
-        std::vector<float> f32(n);
-        if (t->type == GGML_TYPE_F32) {
-            if (!read_raw(name, f32.data())) return {};
-        } else if (t->type == GGML_TYPE_BF16) {
-            std::vector<ggml_bf16_t> tmp(n);
-            if (!read_raw(name, tmp.data())) return {};
-            ggml_bf16_to_fp32_row(tmp.data(), f32.data(), n);
-        } else {
-            std::fprintf(stderr, "vla(pi0): tensor %s has unsupported type %d\n", name, (int) t->type);
-            return {};
-        }
-        if (gemma_norm) for (int64_t i = 0; i < n; ++i) f32[i] += 1.0f;
-
-        if (target == GGML_TYPE_F32) {
-            std::vector<uint8_t> out(n * sizeof(float));
-            std::memcpy(out.data(), f32.data(), out.size());
-            return out;
-        }
-        if (target == GGML_TYPE_BF16) {
-            std::vector<uint8_t> out(n * sizeof(ggml_bf16_t));
-            ggml_fp32_to_bf16_row(f32.data(), reinterpret_cast<ggml_bf16_t *>(out.data()), n);
-            return out;
-        }
-        std::fprintf(stderr, "vla(pi0): unsupported resident type %d for %s\n", (int) target, name);
-        return {};
-    }
-
-    bool fetch_rows_f32(const char * name, const std::vector<int32_t> & row_ids,
-                        float * dst, int64_t cols) {
-        const ggml_tensor * t = meta(name);
-        if (!t) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); return false; }
-        if (t->ne[0] != cols || t->ne[2] != 1 || t->ne[3] != 1) {
-            std::fprintf(stderr, "vla(pi0): %s shape unfit for row-fetch\n", name); return false;
-        }
-        const int64_t rows = t->ne[1];
-        const int64_t id   = gguf_find_tensor(gctx, name);
-        const size_t  base = data_off + gguf_get_tensor_offset(gctx, id);
-        const size_t  elsz = (t->type == GGML_TYPE_F32) ? 4u : 2u;
-        const size_t  rb   = (size_t) cols * elsz;
-        std::vector<uint8_t> row(rb);
-        for (size_t k = 0; k < row_ids.size(); ++k) {
-            const int32_t r = row_ids[k];
-            if (r < 0 || r >= rows) {
-                std::fprintf(stderr, "vla(pi0): row %d out of range for %s\n", r, name); return false;
-            }
-            if (std::fseek(fp, (long) (base + (size_t) r * rb), SEEK_SET) != 0) return false;
-            if (std::fread(row.data(), 1, rb, fp) != rb) return false;
-            if (elsz == 4) std::memcpy(dst + k * cols, row.data(), rb);
-            else ggml_bf16_to_fp32_row(reinterpret_cast<ggml_bf16_t *>(row.data()), dst + k * cols, cols);
-        }
-        return true;
-    }
-};
 
 struct GemmaLayerW {
     ggml_tensor * ln_in   = nullptr;
@@ -354,7 +248,7 @@ ggml_tensor * build_embed_suffix(ggml_context * ctx, const Pi0ModelArch & m,
 
 bool load_config(const gguf_reader & g, Config & cfg) {
     auto need = [&](const char * k) {
-        if (!g.has_key(k)) { std::fprintf(stderr, "vla(pi0): gguf missing key %s\n", k); return false; }
+        if (!g.has(k)) { std::fprintf(stderr, "vla(pi0): gguf missing key %s\n", k); return false; }
         return true;
     };
     for (const char * k : {"pi0.hidden", "pi0.intermediate", "pi0.n_q_heads", "pi0.n_kv_heads",
@@ -388,11 +282,11 @@ bool load_config(const gguf_reader & g, Config & cfg) {
     cfg.q_full_dim      = cfg.n_q_heads  * cfg.head_dim;
     cfg.kv_full_dim     = cfg.n_kv_heads * cfg.head_dim;
     cfg.self_attn_every_n = 0;
-    cfg.rms_eps         = g.has_key("pi0.rms_norm_eps") ? g.f32("pi0.rms_norm_eps") : 1e-6f;
-    cfg.norm_eps        = g.has_key("pi0.norm_eps")     ? g.f32("pi0.norm_eps")     : 1e-8f;
+    cfg.rms_eps         = g.has("pi0.rms_norm_eps") ? g.f32("pi0.rms_norm_eps") : 1e-6f;
+    cfg.norm_eps        = g.has("pi0.norm_eps")     ? g.f32("pi0.norm_eps")     : 1e-8f;
     cfg.rope_mode       = GGML_ROPE_TYPE_NEOX;
     cfg.rope_n_dims     = (int) cfg.head_dim;
-    cfg.rope_freq_base  = g.has_key("pi0.rope_theta") ? (float) g.f64("pi0.rope_theta") : 10000.f;
+    cfg.rope_freq_base  = g.has("pi0.rope_theta") ? (float) g.f64("pi0.rope_theta") : 10000.f;
     cfg.n_prefix        = 0;
     cfg.n_full          = 0;
     return true;
@@ -442,9 +336,9 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     m->ckpt_path_ = ckpt_path;
     m->matmul_type = std::getenv("VLA_PI0_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
-    gguf_reader g;
+    gguf_reader g("pi0");
     if (!g.open(ckpt_path)) return nullptr;
-    if (!g.has_key("pi0.architecture") || g.str("pi0.architecture") != "pi0") {
+    if (!g.has("pi0.architecture") || g.str("pi0.architecture") != "pi0") {
         std::fprintf(stderr, "vla(pi0): '%s' is not a π₀ GGUF (pi0.architecture missing/wrong)\n",
                      ckpt_path.c_str());
         return nullptr;
@@ -483,11 +377,11 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     // The SigLIP tower is now bundled in the ckpt GGUF; mmproj_path is ignored.
     (void) mmproj_path;
     {
-        auto vu = [&](const char * k, int64_t & d) { if (g.has_key(k)) d = (int64_t) g.u32(k); };
+        auto vu = [&](const char * k, int64_t & d) { if (g.has(k)) d = (int64_t) g.u32(k); };
         vu("pi0.vit_hidden", m->vit_hidden); vu("pi0.vit_layers", m->vit_layers);
         vu("pi0.vit_heads",  m->vit_heads);  vu("pi0.image_size", m->vit_image_size);
         vu("pi0.patch_size", m->vit_patch_size); vu("pi0.n_img_tokens", m->vit_n_tokens);
-        if (g.has_key("pi0.vit_ln_eps")) m->vit_ln_eps = g.f32("pi0.vit_ln_eps");
+        if (g.has("pi0.vit_ln_eps")) m->vit_ln_eps = g.f32("pi0.vit_ln_eps");
         const int64_t grid = m->vit_image_size / m->vit_patch_size;
         if (grid * grid != m->vit_n_tokens || m->vit_n_tokens != cfg.n_img) {
             std::fprintf(stderr, "vla(pi0): vit geometry mismatch (grid^2=%lld n_img_tokens=%lld cfg.n_img=%lld)\n",
@@ -678,7 +572,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     std::vector<int32_t> lang_ids(in.lang_tokens, in.lang_tokens + n_lang);
     std::vector<float> lang_rows((size_t) n_lang * hidden_pl);
     {
-        gguf_reader g;
+        gguf_reader g("pi0");
         if (!g.open(ckpt_path_)) return {};
         if (!g.fetch_rows_f32("token_embd.weight", lang_ids, lang_rows.data(), hidden_pl)) return {};
     }

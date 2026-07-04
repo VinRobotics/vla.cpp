@@ -25,6 +25,7 @@
 #include "ggml-metal.h"
 #endif
 #include "gguf.h"
+#include "models/gguf_reader.h"
 
 #include <chrono>
 #include <cmath>
@@ -40,105 +41,6 @@
 namespace vla {
 namespace {
 
-struct gguf_reader {
-    gguf_context * gctx     = nullptr;
-    ggml_context * meta_ctx = nullptr;
-    FILE *         fp       = nullptr;
-    size_t         data_off = 0;
-
-    bool open(const std::string & path) {
-        gguf_init_params p{};
-        p.no_alloc = true;
-        p.ctx      = &meta_ctx;
-        gctx = gguf_init_from_file(path.c_str(), p);
-        if (!gctx) { std::fprintf(stderr, "vla(evo1): gguf_init_from_file failed for %s\n", path.c_str()); return false; }
-        fp = std::fopen(path.c_str(), "rb");
-        if (!fp) { std::fprintf(stderr, "vla(evo1): fopen failed for %s\n", path.c_str()); return false; }
-        data_off = gguf_get_data_offset(gctx);
-        return true;
-    }
-    ~gguf_reader() {
-        if (fp)       std::fclose(fp);
-        if (gctx)     gguf_free(gctx);
-        if (meta_ctx) ggml_free(meta_ctx);
-    }
-    gguf_reader() = default;
-    gguf_reader(const gguf_reader &) = delete;
-    gguf_reader & operator=(const gguf_reader &) = delete;
-
-    bool        has(const char * k) const { return gguf_find_key(gctx, k) >= 0; }
-    uint32_t    u32(const char * k) const { return gguf_get_val_u32(gctx, gguf_find_key(gctx, k)); }
-    float       f32(const char * k) const { return gguf_get_val_f32(gctx, gguf_find_key(gctx, k)); }
-    double      f64(const char * k) const { return gguf_get_val_f64(gctx, gguf_find_key(gctx, k)); }
-    std::string str(const char * k) const { return gguf_get_val_str(gctx, gguf_find_key(gctx, k)); }
-    const ggml_tensor * meta(const char * name) const { return ggml_get_tensor(meta_ctx, name); }
-
-    bool read_raw(const char * name, void * buf) {
-        const int64_t id = gguf_find_tensor(gctx, name);
-        if (id < 0) { std::fprintf(stderr, "vla(evo1): missing tensor %s\n", name); return false; }
-        const size_t off = data_off + gguf_get_tensor_offset(gctx, id);
-        const size_t nb  = gguf_get_tensor_size(gctx, id);
-        if (std::fseek(fp, (long) off, SEEK_SET) != 0) return false;
-        return std::fread(buf, 1, nb, fp) == nb;
-    }
-
-    std::vector<float> read_f32(const char * name) {
-        const ggml_tensor * t = meta(name);
-        if (!t) { std::fprintf(stderr, "vla(evo1): missing tensor %s\n", name); return {}; }
-        const int64_t n = ggml_nelements(t);
-        std::vector<float> out(n);
-        if (t->type == GGML_TYPE_F32) {
-            if (!read_raw(name, out.data())) return {};
-        } else if (t->type == GGML_TYPE_BF16) {
-            std::vector<ggml_bf16_t> tmp(n);
-            if (!read_raw(name, tmp.data())) return {};
-            ggml_bf16_to_fp32_row(tmp.data(), out.data(), n);
-        } else {
-            std::fprintf(stderr, "vla(evo1): tensor %s unsupported type %d\n", name, (int) t->type); return {};
-        }
-        return out;
-    }
-
-    std::vector<uint8_t> read_convert(const char * name, ggml_type target) {
-        std::vector<float> f32 = read_f32(name);
-        if (f32.empty()) return {};
-        const int64_t n = (int64_t) f32.size();
-        if (target == GGML_TYPE_F32) {
-            std::vector<uint8_t> out(n * sizeof(float));
-            std::memcpy(out.data(), f32.data(), out.size());
-            return out;
-        }
-        if (target == GGML_TYPE_BF16) {
-            std::vector<uint8_t> out(n * sizeof(ggml_bf16_t));
-            ggml_fp32_to_bf16_row(f32.data(), reinterpret_cast<ggml_bf16_t *>(out.data()), n);
-            return out;
-        }
-        std::fprintf(stderr, "vla(evo1): unsupported resident type %d for %s\n", (int) target, name);
-        return {};
-    }
-
-    bool fetch_rows_f32(const char * name, const std::vector<int32_t> & row_ids, float * dst, int64_t cols) {
-        const ggml_tensor * t = meta(name);
-        if (!t || t->ne[0] != cols || t->ne[2] != 1 || t->ne[3] != 1) {
-            std::fprintf(stderr, "vla(evo1): %s shape unfit for row-fetch\n", name); return false;
-        }
-        const int64_t rows = t->ne[1];
-        const int64_t id   = gguf_find_tensor(gctx, name);
-        const size_t  base = data_off + gguf_get_tensor_offset(gctx, id);
-        const size_t  elsz = (t->type == GGML_TYPE_F32) ? 4u : 2u;
-        const size_t  rb   = (size_t) cols * elsz;
-        std::vector<uint8_t> row(rb);
-        for (size_t k = 0; k < row_ids.size(); ++k) {
-            const int32_t r = row_ids[k];
-            if (r < 0 || r >= rows) { std::fprintf(stderr, "vla(evo1): row %d out of range for %s\n", r, name); return false; }
-            if (std::fseek(fp, (long) (base + (size_t) r * rb), SEEK_SET) != 0) return false;
-            if (std::fread(row.data(), 1, rb, fp) != rb) return false;
-            if (elsz == 4) std::memcpy(dst + k * cols, row.data(), rb);
-            else ggml_bf16_to_fp32_row(reinterpret_cast<ggml_bf16_t *>(row.data()), dst + k * cols, cols);
-        }
-        return true;
-    }
-};
 
 struct Qwen2LayerW {
     ggml_tensor *attn_norm, *Wq, *bq, *Wk, *bk, *Wv, *bv, *Wo, *ffn_norm, *Wgate, *Wup, *Wdown;
@@ -367,7 +269,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
     m->gguf_path = ckpt_path;
     m->matmul_type = std::getenv("VLA_EVO1_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
-    gguf_reader g;
+    gguf_reader g("evo1");
     if (!g.open(ckpt_path)) return nullptr;
     if (!g.has("evo1.architecture")) {
         std::fprintf(stderr, "vla(evo1): %s is not an evo1 GGUF (no evo1.architecture KV)\n", ckpt_path.c_str()); return nullptr;
@@ -593,7 +495,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     input_ids.resize(max_text_length, pad_id);
     const int64_t SEQ = max_text_length;
 
-    gguf_reader g;
+    gguf_reader g("evo1");
     if (!g.open(gguf_path)) return {};
     std::vector<float> inputs_embeds((size_t) SEQ * lm_hidden);
     if (!g.fetch_rows_f32("token_embd.weight", input_ids, inputs_embeds.data(), lm_hidden)) return {};

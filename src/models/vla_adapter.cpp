@@ -25,6 +25,7 @@
 #include "ggml-metal.h"
 #endif
 #include "gguf.h"
+#include "models/gguf_reader.h"
 
 #include <chrono>
 #include <cmath>
@@ -40,59 +41,6 @@
 namespace vla {
 namespace {
 
-struct gguf_reader {
-    gguf_context * gctx = nullptr;
-    ggml_context * meta_ctx = nullptr;
-    FILE * fp = nullptr;
-    size_t data_off = 0;
-
-    bool open(const std::string & path) {
-        gguf_init_params p{}; p.no_alloc = true; p.ctx = &meta_ctx;
-        gctx = gguf_init_from_file(path.c_str(), p);
-        if (!gctx) { std::fprintf(stderr, "vla(vla_adapter): gguf_init_from_file failed for %s\n", path.c_str()); return false; }
-        fp = std::fopen(path.c_str(), "rb");
-        if (!fp) { std::fprintf(stderr, "vla(vla_adapter): fopen failed for %s\n", path.c_str()); return false; }
-        data_off = gguf_get_data_offset(gctx);
-        return true;
-    }
-    ~gguf_reader() { if (fp) std::fclose(fp); if (gctx) gguf_free(gctx); if (meta_ctx) ggml_free(meta_ctx); }
-    gguf_reader() = default;
-    gguf_reader(const gguf_reader &) = delete;
-    gguf_reader & operator=(const gguf_reader &) = delete;
-
-    bool has(const char * k) const { return gguf_find_key(gctx, k) >= 0; }
-    uint32_t u32(const char * k) const { return gguf_get_val_u32(gctx, gguf_find_key(gctx, k)); }
-    float f32(const char * k) const { return gguf_get_val_f32(gctx, gguf_find_key(gctx, k)); }
-    std::string str(const char * k) const { return gguf_get_val_str(gctx, gguf_find_key(gctx, k)); }
-    const ggml_tensor * meta(const char * name) const { return ggml_get_tensor(meta_ctx, name); }
-
-    bool read_raw(const char * name, void * buf) {
-        const int64_t id = gguf_find_tensor(gctx, name);
-        if (id < 0) { std::fprintf(stderr, "vla(vla_adapter): missing tensor %s\n", name); return false; }
-        const size_t off = data_off + gguf_get_tensor_offset(gctx, id);
-        const size_t nb = gguf_get_tensor_size(gctx, id);
-        if (std::fseek(fp, (long) off, SEEK_SET) != 0) return false;
-        return std::fread(buf, 1, nb, fp) == nb;
-    }
-    std::vector<float> read_f32(const char * name) {
-        const ggml_tensor * t = meta(name);
-        if (!t) { std::fprintf(stderr, "vla(vla_adapter): missing tensor %s\n", name); return {}; }
-        const int64_t n = ggml_nelements(t);
-        std::vector<float> out(n);
-        if (t->type == GGML_TYPE_F32) { if (!read_raw(name, out.data())) return {}; }
-        else if (t->type == GGML_TYPE_BF16) { std::vector<ggml_bf16_t> tmp(n); if (!read_raw(name, tmp.data())) return {}; ggml_bf16_to_fp32_row(tmp.data(), out.data(), n); }
-        else { std::fprintf(stderr, "vla(vla_adapter): tensor %s unsupported type %d\n", name, (int) t->type); return {}; }
-        return out;
-    }
-    std::vector<uint8_t> read_convert(const char * name, ggml_type target) {
-        std::vector<float> f = read_f32(name);
-        if (f.empty()) return {};
-        const int64_t n = (int64_t) f.size();
-        if (target == GGML_TYPE_F32) { std::vector<uint8_t> o(n * sizeof(float)); std::memcpy(o.data(), f.data(), o.size()); return o; }
-        if (target == GGML_TYPE_BF16) { std::vector<uint8_t> o(n * sizeof(ggml_bf16_t)); ggml_fp32_to_bf16_row(f.data(), reinterpret_cast<ggml_bf16_t *>(o.data()), n); return o; }
-        std::fprintf(stderr, "vla(vla_adapter): unsupported resident type %d for %s\n", (int) target, name); return {};
-    }
-};
 
 bool parse_stats(const std::string & js, int64_t want, std::vector<float> & q01,
                  std::vector<float> & q99, std::vector<uint8_t> & mask, std::string & suite) {
@@ -239,7 +187,7 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
     auto m = std::make_unique<VlaAdapterModelArch>();
     m->mt = std::getenv("VLA_ADAPTER_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
-    gguf_reader g;
+    gguf_reader g("vla_adapter");
     if (!g.open(ckpt_path)) return nullptr;
     if (!g.has("vla_adapter.architecture")) { std::fprintf(stderr, "vla(vla_adapter): not a vla_adapter GGUF\n"); return nullptr; }
 
