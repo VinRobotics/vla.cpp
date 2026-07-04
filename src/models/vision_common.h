@@ -22,6 +22,12 @@
 
 namespace vla {
 
+// A tower that reads side*side*3 from a view needs the view to be exactly that
+// size with real data, else it runs past the buffer.
+inline bool view_is_side(const void * data, int w, int h, int64_t side) {
+    return data != nullptr && (int64_t) w == side && (int64_t) h == side;
+}
+
 // IDEFICS3/SmolVLM pixel-shuffle (space-to-depth), c-innermost channel order.
 // src [embed, n_patches] row-major (patch p, channel e) -> dst [embed*s^2, (grid/s)^2].
 inline void pixel_shuffle_hf(const float * src, float * dst,

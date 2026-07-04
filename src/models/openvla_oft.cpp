@@ -14,6 +14,7 @@
 
 #include "arch.h"
 #include "model.h"
+#include "vision_common.h"
 
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -308,6 +309,15 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     if (in.precomputed_img_emb) { std::fprintf(stderr, "vla(openvla_oft): precomputed_img_emb is not supported; the DINOv2+SigLIP tower is baked into the GGUF, pass raw images\n"); return {}; }
     if (n_views < 1) { std::fprintf(stderr, "vla(openvla_oft): need >=1 image view\n"); return {}; }
     if (!in.images) { std::fprintf(stderr, "vla(openvla_oft): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
+    // towers read S*S*3 per view; reject any view that is not exactly SxS.
+    for (int64_t v = 0; v < n_views; ++v) {
+        const ImageView& iv = in.images[v];
+        if (!view_is_side(iv.data, iv.w, iv.h, S)) {
+            std::fprintf(stderr, "vla(openvla_oft): image view %lld is %dx%d, expected %lldx%lld\n",
+                         (long long) v, iv.w, iv.h, (long long) S, (long long) S);
+            return {};
+        }
+    }
     static const float DMEAN[3]={0.484375f,0.455078125f,0.40625f}, DSTD[3]={0.228515625f,0.2236328125f,0.224609375f};
     static const float SMEAN[3]={0.5f,0.5f,0.5f}, SSTD[3]={0.5f,0.5f,0.5f};
 

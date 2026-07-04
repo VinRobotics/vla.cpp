@@ -66,6 +66,14 @@ int main() {
         (void) got; (void) want;
     }
 
+    // view_is_side: only an exact side x side view with real data passes.
+    int dummy = 0;
+    assert(vla::view_is_side(&dummy, 224, 224, 224));
+    assert(!vla::view_is_side(nullptr, 224, 224, 224));
+    assert(!vla::view_is_side(&dummy, 32, 32, 224));
+    assert(!vla::view_is_side(&dummy, 224, 32, 224));
+    assert(!vla::view_is_side(&dummy, 32, 224, 224));
+
     std::printf("test_vision_common: pixel_shuffle_hf c-innermost order OK\n");
     return 0;
 }
