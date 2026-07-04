@@ -800,9 +800,20 @@ ggml_tensor * build_expert_self_attn_layer(
     return ggml_add(ctx, h1, mm_w(ctx, w.Wdown, inter));
 }
 
+// Reproject the constant prefix cache into a cross-attn layer's K/V. Depends only
+// on the prefix, so it is built once and shared across all denoise steps.
+void expert_cross_kv(ggml_context * ctx, const ExpertLayerW & w,
+                     ggml_tensor * cached_K, ggml_tensor * cached_V, const Config & cfg,
+                     ggml_tensor ** K_repro, ggml_tensor ** V_repro) {
+    ggml_tensor * cK_flat = ggml_reshape_2d(ctx, cached_K, cfg.kv_full_dim, cfg.n_prefix);
+    ggml_tensor * cV_flat = ggml_reshape_2d(ctx, cached_V, cfg.kv_full_dim, cfg.n_prefix);
+    *K_repro = ggml_reshape_3d(ctx, mm_w(ctx, w.Wk, cK_flat), cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix);
+    *V_repro = ggml_reshape_3d(ctx, mm_w(ctx, w.Wv, cV_flat), cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix);
+}
+
 ggml_tensor * build_expert_cross_attn_layer(
     ggml_context * ctx, const ExpertLayerW & w,
-    ggml_tensor * x_in, ggml_tensor * cached_K, ggml_tensor * cached_V,
+    ggml_tensor * x_in, ggml_tensor * K_repro, ggml_tensor * V_repro,
     ggml_tensor * positions_rebased, ggml_tensor * mask_prefix_only,
     const Config & cfg)
 {
@@ -811,13 +822,6 @@ ggml_tensor * build_expert_cross_attn_layer(
     ggml_tensor * q_proj = mm_w(ctx, w.Wq, x_norm);
     ggml_tensor * q_h    = ggml_reshape_3d(ctx, q_proj, cfg.head_dim, cfg.n_q_heads, cfg.n_suffix);
     ggml_tensor * q_rope = rope_q_or_k(ctx, q_h, positions_rebased, cfg);
-
-    ggml_tensor * cK_flat = ggml_reshape_2d(ctx, cached_K, cfg.kv_full_dim, cfg.n_prefix);
-    ggml_tensor * cV_flat = ggml_reshape_2d(ctx, cached_V, cfg.kv_full_dim, cfg.n_prefix);
-    ggml_tensor * K_repro = ggml_reshape_3d(ctx, mm_w(ctx, w.Wk, cK_flat),
-                                            cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix);
-    ggml_tensor * V_repro = ggml_reshape_3d(ctx, mm_w(ctx, w.Wv, cV_flat),
-                                            cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix);
 
     ggml_tensor * Q  = ggml_permute(ctx, q_rope,  0, 2, 1, 3);
     ggml_tensor * Kp = ggml_permute(ctx, K_repro, 0, 2, 1, 3);
@@ -949,7 +953,7 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
             return nullptr;
         }
         ggml_backend_cpu_set_n_threads(m->backend, default_cpu_threads());
-        std::printf("vla: backend = CPU (4 threads)\n");
+        std::printf("vla: backend = CPU (%d threads)\n", default_cpu_threads());
     }
     vram_probe(m->backend, "after backend init");
 
@@ -1355,6 +1359,15 @@ bool build_compute_graph(SmolVLAModelArch* m, int n_views) {
         }
     }
 
+    // Reproject each cross-attn layer's prefix K/V once; reused every denoise step.
+    std::vector<ggml_tensor *> xk_cache(cfg.n_layers, nullptr);
+    std::vector<ggml_tensor *> xv_cache(cfg.n_layers, nullptr);
+    for (int li = 0; li < cfg.n_layers; ++li) {
+        if (!m->expert_layers[li].is_self_attn)
+            expert_cross_kv(ctx, m->expert_layers[li], k_cache[li], v_cache[li],
+                            cfg_built, &xk_cache[li], &xv_cache[li]);
+    }
+
     const float dt = -1.f / static_cast<float>(cfg.num_steps);
     ggml_tensor * x_t = x0;
 
@@ -1374,7 +1387,7 @@ bool build_compute_graph(SmolVLAModelArch* m, int n_views) {
                                                  pos_full, mask_full_f16, cfg_built);
             } else {
                 h = build_expert_cross_attn_layer(ctx, m->expert_layers[li], h,
-                                                  k_cache[li], v_cache[li],
+                                                  xk_cache[li], xv_cache[li],
                                                   pos_rebased, mask_pfx_only_f16, cfg_built);
             }
         }
@@ -1786,6 +1799,13 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     std::vector<ggml_tensor *>     time_bcasts(cfg.num_steps, nullptr);
     std::vector<std::vector<float>> time_host  (cfg.num_steps);
 
+    std::vector<ggml_tensor *> xk_cache(cfg.n_layers, nullptr);
+    std::vector<ggml_tensor *> xv_cache(cfg.n_layers, nullptr);
+    for (int li = 0; li < cfg.n_layers; ++li) {
+        if (!m->expert_layers[li].is_self_attn)
+            expert_cross_kv(ctx, m->expert_layers[li], K_ref[li], V_ref[li], cfg, &xk_cache[li], &xv_cache[li]);
+    }
+
     for (int step = 0; step < cfg.num_steps; ++step) {
         const double time = 1.0 + static_cast<double>(step) * static_cast<double>(dt);
         time_host[step] = sinusoidal_time_emb(time, cfg.expert_h, cfg.min_period, cfg.max_period);
@@ -1808,7 +1828,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
                                                  pos_full, mask_full_f16, cfg);
             } else {
                 h = build_expert_cross_attn_layer(ctx, m->expert_layers[li], h,
-                                                  K_ref[li], V_ref[li],
+                                                  xk_cache[li], xv_cache[li],
                                                   pos_rebased, mask_prefix_only_f16, cfg);
             }
         }
