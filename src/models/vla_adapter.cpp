@@ -423,6 +423,10 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
             std::fprintf(stderr, "vla(vla_adapter): token %d out of vocab\n", in.lang_tokens[i]);
             return {};
         }
+    if ((int64_t) stop_id < 0 || (int64_t) stop_id >= vocab) {
+        std::fprintf(stderr, "vla(vla_adapter): stop_id %lld out of vocab\n", (long long) stop_id);
+        return {};
+    }
     const int64_t NUM_PROMPT_TOKENS = NPROMPT - 1;
     const int64_t NPATCH = NP * n_views;
     const int64_t SEQ = 1 + NPATCH + (NPROMPT-1) + num_tokens + 1;

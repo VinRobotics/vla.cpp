@@ -401,6 +401,10 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
             std::fprintf(stderr, "vla(openvla_oft): token %d out of vocab\n", in.lang_tokens[i]);
             return {};
         }
+    if ((int64_t) stop_id < 0 || (int64_t) stop_id >= vocab) {
+        std::fprintf(stderr, "vla(openvla_oft): stop_id %lld out of vocab\n", (long long) stop_id);
+        return {};
+    }
     const int64_t n_act = chunk * action_dim;
     const int64_t NUM_PATCHES = NPATCH + 1;
     const int64_t NUM_PROMPT_TOKENS = L - 1;

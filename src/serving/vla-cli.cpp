@@ -31,6 +31,9 @@
 #include "stb_image.h"
 #pragma GCC diagnostic pop
 
+#include <cerrno>
+#include <climits>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -41,34 +44,39 @@ using namespace vla;
 
 namespace {
 
-std::vector<int32_t> parse_ints(const std::string & s) {
-    std::vector<int32_t> v;
+// Comma/space separated ints. Returns false on junk or out-of-int32 values.
+bool parse_ints(const std::string & s, std::vector<int32_t> & out) {
+    out.clear();
     size_t i = 0;
     while (i < s.size()) {
         while (i < s.size() && (s[i] == ',' || s[i] == ' ')) ++i;
         if (i >= s.size()) break;
+        errno = 0;
         char * e = nullptr;
-        long x = std::strtol(s.c_str() + i, &e, 10);
-        if (e == s.c_str() + i) { ++i; continue; }
-        v.push_back((int32_t) x);
+        long long x = std::strtoll(s.c_str() + i, &e, 10);
+        if (e == s.c_str() + i) { std::fprintf(stderr, "vla-cli: bad token near '%s'\n", s.c_str() + i); return false; }
+        if (errno == ERANGE || x < INT32_MIN || x > INT32_MAX) { std::fprintf(stderr, "vla-cli: token %lld out of int32 range\n", x); return false; }
+        out.push_back((int32_t) x);
         i = (size_t) (e - s.c_str());
     }
-    return v;
+    return true;
 }
 
-std::vector<float> parse_floats(const std::string & s) {
-    std::vector<float> v;
+// Comma/space separated floats. Returns false on junk or non-finite values.
+bool parse_floats(const std::string & s, std::vector<float> & out) {
+    out.clear();
     size_t i = 0;
     while (i < s.size()) {
         while (i < s.size() && (s[i] == ',' || s[i] == ' ')) ++i;
         if (i >= s.size()) break;
         char * e = nullptr;
         float x = std::strtof(s.c_str() + i, &e);
-        if (e == s.c_str() + i) { ++i; continue; }
-        v.push_back(x);
+        if (e == s.c_str() + i) { std::fprintf(stderr, "vla-cli: bad number near '%s'\n", s.c_str() + i); return false; }
+        if (!std::isfinite(x)) { std::fprintf(stderr, "vla-cli: non-finite value in --state\n"); return false; }
+        out.push_back(x);
         i = (size_t) (e - s.c_str());
     }
-    return v;
+    return true;
 }
 
 // Decode an image file to interleaved RGB8. buf must outlive the ImageView.
@@ -121,9 +129,20 @@ int main(int argc, char ** argv) {
     }
     if (ckpt.empty() || image_paths.empty() || tokens_s.empty()) { usage(argv[0]); return 1; }
 
+    // Validate the cheap args before loading the model.
+    std::vector<int32_t> lang;
+    std::vector<float>   state;
+    if (!parse_ints(tokens_s, lang) || !parse_floats(state_s, state)) return 1;
+    if (lang.empty()) { std::fprintf(stderr, "vla-cli: --tokens parsed to nothing\n"); return 1; }
+
     Model * m = model_load(mmproj, ckpt, "");
     if (!m) { std::fprintf(stderr, "vla-cli: model_load failed\n"); return 1; }
     const Config & cfg = model_config(m);
+
+    if (!state.empty() && (int64_t) state.size() != cfg.max_state_dim)
+        std::fprintf(stderr, "vla-cli: --state has %zu values, model expects %lld; padding or truncating\n",
+                     state.size(), (long long) cfg.max_state_dim);
+    state.resize((size_t) cfg.max_state_dim, 0.0f);
 
     std::vector<std::vector<uint8_t>> imgbuf(image_paths.size());
     std::vector<ImageView>            views(image_paths.size());
@@ -132,11 +151,6 @@ int main(int argc, char ** argv) {
         if (!load_image(image_paths[v].c_str(), imgbuf[v], w, h)) { model_free(m); return 1; }
         views[v] = ImageView{ imgbuf[v].data(), w, h, PixelFormat::U8 };
     }
-
-    std::vector<int32_t> lang  = parse_ints(tokens_s);
-    std::vector<float>   state = parse_floats(state_s);
-    state.resize((size_t) cfg.max_state_dim, 0.0f);
-    if (lang.empty()) { std::fprintf(stderr, "vla-cli: --tokens parsed to nothing\n"); model_free(m); return 1; }
 
     Inputs in{};
     in.images      = views.data();
