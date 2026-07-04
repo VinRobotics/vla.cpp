@@ -1,6 +1,6 @@
 [project]
 name = "vla-cpp-tooling"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python tooling for vla.cpp: HuggingFace -> GGUF converters and the ZeroMQ eval client."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -2,7 +2,7 @@
 
 Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.1.1] - 2026-07-04
 
 ### Added
 - `vla-cli`: one-shot inference from the command line (image + tokens to action), no server needed.
@@ -34,4 +34,5 @@ expert + dataset stats), CPU or CUDA, no external mmproj and no patch to llama.c
 - llama.cpp is fetched + pinned via CMake `FetchContent` (tag `b9866`); bumping is a
   one-line `GIT_TAG` change. Removed the `patches/` fetch script.
 
+[0.1.1]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.1.0
