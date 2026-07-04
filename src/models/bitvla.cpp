@@ -98,7 +98,7 @@ struct BitvlaModelArch : public ModelArchBase {
     std::vector<float>    stop_embed;   // cached constant stop-token embedding row
     ggml_backend_t        backend     = nullptr;
     bool                  is_cuda     = false;
-    int                   n_threads   = 4;
+    int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_F32;
