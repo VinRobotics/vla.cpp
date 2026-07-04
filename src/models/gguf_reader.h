@@ -77,7 +77,7 @@ struct gguf_reader {
         if (id < 0) { std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name); return false; }
         const size_t off = data_off + gguf_get_tensor_offset(gctx, id);
         const size_t nb  = gguf_get_tensor_size(gctx, id);
-        if (std::fseek(fp, (long) off, SEEK_SET) != 0) return false;
+        if (fseeko(fp, (off_t) off, SEEK_SET) != 0) return false;
         return std::fread(buf, 1, nb, fp) == nb;
     }
 
@@ -115,6 +115,7 @@ struct gguf_reader {
     bool fetch_rows_f32(const char * name, const std::vector<int32_t> & row_ids, float * dst, int64_t cols) {
         const ggml_tensor * t = meta(name);
         if (!t || t->ne[0] != cols || t->ne[2] != 1 || t->ne[3] != 1) { std::fprintf(stderr, "vla(%s): %s shape unfit for row-fetch\n", arch, name); return false; }
+        if (t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_BF16) { std::fprintf(stderr, "vla(%s): %s type %d not f32/bf16 for row-fetch\n", arch, name, (int) t->type); return false; }
         const int64_t rows = t->ne[1];
         const int64_t id   = gguf_find_tensor(gctx, name);
         const size_t  base = data_off + gguf_get_tensor_offset(gctx, id);
@@ -124,7 +125,7 @@ struct gguf_reader {
         for (size_t k = 0; k < row_ids.size(); ++k) {
             const int32_t r = row_ids[k];
             if (r < 0 || r >= rows) { std::fprintf(stderr, "vla(%s): row %d out of range for %s\n", arch, r, name); return false; }
-            if (std::fseek(fp, (long) (base + (size_t) r * rb), SEEK_SET) != 0) return false;
+            if (fseeko(fp, (off_t) (base + (size_t) r * rb), SEEK_SET) != 0) return false;
             if (std::fread(row.data(), 1, rb, fp) != rb) return false;
             if (elsz == 4) std::memcpy(dst + k * cols, row.data(), rb);
             else ggml_bf16_to_fp32_row(reinterpret_cast<ggml_bf16_t *>(row.data()), dst + k * cols, cols);

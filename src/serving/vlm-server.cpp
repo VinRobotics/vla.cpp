@@ -181,6 +181,10 @@ int main(int argc, char ** argv) {
             send_reply(make_error_stream(rid, "ChatRequest has no messages"));
             continue;
         }
+        if (req.images_size() > 16) {
+            send_reply(make_error_stream(rid, "too many image views (max 16)"));
+            continue;
+        }
 
         std::vector<vlm::Image> images;
         images.reserve(req.images_size());

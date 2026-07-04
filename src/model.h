@@ -132,7 +132,8 @@ struct Inputs {
                                       ///  (pad @c real_state_dim..max with zeros).
     const float*     noise;           ///< Initial noise for the action expert.
 
-    /// Optional override for the language attention mask (per-token).
+    /// Optional per-token language attention mask. Only Evo-1 honors this; the
+    /// other architectures derive their own mask and ignore it.
     const int32_t*   attention_mask   = nullptr;
     int              attention_mask_n = 0;     ///< Length of @ref attention_mask.
 
