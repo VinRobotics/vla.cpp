@@ -357,7 +357,9 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     stats = Stats{};
     const int64_t S=image_size, NP=n_patches, HC=lm_hidden;
     const int64_t n_views = in.n_images;
+    if (in.precomputed_img_emb) { std::fprintf(stderr, "vla(openvla_oft): precomputed_img_emb is not supported; the DINOv2+SigLIP tower is baked into the GGUF, pass raw images\n"); return {}; }
     if (n_views < 1) { std::fprintf(stderr, "vla(openvla_oft): need >=1 image view\n"); return {}; }
+    if (!in.images) { std::fprintf(stderr, "vla(openvla_oft): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
     static const float DMEAN[3]={0.484375f,0.455078125f,0.40625f}, DSTD[3]={0.228515625f,0.2236328125f,0.224609375f};
     static const float SMEAN[3]={0.5f,0.5f,0.5f}, SSTD[3]={0.5f,0.5f,0.5f};
 
