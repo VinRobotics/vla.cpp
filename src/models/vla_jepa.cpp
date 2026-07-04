@@ -592,8 +592,12 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         std::fclose(fp);
         std::printf("vla(vla_jepa): conditioning injected from %s (action-head isolation)\n", cond_file);
     } else {
-
-        int64_t n_views = in.n_images > 0 ? in.n_images : in.n_img_views;
+        if (in.precomputed_img_emb) {
+            std::fprintf(stderr, "vla(vla_jepa): precomputed_img_emb is not supported. The V-JEPA tower also "
+                                 "emits deepstack features that a single embedding buffer cannot carry; pass raw images.\n");
+            return {};
+        }
+        int64_t n_views = in.n_images;
         if (n_views <= 0) { std::fprintf(stderr, "vla(vla_jepa): no images in the request\n"); return {}; }
         std::vector<float> img_emb_host((size_t) n_views * K * H), ds_host[3];
         for (int j = 0; j < 3; ++j) ds_host[j].assign((size_t) n_views * K * H, 0.0f);
@@ -607,6 +611,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
             std::fclose(fp);
             std::printf("vla(vla_jepa): pixel_values injected from %s\n", patches_file);
         }
+        if (inj_patches.empty() && !in.images) { std::fprintf(stderr, "vla(vla_jepa): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
 
         ggml_init_params vp = { (size_t) 512 * 1024 * 1024, nullptr, true };
         ggml_context * VC = ggml_init(vp);
