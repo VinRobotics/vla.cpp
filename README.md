@@ -75,7 +75,6 @@ Once the binaries are built, run one CPU prediction without a server or simulato
 pip install -U "huggingface_hub[cli]" gguf
 hf download vrfai/smolvla-libero-gguf --local-dir models/smolvla
 
-# The GGUF is self-contained (SigLIP tower bundled in) - no mmproj, no merge step.
 # front.jpg must already be the model input size (512x512 for this checkpoint).
 ./build/vla-cli --ckpt models/smolvla/smolvla-libero.gguf \
     --image front.jpg --tokens 1,100,200,2 --pretty
@@ -83,7 +82,7 @@ hf download vrfai/smolvla-libero-gguf --local-dir models/smolvla
 
 `--tokens` are language token ids from the client tokenizer. For the design overview
 see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); for the server path and other models
-see [Models](#models).
+see [Roadmap](#roadmap).
 
 ## Install simulators
 
@@ -110,7 +109,6 @@ Clones SimplerEnv (and its nested `ManiSkill2_real2sim`) into [`eval/sim/simpler
 `vla-server` loads the model once at startup and answers ZeroMQ REQ/REP requests synchronously.
 
 ```bash
-# Every model is a single self-contained GGUF (vision tower bundled into the ckpt):
 ./build/vla-server "$VLA_GGUF"
 ```
 
@@ -129,7 +127,6 @@ an image, and the tokenized instruction, and it prints the action chunk. Handy f
 smoke-testing a GGUF or scripting a quick inference.
 
 ```bash
-# Every model is a single self-contained GGUF (vision tower bundled into the ckpt):
 ./build/vla-cli --ckpt "$VLA_GGUF" \
     --image front.jpg --image wrist.jpg --tokens 1,100,200,2 --pretty
 ```
@@ -141,7 +138,7 @@ Tokenization stays in the Python client, so the instruction is passed as token i
 
 [`eval/client/`](eval/client/) ships an end-to-end LIBERO benchmark runner that drives `vla-server` directly over the protobuf protocol. Make sure the LIBERO venv from [Install simulators](#install-simulators) is set up first.
 
-### Run an episode (LIBERO)
+### LIBERO
 
 With `vla-server` already running:
 
@@ -153,12 +150,11 @@ python eval/client/run_sim_client_direct.py \
     --arch "$VLA_ARCH"
 ```
 
-Note:
+The GR00T models needs:
+  -  `--stats-json /path/to/dataset_statistics.json` in client side. 
+  - `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda` for N1.6, `libero_sim` for N1.7) and `VLA_GR00T_BF16_WEIGHTS=1` (to fit the 8 GB card) in server side.
 
-- Use proper `--arch` flag (see [Models](#models)) to match the GGUF that `vla-server` is serving.
-- The GR00T arches need `--stats-json <ckpt>/dataset_statistics.json` (action/state un-normalisation) and an embodiment selected server-side via `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda` for N1.6, `libero_sim` for N1.7), with `VLA_GR00T_BF16_WEIGHTS=1` to fit the 8 GB card.
-
-### Run an episode (SimplerEnv)
+### SimplerEnv
 
 So far only **GR00T-N1.6** is wired (the `gr00t-n1d6-bridge` checkpoint with the `oxe_widowx` embodiment). Start `vla-server` on port 5566 with `oxe_widowx` embodiment:
 
@@ -178,28 +174,18 @@ python eval/client/run_simpler_client_direct.py \
     --stats-json "$VLA_STATS_JSON"
 ```
 
-`$VLA_STATS_JSON` is the `statistics.json` shipped beside the bridge GGUF. The default 224-px GGUF mis-localises on WidowX (≈20% success) - the 252-px build is required.
-
 ## Models
 
-Each model ships as a single self-contained GGUF
+### Conversion
 
-| Model       | Converted GGUF | Source ckpt | Client `--arch` flag |
-|---|---|---|---|
-| SmolVLA      | [`smolvla-libero`](https://huggingface.co/vrfai/smolvla-libero-gguf) | [link](https://huggingface.co/HuggingFaceVLA/smolvla_libero) | `smolvla` |
-| π0           | [`pi0-libero`](https://huggingface.co/vrfai/pi0-libero-finetuned-v044-gguf) | [link](https://huggingface.co/lerobot/pi0_libero_finetuned_v044) | `pi0` |
-| BitVLA       | [`bitvla-libero`](https://huggingface.co/vrfai/bitvla-libero-gguf) | [link](https://huggingface.co/hongyuw/ft-bitvla-bitsiglipL-224px-libero_object-bf16) | `bitvla` |
-| OpenVLA-OFT  | [`openvla-oft-libero`](https://huggingface.co/vrfai/openvla-oft-libero-gguf) | [link](https://huggingface.co/moojink/openvla-7b-oft-finetuned-libero-spatial-object-goal-10) | `openvla_oft` |
-| Groot-N1.7   | [`gr00tn1d7-libero`](https://huggingface.co/vrfai/gr00tn1d7-libero-gguf) | [link](https://huggingface.co/nvidia/GR00T-N1.7-LIBERO) | `gr00t_n1_7` |
-
-`vla.cpp` also supports `gr00t_n1_5`, `gr00t_n1_6`, `evo1`, `vla_adapter`, `vla_jepa` and `pi05`.
+Each model ships as a single self-contained GGUF.
 If you would rather convert a HuggingFace safetensors checkpoint yourself, [`scripts/`](scripts/) provides per-arch GGUF converters.
 Set up a venv for converter by:
 
 ```bash
 python3 -m venv .venv-converter
 source .venv-converter/bin/activate
-pip install -e ".[convert]"   # torch, safetensors, gguf, numpy (see pyproject.toml)
+pip install -e ".[convert]"
 ```
 
 Then run any of the per-arch converters (`--help` for the full flag list):
@@ -227,20 +213,19 @@ pack the vision tower too (smaller, but more accuracy loss).
 
 ## Benchmarks
 
-Full `libero_object` sweep - all 10 tasks × 20 episodes (200 episodes per arch),
-run via `vla-server` + `eval/client/run_sim_client_direct.py` across three deployment
-targets: an **RTX 3060** (sm_86), an **NVIDIA Jetson AGX Orin** (sm_87, Jetson-class
-deployment hardware), and an **NVIDIA Jetson Orin Nano (8 GB)** (sm_87, the cheapest
+Latency (ms, inference time + transport overhead) measured at client sides
+across four deployment targets: an **RTX 3090**, an **NVIDIA Jetson AGX
+Orin**, an **NVIDIA Jetson Orin Nano (8 GB)**, and an **Apple M4**.
 
-Columns report `client/call (ms)` and `Peak RAM (MiB)` for each hardware target.
 
-| Model | 3060 call (ms) | 3060 RAM (MiB) | AGX Orin call (ms) | AGX Orin RAM (MiB) | Orin Nano call (ms) | Orin Nano RAM (MiB) |
-|---|---:|---:|---:|---:|---:|---:|
-| `smolvla`    |  113 | 1410 |  262 |  689.4 |  567 | 2031.2 |
-| `bitvla`     |  303 | 1312 |  809 | 1148.8 | 2845 | 2199.0 |
-| `evo1`       |  509 | 1564 | 1048 |  637.5 | 3671 | 2135.0 |
-| `pi0`        |  312 | 5548 |  893 |  640.4 | 1955 | 6067.7 |
-| `gr00t_n1_5` |  227 | 4866 |  461 | 1331.3 | 1356 | 5974.9 |
+| Model | 3090 call (ms) | AGX Orin call (ms) | Orin Nano call (ms) | M4 call (ms) |
+|---|---:|---:|---:|---:|
+| `smolvla`     |  113 |  262 |  567 |  888 |
+| `pi0`         |  312 |  893 | 1955 | 1135 |
+| `gr00t_n1_5`  |  227 |  461 | 1356 |    - |
+| `gr00t_n1_7`  |  164 |  429 |    - |  755 |
+| `bitvla`      |  303 |  809 | 2845 |    - |
+| `evo1`        |  509 | 1048 | 3671 |    - |
 
 ## Roadmap
 
@@ -249,17 +234,17 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 
 | Model | CPU (x86-64 / ARM) | CUDA | Metal | OpenVINO | Hexagon |
 |---|:--:|:--:|:--:|:--:|:--:|
-| SmolVLA     | Y | Y | Y | - | - |
-| π0          | Y | Y | Y | - | - |
-| π0.5        | Y | Y | ~ | - | - |
-| GR00T N1.5  | Y | Y | ~ | - | - |
-| GR00T N1.6  | Y | Y | ~ | - | - |
-| GR00T N1.7  | Y | Y | Y | - | - |
-| BitVLA      | Y | Y | ~ | - | - |
-| Evo-1       | Y | Y | ~ | - | - |
-| VLA-Adapter | Y | Y | ~ | - | - |
-| OpenVLA-OFT | Y | Y | ~ | - | - |
-| VLA-JEPA    | Y | Y | ~ | - | - |
+| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | - | - |
+| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | Y | - | - |
+| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | ~ | - | - |
+| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | ~ | - | - |
+| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | ~ | - | - |
+| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | Y | - | - |
+| [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | ~ | - | - |
+| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | ~ | - | - |
+| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | - | - |
+| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | ~ | - | - |
+| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | ~ | - | - |
 
 Looking ahead, we will support more models, more platforms, and continue to
 optimize the framework.
