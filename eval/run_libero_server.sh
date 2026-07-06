@@ -121,13 +121,13 @@ if [[ ! -x "${SERVER_BIN}" ]]; then
 fi
 
 # ---- per-arch GGUF positional args + GR00T env -----------------------------
-# pi0: mmproj + ckpt. gr00t_*: vision baked in -> just ckpt. Weights live here on
-# the server, NOT on the client. (dataset_statistics.json is a CLIENT-side arg.)
+# pi0 / gr00t_*: vision baked into the ckpt -> just the self-contained ckpt GGUF.
+# Weights live here on the server, NOT on the client. (dataset_statistics.json is a
+# CLIENT-side arg.)
 SERVER_ARGS=()
 case "${MODEL}" in
     pi0)
         SERVER_ARGS=(
-            "${MODELS_ROOT}/pi0-libero-finetuned-v044-gguf/mmproj-pi0-libero-finetuned-v044.gguf"
             "${MODELS_ROOT}/pi0-libero-finetuned-v044-gguf/pi0-libero-finetuned-v044.gguf"
         )
         ;;

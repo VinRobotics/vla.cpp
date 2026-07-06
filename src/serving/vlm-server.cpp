@@ -17,6 +17,7 @@
 
 #include <zmq.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -28,6 +29,9 @@ namespace {
 
 std::atomic<bool> g_shutdown{false};
 void on_signal(int) { g_shutdown.store(true, std::memory_order_relaxed); }
+
+// Reject absurd image dimensions before any size arithmetic on untrusted input.
+constexpr unsigned kMaxImageDim = 8192;
 
 std::string make_error_stream(uint64_t request_id, const std::string & msg) {
     vlm_chat::StreamMessage sm;
@@ -97,8 +101,19 @@ int main(int argc, char ** argv) {
     zmq::context_t zctx( 1);
     zmq::socket_t  sock(zctx, zmq::socket_type::router);
     sock.set(zmq::sockopt::linger, 0);
+    // cap inbound messages so one oversized request cannot exhaust memory.
+    sock.set(zmq::sockopt::maxmsgsize, int64_t(256) * 1024 * 1024);
     sock.bind(bind_addr);
     std::printf("vlm-server: bound to %s. ready.\n", bind_addr.c_str());
+
+    if (bind_addr.find("127.0.0.1") == std::string::npos &&
+        bind_addr.find("localhost") == std::string::npos) {
+        std::fprintf(stderr,
+            "vlm-server: WARNING: bound to %s with no authentication. Any host that can\n"
+            "            reach this address may submit requests. Restrict to a trusted\n"
+            "            network, or bind tcp://127.0.0.1:PORT for local use.\n",
+            bind_addr.c_str());
+    }
 
     std::signal(SIGINT,  on_signal);
     std::signal(SIGTERM, on_signal);
@@ -111,7 +126,9 @@ int main(int argc, char ** argv) {
             zmq::poll(poll, 1, std::chrono::milliseconds(200));
         } catch (const zmq::error_t & e) {
             if (e.num() == EINTR) continue;
-            throw;
+            if (e.num() == ETERM) break;
+            std::fprintf(stderr, "vlm-server: zmq error: %s\n", e.what());
+            continue;
         }
         if (!(poll[0].revents & ZMQ_POLLIN)) continue;
 
@@ -124,8 +141,9 @@ int main(int argc, char ** argv) {
                 auto rr = sock.recv(part, zmq::recv_flags::none);
                 if (!rr) { recv_ok = false; break; }
             } catch (const zmq::error_t & e) {
-                if (e.num() == EINTR) { recv_ok = false; break; }
-                throw;
+                if (e.num() != EINTR)
+                    std::fprintf(stderr, "vlm-server: zmq recv error: %s\n", e.what());
+                recv_ok = false; break;
             }
             if (sock.get(zmq::sockopt::rcvmore)) {
                 env.emplace_back(static_cast<const char*>(part.data()), part.size());
@@ -138,10 +156,17 @@ int main(int argc, char ** argv) {
         if (!recv_ok || !have_payload || env.empty()) continue;
 
         auto send_reply = [&](const std::string & body) {
-            for (const auto & e : env) {
-                sock.send(zmq::buffer(e), zmq::send_flags::sndmore);
+            try {
+                for (const auto & e : env) {
+                    sock.send(zmq::buffer(e), zmq::send_flags::sndmore);
+                }
+                sock.send(zmq::buffer(body), zmq::send_flags::none);
+            } catch (const zmq::error_t & e) {
+                // A throw mid-multipart leaves the ROUTER frame open, which would
+                // corrupt the next reply; shut down cleanly instead of crashing.
+                std::fprintf(stderr, "vlm-server: reply send failed (%s); shutting down\n", e.what());
+                g_shutdown.store(true, std::memory_order_relaxed);
             }
-            sock.send(zmq::buffer(body), zmq::send_flags::none);
         };
 
         vlm_chat::ChatRequest req;
@@ -154,6 +179,10 @@ int main(int argc, char ** argv) {
 
         if (req.messages_size() < 1) {
             send_reply(make_error_stream(rid, "ChatRequest has no messages"));
+            continue;
+        }
+        if (req.images_size() > 16) {
+            send_reply(make_error_stream(rid, "too many image views (max 16)"));
             continue;
         }
 
@@ -172,6 +201,14 @@ int main(int argc, char ** argv) {
                     decode_ok = false; break;
                 }
             } else if (im.encoding() == vlm_chat::Image::RGB_U8) {
+                if (im.width() == 0 || im.height() == 0 ||
+                    im.width() > kMaxImageDim || im.height() > kMaxImageDim) {
+                    char buf[96]; std::snprintf(buf, sizeof(buf),
+                        "image[%d] RGB_U8 dims %ux%u out of range (max %u)", v,
+                        im.width(), im.height(), kMaxImageDim);
+                    send_reply(make_error_stream(rid, buf));
+                    decode_ok = false; break;
+                }
                 const size_t expected = size_t(3) * im.width() * im.height();
                 if (im.data().size() != expected) {
                     char buf[96]; std::snprintf(buf, sizeof(buf),
@@ -204,7 +241,11 @@ int main(int argc, char ** argv) {
             sp.temperature = s.temperature();
             sp.top_p       = s.top_p();
             sp.top_k       = s.top_k();
-            sp.max_tokens  = s.max_tokens() > 0 ? s.max_tokens() : 256;
+            // Cap client-requested length at the context window so a huge
+            // max_tokens cannot monopolize the single-threaded decode loop.
+            const uint32_t cap  = uint32_t(lp.n_ctx > 0 ? lp.n_ctx : 4096);
+            const uint32_t want = s.max_tokens() > 0 ? s.max_tokens() : 256;
+            sp.max_tokens = int(std::min<uint32_t>(want, cap));
             sp.seed        = s.seed() != 0 ? s.seed() : 0xFFFFFFFFu;
         }
 

@@ -15,6 +15,10 @@
 
 set -euxo pipefail
 
+# egl-probe and friends request cmake_minimum_required < 3.5, which CMake >= 4.0
+# refuses; this lets them configure anyway (env var honored since CMake 3.31).
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
+
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
@@ -39,7 +43,7 @@ else
 	git clone "$LIBERO_GIT_URL" "$LIBERO_REPO"
 fi
 
-rm -rf "$LIBERO_UV_ENV"deac
+rm -rf "$LIBERO_UV_ENV"
 mkdir -p "$LIBERO_UV_ENV"
 uv venv "$LIBERO_UV_ENV/.venv" --python 3.10
 source "$LIBERO_UV_ENV/.venv/bin/activate"
@@ -52,5 +56,11 @@ uv pip install pandas==2.0.3
 uv pip install pyarrow==12.0.1
 uv pip install diffusers==0.30.1
 uv pip install numpy==1.26.4
+# robosuite 1.4.0 calls the mujoco 2.3 mj_fullM(m, dst, M) signature; mujoco 3.x
+# changed it, so a transitive dep pulling 3.x breaks the OSC controller at reset.
+uv pip install mujoco==2.3.2
 
+# LIBERO prompts for a dataset path on first import if ~/.libero/config.yaml is
+# missing, which hangs a headless eval; clear stale config and seed defaults (N).
 rm -rf "$HOME/.libero"
+echo "N" | MUJOCO_GL=egl python -c "import libero.libero" || true

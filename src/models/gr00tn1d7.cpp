@@ -25,6 +25,7 @@
 #include "ggml-metal.h"
 #endif
 #include "gguf.h"
+#include "models/gguf_reader.h"
 
 #include <chrono>
 #include <cmath>
@@ -42,86 +43,6 @@
 namespace vla {
 namespace {
 
-struct gguf_reader {
-    gguf_context * gctx     = nullptr;
-    ggml_context * meta_ctx = nullptr;
-    FILE *         fp       = nullptr;
-    size_t         data_off = 0;
-
-    bool open(const std::string & path) {
-        gguf_init_params p{};
-        p.no_alloc = true;
-        p.ctx      = &meta_ctx;
-        gctx = gguf_init_from_file(path.c_str(), p);
-        if (!gctx) { std::fprintf(stderr, "vla(gr00tn1d7): gguf_init_from_file failed for %s\n", path.c_str()); return false; }
-        fp = std::fopen(path.c_str(), "rb");
-        if (!fp) { std::fprintf(stderr, "vla(gr00tn1d7): fopen failed for %s\n", path.c_str()); return false; }
-        data_off = gguf_get_data_offset(gctx);
-        return true;
-    }
-    ~gguf_reader() {
-        if (fp)       std::fclose(fp);
-        if (gctx)     gguf_free(gctx);
-        if (meta_ctx) ggml_free(meta_ctx);
-    }
-    gguf_reader() = default;
-    gguf_reader(const gguf_reader &) = delete;
-    gguf_reader & operator=(const gguf_reader &) = delete;
-
-    bool        has(const char * k) const { return gguf_find_key(gctx, k) >= 0; }
-    uint32_t    u32(const char * k) const { return gguf_get_val_u32(gctx, gguf_find_key(gctx, k)); }
-    float       f32(const char * k) const { return gguf_get_val_f32(gctx, gguf_find_key(gctx, k)); }
-    double      f64(const char * k) const { return gguf_get_val_f64(gctx, gguf_find_key(gctx, k)); }
-    std::string str(const char * k) const { const int64_t id = gguf_find_key(gctx, k); return id < 0 ? std::string() : std::string(gguf_get_val_str(gctx, id)); }
-    const ggml_tensor * meta(const char * name) const { return ggml_get_tensor(meta_ctx, name); }
-
-    bool read_raw(const char * name, void * buf) {
-        const int64_t id = gguf_find_tensor(gctx, name);
-        if (id < 0) { std::fprintf(stderr, "vla(gr00tn1d7): missing tensor %s\n", name); return false; }
-        const size_t off = data_off + gguf_get_tensor_offset(gctx, id);
-        const size_t nb  = gguf_get_tensor_size(gctx, id);
-        if (std::fseek(fp, (long) off, SEEK_SET) != 0) return false;
-        return std::fread(buf, 1, nb, fp) == nb;
-    }
-    std::vector<float> read_f32(const char * name) {
-        const ggml_tensor * t = meta(name);
-        if (!t) { std::fprintf(stderr, "vla(gr00tn1d7): missing tensor %s\n", name); return {}; }
-        const int64_t n = ggml_nelements(t);
-        std::vector<float> out(n);
-        if (t->type == GGML_TYPE_F32) { if (!read_raw(name, out.data())) return {}; }
-        else if (t->type == GGML_TYPE_BF16) { std::vector<ggml_bf16_t> tmp(n); if (!read_raw(name, tmp.data())) return {}; ggml_bf16_to_fp32_row(tmp.data(), out.data(), n); }
-        else { std::fprintf(stderr, "vla(gr00tn1d7): tensor %s unsupported type %d\n", name, (int) t->type); return {}; }
-        return out;
-    }
-    std::vector<uint8_t> read_convert(const char * name, ggml_type target) {
-        std::vector<float> f = read_f32(name);
-        if (f.empty()) return {};
-        const int64_t n = (int64_t) f.size();
-        if (target == GGML_TYPE_F32)  { std::vector<uint8_t> o(n * 4);  std::memcpy(o.data(), f.data(), o.size()); return o; }
-        if (target == GGML_TYPE_BF16) { std::vector<uint8_t> o(n * 2);  ggml_fp32_to_bf16_row(f.data(), reinterpret_cast<ggml_bf16_t *>(o.data()), n); return o; }
-        std::fprintf(stderr, "vla(gr00tn1d7): unsupported resident type %d for %s\n", (int) target, name); return {};
-    }
-
-    bool fetch_rows_f32(const char * name, const std::vector<int32_t> & row_ids, float * dst, int64_t cols) {
-        const ggml_tensor * t = meta(name);
-        if (!t || t->ne[0] != cols || t->ne[2] != 1 || t->ne[3] != 1) { std::fprintf(stderr, "vla(gr00tn1d7): %s shape unfit for row-fetch\n", name); return false; }
-        const int64_t rows = t->ne[1];
-        const int64_t id   = gguf_find_tensor(gctx, name);
-        const size_t  base = data_off + gguf_get_tensor_offset(gctx, id);
-        const size_t  elsz = (t->type == GGML_TYPE_F32) ? 4u : 2u;
-        const size_t  rb   = (size_t) cols * elsz;
-        std::vector<uint8_t> row(rb);
-        for (size_t k = 0; k < row_ids.size(); ++k) {
-            const int32_t r = row_ids[k];
-            if (r < 0 || r >= rows) { std::fprintf(stderr, "vla(gr00tn1d7): row %d out of range for %s\n", r, name); return false; }
-            if (std::fseek(fp, (long) (base + (size_t) r * rb), SEEK_SET) != 0) return false;
-            if (std::fread(row.data(), 1, rb, fp) != rb) return false;
-            if (elsz == 4) std::memcpy(dst + k * cols, row.data(), rb);
-            else ggml_bf16_to_fp32_row(reinterpret_cast<ggml_bf16_t *>(row.data()), dst + k * cols, cols);
-        }
-        return true;
-    }
-};
 
 constexpr float CLIP_MEAN[3] = {0.5f, 0.5f, 0.5f};
 constexpr float CLIP_STD [3] = {0.5f, 0.5f, 0.5f};
@@ -143,7 +64,7 @@ struct Gr00tN1d7ModelArch : public ModelArchBase {
     ggml_backend_t        backend     = nullptr;
     bool                  is_cuda     = false;
     bool                  is_gpu      = false;
-    int                   n_threads   = 4;
+    int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_F32;
@@ -234,6 +155,7 @@ ggml_tensor * head_view(ggml_context * C, ggml_tensor * proj, int64_t hd, int64_
 
 ggml_tensor * flash_attn(ggml_context * C, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
                          ggml_tensor * mask, float scale, int64_t hidden) {
+    (void) hidden;
     ggml_tensor * kf = (k->type == GGML_TYPE_F16) ? k : ggml_cast(C, k, GGML_TYPE_F16);
     ggml_tensor * vf = (v->type == GGML_TYPE_F16) ? v : ggml_cast(C, v, GGML_TYPE_F16);
     ggml_tensor * o  = ggml_flash_attn_ext(C, q, kf, vf, mask, scale, 0.0f, 0.0f);
@@ -533,7 +455,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
     m->gguf_path   = ckpt_path;
     m->matmul_type = std::getenv("VLA_GR00T_BF16_WEIGHTS") ? GGML_TYPE_BF16 : GGML_TYPE_F32;
 
-    gguf_reader g;
+    gguf_reader g("gr00tn1d7");
     if (!g.open(ckpt_path)) return nullptr;
     if (!g.has("gr00t_n1_7.architecture")) { std::fprintf(stderr, "vla(gr00tn1d7): %s is not a gr00t_n1_7 GGUF\n", ckpt_path.c_str()); return nullptr; }
     if (!load_config(g, *m, m->cfg)) return nullptr;
@@ -571,7 +493,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
     auto mk = [&](const char * name, ggml_type type) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
         if (!gt) { std::fprintf(stderr, "vla(gr00tn1d7): missing tensor %s\n", name); return nullptr; }
-        ggml_tensor * t = ggml_new_tensor(W, type, ggml_n_dims(gt), gt->ne);
+        ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), ggml_n_dims(gt), gt->ne);
         ggml_set_name(t, name); return t;
     };
     auto mk_mm  = [&](const char * name) { return mk(name, m->matmul_type); };

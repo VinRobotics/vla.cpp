@@ -27,10 +27,19 @@
 
 #include "model.h"
 
+#include <algorithm>
 #include <memory>
 #include <string>
+#include <thread>
 
 namespace vla {
+
+// Default CPU thread count for the in-tree loaders: all cores, capped at 8,
+// with a safe fallback when the hardware count is unknown.
+inline int default_cpu_threads() {
+    const unsigned hw = std::thread::hardware_concurrency();
+    return hw == 0 ? 4 : (int) std::min(hw, 8u);
+}
 
 /**
  * @brief Identifier for every VLA architecture the engine can serve.

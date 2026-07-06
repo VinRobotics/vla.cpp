@@ -26,8 +26,8 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LLAMA_DIR="$ROOT/third_party/llama.cpp"
-PATCH="$ROOT/patches/llama.cpp-vla.patch"
+# llama.cpp lives in the build tree (cmake FetchContent); set VLA_BUILD_DIR to override.
+LLAMA_DIR="${VLA_BUILD_DIR:-$ROOT/build}/_deps/llama-src"
 
 sha256() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -76,11 +76,6 @@ echo
 VLA_HEAD=$(git_head_or_dash "$ROOT")
 VLA_DESC=$(git_describe_or_dash "$ROOT")
 echo "- repo HEAD: \`${VLA_HEAD}\` (\`${VLA_DESC}\`)"
-if [[ -f "$PATCH" ]]; then
-    echo "- patch \`patches/llama.cpp-vla.patch\` sha256: \`$(sha256 "$PATCH")\`"
-else
-    echo "- patch \`patches/llama.cpp-vla.patch\`: **missing**"
-fi
 
 # ---- llama.cpp ----
 echo
@@ -89,7 +84,8 @@ echo
 LLAMA_HEAD=$(git_head_or_dash "$LLAMA_DIR")
 LLAMA_DESC=$(git_describe_or_dash "$LLAMA_DIR")
 echo "- HEAD: \`${LLAMA_HEAD}\` (\`${LLAMA_DESC}\`)"
-echo "- expected pinned tag (from \`patches/patch.sh\`): \`b9016\`"
+LLAMA_TAG=$(grep -m1 'GIT_TAG' "$ROOT/CMakeLists.txt" | grep -oE 'b[0-9]+' || echo '?')
+echo "- expected pinned tag (from \`CMakeLists.txt\`): \`${LLAMA_TAG}\`"
 
 # ---- GGUFs ----
 echo

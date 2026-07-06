@@ -38,7 +38,8 @@ namespace vla {
  * Populated from the GGUF metadata at load time. Sequence counts are in
  * tokens; @c hidden / @c expert_h / @c intermediate refer to model widths.
  * The action chunk returned by @ref predict has shape
- * @c [num_steps, real_action_dim] in row-major order.
+ * @c [num_steps, max_action_dim] in row-major order; only the first
+ * @c real_action_dim columns are valid, the rest are zero padding.
  */
 struct Config {
     int64_t n_img;            ///< Image-token count fed to the LM.
@@ -127,10 +128,12 @@ struct Inputs {
     const int32_t*   lang_tokens;     ///< Tokenised language instruction.
     int              n_lang;          ///< Length of @ref lang_tokens.
 
-    const float*     state;           ///< Proprioception, length @c real_state_dim.
+    const float*     state;           ///< Proprioception, length @c max_state_dim
+                                      ///  (pad @c real_state_dim..max with zeros).
     const float*     noise;           ///< Initial noise for the action expert.
 
-    /// Optional override for the language attention mask (per-token).
+    /// Optional per-token language attention mask. Only Evo-1 honors this; the
+    /// other architectures derive their own mask and ignore it.
     const int32_t*   attention_mask   = nullptr;
     int              attention_mask_n = 0;     ///< Length of @ref attention_mask.
 
@@ -176,8 +179,8 @@ const Config& model_config(const Model* m);
  *
  * @param m  A handle from @ref model_load.
  * @param in Filled-in @ref Inputs struct.
- * @return Action chunk of length @c num_steps * real_action_dim, in
- *         row-major order.
+ * @return Action chunk of length @c num_steps * max_action_dim, in
+ *         row-major order (first @c real_action_dim columns valid).
  */
 std::vector<float> predict(Model* m, const Inputs& in);
 

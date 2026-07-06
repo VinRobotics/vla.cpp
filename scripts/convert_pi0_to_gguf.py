@@ -34,6 +34,15 @@ PFX_VLM_HEAD = "model.paligemma_with_expert.paligemma.lm_head.weight"
 PFX_AEX  = "model.paligemma_with_expert.gemma_expert.model"
 PFX_PROJ = "model"
 
+PFX_VIS_CANDIDATES = [
+    "model.paligemma_with_expert.paligemma.model.vision_tower.vision_model",
+    "model.paligemma_with_expert.paligemma.vision_tower.vision_model",
+]
+PFX_MMP_CANDIDATES = [
+    "model.paligemma_with_expert.paligemma.model.multi_modal_projector",
+    "model.paligemma_with_expert.paligemma.multi_modal_projector",
+]
+
 GEMMA_2B   = dict(hidden=2048, n_q_heads=8, n_kv_heads=1, head_dim=256, intermediate=16384)
 GEMMA_300M = dict(expert_h=1024, expert_inter=4096)
 
@@ -79,6 +88,48 @@ def _stream_block(writer: gguf.GGUFWriter, sf, src_pfx: str, dst_pfx: str, n_lay
         for src_suf, dst_suf in suffix_map:
             t = sf.get_tensor(f"{src_pfx}.layers.{i}.{src_suf}")
             _add_one_tensor(writer, f"{dst_pfx}.blk.{i}.{dst_suf}", t)
+
+def _probe_vision(sf, keys, cfg_json) -> Optional[dict]:
+    vis = next((p for p in PFX_VIS_CANDIDATES
+                if f"{p}.embeddings.patch_embedding.weight" in keys), None)
+    mmp = next((p for p in PFX_MMP_CANDIDATES if f"{p}.linear.weight" in keys), None)
+    if vis is None or mmp is None:
+        raise SystemExit("vision_tower / multi_modal_projector not found in checkpoint; "
+                         f"tried {PFX_VIS_CANDIDATES} and {PFX_MMP_CANDIDATES}")
+    conv = sf.get_slice(f"{vis}.embeddings.patch_embedding.weight").get_shape()
+    pos  = sf.get_slice(f"{vis}.embeddings.position_embedding.weight").get_shape()
+    n_vit = 0
+    while f"{vis}.encoder.layers.{n_vit}.layer_norm1.weight" in keys:
+        n_vit += 1
+    vcfg = cfg_json.get("vision_config") or {}
+    patch = int(conv[2]); ntok = int(pos[0]); grid = int(round(ntok ** 0.5))
+    return dict(prefix=vis, mmp=mmp, vit_hidden=int(conv[0]), vit_layers=n_vit,
+                vit_heads=int(vcfg.get("num_attention_heads", 16)),
+                image_size=grid * patch, patch_size=patch, n_img_tokens=ntok,
+                vit_ln_eps=float(vcfg.get("layer_norm_eps", 1e-6)))
+
+
+def _add_vision_tensors(writer: gguf.GGUFWriter, sf, v: dict) -> None:
+    vis, mmp = v["prefix"], v["mmp"]
+    af32  = lambda dst, src: _add_one_tensor(writer, dst, sf.get_tensor(src).float())
+    akeep = lambda dst, src: _add_one_tensor(writer, dst, sf.get_tensor(src))
+    af32("vit.patch_embd.weight", f"{vis}.embeddings.patch_embedding.weight")
+    af32("vit.patch_embd.bias",   f"{vis}.embeddings.patch_embedding.bias")
+    af32("vit.pos_embd",          f"{vis}.embeddings.position_embedding.weight")
+    for i in range(v["vit_layers"]):
+        L = f"{vis}.encoder.layers.{i}."
+        af32(f"vit.blk.{i}.ln1.weight", L + "layer_norm1.weight"); af32(f"vit.blk.{i}.ln1.bias", L + "layer_norm1.bias")
+        af32(f"vit.blk.{i}.ln2.weight", L + "layer_norm2.weight"); af32(f"vit.blk.{i}.ln2.bias", L + "layer_norm2.bias")
+        for q in ("q", "k", "v"):
+            akeep(f"vit.blk.{i}.attn_{q}.weight", L + f"self_attn.{q}_proj.weight")
+            af32 (f"vit.blk.{i}.attn_{q}.bias",   L + f"self_attn.{q}_proj.bias")
+        akeep(f"vit.blk.{i}.attn_o.weight", L + "self_attn.out_proj.weight"); af32(f"vit.blk.{i}.attn_o.bias", L + "self_attn.out_proj.bias")
+        akeep(f"vit.blk.{i}.fc1.weight", L + "mlp.fc1.weight"); af32(f"vit.blk.{i}.fc1.bias", L + "mlp.fc1.bias")
+        akeep(f"vit.blk.{i}.fc2.weight", L + "mlp.fc2.weight"); af32(f"vit.blk.{i}.fc2.bias", L + "mlp.fc2.bias")
+    af32("vit.post_ln.weight", f"{vis}.post_layernorm.weight"); af32("vit.post_ln.bias", f"{vis}.post_layernorm.bias")
+    akeep("mm.proj.weight", f"{mmp}.linear.weight")
+    af32 ("mm.proj.bias",   f"{mmp}.linear.bias")
+
 
 def _read_norm_eps(meta_path: Path) -> Optional[float]:
 
@@ -200,6 +251,15 @@ def _add_kv(writer: gguf.GGUFWriter, cfg: dict) -> None:
     writer.add_float64 (KV("rope_theta"),               cfg["rope_theta"])
     writer.add_float32 (KV("rms_norm_eps"),             cfg["rms_norm_eps"])
     writer.add_float32 (KV("norm_eps"),                 cfg["norm_eps"])
+    if "vit" in cfg:
+        v = cfg["vit"]
+        writer.add_uint32 (KV("vit_hidden"),   v["vit_hidden"])
+        writer.add_uint32 (KV("vit_layers"),   v["vit_layers"])
+        writer.add_uint32 (KV("vit_heads"),    v["vit_heads"])
+        writer.add_uint32 (KV("image_size"),   v["image_size"])
+        writer.add_uint32 (KV("patch_size"),   v["patch_size"])
+        writer.add_uint32 (KV("n_img_tokens"), v["n_img_tokens"])
+        writer.add_float32(KV("vit_ln_eps"),   v["vit_ln_eps"])
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
@@ -305,6 +365,12 @@ def main() -> int:
     print("loading normalizer stats...")
     stats = _load_stats(sf, ckpt, cfg["real_state_dim"], cfg["real_action_dim"])
 
+    vit = _probe_vision(sf, keys, cfg_json)
+    cfg["vit"] = vit
+    print(f"vision: SigLIP hidden={vit['vit_hidden']} layers={vit['vit_layers']} "
+          f"heads={vit['vit_heads']} image={vit['image_size']} patch={vit['patch_size']} "
+          f"tokens={vit['n_img_tokens']} ln_eps={vit['vit_ln_eps']:g}")
+
     out.parent.mkdir(parents=True, exist_ok=True)
     print(f"writing {out}")
     writer = gguf.GGUFWriter(str(out), arch=ARCH)
@@ -326,6 +392,8 @@ def main() -> int:
     ]:
         _add_one_tensor(writer, suf, sf.get_tensor(f"{PFX_PROJ}.{suf}"))
 
+    _add_vision_tensors(writer, sf, vit)
+
     for k, v in stats.items():
         writer.add_tensor(k, v, raw_dtype=gguf.GGMLQuantizationType.F32)
 
@@ -335,8 +403,7 @@ def main() -> int:
     writer.close()
 
     print(f"done. {out} ({out.stat().st_size / (1024*1024):.1f} MiB)")
-    print("note: the SigLIP vision tower + multi_modal_projector are NOT in this file - "
-          "produce the mmproj GGUF separately (see tests/pi0/img_emb_mtmd/prepare_mmproj.py).")
+    print("self-contained: SigLIP vision tower + projector are bundled; no separate mmproj needed.")
     return 0
 
 if __name__ == "__main__":

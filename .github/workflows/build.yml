@@ -1,0 +1,52 @@
+# Fast build + unit gate on GitHub-hosted runners. The heavier cross-platform
+# LIBERO regression sweep lives in vla-ci.yml (self-hosted).
+name: build
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpp-unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: pixel-shuffle channel order
+        run: |
+          g++ -std=c++17 -Isrc -Wall -Wextra tests/test_vision_common.cpp -o /tmp/test_vision_common
+          /tmp/test_vision_common
+
+  py-tooling:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: converter remap
+        run: python tests/py/test_converters.py
+
+  build-gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential cmake git ca-certificates pkg-config \
+            libzmq3-dev cppzmq-dev libprotobuf-dev protobuf-compiler
+      - uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: llama-b9866-${{ runner.os }}
+      - name: build vla-server + vlm-server + vla-cli (CPU, -Wall -Wextra)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF
+          cmake --build build -j"$(nproc)" --target vla-server vlm-server vla-cli

@@ -42,10 +42,9 @@ Identify your machine CUDA architecture:
 
 Configure and build the source:
 
-```bash
-# Fetch llama.cpp at pinned tag and apply local patch
-bash ./patches/patch.sh
+CMake fetches and pins `llama.cpp` automatically (no patch, no submodule):
 
+```bash
 # CPU build:
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
@@ -68,6 +67,23 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 On Apple Silicon (e.g. Mac Mini M4), Metal is enabled by default and runs both the transformer and vision tower on the GPU. See [docs/backend/metal.md](docs/backend/metal.md) for building `vla.cpp` on macOS.
 
+## Quickstart
+
+Once the binaries are built, run one CPU prediction without a server or simulator:
+
+```bash
+pip install -U "huggingface_hub[cli]" gguf
+hf download vrfai/smolvla-libero-gguf --local-dir models/smolvla
+
+# front.jpg must already be the model input size (512x512 for this checkpoint).
+./build/vla-cli --ckpt models/smolvla/smolvla-libero.gguf \
+    --image front.jpg --tokens 1,100,200,2 --pretty
+```
+
+`--tokens` are language token ids from the client tokenizer. For the design overview
+see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); for the server path and other models
+see [Roadmap](#roadmap).
+
 ## Install simulators
 
 The eval scaffold under [`eval/`](eval/) supports two simulators end-to-end. Each setup script bootstraps an isolated Python 3.10 `uv` venv next to itself and clones the upstream sim repo. Both require [`uv`](https://github.com/astral-sh/uv) on `PATH`.
@@ -86,17 +102,13 @@ Clones LIBERO into [`eval/sim/libero/LIBERO/`](eval/sim/libero/LIBERO), creates 
 bash eval/sim/simpler/setup_SimplerEnv.sh
 ```
 
-Clones SimplerEnv (and its nested `ManiSkill2_real2sim`) into [`eval/sim/simpler/SimplerEnv/`](eval/sim/simpler/SimplerEnv), creates `eval/sim/simpler/simpler_uv/.venv/`, and pins gymnasium 0.29.1, numpy 1.26.4, transformers 4.51.3, plus the ManiSkill2 + SimplerEnv editable installs.
+Clones SimplerEnv (and its nested `ManiSkill2_real2sim`) into [`eval/sim/simpler/SimplerEnv/`](eval/sim/simpler/SimplerEnv), creates `eval/sim/simpler/simpler_uv/.venv/`.
 
 ## Running the server
 
 `vla-server` loads the model once at startup and answers ZeroMQ REQ/REP requests synchronously.
 
 ```bash
-# SmolVLA / π0 (mmproj + ckpt):
-./build/vla-server "$VLA_MMPROJ" "$VLA_GGUF"
-
-# Evo-1 / BitVLA / GR00T-N1.{5,6,7} (vision baked into the ckpt - omit mmproj):
 ./build/vla-server "$VLA_GGUF"
 ```
 
@@ -108,12 +120,25 @@ vla-server: bound to tcp://*:5555. ready.
 
 Bound address and port can be configured by `--bind` flag. Stop server with `Ctrl-C`.
 
+## One-shot CLI
+
+`vla-cli` runs a single prediction without a server or simulator: give it a model,
+an image, and the tokenized instruction, and it prints the action chunk. Handy for
+smoke-testing a GGUF or scripting a quick inference.
+
+```bash
+./build/vla-cli --ckpt "$VLA_GGUF" \
+    --image front.jpg --image wrist.jpg --tokens 1,100,200,2 --pretty
+```
+
+Tokenization stays in the Python client, so the instruction is passed as token ids.
+`--pretty` prints one action row per line; `--state` sets proprioception (defaults to zeros).
 
 ## Running the client
 
 [`eval/client/`](eval/client/) ships an end-to-end LIBERO benchmark runner that drives `vla-server` directly over the protobuf protocol. Make sure the LIBERO venv from [Install simulators](#install-simulators) is set up first.
 
-### Run an episode (LIBERO)
+### LIBERO
 
 With `vla-server` already running:
 
@@ -125,13 +150,11 @@ python eval/client/run_sim_client_direct.py \
     --arch "$VLA_ARCH"
 ```
 
-Note:
+The GR00T models needs:
+  -  `--stats-json /path/to/dataset_statistics.json` in client side. 
+  - `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda` for N1.6, `libero_sim` for N1.7) and `VLA_GR00T_BF16_WEIGHTS=1` (to fit the 8 GB card) in server side.
 
-- Use proper `--arch` flag (see [Models](#models)) to match the GGUF that `vla-server` is serving.
-- Pi0 uses the gated `google/paligemma-3b-pt-224` tokenizer (`huggingface-cli login` + accept the licence, or point `--tokenizer` at a local copy)
-- The GR00T arches need `--stats-json <ckpt>/dataset_statistics.json` (action/state un-normalisation) and an embodiment selected server-side via `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda` for N1.6, `libero_sim` for N1.7), with `VLA_GR00T_BF16_WEIGHTS=1` to fit the 8 GB card.
-
-### Run an episode (SimplerEnv)
+### SimplerEnv
 
 So far only **GR00T-N1.6** is wired (the `gr00t-n1d6-bridge` checkpoint with the `oxe_widowx` embodiment). Start `vla-server` on port 5566 with `oxe_widowx` embodiment:
 
@@ -151,30 +174,18 @@ python eval/client/run_simpler_client_direct.py \
     --stats-json "$VLA_STATS_JSON"
 ```
 
-`$VLA_STATS_JSON` is the `statistics.json` shipped beside the bridge GGUF. The default 224-px GGUF mis-localises on WidowX (≈20% success) - the 252-px build is required.
-
 ## Models
 
-Each model ships a combined VLA GGUF (LM + action expert + dataset stats + arch config) and, where applicable, a matching mmproj GGUF (vision tower). SmolVLA, π0 and π0.5 ship a separate mmproj; BitVLA, Evo-1, VLA-Adapter and OpenVLA-OFT bake their vision tower into the combined GGUF, so no mmproj file is needed.
+### Conversion
 
-| Model       | Converted GGUF | Source ckpt | Client `--arch` flag |
-|---|---|---|---|
-| SmolVLA      | [`smolvla-libero`](https://huggingface.co/vrfai/smolvla-libero-gguf) | [link](https://huggingface.co/HuggingFaceVLA/smolvla_libero) | `smolvla` |
-| π0           | [`pi0-libero`](https://huggingface.co/vrfai/pi0-libero-finetuned-v044-gguf) | [link](https://huggingface.co/lerobot/pi0_libero_finetuned_v044) | `pi0` |
-| BitVLA       | [`bitvla-libero`](https://huggingface.co/vrfai/bitvla-libero-gguf) | [link](https://huggingface.co/hongyuw/ft-bitvla-bitsiglipL-224px-libero_object-bf16) | `bitvla` |
-| OpenVLA-OFT  | [`openvla-oft-libero`](https://huggingface.co/vrfai/openvla-oft-libero-gguf) | [link](https://huggingface.co/moojink/openvla-7b-oft-finetuned-libero-spatial-object-goal-10) | `openvla_oft` |
-| Groot-N1.7   | [`gr00tn1d7-libero`](https://huggingface.co/vrfai/gr00tn1d7-libero-gguf) | [link](https://huggingface.co/nvidia/GR00T-N1.7-LIBERO) | `gr00t_n1_7` |
-
-`vla.cpp` also supports `gr00t_n1_5`, `gr00t_n1_6`, `evo1`, `vla_adapter`, `vla_jepa` and `pi05`.
+Each model ships as a single self-contained GGUF.
 If you would rather convert a HuggingFace safetensors checkpoint yourself, [`scripts/`](scripts/) provides per-arch GGUF converters.
 Set up a venv for converter by:
 
 ```bash
-# Assume third_party/llama.cpp has been cloned and patched
 python3 -m venv .venv-converter
 source .venv-converter/bin/activate
-pip install -r third_party/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt
-pip install safetensors
+pip install -e ".[convert]"
 ```
 
 Then run any of the per-arch converters (`--help` for the full flag list):
@@ -185,28 +196,36 @@ python scripts/convert_smolvla_to_gguf.py \
     --out  /path/to/smolvla-libero-bf16.gguf
 ```
 
+### Quantization
+
+The shipped GGUFs are bf16. `scripts/quantize_gguf.py` repacks the LM-backbone weight
+matrices to a smaller type and copies everything else unchanged; the loader keeps the
+packed weights and lets `ggml_mul_mat` dequantize at compute, so the file just loads and
+runs like the bf16 one.
+
+```bash
+python scripts/quantize_gguf.py --in model-bf16.gguf --out model-q8_0.gguf --type Q8_0
+```
+
+`Q8_0` is near-lossless and roughly halves the LM. `Q4_0` is 4-bit for a bigger cut.
+Embeddings, the output head, norms and the action expert stay float; pass `--vision` to
+pack the vision tower too (smaller, but more accuracy loss).
+
 ## Benchmarks
 
-Full `libero_object` sweep - all 10 tasks × 20 episodes (200 episodes per arch),
-run via `vla-server` + `eval/client/run_sim_client_direct.py` across three deployment
-targets: an **RTX 3060** (sm_86), an **NVIDIA Jetson AGX Orin** (sm_87, Jetson-class
-deployment hardware), and an **NVIDIA Jetson Orin Nano (8 GB)** (sm_87, the cheapest
-Jetson and the project's primary deployment target). On the Orin Nano, the 8 GB budget
-forces the ~6 GB servers (`gr00t_n1_5`, `pi0`) to run split - server on the Nano, client
-(sim) on the RTX 3060 - while lighter models run co-located; GR00T-N1.6 and GR00T-N1.7
-could not be loaded on 8 GB and are omitted there.
+Latency (ms, inference time + transport overhead) measured at client sides
+across four deployment targets: an **RTX 3090**, an **NVIDIA Jetson AGX
+Orin**, an **NVIDIA Jetson Orin Nano (8 GB)**, and an **Apple M4**.
 
-Columns report `client/call (ms)` and `Peak RAM (MiB)` for each hardware target.
 
-| Model | 3060 call (ms) | 3060 RAM (MiB) | AGX Orin call (ms) | AGX Orin RAM (MiB) | Orin Nano call (ms) | Orin Nano RAM (MiB) |
-|---|---:|---:|---:|---:|---:|---:|
-| `smolvla`    |  113 | 1410 |  262 |  689.4 |  567 | 2031.2 |
-| `bitvla`     |  303 | 1312 |  809 | 1148.8 | 2845 | 2199.0 |
-| `evo1`       |  509 | 1564 | 1048 |  637.5 | 3671 | 2135.0 |
-| `pi0`        |  312 | 5548 |  893 |  640.4 | 1955 | 6067.7 |
-| `gr00t_n1_5` |  227 | 4866 |  461 | 1331.3 | 1356 | 5974.9 |
-| `gr00t_n1_6` |  165 | 6048 |  427 | 1340.5 |    - |      - |
-| `gr00t_n1_7` |  164 | 6302 |  429 | 1316.5 |    - |      - |
+| Model | 3090 call (ms) | AGX Orin call (ms) | Orin Nano call (ms) | M4 call (ms) |
+|---|---:|---:|---:|---:|
+| `smolvla`     |  113 |  262 |  567 |  888 |
+| `pi0`         |  312 |  893 | 1955 | 1135 |
+| `gr00t_n1_5`  |  227 |  461 | 1356 |    - |
+| `gr00t_n1_7`  |  164 |  429 |    - |  755 |
+| `bitvla`      |  303 |  809 | 2845 |    - |
+| `evo1`        |  509 | 1048 | 3671 |    - |
 
 ## Roadmap
 
@@ -215,17 +234,17 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 
 | Model | CPU (x86-64 / ARM) | CUDA | Metal | OpenVINO | Hexagon |
 |---|:--:|:--:|:--:|:--:|:--:|
-| SmolVLA     | Y | Y | Y | - | - |
-| π0          | Y | Y | Y | - | - |
-| π0.5        | Y | Y | ~ | - | - |
-| GR00T N1.5  | Y | Y | ~ | - | - |
-| GR00T N1.6  | Y | Y | ~ | - | - |
-| GR00T N1.7  | Y | Y | Y | - | - |
-| BitVLA      | Y | Y | ~ | - | - |
-| Evo-1       | Y | Y | ~ | - | - |
-| VLA-Adapter | Y | Y | ~ | - | - |
-| OpenVLA-OFT | Y | Y | ~ | - | - |
-| VLA-JEPA    | Y | Y | ~ | - | - |
+| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | - | - |
+| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | Y | - | - |
+| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | ~ | - | - |
+| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | ~ | - | - |
+| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | ~ | - | - |
+| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | Y | - | - |
+| [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | ~ | - | - |
+| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | ~ | - | - |
+| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | - | - |
+| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | ~ | - | - |
+| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | ~ | - | - |
 
 Looking ahead, we will support more models, more platforms, and continue to
 optimize the framework.

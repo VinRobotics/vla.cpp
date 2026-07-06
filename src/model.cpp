@@ -47,6 +47,9 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
     auto try_str = [&](const char * key, std::string& val) -> bool {
         const int64_t kid = gguf_find_key(gctx, key);
         if (kid < 0) return false;
+        // gguf_get_val_str asserts (aborts) if the key is not a string, so a
+        // malformed GGUF would kill the process here. Fail the probe instead.
+        if (gguf_get_kv_type(gctx, kid) != GGUF_TYPE_STRING) return false;
         const char * s = gguf_get_val_str(gctx, kid);
         if (!s) return false;
         val = s;
@@ -199,6 +202,7 @@ const Stats& last_stats(const Model* m) {
 }
 
 std::vector<float> predict(Model* m, const Inputs& in) {
+    if (!m || !m->impl) return {};
     return m->impl->predict(in);
 }
 

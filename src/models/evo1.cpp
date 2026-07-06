@@ -25,6 +25,7 @@
 #include "ggml-metal.h"
 #endif
 #include "gguf.h"
+#include "models/gguf_reader.h"
 
 #include <chrono>
 #include <cmath>
@@ -40,105 +41,6 @@
 namespace vla {
 namespace {
 
-struct gguf_reader {
-    gguf_context * gctx     = nullptr;
-    ggml_context * meta_ctx = nullptr;
-    FILE *         fp       = nullptr;
-    size_t         data_off = 0;
-
-    bool open(const std::string & path) {
-        gguf_init_params p{};
-        p.no_alloc = true;
-        p.ctx      = &meta_ctx;
-        gctx = gguf_init_from_file(path.c_str(), p);
-        if (!gctx) { std::fprintf(stderr, "vla(evo1): gguf_init_from_file failed for %s\n", path.c_str()); return false; }
-        fp = std::fopen(path.c_str(), "rb");
-        if (!fp) { std::fprintf(stderr, "vla(evo1): fopen failed for %s\n", path.c_str()); return false; }
-        data_off = gguf_get_data_offset(gctx);
-        return true;
-    }
-    ~gguf_reader() {
-        if (fp)       std::fclose(fp);
-        if (gctx)     gguf_free(gctx);
-        if (meta_ctx) ggml_free(meta_ctx);
-    }
-    gguf_reader() = default;
-    gguf_reader(const gguf_reader &) = delete;
-    gguf_reader & operator=(const gguf_reader &) = delete;
-
-    bool        has(const char * k) const { return gguf_find_key(gctx, k) >= 0; }
-    uint32_t    u32(const char * k) const { return gguf_get_val_u32(gctx, gguf_find_key(gctx, k)); }
-    float       f32(const char * k) const { return gguf_get_val_f32(gctx, gguf_find_key(gctx, k)); }
-    double      f64(const char * k) const { return gguf_get_val_f64(gctx, gguf_find_key(gctx, k)); }
-    std::string str(const char * k) const { return gguf_get_val_str(gctx, gguf_find_key(gctx, k)); }
-    const ggml_tensor * meta(const char * name) const { return ggml_get_tensor(meta_ctx, name); }
-
-    bool read_raw(const char * name, void * buf) {
-        const int64_t id = gguf_find_tensor(gctx, name);
-        if (id < 0) { std::fprintf(stderr, "vla(evo1): missing tensor %s\n", name); return false; }
-        const size_t off = data_off + gguf_get_tensor_offset(gctx, id);
-        const size_t nb  = gguf_get_tensor_size(gctx, id);
-        if (std::fseek(fp, (long) off, SEEK_SET) != 0) return false;
-        return std::fread(buf, 1, nb, fp) == nb;
-    }
-
-    std::vector<float> read_f32(const char * name) {
-        const ggml_tensor * t = meta(name);
-        if (!t) { std::fprintf(stderr, "vla(evo1): missing tensor %s\n", name); return {}; }
-        const int64_t n = ggml_nelements(t);
-        std::vector<float> out(n);
-        if (t->type == GGML_TYPE_F32) {
-            if (!read_raw(name, out.data())) return {};
-        } else if (t->type == GGML_TYPE_BF16) {
-            std::vector<ggml_bf16_t> tmp(n);
-            if (!read_raw(name, tmp.data())) return {};
-            ggml_bf16_to_fp32_row(tmp.data(), out.data(), n);
-        } else {
-            std::fprintf(stderr, "vla(evo1): tensor %s unsupported type %d\n", name, (int) t->type); return {};
-        }
-        return out;
-    }
-
-    std::vector<uint8_t> read_convert(const char * name, ggml_type target) {
-        std::vector<float> f32 = read_f32(name);
-        if (f32.empty()) return {};
-        const int64_t n = (int64_t) f32.size();
-        if (target == GGML_TYPE_F32) {
-            std::vector<uint8_t> out(n * sizeof(float));
-            std::memcpy(out.data(), f32.data(), out.size());
-            return out;
-        }
-        if (target == GGML_TYPE_BF16) {
-            std::vector<uint8_t> out(n * sizeof(ggml_bf16_t));
-            ggml_fp32_to_bf16_row(f32.data(), reinterpret_cast<ggml_bf16_t *>(out.data()), n);
-            return out;
-        }
-        std::fprintf(stderr, "vla(evo1): unsupported resident type %d for %s\n", (int) target, name);
-        return {};
-    }
-
-    bool fetch_rows_f32(const char * name, const std::vector<int32_t> & row_ids, float * dst, int64_t cols) {
-        const ggml_tensor * t = meta(name);
-        if (!t || t->ne[0] != cols || t->ne[2] != 1 || t->ne[3] != 1) {
-            std::fprintf(stderr, "vla(evo1): %s shape unfit for row-fetch\n", name); return false;
-        }
-        const int64_t rows = t->ne[1];
-        const int64_t id   = gguf_find_tensor(gctx, name);
-        const size_t  base = data_off + gguf_get_tensor_offset(gctx, id);
-        const size_t  elsz = (t->type == GGML_TYPE_F32) ? 4u : 2u;
-        const size_t  rb   = (size_t) cols * elsz;
-        std::vector<uint8_t> row(rb);
-        for (size_t k = 0; k < row_ids.size(); ++k) {
-            const int32_t r = row_ids[k];
-            if (r < 0 || r >= rows) { std::fprintf(stderr, "vla(evo1): row %d out of range for %s\n", r, name); return false; }
-            if (std::fseek(fp, (long) (base + (size_t) r * rb), SEEK_SET) != 0) return false;
-            if (std::fread(row.data(), 1, rb, fp) != rb) return false;
-            if (elsz == 4) std::memcpy(dst + k * cols, row.data(), rb);
-            else ggml_bf16_to_fp32_row(reinterpret_cast<ggml_bf16_t *>(row.data()), dst + k * cols, cols);
-        }
-        return true;
-    }
-};
 
 struct Qwen2LayerW {
     ggml_tensor *attn_norm, *Wq, *bq, *Wk, *bk, *Wv, *bv, *Wo, *ffn_norm, *Wgate, *Wup, *Wdown;
@@ -160,7 +62,7 @@ struct Evo1ModelArch : public ModelArchBase {
     ggml_backend_t        backend     = nullptr;
     bool                  is_cuda     = false;
     bool                  is_gpu      = false;
-    int                   n_threads   = 4;
+    int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_BF16;
@@ -321,6 +223,12 @@ bool load_config(const gguf_reader & g, Evo1ModelArch & m, Config & cfg) {
         std::fprintf(stderr, "vla(evo1): embed_dim (%lld) != lm_hidden (%lld) - not handled\n",
                      (long long) m.embed_dim, (long long) m.lm_hidden); return false;
     }
+    // predict() reads action_dim noise floats; the server sizes noise as
+    // horizon*per_action_dim, so they must agree or a client noise buffer underruns.
+    if (m.action_dim != m.horizon * m.per_a) {
+        std::fprintf(stderr, "vla(evo1): action_dim (%lld) != horizon (%lld) * per_action_dim (%lld)\n",
+                     (long long) m.action_dim, (long long) m.horizon, (long long) m.per_a); return false;
+    }
 
     cfg = Config{};
     cfg.n_suffix       = m.horizon;
@@ -367,7 +275,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
     m->gguf_path = ckpt_path;
     m->matmul_type = std::getenv("VLA_EVO1_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
-    gguf_reader g;
+    gguf_reader g("evo1");
     if (!g.open(ckpt_path)) return nullptr;
     if (!g.has("evo1.architecture")) {
         std::fprintf(stderr, "vla(evo1): %s is not an evo1 GGUF (no evo1.architecture KV)\n", ckpt_path.c_str()); return nullptr;
@@ -405,7 +313,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
     auto mk = [&](const char * name, ggml_type type) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
         if (!gt) { std::fprintf(stderr, "vla(evo1): missing tensor %s\n", name); return nullptr; }
-        ggml_tensor * t = ggml_new_tensor(W, type, ggml_n_dims(gt), gt->ne);
+        ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), ggml_n_dims(gt), gt->ne);
         ggml_set_name(t, name);
         return t;
     };
@@ -517,7 +425,11 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     const float * img_emb_ptr = nullptr;
     std::vector<float> img_emb_host;
     if (in.precomputed_img_emb) {
-        n_views = in.n_img_views > 0 ? in.n_img_views : n_images;
+        if (in.n_img_views < 1) {
+            std::fprintf(stderr, "vla(evo1): precomputed_img_emb set but n_img_views=%d; cannot infer view count\n", in.n_img_views);
+            return {};
+        }
+        n_views = in.n_img_views;
         img_emb_ptr = in.precomputed_img_emb;
     } else if (in.images && in.n_images > 0) {
         if (!have_vision) {
@@ -537,7 +449,9 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         ggml_gallocr_t vga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
         if (!vga || !ggml_gallocr_alloc_graph(vga, vg)) {
             std::fprintf(stderr, "vla(evo1): vision ggml_gallocr_alloc_graph failed\n");
-            if (vga) ggml_gallocr_free(vga); ggml_free(VC); return {};
+            if (vga) ggml_gallocr_free(vga);
+            ggml_free(VC);
+            return {};
         }
         img_emb_host.assign((size_t) n_views * num_image_token * lm_hidden, 0.0f);
         std::vector<float> chw;
@@ -587,7 +501,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     input_ids.resize(max_text_length, pad_id);
     const int64_t SEQ = max_text_length;
 
-    gguf_reader g;
+    gguf_reader g("evo1");
     if (!g.open(gguf_path)) return {};
     std::vector<float> inputs_embeds((size_t) SEQ * lm_hidden);
     if (!g.fetch_rows_f32("token_embd.weight", input_ids, inputs_embeds.data(), lm_hidden)) return {};
@@ -601,7 +515,10 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
                 ++img_idx;
             }
         }
-        if (img_idx != n_img_tokens) std::fprintf(stderr, "vla(evo1): warning - spliced %lld of %lld ViT embeds\n", (long long) img_idx, (long long) n_img_tokens);
+        if (img_idx != n_img_tokens) {
+            std::fprintf(stderr, "vla(evo1): spliced %lld of %lld ViT embeds - IMG_CTX slot count does not match the images\n", (long long) img_idx, (long long) n_img_tokens);
+            return {};
+        }
     }
 
     std::vector<int32_t> attn_ok(SEQ, 0);
@@ -620,7 +537,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     for (int64_t i = 0; i < per_a; ++i) {
         const float lo = state_min[i], hi = state_max[i];
         float xn = 2.0f * (in.state[i] - lo) / (hi - lo + norm_eps_denom) - 1.0f;
-        if (xn < -1.0f) xn = -1.0f; if (xn > 1.0f) xn = 1.0f;
+        if (xn < -1.0f) xn = -1.0f;
+        if (xn >  1.0f) xn =  1.0f;
         state_norm[i] = xn;
     }
 
@@ -628,16 +546,19 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     if (in.noise) {
         std::memcpy(x_init.data(), in.noise, x_init.size() * sizeof(float));
     } else {
-
+        // Evo1 is trained with uniform[-1,1] noise
         uint64_t s = 0xE701ACE5ULL ^ (uint64_t) std::chrono::steady_clock::now().time_since_epoch().count();
-        for (auto & v : x_init) { s = s * 6364136223846793005ULL + 1442695040888963407ULL; v = ((float) (uint32_t)(s >> 32) / 2147483648.0f) - 1.0f; }
+        for (auto & v : x_init) {
+            s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+            v = ((float) (uint32_t) (s >> 32) / 2147483648.0f) - 1.0f; // uniform[-1,1)
+        }
     }
 
     ggml_init_params cp = {  (size_t) 96 * 1024 * 1024,  nullptr,  true };
     ggml_context * C = ggml_init(cp);
     if (!C) { std::fprintf(stderr, "vla(evo1): ggml_init(ctx_compute) failed\n"); return {}; }
 
-    const int64_t E = embed_dim, hd_dit = E / dit_heads, inner_dit = 4 * E;
+    const int64_t E = embed_dim, hd_dit = E / dit_heads;
     const float   scale_dit = 1.0f / std::sqrt((float) hd_dit);
     const int64_t Nctx = SEQ + 1;
 
@@ -686,6 +607,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             ggml_tensor * qp = ggml_add(C, ggml_mul_mat(C, c.Wq, x_q), c.bq);
             ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, qp, hd_dit, dit_heads, horizon), 0, 2, 1, 3));
             ggml_tensor * kq = ggml_mul_mat(C, c.K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+            // The Evo-1 reference cross-attends over the full padded context
+            // (no key mask), so the action queries see every LM position.
             ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale_dit, 0.0f);
             ggml_tensor * kqv = ggml_mul_mat(C, c.V, aw);
             ggml_tensor * att_pre = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), E, horizon);
@@ -723,7 +646,9 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
     if (!galloc || !ggml_gallocr_alloc_graph(galloc, gf)) {
         std::fprintf(stderr, "vla(evo1): ggml_gallocr_alloc_graph failed\n");
-        if (galloc) ggml_gallocr_free(galloc); ggml_free(C); return {};
+        if (galloc) ggml_gallocr_free(galloc);
+        ggml_free(C);
+        return {};
     }
     ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
     { std::vector<int32_t> pp(SEQ); for (int64_t i = 0; i < SEQ; ++i) pp[i] = (int32_t) i; ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos)); }

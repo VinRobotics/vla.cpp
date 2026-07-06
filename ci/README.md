@@ -29,8 +29,8 @@ platform; each platform is a remote server reached over the LAN.
 
 | Platform | Models | Suites |
 |---|---|---|
-| `rtx3090` | all 7 (smolvla, pi0, bitvla, evo1, gr00t_n1_5/6/7) | `libero_object`; **+ spatial/object/goal/10** for bitvla & gr00t_n1_7 |
-| `orin` | all except gr00t_n1_6/_7 | `libero_object` |
+| `rtx3090` | all 10 (smolvla, pi0, pi05, bitvla, evo1, vla_adapter, openvla_oft, gr00t_n1_5/6/7) | `libero_object`; **+ spatial/object/goal/10** for bitvla & gr00t_n1_7 |
+| `orin` | smolvla, pi0, bitvla, evo1, gr00t_n1_5 | `libero_object` |
 | `m4` | smolvla, pi0, gr00t_n1_7 | `libero_object` |
 
 Every cell is **10 tasks × 1 episode**.

@@ -38,7 +38,7 @@ Usage: $(basename "$0") -i <MODELS_ROOT> [-o <OUTPUT_ROOT>] [-n <N_EPISODES>] [-
                    (default: all)
   -h               show this help
 
-Env overrides: BIND_ADDR, CLIENT_ADDR, BITVLA_TOKENIZER,
+Env overrides: BIND_ADDR, CLIENT_ADDR, BITVLA_TOKENIZER, GR00T_N1_6_TOKENIZER,
                GR00T_N1_5_STATS, GR00T_N1_6_STATS, GR00T_N1_7_STATS
 EOF
 }
@@ -97,6 +97,10 @@ TASK_SUITE="libero_object"
 # bitvla auto-loads its tokenizer + dataset_statistics.json from the GGUF repo on
 # the Hub. Optional override (offline): BITVLA_TOKENIZER=/path/to/bitvla-ckpt-dir
 BITVLA_TOKENIZER="${BITVLA_TOKENIZER:-}"
+
+# gr00t_n1_6 has no HF-default tokenizer; its Eagle tokenizer is vendored in the
+# model dir. Defaults to the model dir; override with GR00T_N1_6_TOKENIZER.
+GR00T_N1_6_TOKENIZER="${GR00T_N1_6_TOKENIZER:-}"
 
 # GR00T-N1.5 / N1.6 / N1.7 need a dataset_statistics.json
 GR00T_N1_5_STATS="${GR00T_N1_5_STATS:-}"
@@ -273,13 +277,18 @@ run_model() {
     local n_action_steps="$3"
     local stats_json="$4"     # optional dataset_statistics.json (gr00t_n1_{6,7}); "" to skip
     shift 4
-    local server_args=("$@")  # bitvla/evo1/gr00t_n1_{6,7}: just ckpt; smolvla/pi0: mmproj + ckpt
+    local server_args=("$@")
     local client_extra=()
 
     # bitvla auto-loads tokenizer + dataset_statistics.json from the GGUF repo on
     # the Hub; only pass --tokenizer when BITVLA_TOKENIZER overrides with a local dir.
     if [[ "${arch}" == "bitvla" && -n "${BITVLA_TOKENIZER}" ]]; then
         client_extra+=(--tokenizer "${BITVLA_TOKENIZER}")
+    fi
+    # gr00t_n1_6 has no HF-default tokenizer; point the client at the vendored
+    # Eagle tokenizer in the model dir (override via GR00T_N1_6_TOKENIZER).
+    if [[ "${arch}" == "gr00t_n1_6" ]]; then
+        client_extra+=(--tokenizer "${GR00T_N1_6_TOKENIZER:-${model_dir}}")
     fi
     if [[ -n "${stats_json}" ]]; then
         client_extra+=(--stats-json "${stats_json}")
@@ -348,30 +357,24 @@ if should_run pi0; then
         "${MODELS_ROOT}/pi0-libero-finetuned-v044-gguf" \
         "${N_ACTION_STEPS_PI0}" \
         "" \
-        "${MODELS_ROOT}/pi0-libero-finetuned-v044-gguf/mmproj-pi0-libero-finetuned-v044.gguf" \
         "${MODELS_ROOT}/pi0-libero-finetuned-v044-gguf/pi0-libero-finetuned-v044.gguf"
 fi
 
-# pi05: PaliGemma + Gemma-300m adaRMS expert; mmproj + ckpt (same layout as pi0).
-# State quantiles auto-load from the lerobot/libero dataset; the pi05 client preset
-# sets max_length=200 automatically. Pass --stats-json via PI05_STATS to pin a
-# local LIBERO meta/stats.json (offline).
 if should_run pi05; then
     run_model pi05 \
         "${MODELS_ROOT}/pi05-libero-gguf" \
         "${N_ACTION_STEPS_PI05}" \
         "${PI05_STATS:-}" \
-        "${MODELS_ROOT}/pi05-libero-gguf/mmproj-pi05-libero.gguf" \
         "${MODELS_ROOT}/pi05-libero-gguf/pi05-libero.gguf"
 fi
 
+# smolvla: vision baked into the ckpt (no mmproj).
 if should_run smol; then
     run_model smolvla \
-        "${MODELS_ROOT}/smolvla-libero-bf16-gguf" \
+        "${MODELS_ROOT}/smolvla-libero-gguf" \
         "${N_ACTION_STEPS_SMOL}" \
         "" \
-        "${MODELS_ROOT}/smolvla-libero-bf16-gguf/mmproj-smolvla-libero.gguf" \
-        "${MODELS_ROOT}/smolvla-libero-bf16-gguf/smolvla-libero.gguf"
+        "${MODELS_ROOT}/smolvla-libero-gguf/smolvla-libero.gguf"
 fi
 
 # evo1: vision baked into ckpt (no mmproj)
@@ -387,10 +390,10 @@ fi
 # GGUF repo on the Hub. Set BITVLA_TOKENIZER=<local ckpt dir> to override (offline).
 if should_run bit; then
     run_model bitvla \
-        "${MODELS_ROOT}/bitvla-libero-object-gguf" \
+        "${MODELS_ROOT}/bitvla-libero-gguf/libero_object" \
         "${N_ACTION_STEPS_BIT}" \
         "" \
-        "${MODELS_ROOT}/bitvla-libero-object-gguf/bitvla-libero-object-int2.gguf"
+        "${MODELS_ROOT}/bitvla-libero-gguf/libero_object/bitvla-libero-object.gguf"
 fi
 
 # vla_adapter: Qwen2.5-0.5B + Bridge-Attention; vision baked in (no mmproj),
@@ -438,17 +441,17 @@ fi
 
 # gr00t_n1_6: needs GR00T_N1_6_STATS dataset_statistics.json
 if should_run gr00t_n1_6; then
-    g6_stats_default="${MODELS_ROOT}/gr00t-n1d6-libero-gguf/dataset_statistics.json"
+    g6_stats_default="${MODELS_ROOT}/gr00tn1d6-libero-gguf/dataset_statistics.json"
     g6_stats="${GR00T_N1_6_STATS:-}"
     if [[ -z "${g6_stats}" && -f "${g6_stats_default}" ]]; then
         g6_stats="${g6_stats_default}"
     fi
     if [[ -n "${g6_stats}" && -f "${g6_stats}" ]]; then
         run_model gr00t_n1_6 \
-            "${MODELS_ROOT}/gr00t-n1d6-libero-gguf" \
+            "${MODELS_ROOT}/gr00tn1d6-libero-gguf" \
             "${N_ACTION_STEPS_GR00T_N1_6}" \
             "${g6_stats}" \
-            "${MODELS_ROOT}/gr00t-n1d6-libero-gguf/gr00t-n1d6-libero.gguf"
+            "${MODELS_ROOT}/gr00tn1d6-libero-gguf/gr00tn1d6-libero.gguf"
     else
         echo "[skip] gr00t_n1_6: set GR00T_N1_6_STATS=<path to experiment_cfg/dataset_statistics.json> to enable"
     fi
@@ -456,14 +459,14 @@ fi
 
 # gr00t_n1_7: needs dataset_statistics.json
 if should_run gr00t_n1_7; then
-    g7_stats_default="${MODELS_ROOT}/gr00t-n1d7-libero-object-gguf/dataset_statistics.json"
+    g7_stats_default="${MODELS_ROOT}/gr00tn1d7-libero-gguf/libero_object/dataset_statistics.json"
     g7_stats="${GR00T_N1_7_STATS:-${g7_stats_default}}"
     if [[ -f "${g7_stats}" ]]; then
         run_model gr00t_n1_7 \
-            "${MODELS_ROOT}/gr00t-n1d7-libero-object-gguf" \
+            "${MODELS_ROOT}/gr00tn1d7-libero-gguf/libero_object" \
             "${N_ACTION_STEPS_GR00T_N1_7}" \
             "${g7_stats}" \
-            "${MODELS_ROOT}/gr00t-n1d7-libero-object-gguf/gr00t-n1d7-libero-object.gguf"
+            "${MODELS_ROOT}/gr00tn1d7-libero-gguf/libero_object/gr00tn1d7-libero-object.gguf"
     else
         echo "[skip] gr00t_n1_7: dataset_statistics.json not found at ${g7_stats}; set GR00T_N1_7_STATS to override"
     fi

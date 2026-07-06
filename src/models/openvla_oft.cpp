@@ -14,6 +14,7 @@
 
 #include "arch.h"
 #include "model.h"
+#include "vision_common.h"
 
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -25,6 +26,7 @@
 #include "ggml-metal.h"
 #endif
 #include "gguf.h"
+#include "models/gguf_reader.h"
 
 #include <chrono>
 #include <cmath>
@@ -40,59 +42,6 @@
 namespace vla {
 namespace {
 
-struct gguf_reader {
-    gguf_context * gctx = nullptr;
-    ggml_context * meta_ctx = nullptr;
-    FILE * fp = nullptr;
-    size_t data_off = 0;
-
-    bool open(const std::string & path) {
-        gguf_init_params p{}; p.no_alloc = true; p.ctx = &meta_ctx;
-        gctx = gguf_init_from_file(path.c_str(), p);
-        if (!gctx) { std::fprintf(stderr, "vla(openvla_oft): gguf_init_from_file failed for %s\n", path.c_str()); return false; }
-        fp = std::fopen(path.c_str(), "rb");
-        if (!fp) { std::fprintf(stderr, "vla(openvla_oft): fopen failed for %s\n", path.c_str()); return false; }
-        data_off = gguf_get_data_offset(gctx);
-        return true;
-    }
-    ~gguf_reader() { if (fp) std::fclose(fp); if (gctx) gguf_free(gctx); if (meta_ctx) ggml_free(meta_ctx); }
-    gguf_reader() = default;
-    gguf_reader(const gguf_reader &) = delete;
-    gguf_reader & operator=(const gguf_reader &) = delete;
-
-    bool has(const char * k) const { return gguf_find_key(gctx, k) >= 0; }
-    uint32_t u32(const char * k) const { return gguf_get_val_u32(gctx, gguf_find_key(gctx, k)); }
-    float f32(const char * k) const { return gguf_get_val_f32(gctx, gguf_find_key(gctx, k)); }
-    std::string str(const char * k) const { return gguf_get_val_str(gctx, gguf_find_key(gctx, k)); }
-    const ggml_tensor * meta(const char * name) const { return ggml_get_tensor(meta_ctx, name); }
-
-    bool read_raw(const char * name, void * buf) {
-        const int64_t id = gguf_find_tensor(gctx, name);
-        if (id < 0) { std::fprintf(stderr, "vla(openvla_oft): missing tensor %s\n", name); return false; }
-        const size_t off = data_off + gguf_get_tensor_offset(gctx, id);
-        const size_t nb = gguf_get_tensor_size(gctx, id);
-        if (std::fseek(fp, (long) off, SEEK_SET) != 0) return false;
-        return std::fread(buf, 1, nb, fp) == nb;
-    }
-    std::vector<float> read_f32(const char * name) {
-        const ggml_tensor * t = meta(name);
-        if (!t) { std::fprintf(stderr, "vla(openvla_oft): missing tensor %s\n", name); return {}; }
-        const int64_t n = ggml_nelements(t);
-        std::vector<float> out(n);
-        if (t->type == GGML_TYPE_F32) { if (!read_raw(name, out.data())) return {}; }
-        else if (t->type == GGML_TYPE_BF16) { std::vector<ggml_bf16_t> tmp(n); if (!read_raw(name, tmp.data())) return {}; ggml_bf16_to_fp32_row(tmp.data(), out.data(), n); }
-        else { std::fprintf(stderr, "vla(openvla_oft): tensor %s unsupported type %d\n", name, (int) t->type); return {}; }
-        return out;
-    }
-    std::vector<uint8_t> read_convert(const char * name, ggml_type target) {
-        std::vector<float> f = read_f32(name);
-        if (f.empty()) return {};
-        const int64_t n = (int64_t) f.size();
-        if (target == GGML_TYPE_F32) { std::vector<uint8_t> o(n * sizeof(float)); std::memcpy(o.data(), f.data(), o.size()); return o; }
-        if (target == GGML_TYPE_BF16) { std::vector<uint8_t> o(n * sizeof(ggml_bf16_t)); ggml_fp32_to_bf16_row(f.data(), reinterpret_cast<ggml_bf16_t *>(o.data()), n); return o; }
-        std::fprintf(stderr, "vla(openvla_oft): unsupported resident type %d for %s\n", (int) target, name); return {};
-    }
-};
 
 bool parse_stats(const std::string & js, int64_t want, std::vector<float> & q01,
                  std::vector<float> & q99, std::vector<uint8_t> & mask, std::string & suite) {
@@ -147,7 +96,7 @@ struct OpenVlaOftModelArch : public ModelArchBase {
     }
 
     ggml_backend_t backend = nullptr;
-    bool is_gpu = false; int n_threads = 4;
+    bool is_gpu = false; int n_threads = default_cpu_threads();
     ggml_context * ctx_weights = nullptr;
     ggml_backend_buffer_t weight_buf = nullptr;
     ggml_type mt = GGML_TYPE_BF16;
@@ -225,7 +174,7 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
     auto m = std::make_unique<OpenVlaOftModelArch>();
     m->mt = std::getenv("VLA_OPENVLA_OFT_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
-    gguf_reader g;
+    gguf_reader g("openvla_oft");
     if (!g.open(ckpt_path)) return nullptr;
     if (!g.has("openvla_oft.architecture")) { std::fprintf(stderr, "vla(openvla_oft): not an openvla_oft GGUF\n"); return nullptr; }
 
@@ -274,7 +223,7 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
     bool ok = true;
     auto mk=[&](const char*name, ggml_type ty)->ggml_tensor*{ const ggml_tensor*gt=g.meta(name);
         if(!gt){ std::fprintf(stderr,"vla(openvla_oft): missing %s\n",name); ok=false; return nullptr; }
-        ggml_tensor*t=ggml_new_tensor(W,ty,ggml_n_dims(gt),gt->ne); ggml_set_name(t,name); return t; };
+        ggml_tensor*t=ggml_new_tensor(W,g.resident_type(gt,ty),ggml_n_dims(gt),gt->ne); ggml_set_name(t,name); return t; };
     auto mm=[&](const char*n){ return mk(n,m->mt); };
     auto f32=[&](const char*n){ return mk(n,GGML_TYPE_F32); };
 
@@ -357,7 +306,18 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     stats = Stats{};
     const int64_t S=image_size, NP=n_patches, HC=lm_hidden;
     const int64_t n_views = in.n_images;
+    if (in.precomputed_img_emb) { std::fprintf(stderr, "vla(openvla_oft): precomputed_img_emb is not supported; the DINOv2+SigLIP tower is baked into the GGUF, pass raw images\n"); return {}; }
     if (n_views < 1) { std::fprintf(stderr, "vla(openvla_oft): need >=1 image view\n"); return {}; }
+    if (!in.images) { std::fprintf(stderr, "vla(openvla_oft): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
+    // towers read S*S*3 per view; reject any view that is not exactly SxS.
+    for (int64_t v = 0; v < n_views; ++v) {
+        const ImageView& iv = in.images[v];
+        if (!view_is_side(iv.data, iv.w, iv.h, S)) {
+            std::fprintf(stderr, "vla(openvla_oft): image view %lld is %dx%d, expected %lldx%lld\n",
+                         (long long) v, iv.w, iv.h, (long long) S, (long long) S);
+            return {};
+        }
+    }
     static const float DMEAN[3]={0.484375f,0.455078125f,0.40625f}, DSTD[3]={0.228515625f,0.2236328125f,0.224609375f};
     static const float SMEAN[3]={0.5f,0.5f,0.5f}, SSTD[3]={0.5f,0.5f,0.5f};
 
@@ -393,6 +353,16 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     }
 
     const int64_t L = in.n_lang;
+    // ggml_get_rows does not bound-check, so reject out-of-range tokens here.
+    for (int64_t i = 0; i < L; ++i)
+        if (in.lang_tokens[i] < 0 || in.lang_tokens[i] >= vocab) {
+            std::fprintf(stderr, "vla(openvla_oft): token %d out of vocab\n", in.lang_tokens[i]);
+            return {};
+        }
+    if ((int64_t) stop_id < 0 || (int64_t) stop_id >= vocab) {
+        std::fprintf(stderr, "vla(openvla_oft): stop_id %lld out of vocab\n", (long long) stop_id);
+        return {};
+    }
     const int64_t n_act = chunk * action_dim;
     const int64_t NUM_PATCHES = NPATCH + 1;
     const int64_t NUM_PROMPT_TOKENS = L - 1;

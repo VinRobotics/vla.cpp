@@ -77,17 +77,14 @@ server_args_for() {
     local arch="$1" root="$2" suite="${3:-${DEFAULT_SUITE:-libero_object}}" sd tok
     case "$arch" in
         pi0)
-            echo "${root}/pi0-libero-finetuned-v044-gguf/mmproj-pi0-libero-finetuned-v044.gguf"
             echo "${root}/pi0-libero-finetuned-v044-gguf/pi0-libero-finetuned-v044.gguf" ;;
         pi05)
-            echo "${root}/pi05-libero-gguf/mmproj-pi05-libero.gguf"
             echo "${root}/pi05-libero-gguf/pi05-libero.gguf" ;;
         vla_adapter)
             echo "${root}/vla-adapter-libero-object-gguf/libero_object/vla-adapter-libero-object.gguf" ;;
         openvla_oft)
             echo "${root}/openvla-oft-libero-gguf/openvla-oft-libero.gguf" ;;
         smolvla)
-            echo "${root}/smolvla-libero-gguf/mmproj-smolvla-libero.gguf"
             echo "${root}/smolvla-libero-gguf/smolvla-libero.gguf" ;;
         evo1)
             echo "${root}/evo1-libero-gguf/evo1-libero.gguf" ;;
