@@ -546,20 +546,11 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     if (in.noise) {
         std::memcpy(x_init.data(), in.noise, x_init.size() * sizeof(float));
     } else {
-        // Flow matching samples the base action from N(0,1). Box-Muller over a
-        // simple LCG keeps this dependency-free; it runs only when the caller
-        // omits noise, which the eval client does (noise is sampled here).
+        // Evo1 is trained with uniform[-1,1] noise
         uint64_t s = 0xE701ACE5ULL ^ (uint64_t) std::chrono::steady_clock::now().time_since_epoch().count();
-        auto next_u01 = [&s]() -> double {
+        for (auto & v : x_init) {
             s = s * 6364136223846793005ULL + 1442695040888963407ULL;
-            return ((double) (uint32_t) (s >> 32) + 1.0) / 4294967297.0; // in (0,1)
-        };
-        for (size_t i = 0; i < x_init.size(); i += 2) {
-            const double u1 = next_u01(), u2 = next_u01();
-            const double r  = std::sqrt(-2.0 * std::log(u1));
-            const double th = 6.283185307179586 * u2;
-            x_init[i] = (float) (r * std::cos(th));
-            if (i + 1 < x_init.size()) x_init[i + 1] = (float) (r * std::sin(th));
+            v = ((float) (uint32_t) (s >> 32) / 2147483648.0f) - 1.0f; // uniform[-1,1)
         }
     }
 
