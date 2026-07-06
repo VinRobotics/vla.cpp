@@ -273,7 +273,7 @@ run_model() {
     local n_action_steps="$3"
     local stats_json="$4"     # optional dataset_statistics.json (gr00t_n1_{6,7}); "" to skip
     shift 4
-    local server_args=("$@")  # bitvla/evo1/gr00t_n1_{6,7}: just ckpt; smolvla/pi0: mmproj + ckpt
+    local server_args=("$@")
     local client_extra=()
 
     # bitvla auto-loads tokenizer + dataset_statistics.json from the GGUF repo on
@@ -348,29 +348,23 @@ if should_run pi0; then
         "${MODELS_ROOT}/pi0-libero-finetuned-v044-gguf" \
         "${N_ACTION_STEPS_PI0}" \
         "" \
-        "${MODELS_ROOT}/pi0-libero-finetuned-v044-gguf/mmproj-pi0-libero-finetuned-v044.gguf" \
         "${MODELS_ROOT}/pi0-libero-finetuned-v044-gguf/pi0-libero-finetuned-v044.gguf"
 fi
 
-# pi05: PaliGemma + Gemma-300m adaRMS expert; mmproj + ckpt (same layout as pi0).
-# State quantiles auto-load from the lerobot/libero dataset; the pi05 client preset
-# sets max_length=200 automatically. Pass --stats-json via PI05_STATS to pin a
-# local LIBERO meta/stats.json (offline).
 if should_run pi05; then
     run_model pi05 \
         "${MODELS_ROOT}/pi05-libero-gguf" \
         "${N_ACTION_STEPS_PI05}" \
         "${PI05_STATS:-}" \
-        "${MODELS_ROOT}/pi05-libero-gguf/mmproj-pi05-libero.gguf" \
         "${MODELS_ROOT}/pi05-libero-gguf/pi05-libero.gguf"
 fi
 
+# smolvla: vision baked into the ckpt (no mmproj).
 if should_run smol; then
     run_model smolvla \
         "${MODELS_ROOT}/smolvla-libero-bf16-gguf" \
         "${N_ACTION_STEPS_SMOL}" \
         "" \
-        "${MODELS_ROOT}/smolvla-libero-bf16-gguf/mmproj-smolvla-libero.gguf" \
         "${MODELS_ROOT}/smolvla-libero-bf16-gguf/smolvla-libero.gguf"
 fi
 

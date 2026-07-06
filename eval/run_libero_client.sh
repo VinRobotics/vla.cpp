@@ -137,7 +137,6 @@ print_server_cmd() {
         pi0)
             cat <<EOF
     ./build/vla-server --bind tcp://*:${PORT} \\
-        \${MODELS_ROOT}/pi0-libero-finetuned-v044-gguf/mmproj-pi0-libero-finetuned-v044.gguf \\
         \${MODELS_ROOT}/pi0-libero-finetuned-v044-gguf/pi0-libero-finetuned-v044.gguf
 EOF
             ;;

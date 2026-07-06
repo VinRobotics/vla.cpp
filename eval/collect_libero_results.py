@@ -342,7 +342,7 @@ def main() -> int:
                     help="do not write a markdown report")
     ap.add_argument("--gguf", type=Path, nargs="*", default=[], metavar="PATH",
                     help="GGUF files to checksum in the ## Reproducibility block "
-                         "(combined ckpt + mmproj where applicable)")
+                         "(the self-contained ckpt GGUF)")
     ap.add_argument("--libero-venv", type=Path,
                     default=REPO_ROOT / "eval" / "sim" / "libero" / "libero_uv" / ".venv",
                     help="LIBERO uv venv whose torch/transformers/lerobot/numpy pins are "
