@@ -50,12 +50,10 @@ def test_pi0_remap():
     _check(m.remap)
 
 
-def test_smolvla_remap():
-    m = _load("merge_smolvla_mmproj_to_gguf")
-    _check(m.remap)
+# NB: SmolVLA has no merge script - convert_smolvla_to_gguf.py bakes the vision
+# tower straight from safetensors, so there is no clip->vit remap to test here.
 
 
 if __name__ == "__main__":
     test_pi0_remap()
-    test_smolvla_remap()
     print("test_converters: remap OK")

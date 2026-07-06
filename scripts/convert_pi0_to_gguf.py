@@ -34,9 +34,6 @@ PFX_VLM_HEAD = "model.paligemma_with_expert.paligemma.lm_head.weight"
 PFX_AEX  = "model.paligemma_with_expert.gemma_expert.model"
 PFX_PROJ = "model"
 
-# The SigLIP tower + PaliGemma projector are bundled in the ckpt GGUF and built
-# in-tree by src/models/pi0.cpp (no llama.cpp clip.cpp). HF nests them under one
-# of these prefixes depending on the transformers version.
 PFX_VIS_CANDIDATES = [
     "model.paligemma_with_expert.paligemma.model.vision_tower.vision_model",
     "model.paligemma_with_expert.paligemma.vision_tower.vision_model",
@@ -99,8 +96,8 @@ def _probe_vision(sf, keys, cfg_json) -> Optional[dict]:
     if vis is None or mmp is None:
         raise SystemExit("vision_tower / multi_modal_projector not found in checkpoint; "
                          f"tried {PFX_VIS_CANDIDATES} and {PFX_MMP_CANDIDATES}")
-    conv = sf.get_slice(f"{vis}.embeddings.patch_embedding.weight").get_shape()  # [OC, IC, KH, KW]
-    pos  = sf.get_slice(f"{vis}.embeddings.position_embedding.weight").get_shape()  # [n_tok, OC]
+    conv = sf.get_slice(f"{vis}.embeddings.patch_embedding.weight").get_shape()
+    pos  = sf.get_slice(f"{vis}.embeddings.position_embedding.weight").get_shape()
     n_vit = 0
     while f"{vis}.encoder.layers.{n_vit}.layer_norm1.weight" in keys:
         n_vit += 1
@@ -116,7 +113,7 @@ def _add_vision_tensors(writer: gguf.GGUFWriter, sf, v: dict) -> None:
     vis, mmp = v["prefix"], v["mmp"]
     af32  = lambda dst, src: _add_one_tensor(writer, dst, sf.get_tensor(src).float())
     akeep = lambda dst, src: _add_one_tensor(writer, dst, sf.get_tensor(src))
-    af32("vit.patch_embd.weight", f"{vis}.embeddings.patch_embedding.weight")  # 4-D conv, as-is
+    af32("vit.patch_embd.weight", f"{vis}.embeddings.patch_embedding.weight")
     af32("vit.patch_embd.bias",   f"{vis}.embeddings.patch_embedding.bias")
     af32("vit.pos_embd",          f"{vis}.embeddings.position_embedding.weight")
     for i in range(v["vit_layers"]):
@@ -130,7 +127,7 @@ def _add_vision_tensors(writer: gguf.GGUFWriter, sf, v: dict) -> None:
         akeep(f"vit.blk.{i}.fc1.weight", L + "mlp.fc1.weight"); af32(f"vit.blk.{i}.fc1.bias", L + "mlp.fc1.bias")
         akeep(f"vit.blk.{i}.fc2.weight", L + "mlp.fc2.weight"); af32(f"vit.blk.{i}.fc2.bias", L + "mlp.fc2.bias")
     af32("vit.post_ln.weight", f"{vis}.post_layernorm.weight"); af32("vit.post_ln.bias", f"{vis}.post_layernorm.bias")
-    akeep("mm.proj.weight", f"{mmp}.linear.weight")            # PaliGemma projector (1/sqrt scale applied in pi0.cpp)
+    akeep("mm.proj.weight", f"{mmp}.linear.weight")
     af32 ("mm.proj.bias",   f"{mmp}.linear.bias")
 
 

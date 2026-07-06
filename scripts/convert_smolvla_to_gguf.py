@@ -112,9 +112,9 @@ PFX_CONN = "model.vlm_with_expert.vlm.model.connector.modality_projection.proj.w
 def _probe_vision(sf, keys, cfg_json) -> dict:
     if f"{PFX_VIS}.embeddings.patch_embedding.weight" not in keys or PFX_CONN not in keys:
         raise SystemExit(f"vision_model / connector not found under {PFX_VIS}")
-    conv = sf.get_slice(f"{PFX_VIS}.embeddings.patch_embedding.weight").get_shape()  # [OC, IC, KH, KW]
-    pos  = sf.get_slice(f"{PFX_VIS}.embeddings.position_embedding.weight").get_shape()  # [n_patches, OC]
-    fc1  = sf.get_slice(f"{PFX_VIS}.encoder.layers.0.mlp.fc1.weight").get_shape()  # [inter, OC]
+    conv = sf.get_slice(f"{PFX_VIS}.embeddings.patch_embedding.weight").get_shape()
+    pos  = sf.get_slice(f"{PFX_VIS}.embeddings.position_embedding.weight").get_shape()
+    fc1  = sf.get_slice(f"{PFX_VIS}.encoder.layers.0.mlp.fc1.weight").get_shape()
     n_vit = 0
     while f"{PFX_VIS}.encoder.layers.{n_vit}.layer_norm1.weight" in keys:
         n_vit += 1
@@ -131,7 +131,7 @@ def _probe_vision(sf, keys, cfg_json) -> dict:
 def _add_vision_tensors(writer: gguf.GGUFWriter, sf) -> None:
     af32  = lambda dst, src: _add_one_tensor(writer, dst, sf.get_tensor(src).float())
     akeep = lambda dst, src: _add_one_tensor(writer, dst, sf.get_tensor(src))
-    af32("vit.patch_embd.weight", f"{PFX_VIS}.embeddings.patch_embedding.weight")  # 4-D conv, as-is
+    af32("vit.patch_embd.weight", f"{PFX_VIS}.embeddings.patch_embedding.weight")
     af32("vit.patch_embd.bias",   f"{PFX_VIS}.embeddings.patch_embedding.bias")
     af32("vit.pos_embd",          f"{PFX_VIS}.embeddings.position_embedding.weight")
     i = 0
@@ -151,7 +151,7 @@ def _add_vision_tensors(writer: gguf.GGUFWriter, sf) -> None:
         akeep(f"vit.blk.{i}.fc2.weight", L + "mlp.fc2.weight"); af32(f"vit.blk.{i}.fc2.bias", L + "mlp.fc2.bias")
         i += 1
     af32("vit.post_ln.weight", f"{PFX_VIS}.post_layernorm.weight"); af32("vit.post_ln.bias", f"{PFX_VIS}.post_layernorm.bias")
-    akeep("mm.fc.weight", PFX_CONN)   # single bias-free pixel-shuffle connector linear
+    akeep("mm.fc.weight", PFX_CONN)
 
 
 def _add_kv(writer: gguf.GGUFWriter, cfg: dict) -> None:

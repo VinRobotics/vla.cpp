@@ -75,14 +75,9 @@ Once the binaries are built, run one CPU prediction without a server or simulato
 pip install -U "huggingface_hub[cli]" gguf
 hf download vrfai/smolvla-libero-gguf --local-dir models/smolvla
 
-# SmolVLA ships its SigLIP tower as a separate mmproj; merge it in once.
-python scripts/merge_smolvla_mmproj_to_gguf.py \
-    models/smolvla/smolvla-libero.gguf \
-    models/smolvla/mmproj-smolvla-libero.gguf \
-    models/smolvla/smolvla.gguf
-
+# The GGUF is self-contained (SigLIP tower bundled in) - no mmproj, no merge step.
 # front.jpg must already be the model input size (512x512 for this checkpoint).
-./build/vla-cli --ckpt models/smolvla/smolvla.gguf \
+./build/vla-cli --ckpt models/smolvla/smolvla-libero.gguf \
     --image front.jpg --tokens 1,100,200,2 --pretty
 ```
 
@@ -108,17 +103,14 @@ Clones LIBERO into [`eval/sim/libero/LIBERO/`](eval/sim/libero/LIBERO), creates 
 bash eval/sim/simpler/setup_SimplerEnv.sh
 ```
 
-Clones SimplerEnv (and its nested `ManiSkill2_real2sim`) into [`eval/sim/simpler/SimplerEnv/`](eval/sim/simpler/SimplerEnv), creates `eval/sim/simpler/simpler_uv/.venv/`, and pins gymnasium 0.29.1, numpy 1.26.4, transformers 4.51.3, plus the ManiSkill2 + SimplerEnv editable installs.
+Clones SimplerEnv (and its nested `ManiSkill2_real2sim`) into [`eval/sim/simpler/SimplerEnv/`](eval/sim/simpler/SimplerEnv), creates `eval/sim/simpler/simpler_uv/.venv/`.
 
 ## Running the server
 
 `vla-server` loads the model once at startup and answers ZeroMQ REQ/REP requests synchronously.
 
 ```bash
-# SmolVLA / π0 (mmproj + ckpt):
-./build/vla-server "$VLA_MMPROJ" "$VLA_GGUF"
-
-# Evo-1 / BitVLA / GR00T-N1.{5,6,7} (vision baked into the ckpt - omit mmproj):
+# Every model is a single self-contained GGUF (vision tower bundled into the ckpt):
 ./build/vla-server "$VLA_GGUF"
 ```
 
@@ -137,12 +129,9 @@ an image, and the tokenized instruction, and it prints the action chunk. Handy f
 smoke-testing a GGUF or scripting a quick inference.
 
 ```bash
-# SmolVLA / π0 (mmproj + ckpt):
-./build/vla-cli --mmproj "$VLA_MMPROJ" --ckpt "$VLA_GGUF" \
+# Every model is a single self-contained GGUF (vision tower bundled into the ckpt):
+./build/vla-cli --ckpt "$VLA_GGUF" \
     --image front.jpg --image wrist.jpg --tokens 1,100,200,2 --pretty
-
-# BitVLA / Evo-1 / GR00T (vision baked in):
-./build/vla-cli --ckpt "$VLA_GGUF" --image front.jpg --tokens 1,100,200,2 --pretty
 ```
 
 Tokenization stays in the Python client, so the instruction is passed as token ids.
@@ -167,7 +156,6 @@ python eval/client/run_sim_client_direct.py \
 Note:
 
 - Use proper `--arch` flag (see [Models](#models)) to match the GGUF that `vla-server` is serving.
-- Pi0 uses the gated `google/paligemma-3b-pt-224` tokenizer (`huggingface-cli login` + accept the licence, or point `--tokenizer` at a local copy)
 - The GR00T arches need `--stats-json <ckpt>/dataset_statistics.json` (action/state un-normalisation) and an embodiment selected server-side via `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda` for N1.6, `libero_sim` for N1.7), with `VLA_GR00T_BF16_WEIGHTS=1` to fit the 8 GB card.
 
 ### Run an episode (SimplerEnv)
@@ -194,7 +182,7 @@ python eval/client/run_simpler_client_direct.py \
 
 ## Models
 
-Each model ships a combined VLA GGUF (LM + action expert + dataset stats + arch config) and, where applicable, a matching mmproj GGUF (vision tower). SmolVLA, π0 and π0.5 ship a separate mmproj; BitVLA, Evo-1, VLA-Adapter and OpenVLA-OFT bake their vision tower into the combined GGUF, so no mmproj file is needed.
+Each model ships as a single self-contained GGUF
 
 | Model       | Converted GGUF | Source ckpt | Client `--arch` flag |
 |---|---|---|---|
@@ -243,10 +231,6 @@ Full `libero_object` sweep - all 10 tasks × 20 episodes (200 episodes per arch)
 run via `vla-server` + `eval/client/run_sim_client_direct.py` across three deployment
 targets: an **RTX 3060** (sm_86), an **NVIDIA Jetson AGX Orin** (sm_87, Jetson-class
 deployment hardware), and an **NVIDIA Jetson Orin Nano (8 GB)** (sm_87, the cheapest
-Jetson and the project's primary deployment target). On the Orin Nano, the 8 GB budget
-forces the ~6 GB servers (`gr00t_n1_5`, `pi0`) to run split - server on the Nano, client
-(sim) on the RTX 3060 - while lighter models run co-located; GR00T-N1.6 and GR00T-N1.7
-could not be loaded on 8 GB and are omitted there.
 
 Columns report `client/call (ms)` and `Peak RAM (MiB)` for each hardware target.
 
@@ -257,8 +241,6 @@ Columns report `client/call (ms)` and `Peak RAM (MiB)` for each hardware target.
 | `evo1`       |  509 | 1564 | 1048 |  637.5 | 3671 | 2135.0 |
 | `pi0`        |  312 | 5548 |  893 |  640.4 | 1955 | 6067.7 |
 | `gr00t_n1_5` |  227 | 4866 |  461 | 1331.3 | 1356 | 5974.9 |
-| `gr00t_n1_6` |  165 | 6048 |  427 | 1340.5 |    - |      - |
-| `gr00t_n1_7` |  164 | 6302 |  429 | 1316.5 |    - |      - |
 
 ## Roadmap
 
