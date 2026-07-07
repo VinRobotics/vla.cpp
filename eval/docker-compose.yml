@@ -1,0 +1,78 @@
+# vla.cpp two-container evaluation stack.
+#
+#   server  — vla-server (built with the upstream Dockerfile)
+#   client  — Python simulation environment (eval/Dockerfile.client)
+#
+# Usage:
+#   docker compose -f eval/docker-compose.yml build       # builds both images
+#   docker compose -f eval/docker-compose.yml up -d server # start server
+#   docker compose -f eval/docker-compose.yml run --rm client  # interactive shell
+#
+# Inside the client shell:
+#   python eval/client/run_sim_client_direct.py \
+#       --task libero_object --task-id 0 --n-episodes 1 \
+#       --output-dir /tmp/libero_outputs --arch smolvla \
+#       --vla-addr tcp://server:5555
+#
+# The server is reachable at hostname "server" (Docker Compose DNS).
+
+services:
+
+  # --------------------------------------------------------------------------
+  # vla-server — C++ inference daemon (upstream Dockerfile)
+  # Build args:
+  #   BACKEND=cuda|cpu   (default: cuda)
+  #   CUDA_ARCH          (default: 120, use 89 for RTX40, 87 for Orin, etc.)
+  # --------------------------------------------------------------------------
+  server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        BACKEND: cuda
+        CUDA_ARCH: "120"
+    image: vla-cpp-server
+    container_name: vla-cpp-server
+    devices:
+      - nvidia.com/gpu=all   # CDI
+    volumes:
+      # Mount GGUF model files (read-only)
+      - /tmp/smolvla-models:/models:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    ports:
+      - "5555:5555"
+    # For SmolVLA / π0 pass mmproj + model GGUF.
+    # For baked-in-vision models (BitVLA, GR00T, Evo-1) omit mmproj.
+    command:
+      - --bind
+      - tcp://*:5555
+      - /models/mmproj-smolvla-libero.gguf
+      - /models/smolvla-libero.gguf
+
+  # --------------------------------------------------------------------------
+  # Client — Python simulation environment (eval/Dockerfile.client)
+  # --------------------------------------------------------------------------
+  client:
+    build:
+      context: ..
+      dockerfile: eval/Dockerfile.client
+    image: vla-cpp-client
+    container_name: vla-cpp-client
+    stdin_open: true
+    tty: true
+    depends_on:
+      - server
+    volumes:
+      # Output directory for eval videos / summaries
+      - /tmp/libero_outputs:/tmp/libero_outputs
+      # Model download destination (also used by server)
+      - /tmp/smolvla-models:/models
+      # Cache for HuggingFace tokenizers etc.
+      - hf-cache:/root/.cache/huggingface
+    environment:
+      - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+      - VLA_CPP_PROTO=/workspace/vla.cpp/src/serving/vla.proto
+
+volumes:
+  hf-cache:

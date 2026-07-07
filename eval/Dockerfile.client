@@ -1,0 +1,126 @@
+# vla.cpp evaluation client container.
+#
+# Contains the Python simulation environment (MuJoCo, robosuite, lerobot) and
+# the eval scripts needed to drive vla-server from a LIBERO / SimplerEnv
+# episode.  No CUDA, no C++ build — this is purely a Python runtime.
+#
+# Usage (with the upstream server Dockerfile):
+#
+#   # Terminal 1 — build & start the server:
+#   docker build -t vla-cpp-server .                              # upstream Dockerfile
+#   docker run --gpus all -p5555:5555 -v $PWD/models:/models \
+#       vla-cpp-server --bind tcp://*:5555 /models/model.gguf
+#
+#   # Terminal 2 — build & run the client:
+#   docker build -t vla-cpp-client -f eval/Dockerfile.client .
+#   docker run --rm -it --network host \
+#       -v /tmp/libero_outputs:/tmp/libero_outputs \
+#       vla-cpp-client
+#   root@...:/workspace/vla.cpp# python eval/client/run_sim_client_direct.py \
+#       --task libero_object --task-id 0 --n-episodes 1 \
+#       --output-dir /tmp/libero_outputs --arch smolvla \
+#       --vla-addr tcp://localhost:5555
+#
+# Or with docker-compose (see eval/docker-compose.yml).
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=UTC \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
+    VLA_CPP_PROTO=/workspace/vla.cpp/src/serving/vla.proto
+
+# System dependencies: build tools, protobuf, ZMQ, EGL (for MuJoCo offscreen)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    curl \
+    ca-certificates \
+    libzmq3-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    python3.10 \
+    python3.10-venv \
+    python3.10-dev \
+    python3-pip \
+    libegl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make python3.10 the default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
+    ln -sf /usr/bin/python3 /usr/local/bin/python
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
+
+WORKDIR /workspace/vla.cpp
+COPY . .
+
+# ---------------------------------------------------------------------------
+# Python dependencies — order matters to avoid version conflicts
+# ---------------------------------------------------------------------------
+
+# Pin foundational deps first so nothing pulls numpy 2.x or mujoco 3.x
+RUN pip3 install --no-cache-dir numpy==1.26.4
+RUN pip3 install --no-cache-dir "mujoco<3.0"
+
+# PyTorch CPU-only (the server handles GPU inference)
+RUN pip3 install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+RUN pip3 install --no-cache-dir torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+
+# LIBERO — clone and install.
+# We use editable install (following eval/sim/libero/setup_libero.sh) so that
+# the source tree with bddl_files/, init_files/, assets/ stays accessible at
+# runtime.  The first import seeds ~/.libero/config.yaml via the script's
+# "echo N" trick, avoiding the interactive dataset-path prompt.
+#
+# The CMAKE_POLICY_VERSION_MINIMUM env-var is needed by egl-probe (a transitive
+# dep of robomimic/robosuite) which requests cmake_minimum_required < 3.5.
+RUN CMAKE_POLICY_VERSION_MINIMUM=3.5 pip3 install --no-cache-dir --upgrade pip setuptools && \
+    git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git /tmp/LIBERO && \
+    pip3 install --no-cache-dir -r /tmp/LIBERO/requirements.txt && \
+    CMAKE_POLICY_VERSION_MINIMUM=3.5 pip3 install --no-cache-dir \
+        -e /tmp/LIBERO --config-settings editable_mode=compat && \
+    rm -rf /root/.libero && \
+    echo "N" | python3 -c "import libero.libero" 2>/dev/null || true
+
+# lerobot — install with dependencies but immediately re-pin torch so it is
+# not upgraded from our pinned CPU-only version.
+RUN pip3 install --no-cache-dir lerobot==0.4.3 && \
+    pip3 install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu && \
+    pip3 install --no-cache-dir torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+
+# Remaining client dependencies
+RUN pip3 install --no-cache-dir \
+    transformers==4.51.3 \
+    gymnasium==0.29.1 \
+    zmq \
+    msgpack==1.1.0 \
+    msgpack-numpy==0.4.8 \
+    pillow \
+    imageio \
+    tqdm \
+    pydantic \
+    av \
+    tianshou==0.5.1 \
+    tyro \
+    pandas==2.0.3 \
+    dm_tree \
+    einops==0.8.1 \
+    albumentations==1.4.18 \
+    pyarrow==12.0.1 \
+    diffusers==0.30.1 \
+    huggingface-hub
+
+# Re-pin numpy to 1.x — later deps (albumentations, tianshou, etc.) pull in 2.x
+RUN pip3 install --no-cache-dir numpy==1.26.4
+
+# Apply the accelerate monkey-patch for numpy compat
+RUN sed -i 's/np_core = np._core if is_numpy_available("2.0.0") else np.core/np_core = np.core/' \
+    /usr/local/lib/python3.10/dist-packages/accelerate/utils/other.py 2>/dev/null || true
+
+# Clean up
+RUN rm -rf /root/.cache/pip
+
+CMD ["bash"]
