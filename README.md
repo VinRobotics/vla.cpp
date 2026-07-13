@@ -16,6 +16,8 @@ PyTorch at inference time. The binaries drive robots on **CPU**, **Apple Silicon
 
 [**Learn vla.cpp**](https://fai-modelopt-tech.github.io/learn-vla-cpp/) walks through the engine design and how each policy is implemented on ggml.
 
+---
+
 ## Build the server
 
 ### Prerequisites
@@ -67,6 +69,8 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 On Apple Silicon (e.g. Mac Mini M4), Metal is enabled by default and runs both the transformer and vision tower on the GPU. See [docs/backend/metal.md](docs/backend/metal.md) for building `vla.cpp` on macOS.
 
+---
+
 ## Quickstart
 
 Once the binaries are built, run one CPU prediction without a server or simulator:
@@ -75,12 +79,19 @@ Once the binaries are built, run one CPU prediction without a server or simulato
 pip install -U "huggingface_hub[cli]" gguf
 hf download vrfai/smolvla-libero-gguf --local-dir models/smolvla
 
-# front.jpg must already be the model input size (512x512 for this checkpoint).
+# One-shot CLI
 ./build/vla-cli --ckpt models/smolvla/smolvla-libero.gguf \
-    --image front.jpg --tokens 1,100,200,2 --pretty
+    --image assets/front.jpg --tokens 1,100,200,2 --pretty
 ```
 
-`--tokens` are language token ids from the client tokenizer. For the design overview see
+`vla-cli` runs a single prediction without a server or simulator: give it a model,
+an image, and the tokenized instruction, and it prints the action chunk. Handy for
+smoke-testing a GGUF or scripting a quick inference.
+`--tokens` are language token ids from the client tokenizer.
+`--pretty` prints one action row per line;
+`--state` sets proprioception (defaults to zeros).
+
+For the design overview see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), for the long-running path see
 [Running the server](#running-the-server), and for the other checkpoints see [Roadmap](#roadmap).
 
@@ -90,6 +101,8 @@ The rest of this README refers to a few shell variables:
 export VLA_GGUF=models/smolvla/smolvla-libero.gguf   # the checkpoint to serve
 export VLA_ARCH=smolvla                              # client-side arch preset, see --help
 ```
+
+---
 
 ## Install simulators
 
@@ -111,6 +124,8 @@ bash eval/sim/simpler/setup_SimplerEnv.sh
 
 Clones SimplerEnv (and its nested `ManiSkill2_real2sim`) into [`eval/sim/simpler/SimplerEnv/`](eval/sim/simpler/SimplerEnv), creates `eval/sim/simpler/simpler_uv/.venv/`.
 
+---
+
 ## Running the server
 
 `vla-server` loads the model once at startup and answers ZeroMQ REQ/REP requests synchronously.
@@ -127,19 +142,7 @@ vla-server: bound to tcp://*:5555. ready.
 
 Use `--bind` to change the address and port. Stop the server with `Ctrl-C`.
 
-## One-shot CLI
-
-`vla-cli` runs a single prediction without a server or simulator: give it a model, an
-image, and the tokenized instruction, and it prints the action chunk. Use it to smoke-test
-a GGUF or script a one-off inference.
-
-```bash
-./build/vla-cli --ckpt "$VLA_GGUF" \
-    --image front.jpg --image wrist.jpg --tokens 1,100,200,2 --pretty
-```
-
-Tokenization stays in the Python client, so the instruction is passed as token ids.
-`--pretty` prints one action row per line; `--state` sets proprioception (defaults to zeros).
+---
 
 ## Running the client
 
@@ -182,6 +185,8 @@ python eval/client/run_simpler_client_direct.py \
     --stats-json "$VLA_STATS_JSON"
 ```
 
+---
+
 ## Models
 
 ### Conversion
@@ -218,6 +223,8 @@ python scripts/quantize_gguf.py --in model-bf16.gguf --out model-q8_0.gguf --typ
 Embeddings, the output head, norms and the action expert stay float; pass `--vision` to
 pack the vision tower too (smaller, but more accuracy loss).
 
+---
+
 ## Benchmarks
 
 Latency in ms (inference plus transport), measured client-side on four targets: an
@@ -226,12 +233,14 @@ and an **Apple M4**.
 
 | Model | 3090 call (ms) | AGX Orin call (ms) | Orin Nano call (ms) | M4 call (ms) |
 |---|---:|---:|---:|---:|
-| `smolvla`     |  113 |  262 |  567 |  888 |
-| `pi0`         |  312 |  893 | 1955 | 1135 |
-| `gr00t_n1_5`  |  227 |  461 | 1356 |    - |
-| `gr00t_n1_7`  |  164 |  429 |    - |  755 |
-| `bitvla`      |  303 |  809 | 2845 |    - |
-| `evo1`        |  509 | 1048 | 3671 |    - |
+| `smolvla`     |   86 |  262 |  567 |  888 |
+| `pi0`         |  264 |  893 | 1955 | 1135 |
+| `gr00t_n1_5`  |  109 |  461 | 1356 |    - |
+| `gr00t_n1_7`  |  102 |  429 |    - |  755 |
+| `bitvla`      |  145 |  809 | 2845 |    - |
+| `evo1`        |  238 | 1048 | 3671 |    - |
+
+---
 
 ## Roadmap
 
@@ -258,6 +267,8 @@ reported 94.5%. Do not rely on it for task success yet.
 Open bugs and per-model caveats live in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 More models and more platforms are on the way.
 
+---
+
 ## Contributors
 
 - [Khanh Dang Nguyen](https://github.com/khanhnd61-vr)
@@ -265,9 +276,13 @@ More models and more platforms are on the way.
 - [Chinh Truong Nguyen](https://github.com/nguyentruongchinh04z)
 - [An Thai Le](https://github.com/anindex)
 
+---
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE.md).
+
+---
 
 ## Acknowledgements
 
