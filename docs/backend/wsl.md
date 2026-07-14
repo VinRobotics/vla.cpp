@@ -6,16 +6,10 @@ the bash `patches/patch.sh` script) and the CUDA build all run natively inside
 the Linux environment, while still using the host NVIDIA GPU through the
 WSL CUDA driver.
 
-> **Status: draft.** Verified through toolchain + dependency setup on Ubuntu
-> 24.04 (WSL2) with the CUDA 12.6 toolkit and an RTX 4050 Laptop GPU
-> (`sm_89`). The end-to-end build and the SmolVLA run are being validated;
-> the [Results](#results) section is filled in once that completes.
-
 ## Prerequisites
 
-A WSL2 distribution (this guide uses **Ubuntu 24.04**) and a recent **NVIDIA
-Windows driver** that exposes the GPU to WSL. Confirm the GPU is visible from
-inside WSL before building:
+A WSL2 distribution and a recent **NVIDIA Windows driver** that exposes the GPU to WSL.
+Confirm the GPU is visible from inside WSL before building:
 
 ```bash
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
@@ -26,7 +20,7 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
 > *toolkit* (`nvcc`). The toolkit is installed inside WSL, below.
 
 Install the build dependencies and a CUDA toolkit that matches your driver
-(driver 556.29 supports CUDA ≤ 12.6; CUDA ≥ 12.4 is required for the GCC 13
+(e.g. driver 556.29 supports CUDA ≤ 12.6; CUDA ≥ 12.4 is required for the GCC 13
 shipped on Ubuntu 24.04):
 
 ```bash
@@ -72,16 +66,13 @@ wsl --shutdown   # reopen WSL afterwards so the new PATH is picked up
 ## Configure & build
 
 ```bash
-# Fetch llama.cpp at the pinned tag and apply the local patch
-bash patches/patch.sh
-
 # CUDA build. Set CMAKE_CUDA_ARCHITECTURES for your GPU (see the table in the
-# top-level README; RTX 40-series / Ada = 89).
+# top-level README; e.g. RTX 40-series / Ada = 89).
 cmake -B build \
     -DGGML_CUDA=ON \
     -DGGML_CUDA_GRAPHS=ON \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CUDA_ARCHITECTURES=89
+    -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURE
 cmake --build build -j"$(nproc)"
 ```
 
@@ -95,23 +86,32 @@ vla: backend = CUDA (device 0)
 ```
 
 If you instead see `vla: backend = CPU (4 threads)`, the build did not pick up
-CUDA — rebuild from a clean `build/` and check `GGML_CUDA` is `ON` in the CMake
+CUDA - rebuild from a clean `build/` and check `GGML_CUDA` is `ON` in the CMake
 cache and that `nvcc` was on `PATH` at configure time.
 
-## Run SmolVLA
+## Run a model
 
 SmolVLA ships a combined GGUF plus a separate `mmproj` vision tower (see
-[Models](../../README.md#models); GGUF published at
-[`vrfai/smolvla-libero-gguf`](https://huggingface.co/vrfai/smolvla-libero-gguf)).
+[Models](../../README.md#models); GGUF published
+[here](https://huggingface.co/collections/vrfai/vlacpp-model-bundles)).
 
 ```bash
-./build/vla-server "$VLA_MMPROJ" "$VLA_GGUF"
+./build/vla-server "$VLA_GGUF"
 # vla-server: bound to tcp://*:5555. ready.
 ```
 
-Drive it with the LIBERO client (`--arch smolvla`) as described in the
-top-level README.
-
 ## Results
 
-_Pending end-to-end validation on WSL2 + RTX 4050._
+Evo1 (libero, 1.20 GiB BF16 weights incl. InternViT vision tower),
+**NVIDIA GeForce RTX 3050 Ti Laptop GPU** (4 GB VRAM, ~2.8 GB allocated),
+steady state:
+
+| Stage        | CUDA (WSL2) |
+|--------------|------------:|
+| vision       |   ~1,000 ms |
+| inference    |     ~400 ms |
+| other        |     ~350 ms |
+| **total/req**| **~1,750 ms** |
+
+On libero_object task 0 (pick up the alphabet soup and place it in the basket),
+the episode succeeded after 171 steps at ~2114 ms/step client-side.
