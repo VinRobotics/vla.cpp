@@ -67,7 +67,8 @@ export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
 
-On Apple Silicon (e.g. Mac Mini M4), Metal is enabled by default and runs both the transformer and vision tower on the GPU. See [docs/backend/metal.md](docs/backend/metal.md) for building `vla.cpp` on macOS.
+Check [docs/backend](docs/backend) for compiling `vla.cpp` with other platforms.
+WLS2 and Apple Silicon has been tested. 
 
 ---
 
