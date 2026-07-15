@@ -1,4 +1,3 @@
-
 # vla.cpp
 
 ![logo](assets/logo_vlacpp_white.png)
@@ -7,11 +6,17 @@
 [![Built on llama.cpp](https://img.shields.io/badge/built%20on-llama.cpp-lightgrey)](https://github.com/ggml-org/llama.cpp)
 [![Models on HF](https://img.shields.io/badge/%F0%9F%A4%97%20models-Hugging%20Face-yellow)](https://huggingface.co/vrfai)
 [![arXiv](https://img.shields.io/badge/arXiv-2606.08094-b31b1b.svg)](http://arxiv.org/abs/2606.08094)
+[![Docs](https://img.shields.io/badge/docs-Learn%20vla.cpp-brightgreen)](https://fai-modelopt-tech.github.io/learn-vla-cpp/)
 
-An efficient C++ inference engine for **Vision-Language-Action (VLA) models**, built on top of [`llama.cpp`](https://github.com/ggml-org/llama.cpp).
-It brings today's open VLA policies - SmolVLA, π0, BitVLA, Evo-1, and GR00T N1.5/1.6/1.7
-and more - under one runtime, packaging each as a single self-contained GGUF that needs no Python or PyTorch at inference time.
-The binary can drive robots across **CPU**, **Apple Silicon**, or **CUDA**, scaling from consumer GPUs down to the Jetson-class boards.
+A C++ inference engine for **Vision-Language-Action (VLA) models**, built on [`llama.cpp`](https://github.com/ggml-org/llama.cpp).
+It runs the open VLA policies - SmolVLA, π0, BitVLA, Evo-1, GR00T N1.5/1.6/1.7 and more -
+under one runtime, each packaged as a single self-contained GGUF that needs no Python or
+PyTorch at inference time. The binaries drive robots on **CPU**, **Apple Silicon**, or
+**CUDA**, from consumer GPUs down to Jetson-class boards.
+
+[**Learn vla.cpp**](https://fai-modelopt-tech.github.io/learn-vla-cpp/) walks through the engine design and how each policy is implemented on ggml.
+
+---
 
 ## Build the server
 
@@ -39,10 +44,7 @@ Identify your machine CUDA architecture:
 | Blackwell (consumer) | RTX 50-series | `120` |
 | Blackwell (datacenter) | B100, B200, GB200 | `100` |
 
-
-Configure and build the source:
-
-CMake fetches and pins `llama.cpp` automatically (no patch, no submodule):
+Then configure and build. CMake fetches and pins `llama.cpp` automatically (no patch, no submodule):
 
 ```bash
 # CPU build:
@@ -58,14 +60,17 @@ cmake -B build \
 cmake --build build -j$(nproc)
 ```
 
-If system cannot detect CUDA, declare CUDA explicitly in environment variables
+If CMake cannot find CUDA, point the environment at it explicitly:
 
 ```bash
 export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
 
-On Apple Silicon (e.g. Mac Mini M4), Metal is enabled by default and runs both the transformer and vision tower on the GPU. See [docs/backend/metal.md](docs/backend/metal.md) for building `vla.cpp` on macOS.
+Check [docs/backend](docs/backend) for compiling `vla.cpp` with other platforms.
+WLS2 and Apple Silicon has been tested. 
+
+---
 
 ## Quickstart
 
@@ -75,14 +80,30 @@ Once the binaries are built, run one CPU prediction without a server or simulato
 pip install -U "huggingface_hub[cli]" gguf
 hf download vrfai/smolvla-libero-gguf --local-dir models/smolvla
 
-# front.jpg must already be the model input size (512x512 for this checkpoint).
+# One-shot CLI
 ./build/vla-cli --ckpt models/smolvla/smolvla-libero.gguf \
-    --image front.jpg --tokens 1,100,200,2 --pretty
+    --image assets/front.jpg --tokens 1,100,200,2 --pretty
 ```
 
-`--tokens` are language token ids from the client tokenizer. For the design overview
-see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); for the server path and other models
-see [Roadmap](#roadmap).
+`vla-cli` runs a single prediction without a server or simulator: give it a model,
+an image, and the tokenized instruction, and it prints the action chunk. Handy for
+smoke-testing a GGUF or scripting a quick inference.
+`--tokens` are language token ids from the client tokenizer.
+`--pretty` prints one action row per line;
+`--state` sets proprioception (defaults to zeros).
+
+For the design overview see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), for the long-running path see
+[Running the server](#running-the-server), and for the other checkpoints see [Roadmap](#roadmap).
+
+The rest of this README refers to a few shell variables:
+
+```bash
+export VLA_GGUF=models/smolvla/smolvla-libero.gguf   # the checkpoint to serve
+export VLA_ARCH=smolvla                              # client-side arch preset, see --help
+```
+
+---
 
 ## Install simulators
 
@@ -104,6 +125,8 @@ bash eval/sim/simpler/setup_SimplerEnv.sh
 
 Clones SimplerEnv (and its nested `ManiSkill2_real2sim`) into [`eval/sim/simpler/SimplerEnv/`](eval/sim/simpler/SimplerEnv), creates `eval/sim/simpler/simpler_uv/.venv/`.
 
+---
+
 ## Running the server
 
 `vla-server` loads the model once at startup and answers ZeroMQ REQ/REP requests synchronously.
@@ -118,21 +141,9 @@ When ready, the server prints:
 vla-server: bound to tcp://*:5555. ready.
 ```
 
-Bound address and port can be configured by `--bind` flag. Stop server with `Ctrl-C`.
+Use `--bind` to change the address and port. Stop the server with `Ctrl-C`.
 
-## One-shot CLI
-
-`vla-cli` runs a single prediction without a server or simulator: give it a model,
-an image, and the tokenized instruction, and it prints the action chunk. Handy for
-smoke-testing a GGUF or scripting a quick inference.
-
-```bash
-./build/vla-cli --ckpt "$VLA_GGUF" \
-    --image front.jpg --image wrist.jpg --tokens 1,100,200,2 --pretty
-```
-
-Tokenization stays in the Python client, so the instruction is passed as token ids.
-`--pretty` prints one action row per line; `--state` sets proprioception (defaults to zeros).
+---
 
 ## Running the client
 
@@ -150,9 +161,10 @@ python eval/client/run_sim_client_direct.py \
     --arch "$VLA_ARCH"
 ```
 
-The GR00T models needs:
-  -  `--stats-json /path/to/dataset_statistics.json` in client side. 
-  - `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda` for N1.6, `libero_sim` for N1.7) and `VLA_GR00T_BF16_WEIGHTS=1` (to fit the 8 GB card) in server side.
+The GR00T models need two extras:
+
+- client side: `--stats-json /path/to/dataset_statistics.json`
+- server side: `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda` for N1.6, `libero_sim` for N1.7) and `VLA_GR00T_BF16_WEIGHTS=1` (to fit the 8 GB card).
 
 ### SimplerEnv
 
@@ -174,13 +186,14 @@ python eval/client/run_simpler_client_direct.py \
     --stats-json "$VLA_STATS_JSON"
 ```
 
+---
+
 ## Models
 
 ### Conversion
 
-Each model ships as a single self-contained GGUF.
-If you would rather convert a HuggingFace safetensors checkpoint yourself, [`scripts/`](scripts/) provides per-arch GGUF converters.
-Set up a venv for converter by:
+Each model ships as a single self-contained GGUF. To convert a HuggingFace safetensors
+checkpoint yourself, [`scripts/`](scripts/) has a converter per arch. Set up its venv:
 
 ```bash
 python3 -m venv .venv-converter
@@ -211,21 +224,24 @@ python scripts/quantize_gguf.py --in model-bf16.gguf --out model-q8_0.gguf --typ
 Embeddings, the output head, norms and the action expert stay float; pass `--vision` to
 pack the vision tower too (smaller, but more accuracy loss).
 
+---
+
 ## Benchmarks
 
-Latency (ms, inference time + transport overhead) measured at client sides
-across four deployment targets: an **RTX 3090**, an **NVIDIA Jetson AGX
-Orin**, an **NVIDIA Jetson Orin Nano (8 GB)**, and an **Apple M4**.
-
+Latency in ms (inference plus transport), measured client-side on four targets: an
+**RTX 3090**, an **NVIDIA Jetson AGX Orin**, an **NVIDIA Jetson Orin Nano (8 GB)**,
+and an **Apple M4**.
 
 | Model | 3090 call (ms) | AGX Orin call (ms) | Orin Nano call (ms) | M4 call (ms) |
 |---|---:|---:|---:|---:|
-| `smolvla`     |  113 |  262 |  567 |  888 |
-| `pi0`         |  312 |  893 | 1955 | 1135 |
-| `gr00t_n1_5`  |  227 |  461 | 1356 |    - |
-| `gr00t_n1_7`  |  164 |  429 |    - |  755 |
-| `bitvla`      |  303 |  809 | 2845 |    - |
-| `evo1`        |  509 | 1048 | 3671 |    - |
+| `smolvla`     |   86 |  262 |  567 |  888 |
+| `pi0`         |  264 |  893 | 1955 | 1135 |
+| `gr00t_n1_5`  |  109 |  461 | 1356 |    - |
+| `gr00t_n1_7`  |  102 |  429 |    - |  755 |
+| `bitvla`      |  145 |  809 | 2845 |    - |
+| `evo1`        |  238 | 1048 | 3671 |    - |
+
+---
 
 ## Roadmap
 
@@ -241,13 +257,18 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | ~ | - | - |
 | [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | Y | - | - |
 | [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | ~ | - | - |
-| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | ~ | - | - |
+| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)*                 | Y | Y | ~ | - | - |
 | [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | - | - |
 | [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | ~ | - | - |
 | [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | ~ | - | - |
 
-Looking ahead, we will support more models, more platforms, and continue to
-optimize the framework.
+\* Evo-1 loads and runs, but the released GGUF scores 0% on `libero_object` instead of the
+reported 94.5%. Do not rely on it for task success yet.
+
+Open bugs and per-model caveats live in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
+More models and more platforms are on the way.
+
+---
 
 ## Contributors
 
@@ -256,9 +277,13 @@ optimize the framework.
 - [Chinh Truong Nguyen](https://github.com/nguyentruongchinh04z)
 - [An Thai Le](https://github.com/anindex)
 
+---
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE.md).
+
+---
 
 ## Acknowledgements
 
@@ -273,8 +298,8 @@ Supported VLA models:
 - [GR00T N1.x](https://github.com/NVIDIA/Isaac-GR00T) - NVIDIA Isaac.
 - [VLA-JEPA](https://github.com/ginwind/VLA-JEPA) - Jingwen Sun et al.
 
-Behavioural evaluation is built on:
+Built on:
 
 - [`llama.cpp`](https://github.com/ggml-org/llama.cpp) - LLM inference engine in C/C++.
-- [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO) - the lifelong-robot-learning benchmark suite our success-rate sweeps run on.
-- [SimplerEnv](https://github.com/simpler-env/SimplerEnv) - the second simulator wired through the eval scaffold.
+- [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO) - benchmark suite for the success-rate sweeps.
+- [SimplerEnv](https://github.com/simpler-env/SimplerEnv) - the second simulator in the eval scaffold.
