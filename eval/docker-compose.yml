@@ -42,12 +42,12 @@ services:
       - CUDA_VISIBLE_DEVICES=0
     ports:
       - "5555:5555"
-    # For SmolVLA / π0 pass mmproj + model GGUF.
+    # For SmolVLA the single GGUF is enough.
+    # For π0 pass mmproj + model GGUF.
     # For baked-in-vision models (BitVLA, GR00T, Evo-1) omit mmproj.
     command:
       - --bind
       - tcp://*:5555
-      - /models/mmproj-smolvla-libero.gguf
       - /models/smolvla-libero.gguf
 
   # --------------------------------------------------------------------------

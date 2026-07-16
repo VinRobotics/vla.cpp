@@ -62,12 +62,13 @@ COPY . .
 # ---------------------------------------------------------------------------
 
 # Pin foundational deps first so nothing pulls numpy 2.x or mujoco 3.x
-RUN pip3 install --no-cache-dir numpy==1.26.4
-RUN pip3 install --no-cache-dir "mujoco<3.0"
+RUN pip3 install numpy==1.26.4
+RUN pip3 install "mujoco<3.0"
 
 # PyTorch CPU-only (the server handles GPU inference)
-RUN pip3 install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
-RUN pip3 install --no-cache-dir torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+# install it now to prevent later deps from pulling in a GPU version
+RUN pip3 install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+RUN pip3 install torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
 
 # LIBERO — clone and install.
 # We use editable install (following eval/sim/libero/setup_libero.sh) so that
@@ -77,22 +78,22 @@ RUN pip3 install --no-cache-dir torchvision==0.20.1 --index-url https://download
 #
 # The CMAKE_POLICY_VERSION_MINIMUM env-var is needed by egl-probe (a transitive
 # dep of robomimic/robosuite) which requests cmake_minimum_required < 3.5.
-RUN CMAKE_POLICY_VERSION_MINIMUM=3.5 pip3 install --no-cache-dir --upgrade pip setuptools && \
-    git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git /tmp/LIBERO && \
-    pip3 install --no-cache-dir -r /tmp/LIBERO/requirements.txt && \
-    CMAKE_POLICY_VERSION_MINIMUM=3.5 pip3 install --no-cache-dir \
+RUN CMAKE_POLICY_VERSION_MINIMUM=3.5 pip3 install --upgrade pip setuptools
+RUN git clone --depth 1 https://github.com/Lifelong-Robot-Learning/LIBERO.git /tmp/LIBERO
+RUN CMAKE_POLICY_VERSION_MINIMUM=3.5 pip3 install -r /tmp/LIBERO/requirements.txt
+RUN CMAKE_POLICY_VERSION_MINIMUM=3.5 pip3 install \
         -e /tmp/LIBERO --config-settings editable_mode=compat && \
     rm -rf /root/.libero && \
     echo "N" | python3 -c "import libero.libero" 2>/dev/null || true
 
 # lerobot — install with dependencies but immediately re-pin torch so it is
 # not upgraded from our pinned CPU-only version.
-RUN pip3 install --no-cache-dir lerobot==0.4.3 && \
-    pip3 install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu && \
-    pip3 install --no-cache-dir torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+RUN pip3 install lerobot==0.4.3 && \
+    pip3 install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu && \
+    pip3 install torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
 
 # Remaining client dependencies
-RUN pip3 install --no-cache-dir \
+RUN pip3 install \
     transformers==4.51.3 \
     gymnasium==0.29.1 \
     zmq \
@@ -114,13 +115,13 @@ RUN pip3 install --no-cache-dir \
     huggingface-hub
 
 # Re-pin numpy to 1.x — later deps (albumentations, tianshou, etc.) pull in 2.x
-RUN pip3 install --no-cache-dir numpy==1.26.4
+RUN pip3 install numpy==1.26.4
 
 # Apply the accelerate monkey-patch for numpy compat
 RUN sed -i 's/np_core = np._core if is_numpy_available("2.0.0") else np.core/np_core = np.core/' \
     /usr/local/lib/python3.10/dist-packages/accelerate/utils/other.py 2>/dev/null || true
 
-# Clean up
+# Clean up pip cache to keep image size small
 RUN rm -rf /root/.cache/pip
 
 CMD ["bash"]
