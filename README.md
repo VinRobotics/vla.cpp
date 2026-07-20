@@ -257,16 +257,10 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | ~ | - | - |
 | [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | Y | - | - |
 | [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | ~ | - | - |
-| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)*                 | Y | Y | ~ | - | - |
+| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | ~ | - | - |
 | [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | - | - |
 | [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | ~ | - | - |
 | [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | ~ | - | - |
-
-\* Evo-1 loads and runs, but the released GGUF scores 0% on `libero_object` instead of the
-reported 94.5%. Do not rely on it for task success yet.
-
-Open bugs and per-model caveats live in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
-More models and more platforms are on the way.
 
 ---
 
