@@ -1,0 +1,88 @@
+diff --git a/ggml/src/ggml-openvino/ggml-openvino-extra.cpp b/ggml/src/ggml-openvino/ggml-openvino-extra.cpp
+index d9ad7be73..75d34beb4 100644
+--- a/ggml/src/ggml-openvino/ggml-openvino-extra.cpp
++++ b/ggml/src/ggml-openvino/ggml-openvino-extra.cpp
+@@ -9,6 +9,7 @@
+ #include <openvino/runtime/intel_npu/level_zero/level_zero.hpp>
+ #include <openvino/runtime/properties.hpp>
+ #include <optional>
++#include <vector>
+ 
+ ov::Core & ov_singleton_core() {
+     static ov::Core core;
+@@ -19,6 +20,39 @@ ov::Core & ov_singleton_core() {
+ // Device Configuration Implementations
+ // =====================================================
+ 
++// Find the Intel OpenCL platform. With multiple OpenCL runtimes installed
++// (e.g. NVIDIA + Intel), the first platform is not always the Intel one,
++// and the OpenVINO GPU plugin only accepts Intel contexts.
++static cl_platform_id ggml_openvino_get_intel_platform() {
++    static cl_platform_id platform = nullptr;
++    static bool searched = false;
++    if (searched) {
++        return platform;
++    }
++    searched = true;
++
++    cl_uint n_platforms = 0;
++    if (clGetPlatformIDs(0, nullptr, &n_platforms) != CL_SUCCESS || n_platforms == 0) {
++        return nullptr;
++    }
++    std::vector<cl_platform_id> platforms(n_platforms);
++    if (clGetPlatformIDs(n_platforms, platforms.data(), nullptr) != CL_SUCCESS) {
++        return nullptr;
++    }
++
++    for (cl_platform_id p : platforms) {
++        char vendor[256] = "";
++        if (clGetPlatformInfo(p, CL_PLATFORM_VENDOR, sizeof(vendor), vendor, nullptr) != CL_SUCCESS) {
++            continue;
++        }
++        if (strstr(vendor, "Intel") != nullptr) {
++            platform = p;
++            break;
++        }
++    }
++    return platform;
++}
++
+ void ggml_openvino_device_config::init() {
+     if (initialized) {
+         return;
+@@ -88,10 +122,9 @@ void ggml_openvino_device_config::init() {
+     if (device_name == "GPU") {
+         // Create OpenCL context and queue
+         cl_int err;
+-        cl_platform_id platform;
+-        err = clGetPlatformIDs(1, &platform, nullptr);
+-        if (err != CL_SUCCESS) {
+-            GGML_LOG_ERROR("Failed to get OpenCL platform: %d\n", err);
++        cl_platform_id platform = ggml_openvino_get_intel_platform();
++        if (platform == nullptr) {
++            GGML_LOG_ERROR("Failed to find an Intel OpenCL platform\n");
+             return;
+         }
+ 
+@@ -194,8 +227,8 @@ clEnqueueMemFillINTEL_fn ggml_openvino_get_clEnqueueMemFillINTEL() {
+     static bool loaded = false;
+     if (!loaded) {
+         loaded = true;
+-        cl_platform_id platform;
+-        if (clGetPlatformIDs(1, &platform, nullptr) == CL_SUCCESS) {
++        cl_platform_id platform = ggml_openvino_get_intel_platform();
++        if (platform != nullptr) {
+             fn = (clEnqueueMemFillINTEL_fn) clGetExtensionFunctionAddressForPlatform(platform, "clEnqueueMemFillINTEL");
+         }
+     }
+@@ -208,8 +241,8 @@ clEnqueueMemcpyINTEL_fn ggml_openvino_get_clEnqueueMemcpyINTEL() {
+     static bool loaded = false;
+     if (!loaded) {
+         loaded = true;
+-        cl_platform_id platform;
+-        if (clGetPlatformIDs(1, &platform, nullptr) == CL_SUCCESS) {
++        cl_platform_id platform = ggml_openvino_get_intel_platform();
++        if (platform != nullptr) {
+             fn = (clEnqueueMemcpyINTEL_fn) clGetExtensionFunctionAddressForPlatform(platform, "clEnqueueMemcpyINTEL");
+         }
+     }
