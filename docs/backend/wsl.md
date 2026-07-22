@@ -1,10 +1,9 @@
 # `vla.cpp` on Windows (WSL2 + CUDA)
 
 `vla.cpp` targets Linux and macOS. On Windows the supported path is **WSL2**
-with an Ubuntu distribution: the toolchain (`libzmq`, `protobuf`, `pkg-config`,
-the bash `patches/patch.sh` script) and the CUDA build all run natively inside
-the Linux environment, while still using the host NVIDIA GPU through the
-WSL CUDA driver.
+with an Ubuntu distribution: the toolchain (`libzmq`, `protobuf`, `pkg-config`)
+and the CUDA build all run natively inside the Linux environment, while still
+using the host NVIDIA GPU through the WSL CUDA driver.
 
 ## Prerequisites
 
@@ -100,6 +99,57 @@ SmolVLA ships a combined GGUF plus a separate `mmproj` vision tower (see
 # vla-server: bound to tcp://*:5555. ready.
 ```
 
+## End-to-end evaluation (LIBERO client on WSL)
+
+The eval client (LIBERO simulator + preprocessing) can run in the *same* WSL
+distribution as `vla-server`, so the full serving loop - sim reset/render →
+client preprocess → `vla-server` inference → action → sim step → video - runs on
+one Windows machine with no separate Linux host.
+
+Two WSL-specific gotchas:
+
+- **Work from the Linux filesystem, not `/mnt/c` or `/mnt/d`.** `uv`/venv installs
+  are slow and unreliable on the Windows-mounted drives (drvfs); `git clone` the
+  repo into your home directory (e.g. `~/vla.cpp`) and run from there. This also
+  sidesteps CRLF issues in the shell scripts.
+- **Add your user to the `render` group** so MuJoCo's EGL renderer can open the
+  GPU render node (`/dev/dri/renderD128`, owned `root:render`). Without it, EGL
+  fails with `libEGL warning: failed to open /dev/dri/renderD128: Permission
+  denied` and falls back to software rendering:
+
+  ```bash
+  sudo usermod -aG render "$USER"
+  # then, from PowerShell, restart WSL so the new group takes effect:
+  #   wsl --shutdown
+  ```
+
+Install the LIBERO client into an isolated `uv` venv. Set `UV_LINK_MODE=copy` and
+a home-directory cache so `uv` does not try to hardlink across filesystems:
+
+```bash
+export UV_LINK_MODE=copy
+export UV_CACHE_DIR=$HOME/.cache/uv-vla
+bash eval/sim/libero/setup_libero.sh
+```
+
+Then serve SmolVLA and drive one episode. The client renders with EGL and talks
+to `vla-server` over ZeroMQ:
+
+```bash
+# terminal 1 - server (GPU inference)
+./build/vla-server --bind 'tcp://*:5555' "$VLA_GGUF"
+
+# terminal 2 - client (LIBERO sim + preprocessing)
+export MUJOCO_GL=egl CUDA_VISIBLE_DEVICES=0
+eval/sim/libero/libero_uv/.venv/bin/python eval/client/run_sim_client_direct.py \
+    --arch smolvla --vla-addr tcp://localhost:5555 \
+    --task libero_object --task-id 0 --n-episodes 1 --n-action-steps 1 \
+    --output-dir outputs/wsl_smoke
+```
+
+The client writes `episode_000000.mp4` and `summary.txt` under
+`outputs/wsl_smoke/smolvla/libero_object/task_0/`.
+
 ## Results
 
 Evo1 (libero, 1.20 GiB BF16 weights incl. InternViT vision tower),
@@ -115,3 +165,18 @@ steady state:
 
 On libero_object task 0 (pick up the alphabet soup and place it in the basket),
 the episode succeeded after 171 steps at ~2114 ms/step client-side.
+
+SmolVLA (libero, 532 MB GGUF), **NVIDIA GeForce RTX 4050 Laptop GPU** (6 GB VRAM,
+~1.07 GB allocated), with the full server + LIBERO client stack co-resident on a
+single WSL2 (Ubuntu 24.04) machine, steady state:
+
+| Stage         | CUDA (WSL2) |
+|---------------|------------:|
+| vision        |      ~84 ms |
+| inference     |      ~46 ms |
+| other         |       ~1 ms |
+| **total/req** | **~131 ms** |
+
+On libero_object task 0 the episode succeeded end-to-end (`is_success: True`,
+149 requests served) at ~155 ms/step client-side (including software EGL
+rendering), producing a rendered MP4.
