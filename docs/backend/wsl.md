@@ -150,6 +150,21 @@ eval/sim/libero/libero_uv/.venv/bin/python eval/client/run_sim_client_direct.py 
 The client writes `episode_000000.mp4` and `summary.txt` under
 `outputs/wsl_smoke/smolvla/libero_object/task_0/`.
 
+### One-command runner
+
+`eval/run_libero_wsl.sh` wraps the two steps above - it starts `vla-server`,
+waits for it to become ready, drives one client run, and stops the server on
+exit. Pass the task-id and episode count as arguments, or run with none and it
+prompts for them:
+
+```bash
+bash eval/run_libero_wsl.sh          # prompts for task-id + episodes
+bash eval/run_libero_wsl.sh 3 5      # task-id 3, 5 episodes, no prompt
+```
+
+Override the served model, suite, or output dir via environment
+(`VLA_GGUF`, `TASK_SUITE`, `OUTPUT_DIR`); see the header of the script.
+
 ## Results
 
 Evo1 (libero, 1.20 GiB BF16 weights incl. InternViT vision tower),
