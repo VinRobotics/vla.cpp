@@ -23,12 +23,7 @@
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 #include "gguf.h"
-#ifdef GGML_USE_CUDA
-#include "ggml-cuda.h"
-#endif
-#ifdef GGML_USE_METAL
-#include "ggml-metal.h"
-#endif
+#include "backend.h"
 
 #include "nlohmann/json.hpp"
 
@@ -927,33 +922,12 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
         std::printf("vla: config = %s\n", cfg_path.c_str());
     }
 
-#ifdef GGML_USE_CUDA
-    m->backend = ggml_backend_cuda_init( 0);
-    if (m->backend) {
-        m->is_cuda = true;
-        m->is_gpu  = true;
-        std::printf("vla: backend = CUDA (device 0)\n");
-    } else {
-        std::fprintf(stderr, "vla: ggml_backend_cuda_init failed; falling back to CPU\n");
-    }
-#elif defined(GGML_USE_METAL)
-    m->backend = ggml_backend_metal_init();
-    if (m->backend) {
-        m->is_gpu = true;
-        std::printf("vla: backend = Metal\n");
-    } else {
-        std::fprintf(stderr, "vla: ggml_backend_metal_init failed; falling back to CPU\n");
-    }
-#endif
-    if (!m->backend) {
-        m->backend = ggml_backend_cpu_init();
-        if (!m->backend) {
-            std::fprintf(stderr, "vla: ggml_backend_cpu_init failed\n");
-            delete m;
-            return nullptr;
-        }
-        ggml_backend_cpu_set_n_threads(m->backend, default_cpu_threads());
-        std::printf("vla: backend = CPU (%d threads)\n", default_cpu_threads());
+    {
+        const Backend b = backend_init("vla", default_cpu_threads());
+        if (!b.handle) { delete m; return nullptr; }
+        m->backend = b.handle;
+        m->is_cuda = b.is_cuda;
+        m->is_gpu  = b.is_gpu;
     }
     vram_probe(m->backend, "after backend init");
 

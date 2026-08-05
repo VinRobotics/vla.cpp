@@ -18,12 +18,7 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include "ggml-backend.h"
-#ifdef GGML_USE_CUDA
-#include "ggml-cuda.h"
-#endif
-#ifdef GGML_USE_METAL
-#include "ggml-metal.h"
-#endif
+#include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
 
@@ -349,19 +344,12 @@ std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
                 (long long) m->action_horizon, (long long) m->action_dim, (long long) m->state_dim, (long long) m->num_future, (long long) m->num_steps,
                 m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
-#ifdef GGML_USE_CUDA
-    m->backend = ggml_backend_cuda_init(0);
-    if (m->backend) { m->is_cuda = true; m->is_gpu = true; std::printf("vla(vla_jepa): backend = CUDA (device 0)\n"); }
-    else            std::fprintf(stderr, "vla(vla_jepa): ggml_backend_cuda_init failed; falling back to CPU\n");
-#elif defined(GGML_USE_METAL)
-    m->backend = ggml_backend_metal_init();
-    if (m->backend) { m->is_gpu = true; std::printf("vla(vla_jepa): backend = Metal\n"); }
-#endif
-    if (!m->backend) {
-        m->backend = ggml_backend_cpu_init();
-        if (!m->backend) { std::fprintf(stderr, "vla(vla_jepa): ggml_backend_cpu_init failed\n"); return nullptr; }
-        ggml_backend_cpu_set_n_threads(m->backend, m->n_threads);
-        std::printf("vla(vla_jepa): backend = CPU (%d threads)\n", m->n_threads);
+    {
+        const Backend b = backend_init("vla(vla_jepa)", m->n_threads);
+        if (!b.handle) { return nullptr; }
+        m->backend = b.handle;
+        m->is_cuda = b.is_cuda;
+        m->is_gpu  = b.is_gpu;
     }
 
     ggml_init_params wp = {  (size_t) 32 * 1024 * 1024,  nullptr,  true };

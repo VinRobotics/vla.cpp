@@ -19,12 +19,7 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include "ggml-backend.h"
-#ifdef GGML_USE_CUDA
-#include "ggml-cuda.h"
-#endif
-#ifdef GGML_USE_METAL
-#include "ggml-metal.h"
-#endif
+#include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
 
@@ -203,18 +198,11 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
         std::printf("vla(openvla_oft): unnorm suite = %s (q99 dim %zu)\n", m->suite.c_str(), m->q99.size());
     }
 
-#ifdef GGML_USE_CUDA
-    m->backend = ggml_backend_cuda_init(0);
-    if (m->backend) { m->is_gpu=true; std::printf("vla(openvla_oft): backend = CUDA (device 0)\n"); }
-#elif defined(GGML_USE_METAL)
-    m->backend = ggml_backend_metal_init();
-    if (m->backend) { m->is_gpu=true; std::printf("vla(openvla_oft): backend = Metal\n"); }
-#endif
-    if (!m->backend) {
-        m->backend = ggml_backend_cpu_init();
-        if (!m->backend) { std::fprintf(stderr, "vla(openvla_oft): cpu backend init failed\n"); return nullptr; }
-        ggml_backend_cpu_set_n_threads(m->backend, m->n_threads);
-        std::printf("vla(openvla_oft): backend = CPU (%d threads)\n", m->n_threads);
+    {
+        const Backend b = backend_init("vla(openvla_oft)", m->n_threads);
+        if (!b.handle) { return nullptr; }
+        m->backend = b.handle;
+        m->is_gpu  = b.is_gpu;
     }
 
     ggml_init_params wp = { (size_t)64*1024*1024, nullptr, true };

@@ -19,12 +19,7 @@
 #include "ggml-cpu.h"
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
-#ifdef GGML_USE_CUDA
-#include "ggml-cuda.h"
-#endif
-#ifdef GGML_USE_METAL
-#include "ggml-metal.h"
-#endif
+#include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
 
@@ -435,24 +430,16 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
                 (long long) cfg.n_lang, (long long) m->adarms_cond_dim,
                 m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
-#ifdef GGML_USE_CUDA
-    m->backend = ggml_backend_cuda_init( 0);
-    if (m->backend) { m->is_cuda = true; m->is_gpu = true; std::printf("vla(pi05): backend = CUDA (device 0)\n"); }
-    else            { std::fprintf(stderr, "vla(pi05): ggml_backend_cuda_init failed; falling back to CPU\n"); }
-#elif defined(GGML_USE_METAL)
-    m->backend = ggml_backend_metal_init();
-    if (m->backend) { m->is_gpu = true; std::printf("vla(pi05): backend = Metal\n"); }
-    else            { std::fprintf(stderr, "vla(pi05): ggml_backend_metal_init failed; falling back to CPU\n"); }
-#endif
     {
         const unsigned hw = std::thread::hardware_concurrency();
         m->n_threads = (hw == 0) ? 4 : (int) std::min(hw, 8u);
     }
-    if (!m->backend) {
-        m->backend = ggml_backend_cpu_init();
-        if (!m->backend) { std::fprintf(stderr, "vla(pi05): ggml_backend_cpu_init failed\n"); return nullptr; }
-        ggml_backend_cpu_set_n_threads(m->backend, m->n_threads);
-        std::printf("vla(pi05): backend = CPU (%d threads)\n", m->n_threads);
+    {
+        const Backend b = backend_init("vla(pi05)", m->n_threads);
+        if (!b.handle) { return nullptr; }
+        m->backend = b.handle;
+        m->is_cuda = b.is_cuda;
+        m->is_gpu  = b.is_gpu;
     }
 
     // The SigLIP tower is now bundled in the ckpt GGUF; mmproj_path is ignored.

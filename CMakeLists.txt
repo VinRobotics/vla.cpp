@@ -88,7 +88,23 @@ if(GGML_CUDA)
     target_include_directories(vla_core PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
-if(GGML_METAL AND NOT GGML_CUDA)
+# Intel GPUs (Arc / Flex / Data Center Max / Xe iGPU) through oneAPI SYCL.
+# ggml's SYCL sources only compile under the oneAPI DPC++ driver, and
+# CMAKE_CXX_COMPILER is global, so our targets are built by icpx too. Fail
+# loudly here rather than let ggml die deep in a kernel compile.
+if(GGML_SYCL AND NOT GGML_CUDA)
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        message(FATAL_ERROR
+            "GGML_SYCL=ON needs the oneAPI DPC++ compiler, but CMAKE_CXX_COMPILER is "
+            "'${CMAKE_CXX_COMPILER_ID}'. Source /opt/intel/oneapi/setvars.sh and configure a "
+            "fresh build dir with -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx. "
+            "See docs/backend/sycl.md.")
+    endif()
+    target_compile_definitions(vla_core PUBLIC GGML_USE_SYCL)
+endif()
+
+# Backend precedence matches the ladder in src/backend.h: CUDA, then SYCL, then Metal.
+if(GGML_METAL AND NOT GGML_CUDA AND NOT GGML_SYCL)
     target_compile_definitions(vla_core PUBLIC GGML_USE_METAL)
 endif()
 
