@@ -123,7 +123,7 @@ struct Pi0ModelArch : public ModelArchBase {
     std::vector<float> state_mean, state_std, action_mean, action_std;
 
     std::mt19937 rng{std::random_device{}()};
-    int n_threads = 4;
+    int n_threads = default_cpu_threads();
 };
 
 namespace {
@@ -340,10 +340,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
                 cfg.num_steps, (long long) cfg.real_state_dim, (long long) cfg.real_action_dim,
                 m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
-    {
-        const unsigned hw = std::thread::hardware_concurrency();
-        m->n_threads = (hw == 0) ? 4 : (int) std::min(hw, 8u);
-    }
+    m->n_threads = default_cpu_threads();
     {
         const Backend b = backend_init("vla(pi0)", m->n_threads);
         if (!b.handle) { return nullptr; }

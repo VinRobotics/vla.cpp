@@ -141,7 +141,7 @@ struct Pi05ModelArch : public ModelArchBase {
     bool quantile_norm = false;
 
     std::mt19937 rng{std::random_device{}()};
-    int n_threads = 4;
+    int n_threads = default_cpu_threads();
 };
 
 namespace {
@@ -421,10 +421,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
                 (long long) cfg.n_lang, (long long) m->adarms_cond_dim,
                 m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
-    {
-        const unsigned hw = std::thread::hardware_concurrency();
-        m->n_threads = (hw == 0) ? 4 : (int) std::min(hw, 8u);
-    }
+    m->n_threads = default_cpu_threads();
     {
         const Backend b = backend_init("vla(pi05)", m->n_threads);
         if (!b.handle) { return nullptr; }
