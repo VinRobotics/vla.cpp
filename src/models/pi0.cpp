@@ -22,6 +22,7 @@
 #include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
+#include "models/vision_common.h"
 
 #include <algorithm>
 #include <chrono>
@@ -148,23 +149,6 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_
 }
 
 // CHW-planar float image in [-1,1] for ggml_conv_2d (SigLIP mean/std 0.5).
-bool preprocess_image_chw(const ImageView & v, int64_t side, std::vector<float> & out) {
-    if (v.w != (int) side || v.h != (int) side || !v.data) {
-        std::fprintf(stderr, "vla(pi0): image view is %dx%d, expected %lldx%lld\n",
-                     v.w, v.h, (long long) side, (long long) side);
-        return false;
-    }
-    out.assign((size_t) 3 * side * side, 0.0f);
-    for (int64_t h = 0; h < side; ++h)
-        for (int64_t w = 0; w < side; ++w)
-            for (int64_t c = 0; c < 3; ++c) {
-                float px;
-                if (v.format == PixelFormat::U8) px = ((const uint8_t *) v.data)[(h * side + w) * 3 + c] / 255.0f;
-                else                              px = ((const float  *) v.data)[(h * side + w) * 3 + c];
-                out[c * side * side + h * side + w] = px * 2.0f - 1.0f;
-            }
-    return true;
-}
 
 ggml_tensor * build_gemma_layer(
         ggml_context * ctx, const GemmaLayerW & w,
@@ -542,7 +526,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
         const auto tv0 = clk::now();
         std::vector<float> chw;
         for (int v = 0; v < in.n_images; ++v) {
-            if (!preprocess_image_chw(in.images[v], vit_image_size, chw)) { ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+            if (!preprocess_image_chw("pi0", in.images[v], vit_image_size, chw)) { ggml_gallocr_free(vga); ggml_free(VC); return {}; }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(pi0): vision compute failed (view %d)\n", v);

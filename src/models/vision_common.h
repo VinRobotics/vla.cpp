@@ -17,8 +17,12 @@
 
 #pragma once
 
+#include "model.h"
+
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace vla {
 
@@ -44,6 +48,30 @@ inline void pixel_shuffle_hf(const float * src, float * dst,
                                 (size_t) embed * sizeof(float));
                 }
         }
+}
+
+// HWC interleaved (u8 or float) to CHW planar, scaled to [-1, 1] - the SigLIP
+// convention shared by SmolVLA, pi0, pi0.5 and GR00T N1.5. There is no resize:
+// the caller must hand over an exactly side x side view, which is why the tag is
+// passed in (the error message is the only thing that differed between the four
+// copies this replaces).
+inline bool preprocess_image_chw(const char * arch, const ImageView & v, int64_t side,
+                                 std::vector<float> & out) {
+    if (v.w != (int) side || v.h != (int) side || !v.data) {
+        std::fprintf(stderr, "vla(%s): image view is %dx%d, expected %lldx%lld\n",
+                     arch, v.w, v.h, (long long) side, (long long) side);
+        return false;
+    }
+    out.assign((size_t) 3 * side * side, 0.0f);
+    for (int64_t h = 0; h < side; ++h)
+        for (int64_t w = 0; w < side; ++w)
+            for (int64_t c = 0; c < 3; ++c) {
+                float px;
+                if (v.format == PixelFormat::U8) px = ((const uint8_t *) v.data)[(h * side + w) * 3 + c] / 255.0f;
+                else                             px = ((const float  *) v.data)[(h * side + w) * 3 + c];
+                out[c * side * side + h * side + w] = px * 2.0f - 1.0f;
+            }
+    return true;
 }
 
 }  // namespace vla

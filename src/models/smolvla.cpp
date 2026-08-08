@@ -362,23 +362,6 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_
 }
 
 // CHW-planar float image in [-1,1] for ggml_conv_2d (SigLIP mean/std 0.5).
-bool preprocess_image_chw(const ImageView & v, int64_t side, std::vector<float> & out) {
-    if (v.w != (int) side || v.h != (int) side || !v.data) {
-        std::fprintf(stderr, "vla(smolvla): image view is %dx%d, expected %lldx%lld\n",
-                     v.w, v.h, (long long) side, (long long) side);
-        return false;
-    }
-    out.assign((size_t) 3 * side * side, 0.0f);
-    for (int64_t h = 0; h < side; ++h)
-        for (int64_t w = 0; w < side; ++w)
-            for (int64_t c = 0; c < 3; ++c) {
-                float px;
-                if (v.format == PixelFormat::U8) px = ((const uint8_t *) v.data)[(h * side + w) * 3 + c] / 255.0f;
-                else                              px = ((const float  *) v.data)[(h * side + w) * 3 + c];
-                out[c * side * side + h * side + w] = px * 2.0f - 1.0f;
-            }
-    return true;
-}
 
 bool load_config_from_json(const std::string & path, Config & cfg) {
     std::ifstream f(path);
@@ -1494,7 +1477,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         std::vector<float> chw, post_host((size_t) H * n_patches), shuf_host((size_t) c4 * K);
         bool vok = true;
         for (int v = 0; v < n_views && vok; ++v) {
-            if (!preprocess_image_chw(in.images[v], m->vit_image, chw)) { vok = false; break; }
+            if (!preprocess_image_chw("smolvla", in.images[v], m->vit_image, chw)) { vok = false; break; }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
             if (ggml_backend_graph_compute(m->backend, gA) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(smolvla): vision compute A failed (view %d)\n", v); vok = false; break;
