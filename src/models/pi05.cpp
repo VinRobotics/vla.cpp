@@ -111,6 +111,8 @@ struct Pi05ModelArch : public ModelArchBase {
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_context *        ctx_weights = nullptr;
     std::string           ckpt_path_;
+    // Opened once at load: reopening per predict re-parses the whole GGUF header.
+    gguf_reader           io{"pi05"};
     ggml_type             matmul_type = GGML_TYPE_BF16;
     int64_t               adarms_cond_dim = 0;
 
@@ -398,8 +400,8 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     m->ckpt_path_  = ckpt_path;
     m->matmul_type = std::getenv("VLA_PI05_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
-    gguf_reader g("pi05");
-    if (!g.open(ckpt_path)) return nullptr;
+    if (!m->io.open(ckpt_path)) return nullptr;
+    gguf_reader & g = m->io;
     if (!g.has("pi05.architecture") || g.str("pi05.architecture") != "pi05") {
         std::fprintf(stderr, "vla(pi05): '%s' is not a π0.5 GGUF (pi05.architecture missing/wrong)\n",
                      ckpt_path.c_str());
@@ -649,9 +651,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     std::vector<int32_t> lang_ids(in.lang_tokens, in.lang_tokens + n_lang);
     std::vector<float> lang_rows((size_t) n_lang * hidden_pl);
     {
-        gguf_reader g("pi05");
-        if (!g.open(ckpt_path_)) return {};
-        if (!g.fetch_rows_f32("token_embd.weight", lang_ids, lang_rows.data(), hidden_pl)) return {};
+        if (!io.fetch_rows_f32("token_embd.weight", lang_ids, lang_rows.data(), hidden_pl)) return {};
     }
 
     ggml_init_params cp = { (size_t) 64 * 1024 * 1024, nullptr,  true };

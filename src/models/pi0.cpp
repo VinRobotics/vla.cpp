@@ -96,6 +96,8 @@ struct Pi0ModelArch : public ModelArchBase {
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_context *        ctx_weights = nullptr;
     std::string           ckpt_path_;
+    // Opened once at load: reopening per predict re-parses the whole GGUF header.
+    gguf_reader           io{"pi0"};
     ggml_type             matmul_type = GGML_TYPE_BF16;
 
     // In-tree SigLIP-So400m/14 vision tower (was llama.cpp clip.cpp mmproj).
@@ -320,8 +322,8 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     m->ckpt_path_ = ckpt_path;
     m->matmul_type = std::getenv("VLA_PI0_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
-    gguf_reader g("pi0");
-    if (!g.open(ckpt_path)) return nullptr;
+    if (!m->io.open(ckpt_path)) return nullptr;
+    gguf_reader & g = m->io;
     if (!g.has("pi0.architecture") || g.str("pi0.architecture") != "pi0") {
         std::fprintf(stderr, "vla(pi0): '%s' is not a π₀ GGUF (pi0.architecture missing/wrong)\n",
                      ckpt_path.c_str());
@@ -548,9 +550,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     std::vector<int32_t> lang_ids(in.lang_tokens, in.lang_tokens + n_lang);
     std::vector<float> lang_rows((size_t) n_lang * hidden_pl);
     {
-        gguf_reader g("pi0");
-        if (!g.open(ckpt_path_)) return {};
-        if (!g.fetch_rows_f32("token_embd.weight", lang_ids, lang_rows.data(), hidden_pl)) return {};
+        if (!io.fetch_rows_f32("token_embd.weight", lang_ids, lang_rows.data(), hidden_pl)) return {};
     }
 
     ggml_init_params cp = {  (size_t) 64 * 1024 * 1024,  nullptr,  true };

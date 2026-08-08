@@ -54,6 +54,8 @@ struct Evo1ModelArch : public ModelArchBase {
     ~Evo1ModelArch() override;
 
     std::string           gguf_path;
+    // Opened once at load: reopening per predict re-parses the whole GGUF header.
+    gguf_reader           io{"evo1"};
     ggml_backend_t        backend     = nullptr;
     bool                  is_cuda     = false;
     bool                  is_gpu      = false;
@@ -270,8 +272,8 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
     m->gguf_path = ckpt_path;
     m->matmul_type = std::getenv("VLA_EVO1_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
-    gguf_reader g("evo1");
-    if (!g.open(ckpt_path)) return nullptr;
+    if (!m->io.open(ckpt_path)) return nullptr;
+    gguf_reader & g = m->io;
     if (!g.has("evo1.architecture")) {
         std::fprintf(stderr, "vla(evo1): %s is not an evo1 GGUF (no evo1.architecture KV)\n", ckpt_path.c_str()); return nullptr;
     }
@@ -488,10 +490,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     input_ids.resize(max_text_length, pad_id);
     const int64_t SEQ = max_text_length;
 
-    gguf_reader g("evo1");
-    if (!g.open(gguf_path)) return {};
     std::vector<float> inputs_embeds((size_t) SEQ * lm_hidden);
-    if (!g.fetch_rows_f32("token_embd.weight", input_ids, inputs_embeds.data(), lm_hidden)) return {};
+    if (!io.fetch_rows_f32("token_embd.weight", input_ids, inputs_embeds.data(), lm_hidden)) return {};
     {
         int64_t img_idx = 0;
         for (int64_t p = 0; p < SEQ; ++p) {

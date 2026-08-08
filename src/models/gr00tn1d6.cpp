@@ -50,6 +50,8 @@ struct Gr00tN1d6ModelArch : public ModelArchBase {
     ~Gr00tN1d6ModelArch() override;
 
     std::string           gguf_path;
+    // Opened once at load: reopening per predict re-parses the whole GGUF header.
+    gguf_reader           io{"gr00tn1d6"};
     ggml_backend_t        backend     = nullptr;
     bool                  is_cuda     = false;
     bool                  is_gpu      = false;
@@ -268,8 +270,8 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
     m->gguf_path   = ckpt_path;
     m->matmul_type = std::getenv("VLA_GR00T_BF16_WEIGHTS") ? GGML_TYPE_BF16 : GGML_TYPE_F32;
 
-    gguf_reader g("gr00tn1d6");
-    if (!g.open(ckpt_path)) return nullptr;
+    if (!m->io.open(ckpt_path)) return nullptr;
+    gguf_reader & g = m->io;
     if (!g.has("gr00t_n1_6.architecture")) { std::fprintf(stderr, "vla(gr00tn1d6): %s is not a gr00t_n1_6 GGUF\n", ckpt_path.c_str()); return nullptr; }
     if (!load_config(g, *m, m->cfg)) return nullptr;
     std::printf("vla(gr00tn1d6): vit=%lldd×%lldL×%lldh (Linear patch embed)  pixel_shuffle÷%lld ⇒ n_img_tok=%lld  mlp1=LN(%lld)→Linear→GELU→Linear  "
@@ -468,10 +470,8 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
     const int64_t SEQ = (int64_t) input_ids.size();
     if (SEQ > max_seq_len) { std::fprintf(stderr, "vla(gr00tn1d6): prompt too long (%lld > %lld)\n", (long long) SEQ, (long long) max_seq_len); return {}; }
 
-    gguf_reader g("gr00tn1d6");
-    if (!g.open(gguf_path)) return {};
     std::vector<float> inputs_embeds((size_t) SEQ * H);
-    if (!g.fetch_rows_f32("token_embd.weight", input_ids, inputs_embeds.data(), H)) return {};
+    if (!io.fetch_rows_f32("token_embd.weight", input_ids, inputs_embeds.data(), H)) return {};
     {   int64_t k = 0;
         for (int64_t p = 0; p < SEQ; ++p) if (input_ids[p] == (int32_t) image_token_index) {
             if (k >= n_img) { std::fprintf(stderr, "vla(gr00tn1d6): more <image> tokens than ViT embeds\n"); return {}; }
