@@ -15,6 +15,12 @@ target_include_directories(test_rope_conventions PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_compile_options(test_rope_conventions PRIVATE -Wall -Wextra)
 add_test(NAME rope_conventions COMMAND test_rope_conventions)
 
+# Built as C so the public header stays C-clean.
+add_executable(test_c_api test_c_api.c)
+target_link_libraries(test_c_api PRIVATE vla)
+target_compile_options(test_c_api PRIVATE -Wall -Wextra)
+add_test(NAME c_api COMMAND test_c_api)
+
 add_executable(test_dit_common test_dit_common.cpp)
 target_include_directories(test_dit_common PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_dit_common PRIVATE ggml)

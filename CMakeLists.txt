@@ -210,6 +210,20 @@ target_link_libraries(vlm-server PRIVATE
     PkgConfig::ZeroMQ
 )
 
+# Stable C ABI. Shared so bindings can dlopen it; visibility hidden so only the
+# vla_* symbols are exported and llama/ggml stay internal.
+add_library(vla SHARED src/vla_c_api.cpp)
+target_include_directories(vla
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(vla PRIVATE vla_core)
+set_target_properties(vla PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+    PUBLIC_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/include/vla.h
+)
+
 # One-shot inference CLI: image + tokens -> action, no server or simulator.
 add_executable(vla-cli
     src/serving/vla-cli.cpp
@@ -220,7 +234,7 @@ target_include_directories(vla-cli PRIVATE
 target_link_libraries(vla-cli PRIVATE vla_core)
 
 # --- First-party build hygiene (never applied to the vendored llama.cpp subtree) --
-set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla-server vlm-server vla-cli)
+set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla vla-server vlm-server vla-cli)
 
 foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)
     # Warn on our own C++ only; nvcc device code keeps its own diagnostics.
