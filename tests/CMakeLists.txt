@@ -15,6 +15,12 @@ target_include_directories(test_rope_conventions PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_compile_options(test_rope_conventions PRIVATE -Wall -Wextra)
 add_test(NAME rope_conventions COMMAND test_rope_conventions)
 
+add_executable(test_dit_common test_dit_common.cpp)
+target_include_directories(test_dit_common PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_dit_common PRIVATE ggml)
+target_compile_options(test_dit_common PRIVATE -Wall -Wextra)
+add_test(NAME dit_common COMMAND test_dit_common)
+
 add_executable(test_config_guard test_config_guard.cpp)
 target_include_directories(test_config_guard PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(test_config_guard PRIVATE -Wall -Wextra)

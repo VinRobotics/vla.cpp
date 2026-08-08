@@ -53,5 +53,11 @@ jobs:
           key: llama-b10326-${{ runner.os }}
       - name: build vla-server + vlm-server + vla-cli (CPU, -Wall -Wextra)
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF -DVLA_BUILD_TESTS=ON
           cmake --build build -j"$(nproc)" --target vla-server vlm-server vla-cli
+      # ctest here rather than in cpp-unit: these need ggml headers, so they only
+      # build once llama.cpp has been fetched.
+      - name: ctest
+        run: |
+          cmake --build build -j"$(nproc)" --target test_dit_common
+          ctest --test-dir build --output-on-failure

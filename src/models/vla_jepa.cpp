@@ -21,6 +21,7 @@
 #include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
+#include "models/dit_common.h"
 
 #include <chrono>
 #include <cmath>
@@ -101,13 +102,6 @@ struct VlaJepaModelArch : public ModelArchBase {
 };
 
 namespace {
-
-ggml_tensor * adaln(ggml_context * C, ggml_tensor * x, ggml_tensor * temb, ggml_tensor * lw, ggml_tensor * lb, int64_t dim, float eps) {
-    ggml_tensor * cond = ggml_add(C, ggml_mul_mat(C, lw, ggml_silu(C, temb)), lb);
-    ggml_tensor * sc = ggml_view_1d(C, cond, dim, 0), * sh = ggml_view_1d(C, cond, dim, (size_t) dim * sizeof(float));
-    ggml_tensor * xn = ggml_norm(C, x, eps);
-    return ggml_add(C, ggml_add(C, xn, ggml_mul(C, xn, sc)), sh);
-}
 
 ggml_tensor * rope2d(ggml_context * C, ggml_tensor * x, ggml_tensor * cos_t, ggml_tensor * sin_t) {
     const int64_t hd = x->ne[0], S = x->ne[1], Hh = x->ne[2]; const int64_t half = hd / 2;
@@ -264,18 +258,6 @@ bool preprocess_image_patches(const ImageView & v, int64_t side, int64_t ps, int
                     for (int64_t t = 0; t < tps; ++t) out[s * pf + ch * tps * ps * ps + t * ps * ps + ph * ps + pw] = val;
                 }
     return true;
-}
-
-void timesteps_proj(int64_t bucket, std::vector<float> & out) {
-    const int64_t half = 128; const float lm = std::log(10000.0f); const float t = (float) bucket;
-    out.assign(256, 0.0f);
-    for (int64_t i = 0; i < half; ++i) { const float emb = t * std::exp(-lm * (float) i / (float) (half - 1)); out[i] = std::cos(emb); out[half + i] = std::sin(emb); }
-}
-
-void action_sinusoid(int64_t bucket, int64_t dim, int64_t T, std::vector<float> & out) {
-    const int64_t half = dim / 2; const float step = std::log(10000.0f) / (float) half; const float t = (float) bucket;
-    out.assign((size_t) T * dim, 0.0f);
-    for (int64_t tk = 0; tk < T; ++tk) for (int64_t i = 0; i < half; ++i) { const float emb = t * std::exp(-(float) i * step); out[tk * dim + i] = std::sin(emb); out[tk * dim + half + i] = std::cos(emb); }
 }
 
 bool load_config(const gguf_reader & g, VlaJepaModelArch & m, Config & cfg) {
