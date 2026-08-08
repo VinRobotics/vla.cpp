@@ -184,7 +184,7 @@ struct gguf_source {
         const int64_t id     = gguf_find_tensor(gctx, name.c_str());
         const size_t  offset = data_off + gguf_get_tensor_offset(gctx, id);
         const size_t  bytes  = gguf_get_tensor_size(gctx, id);
-        if (std::fseek(fp, (long) offset, SEEK_SET) != 0) {
+        if (fseeko(fp, (off_t) offset, SEEK_SET) != 0) {
             std::fprintf(stderr, "vla: fseek failed for %s\n", name.c_str());
             return false;
         }
@@ -218,7 +218,7 @@ struct gguf_source {
             return false;
         }
         const size_t offset = data_off + gguf_get_tensor_offset(gctx, id);
-        if (std::fseek(fp, (long) offset, SEEK_SET) != 0) return false;
+        if (fseeko(fp, (off_t) offset, SEEK_SET) != 0) return false;
         return std::fread(dst, 1, bytes, fp) == bytes;
     }
 
@@ -950,7 +950,6 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
         if (k * k != m->vit_n_tokens) {
             std::fprintf(stderr, "vla: smolvla vit geometry mismatch (grid=%lld scale=%lld -> %lld tokens, KV says %lld)\n",
                          (long long) grid, (long long) m->vit_scale, (long long) (k * k), (long long) m->vit_n_tokens);
-            ggml_backend_free(m->backend);
             delete m;
             return nullptr;
         }
@@ -962,7 +961,6 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
     if (!use_gguf) {
         if (!st.open(ckpt_path)) {
             std::fprintf(stderr, "vla: failed to open %s\n", ckpt_path.c_str());
-            ggml_backend_free(m->backend);
             delete m;
             return nullptr;
         }
@@ -977,7 +975,6 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
             }
             if (max_layer < 0) {
                 std::fprintf(stderr, "vla: cannot infer n_layers from %s\n", ckpt_path.c_str());
-                ggml_backend_free(m->backend);
                 delete m;
                 return nullptr;
             }
@@ -987,7 +984,6 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
             const auto it = st.tensors.find("model.vlm_with_expert.lm_expert.layers.0.mlp.gate_proj.weight");
             if (it == st.tensors.end() || it->second.shape.size() != 2) {
                 std::fprintf(stderr, "vla: missing/malformed expert gate_proj for shape derivation\n");
-                ggml_backend_free(m->backend);
                 delete m;
                 return nullptr;
             }
@@ -997,7 +993,6 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
                 std::fprintf(stderr, "vla: expert_h mismatch - config implies %lld, "
                                      "checkpoint gate_proj has %lld\n",
                              (long long) m->cfg.expert_h, (long long) it->second.shape[1]);
-                ggml_backend_free(m->backend);
                 delete m;
                 return nullptr;
             }
@@ -1017,7 +1012,6 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
     if (use_gguf) {
         if (!load_normalizer_stats_from_gguf(gst, *m)) {
             std::fprintf(stderr, "vla: failed to load normalizer stats from gguf\n");
-            ggml_backend_free(m->backend);
             delete m;
             return nullptr;
         }
@@ -1038,7 +1032,6 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
     m->ctx_weights = ggml_init(gparams);
     if (!m->ctx_weights) {
         std::fprintf(stderr, "vla: ggml_init (weights) failed\n");
-        ggml_backend_free(m->backend);
         delete m;
         return nullptr;
     }
@@ -1564,7 +1557,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
 
         std::vector<float> state_host(cfg.max_state_dim);
         std::memcpy(state_host.data(), in.state, cfg.max_state_dim * sizeof(float));
-        for (int64_t i = 0; i < cfg.real_state_dim; ++i) {
+        for (int64_t i = 0; i < cfg.real_state_dim && i < cfg.max_state_dim; ++i) {
             state_host[i] = (state_host[i] - m->state_mean[i]) / (m->state_std[i] + cfg.norm_eps);
         }
 
@@ -1691,7 +1684,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
 
     std::vector<float> state_host(cfg.max_state_dim);
     std::memcpy(state_host.data(), in.state, cfg.max_state_dim * sizeof(float));
-    for (int64_t i = 0; i < cfg.real_state_dim; ++i) {
+    for (int64_t i = 0; i < cfg.real_state_dim && i < cfg.max_state_dim; ++i) {
         state_host[i] = (state_host[i] - m->state_mean[i]) / (m->state_std[i] + cfg.norm_eps);
     }
 

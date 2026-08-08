@@ -662,13 +662,24 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
         if (cudaGetDeviceCount(&dev_count) == cudaSuccess && dev_count > 0) {
             cudaSetDevice(0);
 
+            // Set false by any int2 tensor whose .scale sidecar is missing. The
+            // ladder kernels dereference the scale pointer unconditionally, so a
+            // null one is a device-side out-of-bounds read, not a soft failure.
+            bool scales_ok = true;
+
             auto load_bit = [&](ggml_tensor * t, int64_t N, int64_t K) -> std::pair<int8_t*, float*> {
                 if (m->packed_int2) {
                     int8_t * dp = upload_int8((const uint8_t*) t->data, ggml_nbytes(t), m->cuda_devptrs);
                     std::string nm = ggml_get_name(t);
                     std::string sn = nm.substr(0, nm.size() - 7) + ".scale";
                     std::vector<float> sc = g.read_f32(sn.c_str());
-                    float * dws = sc.empty() ? nullptr : upload_f32_scales(sc.data(), (int) sc.size(), m->cuda_devptrs);
+                    if (sc.empty()) {
+                        std::fprintf(stderr, "vla(bitvla): int2 tensor %s has no %s sidecar\n",
+                                     nm.c_str(), sn.c_str());
+                        scales_ok = false;
+                        return { dp, nullptr };
+                    }
+                    float * dws = upload_f32_scales(sc.data(), (int) sc.size(), m->cuda_devptrs);
                     return { dp, dws };
                 }
                 float ws;
@@ -682,7 +693,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                 (int) m->lm_inter, (int) m->lm_layers, m->lm_rope_base, m->lm_rms_eps, max_seq);
             if (m->lm_cuda_ctx) {
                 bool pack_ok = true;
-                for (int64_t L = 0; L < m->lm_layers && pack_ok; ++L) {
+                for (int64_t L = 0; L < m->lm_layers && pack_ok && scales_ok; ++L) {
                     bitvla_lm_layer_cuda lyr{};
 
                     lyr.attn_norm_w     = upload_bf16_from_f32((const float*) m->lm[L].attn_norm->data,     m->lm_hidden, m->cuda_devptrs);
@@ -700,8 +711,14 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
 
                     if (m->packed_int2) {
                         lyr.gate_up_packed = upload_int8((const uint8_t*) m->lm[L].Wgate_up->data, ggml_nbytes(m->lm[L].Wgate_up), m->cuda_devptrs);
-                        std::vector<float> sc = g.read_f32(("lm.blk." + std::to_string(L) + ".ffn_gate_up.scale").c_str());
-                        lyr.gate_up_ws = upload_f32_scales(sc.data(), (int) sc.size(), m->cuda_devptrs);
+                        const std::string sn = "lm.blk." + std::to_string(L) + ".ffn_gate_up.scale";
+                        std::vector<float> sc = g.read_f32(sn.c_str());
+                        if (sc.empty()) {
+                            std::fprintf(stderr, "vla(bitvla): missing %s\n", sn.c_str());
+                            scales_ok = false;
+                        } else {
+                            lyr.gate_up_ws = upload_f32_scales(sc.data(), (int) sc.size(), m->cuda_devptrs);
+                        }
                     } else {
                         std::vector<float> ws2;
                         lyr.gate_up_packed = pack_and_upload_fused(
@@ -714,7 +731,10 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                     { auto r = load_bit(m->lm[L].Wdown, m->lm_hidden, m->lm_inter); lyr.down_packed = r.first; lyr.down_ws = r.second; }
                     bitvla_lm_cuda_set_layer(m->lm_cuda_ctx, (int) L, &lyr);
                 }
-                if (pack_ok) {
+                if (!scales_ok) {
+                    std::fprintf(stderr, "vla(bitvla): int2 scale sidecars incomplete; refusing the CUDA LM\n");
+                }
+                if (pack_ok && scales_ok) {
                     __nv_bfloat16* onorm = upload_bf16_from_f32((const float*) m->lm_output_norm->data, m->lm_hidden, m->cuda_devptrs);
                     bitvla_lm_cuda_set_output_norm(m->lm_cuda_ctx, onorm);
 
@@ -891,6 +911,10 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                 if (!t) continue;
                 const size_t nb = ggml_nbytes(t);
                 void* copy = std::malloc(nb);
+                if (!copy) {
+                    std::fprintf(stderr, "vla(bitvla): out of memory keeping %zu bytes of CPU weights\n", nb);
+                    return nullptr;
+                }
                 std::memcpy(copy, t->data, nb);
                 t->data = copy;
                 m->cpu_kept_ptrs.push_back(copy);

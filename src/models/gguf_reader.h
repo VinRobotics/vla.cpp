@@ -58,11 +58,28 @@ struct gguf_reader {
         return true;
     }
 
-    bool        has(const char * k) const { return gguf_find_key(gctx, k) >= 0; }
-    uint32_t    u32(const char * k) const { return gguf_get_val_u32(gctx, gguf_find_key(gctx, k)); }
-    float       f32(const char * k) const { return gguf_get_val_f32(gctx, gguf_find_key(gctx, k)); }
-    double      f64(const char * k) const { return gguf_get_val_f64(gctx, gguf_find_key(gctx, k)); }
-    std::string str(const char * k) const { const int64_t id = gguf_find_key(gctx, k); return id < 0 ? std::string() : std::string(gguf_get_val_str(gctx, id)); }
+    bool has(const char * k) const { return gguf_find_key(gctx, k) >= 0; }
+
+    // The gguf_get_val_* helpers assert on a type mismatch, which aborts the
+    // process on a malformed file. Check the declared type first and fall back to
+    // the caller's default instead. (model.cpp's arch probe already did this; the
+    // reader did not.)
+    bool typed_key(const char * k, gguf_type want, int64_t * id_out) const {
+        const int64_t id = gguf_find_key(gctx, k);
+        if (id < 0) return false;
+        if (gguf_get_kv_type(gctx, id) != want) {
+            std::fprintf(stderr, "vla(%s): key %s has unexpected type %d\n",
+                         arch, k, (int) gguf_get_kv_type(gctx, id));
+            return false;
+        }
+        *id_out = id;
+        return true;
+    }
+
+    uint32_t u32(const char * k) const { int64_t id; return typed_key(k, GGUF_TYPE_UINT32,  &id) ? gguf_get_val_u32(gctx, id) : 0u; }
+    float    f32(const char * k) const { int64_t id; return typed_key(k, GGUF_TYPE_FLOAT32, &id) ? gguf_get_val_f32(gctx, id) : 0.f; }
+    double   f64(const char * k) const { int64_t id; return typed_key(k, GGUF_TYPE_FLOAT64, &id) ? gguf_get_val_f64(gctx, id) : 0.0; }
+    std::string str(const char * k) const { int64_t id; return typed_key(k, GGUF_TYPE_STRING, &id) ? std::string(gguf_get_val_str(gctx, id)) : std::string(); }
     const ggml_tensor * meta(const char * name) const { return ggml_get_tensor(meta_ctx, name); }
 
     // Resident type for a weight: keep a quantized source type (Q8_0, Q4_0, ...)
@@ -72,11 +89,20 @@ struct gguf_reader {
         return (src && ggml_is_quantized(src->type)) ? src->type : prefer;
     }
 
-    bool read_raw(const char * name, void * buf) {
+    // cap is the destination capacity in bytes and must equal the declared tensor
+    // size. Without it a tensor with the expected ne[0] but an extra dimension
+    // writes past a caller's vector. On failure buf may be partially written, so
+    // callers must not keep it.
+    bool read_raw(const char * name, void * buf, size_t cap) {
         const int64_t id = gguf_find_tensor(gctx, name);
         if (id < 0) { std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name); return false; }
         const size_t off = data_off + gguf_get_tensor_offset(gctx, id);
         const size_t nb  = gguf_get_tensor_size(gctx, id);
+        if (nb != cap) {
+            std::fprintf(stderr, "vla(%s): tensor %s is %zu bytes, caller expects %zu\n",
+                         arch, name, nb, cap);
+            return false;
+        }
         if (fseeko(fp, (off_t) off, SEEK_SET) != 0) return false;
         return std::fread(buf, 1, nb, fp) == nb;
     }
@@ -86,8 +112,8 @@ struct gguf_reader {
         if (!t) { std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name); return {}; }
         const int64_t n = ggml_nelements(t);
         std::vector<float> out(n);
-        if (t->type == GGML_TYPE_F32) { if (!read_raw(name, out.data())) return {}; }
-        else if (t->type == GGML_TYPE_BF16) { std::vector<ggml_bf16_t> tmp(n); if (!read_raw(name, tmp.data())) return {}; ggml_bf16_to_fp32_row(tmp.data(), out.data(), n); }
+        if (t->type == GGML_TYPE_F32) { if (!read_raw(name, out.data(), out.size() * sizeof(float))) return {}; }
+        else if (t->type == GGML_TYPE_BF16) { std::vector<ggml_bf16_t> tmp(n); if (!read_raw(name, tmp.data(), tmp.size() * sizeof(ggml_bf16_t))) return {}; ggml_bf16_to_fp32_row(tmp.data(), out.data(), n); }
         else { std::fprintf(stderr, "vla(%s): tensor %s unsupported type %d\n", arch, name, (int) t->type); return {}; }
         return out;
     }
@@ -100,7 +126,7 @@ struct gguf_reader {
             const ggml_tensor * t = meta(name);
             if (!t) { std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name); return {}; }
             std::vector<uint8_t> o(ggml_nbytes(t));
-            if (!read_raw(name, o.data())) return {};
+            if (!read_raw(name, o.data(), o.size())) return {};
             return o;
         }
         std::vector<float> f = read_f32(name);
