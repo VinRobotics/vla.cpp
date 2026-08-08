@@ -1,6 +1,6 @@
 # vla-server, CPU or CUDA. cmake fetches llama.cpp at build time.
-#   GPU sm_120 (default):  docker build -t vla-cpp .
-#   GPU other arch:        --build-arg CUDA_ARCH=89   (89=RTX40 90=H100 87=Orin; sm_120 needs CUDA>=12.8)
+#   GPU sm_89 (default):   docker build -t vla-cpp .
+#   GPU other arch:        --build-arg CUDA_ARCH=120  (86=RTX30 90=H100 87=Orin 120=RTX50; sm_120 needs CUDA>=12.8)
 #   older card:            --build-arg BASE_IMAGE=nvidia/cuda:12.4.1-devel-ubuntu24.04 --build-arg CUDA_ARCH=86
 #   CPU:                   --build-arg BACKEND=cpu --build-arg BASE_IMAGE=ubuntu:24.04 -t vla-cpp-cpu
 #   run:  docker run --gpus all -p5555:5555 -v $PWD/models:/models vla-cpp --bind tcp://*:5555 /models/M.gguf
@@ -18,7 +18,7 @@ WORKDIR /src
 COPY . .
 
 ARG BACKEND=cuda
-ARG CUDA_ARCH=120
+ARG CUDA_ARCH=89
 # nvcc can segfault on the flash-attn kernels under high -j; lower JOBS if so.
 ARG JOBS=
 # CUDA: -devel ships only a libcuda stub (real driver injected at runtime), so
