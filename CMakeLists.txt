@@ -202,6 +202,7 @@ add_executable(vlm-server
 )
 target_include_directories(vlm-server PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/proto-gen
+    ${llama_SOURCE_DIR}/vendor/stb
     ${CPPZMQ_INCLUDE_DIR}
 )
 target_link_libraries(vlm-server PRIVATE
