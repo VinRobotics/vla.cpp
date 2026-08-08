@@ -427,6 +427,9 @@ bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
     cfg.hidden = m.lm_hidden; cfg.n_q_heads = m.n_q; cfg.n_kv_heads = m.n_kv; cfg.head_dim = m.lm_head_dim; cfg.n_layers = m.lm_layers;
     cfg.num_steps = (int) m.num_steps; cfg.rms_eps = m.lm_rms_eps;
     cfg.rope_n_dims = (int) m.lm_head_dim; cfg.rope_mode = GGML_ROPE_TYPE_NEOX; cfg.rope_freq_base = m.lm_rope_base;
+    // Raw output: this arch expects the client to apply the dataset statistics
+    // (see the --stats-json flag in eval/client).
+    cfg.denormalized = false;
     cfg.norm_eps = 1e-8f;
     return true;
 }

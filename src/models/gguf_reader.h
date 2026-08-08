@@ -123,6 +123,14 @@ struct gguf_reader {
     // gemma_norm adds 1.0 per weight.
     std::vector<uint8_t> read_convert(const char * name, ggml_type target, bool gemma_norm = false) {
         if (target != GGML_TYPE_F32 && target != GGML_TYPE_BF16) {
+            if (gemma_norm) {
+                // The +1 can only be applied to unpacked floats. Silently skipping
+                // it would give a quantized Gemma checkpoint wrong norm weights and
+                // no diagnostic, so refuse instead.
+                std::fprintf(stderr, "vla(%s): %s needs the Gemma norm +1 but the target type is packed\n",
+                             arch, name);
+                return {};
+            }
             const ggml_tensor * t = meta(name);
             if (!t) { std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name); return {}; }
             std::vector<uint8_t> o(ggml_nbytes(t));

@@ -104,7 +104,7 @@ struct OpenVlaOftModelArch : public ModelArchBase {
     float   lm_rope_base=1e4f, lm_rms_eps=1e-6f;
     int64_t chunk=8,action_dim=7,proprio_dim=8,head_hidden=4096,head_blocks=2;
     float   head_ln_eps=1e-5f;
-    int64_t stop_id=2,empty_id=29871;
+    int64_t stop_id=2;
 
     ggml_tensor *d_patch_w,*d_patch_b,*d_cls,*d_reg,*d_pos; std::vector<ViTLayerW> dvit;
     ggml_tensor *s_patch_w,*s_patch_b,*s_pos;               std::vector<ViTLayerW> svit;
@@ -189,7 +189,10 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
     U("openvla_oft.action.chunk",m->chunk); U("openvla_oft.action.action_dim",m->action_dim);
     U("openvla_oft.action.proprio_dim",m->proprio_dim); U("openvla_oft.action.head_hidden",m->head_hidden);
     U("openvla_oft.action.head_blocks",m->head_blocks); F("openvla_oft.action.head_ln_eps",m->head_ln_eps);
-    U("openvla_oft.tokens.stop_id",m->stop_id); U("openvla_oft.tokens.empty_id",m->empty_id);
+    // No empty_id: the reference zeroes the action-slot embeddings rather than
+    // inserting an empty token (modeling_prismatic.py:891), which is what the
+    // zero-filled act0 below does.
+    U("openvla_oft.tokens.stop_id",m->stop_id);
     if (m->lm_head_dim==0) m->lm_head_dim = m->lm_hidden / m->n_q;
 
     if (g.has("openvla_oft.statistics_json")) {
@@ -391,6 +394,10 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
         ggml_tensor*kr=ggml_rope_ext(C,kh,t_pos,nullptr,(int)lm_head_dim,GGML_ROPE_TYPE_NEOX,0,lm_rope_base,1.0f,0.0f,1.0f,32.0f,1.0f);
         ggml_tensor*Q=ggml_cont(C,ggml_permute(C,qr,0,2,1,3)),*K=ggml_cont(C,ggml_permute(C,kr,0,2,1,3)),*V=ggml_cont(C,ggml_permute(C,vh,1,2,0,3));
         ggml_tensor*kq=ggml_mul_mat(C,K,Q); ggml_mul_mat_set_prec(kq,GGML_PREC_F32);
+        // No causal mask on purpose. OpenVLA-OFT ships a patched transformers that
+        // replaces the lower-triangular mask across the whole sequence
+        // (modeling_llama.py:719-723), so the backbone is fully bidirectional here
+        // even though the sibling vla_adapter builds a causal mask.
         ggml_tensor*aw=ggml_soft_max_ext(C,kq,nullptr,lsc,0.0f);
         ggml_tensor*kqv=ggml_mul_mat(C,V,aw);
         ggml_tensor*att=ggml_reshape_2d(C,ggml_cont(C,ggml_permute(C,kqv,0,2,1,3)),HC,SEQ);

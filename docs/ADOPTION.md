@@ -1,29 +1,28 @@
 # Adoption notes
 
-vla.cpp is technically solid (7 architectures, self-contained GGUFs, CUDA + Jetson,
-real benchmarks). The gap to llama.cpp-style reach is mostly distribution, not code.
-Ordered by leverage:
+The engine works; the gap is distribution. Roughly in priority order.
 
-1. **Publish on GitHub.** The repo lives on Bitbucket (`bitbucket.org/vinrobotics/vla.cpp`)
-   while the README already links a `github.com/VinRobotics/vla.cpp` URL. llama.cpp's reach
-   came from GitHub visibility, issues, and PRs. A public GitHub mirror is the single biggest
-   lever; nothing else here matters as much.
+1. **C ABI.** Done: `include/vla.h` and `libvla`. `src/model.h` is C++ only, so
+   without it nothing outside C++ can link the engine.
 
-2. **Ship the models.** All seven GGUFs are already published under
-   [`vrfai`](https://huggingface.co/vrfai) on the Hub - the README's "coming soon" rows are
-   stale (now fixed). Keep the model table pointing at the real repos so the policies are
-   one `hf download` away.
+2. **Python bindings.** Done: `bindings/python`. Robotics runs on Python; the
+   only other way in is the ZeroMQ server plus a hand-written client.
 
-3. **Cut releases.** `v0.1.0` is the first tag (see `CHANGELOG.md`). Tagged releases +
-   changelog give users something to pin and cite.
+3. **Prebuilt binaries.** `.github/workflows/build.yml` already builds
+   `vla-server`, `vlm-server` and `vla-cli` and uploads nothing. Tagged
+   artifacts (linux x86-64 CPU/CUDA, linux aarch64 Jetson, macOS arm64 Metal)
+   plus a published Docker image remove the build step.
 
-4. **Rotate the committed credential.** The local `.git/config` remote URL embeds an
-   access token (`https://<token>@bitbucket.org/...`). It is never pushed (git config is not
-   tracked), so this is hygiene, not a live leak - but rotate it and use a credential helper
-   or SSH remote instead of an inline token.
+4. **One-command model fetch.** Today: install `huggingface_hub`, run
+   `hf download`, pass a path. llama.cpp solved this with `-hf user/repo`. The
+   GGUFs are already on the Hub under [`vrfai`](https://huggingface.co/vrfai).
 
-5. **Lower the build bar (optional).** A CUDA `Dockerfile` now exists; publishing a prebuilt
-   image (and, later, macOS/Metal or ROCm backends) removes the from-source step that stops
-   most drive-by users.
+5. **Reproducible benchmarks.** The README latency table has no in-repo source
+   and disagrees with `ci/baselines/rtx3090.json`. A `vla-bench` that emits the
+   table, with quantization and memory columns, makes it checkable.
 
-None of these change inference behaviour; they change who can find and run it.
+6. **Contributor path.** Adding an architecture touches six sites, none written
+   down: the `Arch` enum and factory in `src/arch.h`, the key list, string map
+   and switch in `src/model.cpp`, and `CMakeLists.txt`.
+
+None of these change inference behaviour.

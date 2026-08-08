@@ -649,8 +649,11 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now() - tv0).count();
         ggml_gallocr_free(vga); ggml_free(VC);
 
-        // π0.5's image tokens are the raw PaliGemma projector features: this undoes
-        // the 1/sqrt(hidden) the shared vision graph applies (π0 keeps them scaled).
+        // pi05's image tokens are the raw PaliGemma projector features: this undoes
+        // the 1/sqrt(hidden) the shared vision graph applies (pi0 keeps them
+        // scaled). Deliberately inside this branch: precomputed_img_emb replaces
+        // the tower, so a caller supplies LM-ready features and must not be
+        // rescaled here. See the Inputs::precomputed_img_emb contract in model.h.
         const float img_scale = (float) std::sqrt((double) hidden_pl);
         for (float & x : img_emb_host) x *= img_scale;
     }

@@ -27,10 +27,10 @@ from consumer GPUs down to Jetson-class boards - or **Intel GPUs** via SYCL.
 - CUDA 12.x (optional - required only for CUDA GPU builds)
 - Intel oneAPI 2025.x + GPU compute runtime (optional - only for Intel GPU
   builds, see [docs/backend/sycl.md](docs/backend/sycl.md))
-- `libzmq3-dev`, `libprotobuf-dev`, `protobuf-compiler`
+- `libzmq3-dev`, `cppzmq-dev`, `libprotobuf-dev`, `protobuf-compiler`
 
 ```bash
-sudo apt-get install -y libzmq3-dev libprotobuf-dev protobuf-compiler
+sudo apt-get install -y libzmq3-dev cppzmq-dev libprotobuf-dev protobuf-compiler
 ```
 
 ### From source
@@ -84,8 +84,8 @@ export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
 
-Check [docs/backend](docs/backend) for compiling `vla.cpp` with other platforms.
-WLS2 and Apple Silicon has been tested. 
+Check [docs/backend](docs/backend) for compiling `vla.cpp` on other platforms.
+WSL2 and Apple Silicon are both tested.
 
 ---
 

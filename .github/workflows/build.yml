@@ -17,10 +17,15 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: pixel-shuffle channel order
+      # Compiled directly rather than through cmake: these are pure and need
+      # neither llama.cpp nor the protobuf/zmq toolchain.
+      - name: pure unit tests
         run: |
-          g++ -std=c++17 -Isrc -Wall -Wextra tests/test_vision_common.cpp -o /tmp/test_vision_common
-          /tmp/test_vision_common
+          for t in test_vision_common test_rope_conventions test_config_guard; do
+            g++ -std=c++17 -Isrc -Wall -Wextra -fsanitize=address,undefined \
+                -fno-omit-frame-pointer "tests/$t.cpp" -o "/tmp/$t"
+            "/tmp/$t"
+          done
 
   py-tooling:
     runs-on: ubuntu-24.04

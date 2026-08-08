@@ -17,9 +17,7 @@ To disable the Metal build at compile time use the `-DGGML_METAL=OFF` cmake opti
 When built with Metal support, you can explicitly disable GPU inference with the `--n-gpu-layers 0` command-line argument.
 
 ```bash
-# Fetch llama.cpp at pinned tag and apply local patch
-bash patches/patch.sh
-
+# cmake fetches llama.cpp at the pinned tag; no patch step.
 # On MacOS, Metal is enabled by default
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(sysctl -n hw.ncpu)
