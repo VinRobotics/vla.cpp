@@ -77,10 +77,8 @@ struct Config {
     int     rope_mode;        ///< RoPE variant (NeoX / GPT-J / etc).
     float   rope_freq_base;   ///< RoPE base frequency.
 
-    /// True if @ref predict already applied the dataset statistics, so its output
-    /// is in world units. False means the caller must un-normalise (the GR00T
-    /// family and VLA-JEPA, which expect a host-side affine from a stats JSON).
-    /// Branch on this rather than on the architecture name.
+    /// True if @ref predict already applied the dataset statistics. False for the
+    /// GR00T family and VLA-JEPA, whose callers un-normalise from a stats JSON.
     bool    denormalized = true;
 };
 
@@ -126,12 +124,9 @@ struct Inputs {
     const ImageView* images;          ///< Camera views (host memory).
     int              n_images;        ///< Number of @ref images.
 
-    /// Pre-computed image embeddings; bypasses the vision tower entirely.
-    /// Layout is [n_img_views * n_img, hidden]. These are handed to the language
-    /// backbone as-is, so they must already be in whatever scale that arch's LM
-    /// expects -- which differs per arch: pi0 wants the projector output scaled by
-    /// 1/sqrt(hidden), pi0.5 wants it unscaled. Supplying tower output from a
-    /// different arch will not error, it will just be wrong.
+    /// Pre-computed image embeddings, [n_img_views * n_img, hidden]; bypasses the
+    /// vision tower. Passed to the LM as-is, so the scale is arch-specific: pi0
+    /// expects the projector output times 1/sqrt(hidden), pi0.5 expects it raw.
     const float*     precomputed_img_emb = nullptr;
     int              n_img_views         = 0; ///< Number of views in
                                               ///  @ref precomputed_img_emb.
@@ -184,11 +179,8 @@ const Config& model_config(const Model* m);
 /**
  * @brief Run one forward pass.
  *
- * Whether the returned actions are in world units or still normalised depends
- * on the architecture -- see @ref Config::denormalized. Most archs un-normalise
- * internally; the GR00T family and VLA-JEPA return raw values and expect the
- * caller to apply the dataset statistics. NaN/Inf inputs cause the call to
- * abort.
+ * See @ref Config::denormalized for whether the result is in world units.
+ * NaN/Inf inputs cause the call to abort.
  *
  * @param m  A handle from @ref model_load.
  * @param in Filled-in @ref Inputs struct.

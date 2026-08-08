@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The Config invariant model_load enforces for every arch: predict() sizes host
-// buffers from the max_* dims and loops to the real_* dims, so real > max is an
-// out-of-bounds write on the first call. SmolVLA shipped that loop unbounded.
+// predict() sizes host buffers from the max_* dims and loops to the real_* dims,
+// so real > max writes out of bounds. SmolVLA shipped that loop unbounded.
 
 #include "model.h"
 
@@ -22,8 +21,7 @@
 #include <cassert>
 #include <cstdio>
 
-// Mirrors config_is_sane() in src/model.cpp. Kept in sync by this test failing
-// if the rule there is relaxed.
+// Mirrors config_is_sane() in src/model.cpp.
 static bool sane(const vla::Config & c) {
     if (c.real_state_dim  < 0 || c.max_state_dim  < 0) return false;
     if (c.real_action_dim < 0 || c.max_action_dim < 0) return false;

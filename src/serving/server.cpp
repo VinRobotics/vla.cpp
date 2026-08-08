@@ -57,9 +57,8 @@ bool decode_image(const vla::Image & img,
                          data.size());
             return false;
         }
-        // Read the header first: stbi_load allocates 3*w*h before returning, so a
-        // small JPEG declaring huge dimensions would allocate gigabytes before any
-        // check on the decoded size could reject it.
+        // Header first: stbi_load allocates 3*w*h before returning, so a small JPEG
+        // declaring huge dimensions would allocate gigabytes before any check.
         if (!stbi_info_from_memory(
                 reinterpret_cast<const unsigned char *>(data.data()),
                 static_cast<int>(data.size()), &w, &h, &ch)) {
@@ -125,8 +124,8 @@ bool decode_image(const vla::Image & img,
 
         f32.resize(pixels);
         std::memcpy(f32.data(), img.data().data(), expected);
-        // The other float inputs are swept for NaN/Inf; pixels were not, so a
-        // non-finite pixel used to propagate all the way out as a robot action.
+        // State and noise are swept for NaN/Inf; pixels were not, so a bad pixel
+        // came back out as a robot action.
         for (size_t i = 0; i < pixels; ++i) {
             if (!std::isfinite(f32[i])) {
                 std::fprintf(stderr, "vla-server: F32_RGB_01 pixel %zu is not finite\n", i);
@@ -150,9 +149,8 @@ std::string make_error_response(uint64_t request_id, const std::string & msg) {
     return resp.SerializeAsString();
 }
 
-// Discard any frames after the first. Returns true if there were some, meaning
-// the request was malformed. Must run to completion: leaving a frame queued
-// keeps REP in receive state and the next send throws EFSM.
+// Discard frames after the first; true means the request was malformed. Must run
+// to completion: a queued frame keeps REP in receive state and send throws EFSM.
 bool drain_extra_frames(zmq::socket_t & sock) {
     bool extra = false;
     while (sock.get(zmq::sockopt::rcvmore)) {
@@ -266,10 +264,8 @@ int main(int argc, char ** argv) {
     zmq::context_t zctx( 1);
     zmq::socket_t  sock(zctx, zmq::socket_type::rep);
     sock.set(zmq::sockopt::linger, 0);
-    // Cap inbound messages so one oversized request cannot exhaust memory. 64 MiB
-    // is far above any real request (16 views of 512x512 F32 RGB is ~50 MiB) and
-    // low enough that protobuf's several-fold expansion during ParseFromArray
-    // stays bounded.
+    // 64 MiB is above any real request (16 views of 512x512 F32 RGB is ~50 MiB) and
+    // low enough to bound protobuf's expansion during ParseFromArray.
     sock.set(zmq::sockopt::maxmsgsize, int64_t(64) * 1024 * 1024);
     sock.bind(bind_addr);
     std::printf("vla-server: bound to %s. ready.\n", bind_addr.c_str());
@@ -324,10 +320,8 @@ int main(int argc, char ** argv) {
             continue;
         }
 
-        // REP will not let us reply until the whole multipart message is received,
-        // and send_reply treats a failed send as fatal - so an unauthenticated
-        // client could shut the server down with one two-frame request. The
-        // protocol is single-frame: drain any extras and reject.
+        // Without this an unauthenticated client shuts the server down with one
+        // two-frame request: the reply fails and send_reply sets g_shutdown.
         if (drain_extra_frames(sock)) {
             send_reply(make_error_response(0, "expected a single-frame request"));
             continue;

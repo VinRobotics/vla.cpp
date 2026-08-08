@@ -60,10 +60,8 @@ struct gguf_reader {
 
     bool has(const char * k) const { return gguf_find_key(gctx, k) >= 0; }
 
-    // The gguf_get_val_* helpers assert on a type mismatch, which aborts the
-    // process on a malformed file. Check the declared type first and fall back to
-    // the caller's default instead. (model.cpp's arch probe already did this; the
-    // reader did not.)
+    // gguf_get_val_* asserts on a type mismatch, killing the process on a bad
+    // file. Check the declared type first.
     bool typed_key(const char * k, gguf_type want, int64_t * id_out) const {
         const int64_t id = gguf_find_key(gctx, k);
         if (id < 0) return false;
@@ -89,10 +87,9 @@ struct gguf_reader {
         return (src && ggml_is_quantized(src->type)) ? src->type : prefer;
     }
 
-    // cap is the destination capacity in bytes and must equal the declared tensor
-    // size. Without it a tensor with the expected ne[0] but an extra dimension
-    // writes past a caller's vector. On failure buf may be partially written, so
-    // callers must not keep it.
+    // cap must equal the declared tensor size: a tensor with the expected ne[0] but
+    // an extra dimension would write past the caller's vector. On failure buf may be
+    // partially written.
     bool read_raw(const char * name, void * buf, size_t cap) {
         const int64_t id = gguf_find_tensor(gctx, name);
         if (id < 0) { std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name); return false; }
@@ -124,9 +121,8 @@ struct gguf_reader {
     std::vector<uint8_t> read_convert(const char * name, ggml_type target, bool gemma_norm = false) {
         if (target != GGML_TYPE_F32 && target != GGML_TYPE_BF16) {
             if (gemma_norm) {
-                // The +1 can only be applied to unpacked floats. Silently skipping
-                // it would give a quantized Gemma checkpoint wrong norm weights and
-                // no diagnostic, so refuse instead.
+                // The +1 needs unpacked floats; skipping it would silently give wrong
+                // norm weights.
                 std::fprintf(stderr, "vla(%s): %s needs the Gemma norm +1 but the target type is packed\n",
                              arch, name);
                 return {};

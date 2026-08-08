@@ -120,12 +120,9 @@ struct VlaAdapterModelArch : public ModelArchBase {
 
 namespace {
 
-// Interleaved (GPT-J style) rotation: out[2k] = -x[2k+1], out[2k+1] = x[2k].
-// Note this is paired with a half-split frequency table in fill_cs (j = mi % half),
-// so the two halves of a rotation pair get different angles. That mismatch is in
-// the VLA-Adapter reference too (prismatic/models/action_heads.py builds
-// cat([freqs, freqs]) at :163 but rotates x[..., ::2]/x[..., 1::2] at :137-140),
-// and the checkpoint weights were trained against it. Do not "fix" one side.
+// Interleaved rotation, paired with the half-split frequency table in fill_cs, so
+// a rotation pair gets two different angles. The reference does the same
+// (action_heads.py:163 vs :137-140) and the weights were trained on it. Leave it.
 static ggml_tensor* hrot(ggml_context*C, ggml_tensor*x, int64_t HD){
     int64_t L=x->ne[1],H=x->ne[2];
     ggml_tensor*xp=ggml_reshape_4d(C,x,2,HD/2,L,H);

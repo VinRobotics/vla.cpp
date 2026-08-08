@@ -13,11 +13,9 @@
 // limitations under the License.
 
 // Pins the two DiT time embeddings shared by GR00T N1.5/N1.6/N1.7 and VLA-JEPA.
-//
-// These are pure host functions, which is why they get a real test: three of the
-// four archs that use them have no checkpoint small enough to gate in CI, so the
-// end-to-end sha oracle cannot cover them. The trig order is the trap - the two
-// functions use OPPOSITE conventions and both match the reference.
+// Pure host functions, so they can be tested without a checkpoint, which the
+// end-to-end sha oracle cannot do for three of the four archs. The trig orders
+// are opposite and both match the reference.
 
 #include "models/dit_common.h"
 
@@ -74,7 +72,7 @@ int main() {
                 assert(close(out[tk * dim + i], out[i]));
     }
 
-    // --- The orders really are opposite; a "consistency cleanup" must fail. ---
+    // --- The orders are opposite; a consistency cleanup must fail here. ---
     {
         std::vector<float> tp, as;
         vla::timesteps_proj(7, tp);

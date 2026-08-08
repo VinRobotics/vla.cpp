@@ -543,9 +543,8 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                 (double) m->lm_rope_base, (long long) m->num_actions_chunk, (long long) m->action_dim,
                 (long long) m->vocab_size, m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
-    // Not vla::backend_init: bitvla pins its ggml graph to the CPU on purpose and
-    // offloads the LM through the hand-written ternary CUDA kernels below, so it
-    // must not pick up whichever accelerator the build compiled in.
+    // Not backend_init: the ggml graph stays on CPU and the LM offloads through
+    // the ternary CUDA kernels below.
     m->backend = ggml_backend_cpu_init();
     if (!m->backend) { std::fprintf(stderr, "vla(bitvla): ggml_backend_cpu_init failed\n"); return nullptr; }
     ggml_backend_cpu_set_n_threads(m->backend, m->n_threads);
@@ -662,9 +661,8 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
         if (cudaGetDeviceCount(&dev_count) == cudaSuccess && dev_count > 0) {
             cudaSetDevice(0);
 
-            // Set false by any int2 tensor whose .scale sidecar is missing. The
-            // ladder kernels dereference the scale pointer unconditionally, so a
-            // null one is a device-side out-of-bounds read, not a soft failure.
+            // The ladder kernels dereference the scale pointer unconditionally, so
+            // a missing sidecar is a device-side OOB read, not a soft failure.
             bool scales_ok = true;
 
             auto load_bit = [&](ggml_tensor * t, int64_t N, int64_t K) -> std::pair<int8_t*, float*> {

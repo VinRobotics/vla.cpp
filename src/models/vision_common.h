@@ -50,11 +50,9 @@ inline void pixel_shuffle_hf(const float * src, float * dst,
         }
 }
 
-// HWC interleaved (u8 or float) to CHW planar, scaled to [-1, 1] - the SigLIP
-// convention shared by SmolVLA, pi0, pi0.5 and GR00T N1.5. There is no resize:
-// the caller must hand over an exactly side x side view, which is why the tag is
-// passed in (the error message is the only thing that differed between the four
-// copies this replaces).
+// HWC to CHW planar in [-1, 1], the SigLIP convention used by SmolVLA, pi0, pi0.5
+// and GR00T N1.5. No resize: the view must already be side x side. arch only
+// labels the error.
 inline bool preprocess_image_chw(const char * arch, const ImageView & v, int64_t side,
                                  std::vector<float> & out) {
     if (v.w != (int) side || v.h != (int) side || !v.data) {

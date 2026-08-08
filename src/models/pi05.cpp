@@ -355,8 +355,7 @@ bool load_stats(gguf_reader & g, Pi05ModelArch & m) {
         if (t->ne[0] != (int64_t) dst.size()) { std::printf("vla(pi05): %s dim mismatch - identity\n", name); return; }
         const std::vector<float> identity = dst;
         if (!g.read_raw(name, dst.data(), dst.size() * sizeof(float))) {
-            // A short read leaves dst half-overwritten; restore so "identity"
-            // means identity.
+            // A short read leaves dst half-overwritten.
             dst = identity;
             std::printf("vla(pi05): %s read failed - identity\n", name);
         }
@@ -633,11 +632,9 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now() - tv0).count();
         ggml_gallocr_free(vga); ggml_free(VC);
 
-        // pi05's image tokens are the raw PaliGemma projector features: this undoes
-        // the 1/sqrt(hidden) the shared vision graph applies (pi0 keeps them
-        // scaled). Deliberately inside this branch: precomputed_img_emb replaces
-        // the tower, so a caller supplies LM-ready features and must not be
-        // rescaled here. See the Inputs::precomputed_img_emb contract in model.h.
+        // Undo the 1/sqrt(hidden) the shared vision graph applies; pi05 wants raw
+        // projector features. Inside this branch on purpose: precomputed_img_emb
+        // replaces the tower and is already LM-ready.
         const float img_scale = (float) std::sqrt((double) hidden_pl);
         for (float & x : img_emb_host) x *= img_scale;
     }

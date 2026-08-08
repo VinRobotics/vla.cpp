@@ -283,8 +283,7 @@ bool load_stats(gguf_reader & g, Pi0ModelArch & m) {
         if (t->ne[0] != (int64_t) dst.size()) { std::printf("vla(pi0): %s dim mismatch - identity\n", name); return; }
         const std::vector<float> identity = dst;
         if (!g.read_raw(name, dst.data(), dst.size() * sizeof(float))) {
-            // A short read leaves dst half-overwritten; restore so "identity"
-            // means identity.
+            // A short read leaves dst half-overwritten.
             dst = identity;
             std::printf("vla(pi0): %s read failed - identity\n", name);
         }

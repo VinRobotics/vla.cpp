@@ -87,9 +87,8 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
     return ok;
 }
 
-// Invariants every arch's Config must satisfy. Checked once here rather than in
-// eleven loaders: predict() sizes its host buffers from the max_* dims and loops
-// to the real_* dims, so real > max is an out-of-bounds write on the first call.
+// predict() sizes buffers from the max_* dims and loops to the real_* dims, so
+// real > max writes out of bounds. Checked here once for all archs.
 bool config_is_sane(const Config& c) {
     struct { const char* name; int64_t real; int64_t max; } pairs[] = {
         { "state",  c.real_state_dim,  c.max_state_dim  },

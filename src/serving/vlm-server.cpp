@@ -15,8 +15,7 @@
 #include "vlm/engine.h"
 #include "serving/vlm.pb.h"
 
-// Only for stbi_info_from_memory: the engine decodes through mtmd, which has no
-// dimension guard, so we preflight the JPEG header here at the trust boundary.
+// stbi_info_from_memory only, to preflight JPEG dimensions before mtmd decodes.
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
 #pragma GCC diagnostic push
@@ -111,8 +110,7 @@ int main(int argc, char ** argv) {
     zmq::context_t zctx( 1);
     zmq::socket_t  sock(zctx, zmq::socket_type::router);
     sock.set(zmq::sockopt::linger, 0);
-    // Cap inbound messages so one oversized request cannot exhaust memory. Per
-    // frame only - see the envelope caps in the recv loop for the multipart total.
+    // Per frame only; the recv loop caps the multipart total.
     sock.set(zmq::sockopt::maxmsgsize, int64_t(64) * 1024 * 1024);
     sock.bind(bind_addr);
     std::printf("vlm-server: bound to %s. ready.\n", bind_addr.c_str());
@@ -143,9 +141,8 @@ int main(int argc, char ** argv) {
         }
         if (!(poll[0].revents & ZMQ_POLLIN)) continue;
 
-        // A ROUTER envelope is an identity frame plus an optional empty delimiter.
-        // maxmsgsize bounds each frame but not how many, so without these caps a
-        // peer could stream sub-limit frames until the process runs out of memory.
+        // maxmsgsize bounds each frame but not how many, so a peer could stream
+        // sub-limit frames until memory runs out.
         constexpr size_t kMaxEnvFrames = 8;
         constexpr size_t kMaxEnvBytes  = 64 * 1024;
 
@@ -166,8 +163,7 @@ int main(int argc, char ** argv) {
             if (sock.get(zmq::sockopt::rcvmore)) {
                 env_bytes += part.size();
                 if (env.size() >= kMaxEnvFrames || env_bytes > kMaxEnvBytes) {
-                    // Keep draining so the socket stays in a sane state, but stop
-                    // accumulating and drop the request.
+                    // Keep draining so the socket stays sane, but stop accumulating.
                     env_overflow = true;
                 } else {
                     env.emplace_back(static_cast<const char*>(part.data()), part.size());
@@ -210,8 +206,7 @@ int main(int argc, char ** argv) {
             send_reply(make_error_stream(rid, "ChatRequest has no messages"));
             continue;
         }
-        // Bound the work a single request can buy: without these, one 60 MiB
-        // payload of millions of tiny messages costs template formatting and
+        // One 60 MiB payload of tiny messages would cost template formatting and
         // tokenization far beyond anything n_ctx could consume.
         constexpr int    kMaxMessages  = 512;
         constexpr size_t kMaxTextBytes = 4u * 1024 * 1024;
@@ -238,8 +233,7 @@ int main(int argc, char ** argv) {
             vlm::Image out;
             if (im.encoding() == vlm_chat::Image::JPEG) {
                 const auto & d = im.data();
-                // Header first: the decoder allocates from the declared dimensions,
-                // so a tiny JPEG claiming 30000x30000 would allocate gigabytes.
+                // Header first: mtmd decodes with no dimension guard.
                 int jw = 0, jh = 0, jc = 0;
                 if (d.size() > size_t(INT_MAX) ||
                     !stbi_info_from_memory(reinterpret_cast<const stbi_uc*>(d.data()),

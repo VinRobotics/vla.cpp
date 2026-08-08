@@ -53,8 +53,7 @@
 namespace vla {
 
 #ifdef GGML_USE_SYCL
-/// setenv is POSIX; MSVC and the Windows oneAPI toolchain only have _putenv_s,
-/// which has no "do not overwrite" mode, so check first.
+// setenv is POSIX. _putenv_s has no "do not overwrite" mode, so check first.
 inline void setenv_default(const char * key, const char * val) {
 #ifdef _WIN32
     size_t len = 0;
@@ -74,9 +73,8 @@ struct Backend {
     bool           is_gpu  = false;
 };
 
-/// GPU ordinal for the multi-device backends (CUDA, SYCL); `VLA_DEVICE` overrides.
-/// Rejects junk instead of letting atoi turn it into device 0, so a typo does
-/// not silently run on the wrong GPU.
+/// GPU ordinal for CUDA and SYCL; `VLA_DEVICE` overrides. Junk is rejected, not
+/// silently read as device 0.
 inline int backend_device_index() {
     const char * e = std::getenv("VLA_DEVICE");
     if (!e || !*e) return 0;
@@ -122,8 +120,7 @@ inline Backend backend_init(const char * tag, int n_threads) {
         // disabling oneDNN outright. Only a default: an explicit setting wins,
         // for Intel GPUs where the pool is worth keeping.
         // ggml reads this on the first SYCL entry point, so it must be set here.
-        // call_once because two concurrent model_load calls would otherwise race
-        // on the process environment.
+        // call_once: concurrent model_load would race on the environment.
         static std::once_flag vmm_once;
         std::call_once(vmm_once, [] { setenv_default("GGML_SYCL_ENABLE_VMM", "0"); });
 

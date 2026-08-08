@@ -523,9 +523,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     std::vector<float> state_norm(per_a, 0.0f);
     for (int64_t i = 0; i < per_a; ++i) {
         const float lo = state_min[i], hi = state_max[i];
-        // The converter zero-pads the stats past real_state_dim, so those dims have
-        // lo == hi == 0 and the affine below would map any input to -1. Leave them
-        // at 0 instead of feeding the model a spurious -1.
+        // The converter zero-pads stats past real_state_dim, so lo == hi == 0 there
+        // and the affine below would map anything to -1.
         if (hi <= lo) { state_norm[i] = 0.0f; continue; }
         float xn = 2.0f * (in.state[i] - lo) / (hi - lo + norm_eps_denom) - 1.0f;
         if (xn < -1.0f) xn = -1.0f;

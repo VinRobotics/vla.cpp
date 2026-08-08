@@ -11,9 +11,8 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-# One accelerator per build: src/backend.h compiles in exactly one, so two
-# GGML_* flags would give ggml both backends and vla_core only the higher
-# priority one. Reject it here, before FetchContent configures ggml.
+# src/backend.h compiles in exactly one accelerator, so two GGML_* flags would
+# give ggml both backends and vla_core only one. Reject before FetchContent.
 set(_vla_accel "")
 foreach(_flag GGML_CUDA GGML_SYCL GGML_METAL)
     if(${_flag})

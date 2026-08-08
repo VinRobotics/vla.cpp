@@ -12,16 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Pins the two rotary conventions in the tree so a "cleanup" cannot silently
-// swap one for the other.
+// Pins the two rotary conventions so a cleanup cannot swap one for the other.
 //
-// The interesting case is VLA-Adapter's action head, which pairs an INTERLEAVED
-// rotation with a HALF-SPLIT frequency table. Read on its own that looks like a
-// bug - the two elements of a rotation pair get different angles. It is faithful:
-// the OpenHelix reference has the same mismatch (action_heads.py builds
-// cat([freqs, freqs]) at :163 and rotates x[..., ::2]/x[..., 1::2] at :137-140),
-// so the checkpoint weights were trained against it. Making it self-consistent
-// would break the shipped checkpoints, and this test fails if someone tries.
+// VLA-Adapter's action head pairs an interleaved rotation with a half-split
+// frequency table, so a rotation pair gets two angles. The reference does the same
+// (action_heads.py:163 vs :137-140) and the weights were trained on it, so making
+// it self-consistent would break the shipped checkpoints.
 
 #undef NDEBUG  // keep assert() live even in Release builds
 #include <cassert>
@@ -68,7 +64,7 @@ int main() {
 
     const std::vector<float> x = { 1, 2, 3, 4, 5, 6, 7, 8 };
 
-    // 1. The two rotations are genuinely different, so a swap is observable.
+    // 1. The two rotations differ, so a swap is observable.
     const std::vector<float> ri = rotate_interleaved(x);
     const std::vector<float> rh = rotate_half(x);
     assert(ri != rh);
@@ -81,8 +77,8 @@ int main() {
         assert(adapter_angle(i, hd, base, t) == adapter_angle(i + hd / 2, hd, base, t));
     }
 
-    // 3. The mismatch itself: an interleaved pair (2k, 2k+1) does NOT share an
-    //    angle under this table. Pinned deliberately - see the header comment.
+    // 3. The mismatch: an interleaved pair (2k, 2k+1) does not share an angle
+    //    under this table. Pinned on purpose, see the header.
     bool any_pair_differs = false;
     for (size_t k = 0; k < hd / 2; ++k) {
         if (adapter_angle(2 * k, hd, base, t) != adapter_angle(2 * k + 1, hd, base, t)) {
@@ -91,8 +87,8 @@ int main() {
     }
     assert(any_pair_differs);
 
-    // 4. For contrast: an interleaved table (j = mi / 2) would make every pair
-    //    agree. This is the "obvious fix" that must not be applied.
+    // 4. An interleaved table (j = mi / 2) would make every pair agree. That is
+    //    the fix that must not be applied.
     for (size_t k = 0; k < hd / 2; ++k) {
         const auto interleaved_angle = [&](size_t mi) {
             return t * (1.0 / std::pow(base, (2.0 * (double) (mi / 2)) / (double) hd));

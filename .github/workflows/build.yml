@@ -17,8 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      # Compiled directly rather than through cmake: these are pure and need
-      # neither llama.cpp nor the protobuf/zmq toolchain.
+      # Compiled directly: pure, no llama.cpp or protobuf/zmq needed.
       - name: pure unit tests
         run: |
           for t in test_vision_common test_rope_conventions test_config_guard; do
@@ -55,8 +54,7 @@ jobs:
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF -DVLA_BUILD_TESTS=ON
           cmake --build build -j"$(nproc)" --target vla-server vlm-server vla-cli
-      # ctest here rather than in cpp-unit: these need ggml headers, so they only
-      # build once llama.cpp has been fetched.
+      # Not in cpp-unit: these need ggml headers, so llama.cpp must be fetched.
       - name: ctest
         run: |
           cmake --build build -j"$(nproc)" --target test_dit_common

@@ -12,13 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The DINOv2 + SigLIP dual vision tower shared by OpenVLA-OFT and VLA-Adapter.
-// Both archs run the identical tower and differ only in what they put behind it
-// (Llama-2 + MLPResNet vs Qwen2 + Bridge-Attention), so this used to be the same
-// ~50 lines copied into each file.
-//
-// The DINOv2 branch passes prefix=true (CLS + 4 register tokens, dropped after
-// the blocks) and uses LayerScale; the SigLIP branch passes prefix=false.
+// DINOv2 + SigLIP dual vision tower, shared by OpenVLA-OFT and VLA-Adapter.
+// DINOv2 passes prefix=true (CLS + 4 register tokens, dropped after the blocks)
+// and uses LayerScale; SigLIP passes prefix=false.
 
 #pragma once
 
@@ -72,8 +68,7 @@ inline ggml_tensor* tower(ggml_context*C, ggml_tensor*pix, ggml_tensor*pw, ggml_
     return x;
 }
 
-// HWC interleaved (u8 or float) to CHW planar, with per-channel mean/std. The
-// two branches use different constants: ImageNet for DINOv2, 0.5 for SigLIP.
+// HWC to CHW planar with per-channel mean/std: ImageNet for DINOv2, 0.5 for SigLIP.
 inline void normalize_tower(const ImageView& v, int64_t S, const float mean[3], const float std_[3], std::vector<float>& out){
     out.assign((size_t)3*S*S,0.0f);
     for(int64_t h=0;h<S;++h) for(int64_t w=0;w<S;++w) for(int64_t c=0;c<3;++c){
