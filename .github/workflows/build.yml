@@ -35,6 +35,8 @@ jobs:
           python-version: '3.11'
       - name: converter remap
         run: python tests/py/test_converters.py
+      - name: binding struct parity
+        run: python tests/py/test_bindings.py
 
   build-gate:
     runs-on: ubuntu-24.04
