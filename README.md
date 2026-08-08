@@ -160,6 +160,11 @@ vla-server: bound to tcp://*:5555. ready.
 
 Use `--bind` to change the address and port. Stop the server with `Ctrl-C`.
 
+Two environment knobs apply to every arch:
+
+- `VLA_N_THREADS` - CPU backend thread count, default core count capped at 16.
+- `VLA_DEVICE` - GPU ordinal for CUDA and SYCL builds, default 0.
+
 ---
 
 ## Running the client
