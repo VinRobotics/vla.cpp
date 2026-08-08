@@ -147,25 +147,16 @@ it and is the faster of the two workarounds (disabling oneDNN with
 default: set `GGML_SYCL_ENABLE_VMM=1` explicitly to keep the pool on hardware
 where it pays off.
 
-## Known issue: `bf16 -> f32` copies
+## Fixed upstream: `bf16 -> f32` copies
 
-ggml-sycl's copy table has `f16 -> f32` but no `bf16 -> f32`, so an arch whose
-graph contains that copy aborts at predict time:
+ggml-sycl's copy table used to have `f16 -> f32` but no `bf16 -> f32`, so an arch
+whose graph contained that copy aborted at predict time. VLA-Adapter hit it with
+its default BF16 weights, and the workaround was `VLA_ADAPTER_F32_WEIGHTS=1`.
 
-```
-ggml_sycl_cpy: unsupported type combination (bf16 to f32)
-.../ggml-sycl/cpy.cpp:592: fatal error
-```
-
-VLA-Adapter hits this with its default BF16 weights (OpenVLA-OFT shares the same
-graph shape and is expected to as well). Switching that arch to F32 weights
-removes the BF16 tensor from the graph and it runs:
-
-```bash
-VLA_ADAPTER_F32_WEIGHTS=1 ./build-sycl/vla-cli --ckpt <ckpt> ...
-```
-
-SmolVLA and Evo-1 are unaffected and run on their default BF16 weights.
+llama.cpp b10326 adds the missing kernel (`cpy_1_bf16_f32` in
+`ggml/src/ggml-sycl/cpy.cpp`), so VLA-Adapter should run on stock BF16 weights
+now. Not yet re-tested on the A380 - if you hit the old abort, fall back to
+`VLA_ADAPTER_F32_WEIGHTS=1` and file an issue.
 
 ## Performance note: F32 weights
 
@@ -196,8 +187,9 @@ threads); GPU is the Arc A380.
 | Evo-1       | 448 | 7,695 ms | **1,176 ms** | 6.5x |
 | VLA-Adapter | 224 | 2,994 ms | **517 ms** | 5.8x |
 
-VLA-Adapter is measured with `VLA_ADAPTER_F32_WEIGHTS=1` on both sides (see the
-`bf16 -> f32` issue above); the others run their stock defaults.
+VLA-Adapter is measured with `VLA_ADAPTER_F32_WEIGHTS=1` on both sides, which was
+required at the time (see the `bf16 -> f32` section above); the others run their
+stock defaults.
 
 Per-stage for SmolVLA:
 

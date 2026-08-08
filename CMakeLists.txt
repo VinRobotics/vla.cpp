@@ -37,7 +37,7 @@ set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 include(FetchContent)
 FetchContent_Declare(llama
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp
-    GIT_TAG        b9866
+    GIT_TAG        b10326
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(llama)
