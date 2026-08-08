@@ -185,8 +185,9 @@ default stays BF16 for that reason.
 
 ## Results
 
-Measured with `vla_predict_check` (fixed noise, so runs are comparable), best of
-5-10 iterations after 3 warmups. Host is an AMD Ryzen 5 5500 (CPU backend uses 8
+Measured with `vla_predict_check`, which is a test target - add
+`-DVLA_BUILD_TESTS=ON` to the configure line above to get it. Fixed noise, so
+runs are comparable; best of 5-10 iterations after 3 warmups. Host is an AMD Ryzen 5 5500 (CPU backend uses 8
 threads); GPU is the Arc A380.
 
 | Model | input | CPU | Arc A380 | speedup |

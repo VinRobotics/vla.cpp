@@ -11,6 +11,23 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+# One accelerator per build: src/backend.h compiles in exactly one, so two
+# GGML_* flags would give ggml both backends and vla_core only the higher
+# priority one. Reject it here, before FetchContent configures ggml.
+set(_vla_accel "")
+foreach(_flag GGML_CUDA GGML_SYCL GGML_METAL)
+    if(${_flag})
+        list(APPEND _vla_accel ${_flag})
+    endif()
+endforeach()
+list(LENGTH _vla_accel _vla_accel_n)
+if(_vla_accel_n GREATER 1)
+    string(REPLACE ";" ", " _vla_accel_str "${_vla_accel}")
+    message(FATAL_ERROR
+        "Enable one accelerator backend at a time; got ${_vla_accel_str}. "
+        "Configure a separate build directory per backend.")
+endif()
+
 set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS    ON  CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
