@@ -32,11 +32,13 @@ void usage(const char * prog) {
     std::fprintf(stderr,
         "usage: %s (--ckpt c.gguf | -hf user/repo) [--mmproj m.gguf]\n"
         "          [--label name] [--images N] [--size N] [--tokens N]\n"
-        "          [--warmup N] [--reps N] [--markdown]\n"
+        "          [--extra-token ID] [--extra-count N] [--warmup N] [--reps N] [--markdown]\n"
         "  --label    row label (default: the checkpoint filename)\n"
         "  --images   camera views (default 1)\n"
         "  --size     square input side in pixels (default 224)\n"
         "  --tokens   language token count (default 16)\n"
+        "  --extra-token  token id appended --extra-count times (VLA-JEPA needs its\n"
+        "                 <embodied> tokens)\n"
         "  --warmup   untimed calls before measuring (default 3)\n"
         "  --reps     timed calls (default 20)\n"
         "  --markdown print a markdown table row instead of a plain summary\n",
@@ -56,6 +58,7 @@ double percentile(const std::vector<double> & v, double p) {
 int main(int argc, char ** argv) {
     std::string ckpt, mmproj, hf, label;
     int n_images = 1, side = 224, n_tokens = 16, warmup = 3, reps = 20;
+    int extra_token = -1, extra_count = 0;
     bool markdown = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -71,6 +74,8 @@ int main(int argc, char ** argv) {
         else if (a == "--images")   n_images = std::atoi(need("--images"));
         else if (a == "--size")     side     = std::atoi(need("--size"));
         else if (a == "--tokens")   n_tokens = std::atoi(need("--tokens"));
+        else if (a == "--extra-token") extra_token = std::atoi(need("--extra-token"));
+        else if (a == "--extra-count") extra_count = std::atoi(need("--extra-count"));
         else if (a == "--warmup")   warmup   = std::atoi(need("--warmup"));
         else if (a == "--reps")     reps     = std::atoi(need("--reps"));
         else if (a == "--markdown") markdown = true;
@@ -109,6 +114,7 @@ int main(int argc, char ** argv) {
 
     std::vector<int32_t> lang((size_t) n_tokens);
     for (int i = 0; i < n_tokens; ++i) lang[i] = 1 + (i % 100);
+    if (extra_token >= 0 && extra_count > 0) lang.insert(lang.end(), (size_t) extra_count, extra_token);
 
     std::vector<float> state((size_t) cfg.max_state_dim, 0.0f);
     for (int64_t i = 0; i < cfg.real_state_dim && i < cfg.max_state_dim; ++i) state[i] = 0.01f * (float) (i + 1);
@@ -120,7 +126,7 @@ int main(int argc, char ** argv) {
     in.images      = views.data();
     in.n_images    = n_images;
     in.lang_tokens = lang.data();
-    in.n_lang      = n_tokens;
+    in.n_lang      = (int) lang.size();
     in.state       = state.data();
     in.noise       = noise.data();
 

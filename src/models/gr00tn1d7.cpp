@@ -623,7 +623,9 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     if (in.noise) std::memcpy(x_init.data(), in.noise, x_init.size() * sizeof(float));
     else { std::mt19937 rng((uint32_t) std::chrono::steady_clock::now().time_since_epoch().count()); std::normal_distribution<float> nd(0.f, 1.f); for (auto & v : x_init) v = nd(rng); }
 
-    const bool use_cache = (std::getenv("VLA_GR00T_GRAPH_CACHE") != nullptr) && !do_dump;
+    // On by default: 16% faster, bit-identical. Set VLA_GR00T_GRAPH_CACHE=0 to opt out.
+    const char * gc = std::getenv("VLA_GR00T_GRAPH_CACHE");
+    const bool use_cache = (!gc || std::strcmp(gc, "0") != 0) && !do_dump;
     const bool reuse = use_cache && mg.valid && mg.seq == SEQ && mg.n_img == n_img &&
                        mg.seq_txt == SEQ_TXT && mg.nsteps == num_steps && mg.deepstack == inject_deepstack;
 

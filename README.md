@@ -94,10 +94,13 @@ WSL2 and Apple Silicon are both tested.
 Once the binaries are built, run one CPU prediction without a server or simulator:
 
 ```bash
-pip install -U "huggingface_hub[cli]" gguf
-hf download vrfai/smolvla-libero-gguf --local-dir models/smolvla
+pip install -U "huggingface_hub[cli]"
 
-# One-shot CLI
+# -hf fetches and caches the checkpoint (under $VLA_CACHE, default ~/.cache/vla)
+./build/vla-cli -hf vrfai/smolvla-libero-gguf \
+    --image assets/front.jpg --tokens 1,100,200,2 --pretty
+
+# or point at a file you already have
 ./build/vla-cli --ckpt models/smolvla/smolvla-libero.gguf \
     --image assets/front.jpg --tokens 1,100,200,2 --pretty
 ```
@@ -160,10 +163,13 @@ vla-server: bound to tcp://*:5555. ready.
 
 Use `--bind` to change the address and port. Stop the server with `Ctrl-C`.
 
-Two environment knobs apply to every arch:
+`vla-server` also takes `-hf user/repo[:file.gguf]` in place of a checkpoint path.
+
+Environment knobs that apply to every arch:
 
 - `VLA_N_THREADS` - CPU backend thread count, default core count capped at 16.
 - `VLA_DEVICE` - GPU ordinal for CUDA and SYCL builds, default 0.
+- `VLA_CACHE` - where `-hf` stores checkpoints, default `~/.cache/vla`.
 
 ---
 
@@ -250,18 +256,32 @@ pack the vision tower too (smaller, but more accuracy loss).
 
 ## Benchmarks
 
-Latency in ms (inference plus transport), measured client-side on four targets: an
-**RTX 3090**, an **NVIDIA Jetson AGX Orin**, an **NVIDIA Jetson Orin Nano (8 GB)**,
-and an **Apple M4**.
+`vla-bench` times `predict()` in-process on synthetic inputs: engine only, no
+transport, no simulator, no claim about task success.
 
-| Model | 3090 call (ms) | AGX Orin call (ms) | Orin Nano call (ms) | M4 call (ms) |
-|---|---:|---:|---:|---:|
-| `smolvla`     |   86 |  262 |  567 |  888 |
-| `pi0`         |  264 |  893 | 1955 | 1135 |
-| `gr00t_n1_5`  |  109 |  461 | 1356 |    - |
-| `gr00t_n1_7`  |  102 |  429 |    - |  755 |
-| `bitvla`      |  145 |  809 | 2845 |    - |
-| `evo1`        |  238 | 1048 | 3671 |    - |
+```bash
+./build/vla-bench -hf vrfai/smolvla-libero-gguf --images 2 --size 512 --markdown
+```
+
+RTX 5090, driver 595.84, CUDA 13.2, 24-core host, weights as shipped, 20 reps
+after 3 warmups, each model at its native input size and view count.
+
+| Model | Views | Input | min ms | p50 ms | p90 ms | vision ms |
+|---|--:|--:|--:|--:|--:|--:|
+| VLA-Adapter | 1 | 224 | 19.2 | 20.2 | 21.0 |  9.1 |
+| VLA-JEPA    | 1 | 256 | 20.7 | 21.8 | 23.4 |  6.2 |
+| BitVLA      | 1 | 224 | 24.2 | 25.2 | 26.5 |  5.5 |
+| GR00T N1.5  | 1 | 224 | 27.7 | 29.8 | 31.7 |  5.7 |
+| GR00T N1.7  | 1 | 256 | 31.0 | 32.8 | 34.0 |  6.2 |
+| GR00T N1.6  | 1 | 224 | 35.2 | 37.4 | 39.6 |  6.3 |
+| OpenVLA-OFT | 1 | 224 | 47.1 | 49.5 | 51.4 |  9.9 |
+| SmolVLA     | 2 | 512 | 47.9 | 52.4 | 56.5 | 18.8 |
+| pi0         | 2 | 224 | 49.4 | 54.0 | 57.9 | 12.0 |
+| pi0.5       | 2 | 224 | 53.0 | 55.9 | 57.6 | 10.7 |
+| Evo-1       | 1 | 448 | 54.8 | 58.4 | 61.8 | 17.5 |
+
+Jetson and Apple targets are absent: they have not been re-measured with
+`vla-bench`.
 
 ---
 
@@ -283,6 +303,13 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | ~ | - | - |
 | [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | ~ | - | - |
 | [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | ~ | - | - |
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to prove a change is numerically
+neutral, and the six sites you touch to add an architecture.
 
 ---
 
