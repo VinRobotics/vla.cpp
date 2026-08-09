@@ -372,10 +372,12 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     }
     ggml_context * W = m->ctx_weights;
     std::vector<ggml_tensor *> weights;
+    // A miss returns before pushing, so the null scan below cannot see it.
+    bool missing = false;
 
     auto mk = [&](const char * name, ggml_type type, int n_dims, const int64_t * ne) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); return nullptr; }
+        if (!gt) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); missing = true; return nullptr; }
         ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), n_dims, ne);
         ggml_set_name(t, name);
         weights.push_back(t);
@@ -384,12 +386,12 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
 
     auto mk_mm = [&](const char * name) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); return nullptr; }
+        if (!gt) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); missing = true; return nullptr; }
         return mk(name, m->matmul_type, GGML_MAX_DIMS, gt->ne);
     };
     auto mk_f32 = [&](const char * name) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); return nullptr; }
+        if (!gt) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); missing = true; return nullptr; }
         return mk(name, GGML_TYPE_F32, GGML_MAX_DIMS, gt->ne);
     };
 
@@ -439,6 +441,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     m->W_at1  = mk_f32("action_time_mlp_in.weight");  m->b_at1  = mk_f32("action_time_mlp_in.bias");
     m->W_at2  = mk_f32("action_time_mlp_out.weight"); m->b_at2  = mk_f32("action_time_mlp_out.bias");
     m->W_aout = mk_f32("action_out_proj.weight");     m->b_aout = mk_f32("action_out_proj.bias");
+    if (missing) { std::fprintf(stderr, "vla(pi0): checkpoint is missing weights\n"); return nullptr; }
     for (ggml_tensor * t : weights) if (!t) { std::fprintf(stderr, "vla(pi0): weight tensor creation failed\n"); return nullptr; }
     if (!m->ex_final_norm || !m->W_sp || !m->b_sp || !m->W_ain || !m->b_ain ||
         !m->W_at1 || !m->b_at1 || !m->W_at2 || !m->b_at2 || !m->W_aout || !m->b_aout) {
