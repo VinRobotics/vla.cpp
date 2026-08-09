@@ -242,6 +242,23 @@ bool load_config(const gguf_reader & g, Gr00tN1d6ModelArch & m, Config & cfg) {
     }
     if (m.embodiment_id < 0 || m.embodiment_id >= m.max_embodiments) { std::fprintf(stderr, "vla(gr00tn1d6): embodiment id %lld out of range [0,%lld)\n", (long long) m.embodiment_id, (long long) m.max_embodiments); return false; }
 
+    // pixel_shuffle_back writes (grid/shuffle)^2 tokens into a buffer sized from
+    // n_img_tokens, so the KV has to agree with the grid it is derived from.
+    if (m.patch_size <= 0 || m.vit_pixel_shuffle <= 0 || m.image_size % m.patch_size != 0 ||
+        (m.image_size / m.patch_size) % m.vit_pixel_shuffle != 0) {
+        std::fprintf(stderr, "vla(gr00tn1d6): image %lld / patch %lld / shuffle %lld do not divide evenly\n",
+                     (long long) m.image_size, (long long) m.patch_size, (long long) m.vit_pixel_shuffle);
+        return false;
+    }
+    {
+        const int64_t g2 = (m.image_size / m.patch_size) / m.vit_pixel_shuffle;
+        if (m.n_img_tokens != g2 * g2) {
+            std::fprintf(stderr, "vla(gr00tn1d6): n_img_tokens %lld does not match the %lldx%lld shuffled grid\n",
+                         (long long) m.n_img_tokens, (long long) g2, (long long) g2);
+            return false;
+        }
+    }
+
     cfg = Config{};
     cfg.n_img = m.n_img_tokens; cfg.n_lang = m.max_seq_len; cfg.n_state = 1;
     cfg.n_suffix = m.action_horizon; cfg.max_state_dim = m.max_state_dim; cfg.max_action_dim = m.action_dim;

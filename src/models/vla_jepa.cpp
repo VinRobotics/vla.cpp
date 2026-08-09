@@ -178,6 +178,20 @@ bool load_config(const gguf_reader & g, VlaJepaModelArch & m, Config & cfg) {
     F(fk("vit_rope_theta"), m.vit_rope_base); F(fk("dit_ln_eps"), m.dit_ln_eps); F(fk("dit_norm_out_eps"), m.dit_norm_out_eps);
     if (g.has(fk("lm_rope_theta"))) m.lm_rope_base = (float) g.f64(fk("lm_rope_theta"));
 
+    // merge_block_coords only enumerates the patch grid exactly when the spatial
+    // merge divides it; otherwise it emits rows past the position table.
+    if (m.patch_size <= 0 || m.spatial_merge <= 0 || m.image_target_size % m.patch_size != 0 ||
+        (m.image_target_size / m.patch_size) % m.spatial_merge != 0) {
+        std::fprintf(stderr, "vla(vla_jepa): image %lld / patch %lld / merge %lld do not divide evenly\n",
+                     (long long) m.image_target_size, (long long) m.patch_size, (long long) m.spatial_merge);
+        return false;
+    }
+    // timesteps_proj always emits 256 floats into the time-projection input.
+    if (m.time_proj_dim != 256) {
+        std::fprintf(stderr, "vla(vla_jepa): time_proj_dim %lld, expected 256\n", (long long) m.time_proj_dim);
+        return false;
+    }
+
     cfg = Config{};
     cfg.n_img = (m.image_target_size / m.patch_size / m.spatial_merge) * (m.image_target_size / m.patch_size / m.spatial_merge);
     cfg.n_lang = 1024; cfg.n_state = 1;

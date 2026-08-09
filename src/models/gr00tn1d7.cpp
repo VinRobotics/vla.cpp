@@ -243,6 +243,15 @@ bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
     U(fk("num_inference_timesteps"), m.num_steps); U(fk("num_timestep_buckets"), m.num_buckets); U(fk("max_num_embodiments"), m.max_embodiments); U(fk("max_seq_len"), m.max_seq_len);
     U(fk("image_target_size"), m.image_target_size);
 
+    // merge_block_coords only enumerates the patch grid exactly when the spatial
+    // merge divides it; otherwise it emits rows past the position table.
+    if (m.patch_size <= 0 || m.spatial_merge <= 0 || m.image_target_size % m.patch_size != 0 ||
+        (m.image_target_size / m.patch_size) % m.spatial_merge != 0) {
+        std::fprintf(stderr, "vla(gr00tn1d7): image %lld / patch %lld / merge %lld do not divide evenly\n",
+                     (long long) m.image_target_size, (long long) m.patch_size, (long long) m.spatial_merge);
+        return false;
+    }
+
     if (const char * ns = std::getenv("VLA_NUM_STEPS")) {
         char * end = nullptr; long v = std::strtol(ns, &end, 10);
         if (end && *end == '\0' && v >= 1) { m.num_steps = (int64_t) v; std::fprintf(stderr, "vla(gr00tn1d7): VLA_NUM_STEPS override → num_steps=%lld\n", (long long) v); }

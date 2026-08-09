@@ -172,6 +172,14 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
     U("vla_adapter.action.head_dim",m->head_dim); F("vla_adapter.action.head_rope_base",m->head_rope_base);
     F("vla_adapter.action.ln_eps",m->head_ln_eps); U("vla_adapter.tokens.stop_id",m->stop_id);
 
+    // predict() taps one LM layer per head block, so head_blocks past lm_layers
+    // would read off the end of the layer-output vector.
+    if(m->lm_layers<1 || m->head_blocks<1 || m->head_blocks>m->lm_layers){
+        std::fprintf(stderr,"vla(vla_adapter): head_blocks %lld outside [1, lm_layers %lld]\n",
+                     (long long)m->head_blocks,(long long)m->lm_layers);
+        return nullptr;
+    }
+
     if (g.has("vla_adapter.statistics_json")) {
         if (!parse_stats(g.str("vla_adapter.statistics_json"), m->action_dim, m->q01, m->q99, m->unnorm_mask, m->suite))
             { std::fprintf(stderr, "vla(vla_adapter): failed to parse statistics_json\n"); return nullptr; }

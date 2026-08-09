@@ -343,6 +343,22 @@ bool load_config(const gguf_reader & g, BitvlaModelArch & m, Config & cfg) {
     I("bitvla.tokens.stop_id",           m.stop_id);
     m.packed_int2 = g.has("bitvla.quant.int2_packed") && g.u32("bitvla.quant.int2_packed") != 0;
 
+    // predict() sizes the patch buffer from n_patches but fills it by walking the
+    // image grid, so a KV that disagrees with the geometry overruns the buffer.
+    if (m.patch_size <= 0 || m.image_size <= 0 || m.image_size % m.patch_size != 0 ||
+        m.n_patches != (m.image_size / m.patch_size) * (m.image_size / m.patch_size)) {
+        std::fprintf(stderr, "vla(bitvla): n_patches %lld does not match image %lld / patch %lld\n",
+                     (long long) m.n_patches, (long long) m.image_size, (long long) m.patch_size);
+        return false;
+    }
+    // The CUDA LM writes seq*q_heads*head_dim into buffers sized seq*hidden.
+    if (m.lm_kv <= 0 || m.lm_head_dim <= 0 || m.lm_q % m.lm_kv != 0 ||
+        m.lm_q * m.lm_head_dim != m.lm_hidden) {
+        std::fprintf(stderr, "vla(bitvla): lm q_heads %lld x head_dim %lld does not match hidden %lld\n",
+                     (long long) m.lm_q, (long long) m.lm_head_dim, (long long) m.lm_hidden);
+        return false;
+    }
+
     const std::string js = g.str("bitvla.statistics_json");
     if (js.empty()) {
         std::fprintf(stderr, "vla(bitvla): bitvla.statistics_json KV missing - un-normalization will pass-through\n");
@@ -1081,9 +1097,12 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
     _dump_manifest(std::string("mm_proj_out fp32 ") + std::to_string(n_views) + " " + std::to_string(N) + " " + std::to_string(hidden_l));
 
     std::vector<float> proprio_embed_host((size_t) hidden_l);
+    // Like the other archs: a caller may leave the proprio vector out.
+    std::vector<float> state_host((size_t) proprio_dim, 0.0f);
+    if (in.state) std::memcpy(state_host.data(), in.state, (size_t) proprio_dim * sizeof(float));
 #ifdef VLA_BITVLA_CUDA_KERNELS
     if (cuda_fp32head_ready) {
-        if (bitvla_fp32head_proprio_forward(fp32head_cuda_ctx, in.state, proprio_embed_host.data(), 0) != 0) {
+        if (bitvla_fp32head_proprio_forward(fp32head_cuda_ctx, state_host.data(), proprio_embed_host.data(), 0) != 0) {
             std::fprintf(stderr, "vla(bitvla): CUDA proprio forward failed\n"); return {};
         }
     } else
@@ -1100,7 +1119,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         ggml_cgraph * gf = ggml_new_graph(ctx);
         ggml_build_forward_expand(gf, out);
         if (!proprio_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr failed (proprio)\n"); return {}; }
-        ggml_backend_tensor_set(x_in, in.state, 0, ggml_nbytes(x_in));
+        ggml_backend_tensor_set(x_in, state_host.data(), 0, ggml_nbytes(x_in));
         if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): proprio compute failed\n"); return {}; }
         ggml_backend_tensor_get(out, proprio_embed_host.data(), 0, (size_t) hidden_l * sizeof(float));
     }

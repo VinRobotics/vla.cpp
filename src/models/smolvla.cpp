@@ -91,20 +91,33 @@ struct safetensors {
             std::fprintf(stderr, "vla: shape mismatch for %s\n", name.c_str());
             return false;
         }
+        if (info.dtype != "BF16" && info.dtype != "F32") {
+            std::fprintf(stderr, "vla: unsupported dtype for %s: %s\n",
+                         name.c_str(), info.dtype.c_str());
+            return false;
+        }
+        // dst is sized from expected_shape, so the declared span has to match it.
+        // Without this a file can name the right shape and a longer span.
+        const size_t elsz = (info.dtype == "BF16") ? sizeof(ggml_bf16_t) : sizeof(float);
+        size_t want = elsz;
+        for (const int64_t d : info.shape) {
+            if (d < 0) { std::fprintf(stderr, "vla: negative dim for %s\n", name.c_str()); return false; }
+            want *= (size_t) d;
+        }
+        if (info.off_end < info.off_begin || info.off_end - info.off_begin != want) {
+            std::fprintf(stderr, "vla: bad data_offsets for %s\n", name.c_str());
+            return false;
+        }
         const size_t bytes = info.off_end - info.off_begin;
         file.seekg(data_blob_start + info.off_begin, std::ios::beg);
         if (info.dtype == "BF16") {
             std::vector<ggml_bf16_t> tmp(bytes / sizeof(ggml_bf16_t));
             file.read(reinterpret_cast<char *>(tmp.data()), bytes);
             ggml_bf16_to_fp32_row(tmp.data(), dst, tmp.size());
-        } else if (info.dtype == "F32") {
-            file.read(reinterpret_cast<char *>(dst), bytes);
         } else {
-            std::fprintf(stderr, "vla: unsupported dtype for %s: %s\n",
-                         name.c_str(), info.dtype.c_str());
-            return false;
+            file.read(reinterpret_cast<char *>(dst), bytes);
         }
-        return true;
+        return !file.fail();
     }
 
     bool read_raw(const std::string & name, void * dst, size_t expected_bytes,
@@ -1532,8 +1545,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         const int64_t pad_start    = cfg.n_img + in.n_lang;
         const int64_t pad_end      = cfg.n_img + n_lang_max;
 
-        std::vector<float> state_host(cfg.max_state_dim);
-        std::memcpy(state_host.data(), in.state, cfg.max_state_dim * sizeof(float));
+        std::vector<float> state_host(cfg.max_state_dim, 0.0f);
+        if (in.state) std::memcpy(state_host.data(), in.state, cfg.max_state_dim * sizeof(float));
         for (int64_t i = 0; i < cfg.real_state_dim && i < cfg.max_state_dim; ++i) {
             state_host[i] = (state_host[i] - m->state_mean[i]) / (m->state_std[i] + cfg.norm_eps);
         }
@@ -1659,8 +1672,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     ggml_tensor * pos_full         = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
     ggml_tensor * pos_rebased      = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
 
-    std::vector<float> state_host(cfg.max_state_dim);
-    std::memcpy(state_host.data(), in.state, cfg.max_state_dim * sizeof(float));
+    std::vector<float> state_host(cfg.max_state_dim, 0.0f);
+    if (in.state) std::memcpy(state_host.data(), in.state, cfg.max_state_dim * sizeof(float));
     for (int64_t i = 0; i < cfg.real_state_dim && i < cfg.max_state_dim; ++i) {
         state_host[i] = (state_host[i] - m->state_mean[i]) / (m->state_std[i] + cfg.norm_eps);
     }

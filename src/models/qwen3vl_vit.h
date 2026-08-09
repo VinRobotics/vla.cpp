@@ -130,7 +130,10 @@ inline void interp_pos_embed(const std::vector<float> & table, int64_t num_side,
     out.assign((size_t) S * hidden, 0.0f);
     auto src_coord = [&](int64_t k, int64_t g) -> double { return (g <= 1) ? 0.0 : (double) k * (double)(num_side - 1) / (double)(g - 1); };
     for (int64_t s = 0; s < S; ++s) {
-        const double hy = src_coord(row[s], gh), wx = src_coord(col[s], gw);
+        // Clamped, not just h1/w1: a grid that the spatial merge does not divide
+        // pushes row/col past gh-1 and would index off the end of the table.
+        const double lim = (double) (num_side - 1);
+        const double hy = std::min(src_coord(row[s], gh), lim), wx = std::min(src_coord(col[s], gw), lim);
         const int64_t h0 = (int64_t) std::floor(hy), w0 = (int64_t) std::floor(wx);
         const int64_t h1 = std::min(h0 + 1, num_side - 1), w1 = std::min(w0 + 1, num_side - 1);
         const double dh = hy - h0, dw = wx - w0;

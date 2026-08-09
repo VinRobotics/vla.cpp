@@ -523,7 +523,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         // The converter zero-pads stats past real_state_dim, so lo == hi == 0 there
         // and the affine below would map anything to -1.
         if (hi <= lo) { state_norm[i] = 0.0f; continue; }
-        float xn = 2.0f * (in.state[i] - lo) / (hi - lo + norm_eps_denom) - 1.0f;
+        const float sv = in.state ? in.state[i] : 0.0f;
+        float xn = 2.0f * (sv - lo) / (hi - lo + norm_eps_denom) - 1.0f;
         if (xn < -1.0f) xn = -1.0f;
         if (xn >  1.0f) xn =  1.0f;
         state_norm[i] = xn;
