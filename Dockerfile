@@ -26,7 +26,7 @@ ARG JOBS=
 RUN set -eux; \
     if [ "$BACKEND" = "cuda" ]; then \
         export LIBRARY_PATH=/usr/local/cuda/lib64/stubs; \
-        cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DGGML_CUDA_GRAPHS=ON \
+        cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \
               -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}" \
               -DCMAKE_SHARED_LINKER_FLAGS="-lcuda" -DCMAKE_EXE_LINKER_FLAGS="-lcuda"; \
     else \

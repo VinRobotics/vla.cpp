@@ -51,7 +51,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: build/_deps
-          key: llama-b10326-${{ runner.os }}
+          key: llama-b10331-${{ runner.os }}
       # Everything, not a target list: ctest registers tests this job must build,
       # and a named list goes stale the next time one is added.
       - name: build + ctest (CPU, -Wall -Wextra)
