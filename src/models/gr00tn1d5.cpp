@@ -21,6 +21,7 @@
 #include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
+#include "models/scratch_ctx.h"
 #include "models/vision_common.h"
 #include "models/dit_common.h"
 
@@ -59,6 +60,8 @@ struct Gr00tN1d5ModelArch : public ModelArchBase {
     bool                  is_gpu      = false;
     int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
+    scratch_ctx           vision_scratch;
+    scratch_ctx           main_scratch;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_F32;
 
@@ -378,8 +381,7 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     } else if (in.images && in.n_images > 0) {
         n_views = in.n_images;
         img_emb_host.assign((size_t) n_views * K * H, 0.0f);
-        ggml_init_params vp = { (size_t) 64 * 1024 * 1024, nullptr, true };
-        ggml_context * VC = ggml_init(vp);
+        ggml_context * VC = vision_scratch.reset((size_t) 64 * 1024 * 1024);
         if (!VC) { std::fprintf(stderr, "vla(gr00tn1d5): ggml_init(vision ctx) failed\n"); return {}; }
         const int64_t grid = image_size / patch_size;
         ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, image_size, image_size, 3); ggml_set_input(t_px);
@@ -392,18 +394,16 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
         ggml_set_output(vit_emb);
         ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
         ggml_build_forward_expand(vg, vit_emb);
-        ggml_gallocr_t vga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!vga || !ggml_gallocr_alloc_graph(vga, vg)) { std::fprintf(stderr, "vla(gr00tn1d5): vision gallocr alloc failed\n"); if (vga) ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+        if (!vision_scratch.alloc(backend, vg)) { std::fprintf(stderr, "vla(gr00tn1d5): vision gallocr alloc failed\n"); return {}; }
         const auto tv0 = std::chrono::steady_clock::now();
         std::vector<float> chw;
         for (int64_t v = 0; v < n_views; ++v) {
-            if (!preprocess_image_chw("gr00tn1d5", in.images[v], image_size, chw)) { ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+            if (!preprocess_image_chw("gr00tn1d5", in.images[v], image_size, chw)) { return {}; }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
-            if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(gr00tn1d5): vision compute failed\n"); ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+            if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(gr00tn1d5): vision compute failed\n"); return {}; }
             ggml_backend_tensor_get(vit_emb, img_emb_host.data() + v * K * H, 0, ggml_nbytes(vit_emb));
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - tv0).count();
-        ggml_gallocr_free(vga); ggml_free(VC);
         img_emb_ptr = img_emb_host.data();
     } else {
         std::fprintf(stderr, "vla(gr00tn1d5): no images and no precomputed_img_emb in the request\n"); return {};
@@ -442,8 +442,7 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     if (in.noise) std::memcpy(x_init.data(), in.noise, x_init.size() * sizeof(float));
     else { std::mt19937 rng((uint32_t) std::chrono::steady_clock::now().time_since_epoch().count()); std::normal_distribution<float> nd(0.f, 1.f); for (auto & v : x_init) v = nd(rng); }
 
-    ggml_init_params cp = { (size_t) 128 * 1024 * 1024, nullptr, true };
-    ggml_context * C = ggml_init(cp);
+    ggml_context * C = main_scratch.reset((size_t) 128 * 1024 * 1024);
     if (!C) { std::fprintf(stderr, "vla(gr00tn1d5): ggml_init(ctx_compute) failed\n"); return {}; }
 
     ggml_tensor * t_embeds = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);          ggml_set_input(t_embeds);
@@ -506,8 +505,7 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     ggml_cgraph * gf = ggml_new_graph_custom(C, 32768, false);
     ggml_build_forward_expand(gf, actions);
 
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!galloc || !ggml_gallocr_alloc_graph(galloc, gf)) { std::fprintf(stderr, "vla(gr00tn1d5): gallocr alloc failed\n"); if (galloc) ggml_gallocr_free(galloc); ggml_free(C); return {}; }
+    if (!main_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(gr00tn1d5): gallocr alloc failed\n"); return {}; }
 
     ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
     { std::vector<int32_t> pp(SEQ); for (int64_t i = 0; i < SEQ; ++i) pp[i] = (int32_t) i; ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos)); }
@@ -526,12 +524,11 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     const auto tc0 = std::chrono::steady_clock::now();
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
     const auto tc1 = std::chrono::steady_clock::now();
-    if (st != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(gr00tn1d5): graph compute failed (%d)\n", (int) st); ggml_gallocr_free(galloc); ggml_free(C); return {}; }
+    if (st != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(gr00tn1d5): graph compute failed (%d)\n", (int) st); return {}; }
     stats.ms_inference = std::chrono::duration<float, std::milli>(tc1 - tc0).count();
 
     std::vector<float> out((size_t) AH * AD);
     ggml_backend_tensor_get(actions, out.data(), 0, out.size() * sizeof(float));
-    ggml_gallocr_free(galloc); ggml_free(C);
     stats.ms_total = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return out;
 }

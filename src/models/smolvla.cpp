@@ -18,6 +18,7 @@
 #include "arch.h"
 #include "model.h"
 #include "vision_common.h"
+#include "scratch_ctx.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -291,6 +292,8 @@ struct SmolVLAModelArch : public ModelArchBase {
     ggml_type             weight_dtype = GGML_TYPE_BF16;
 
     ggml_context * ctx_weights = nullptr;
+    scratch_ctx vision_scratch;
+    scratch_ctx connector_scratch;
 
     ggml_tensor *  E_lang   = nullptr;
     ggml_tensor *  Wstate   = nullptr;
@@ -1436,8 +1439,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         const auto t_vision_begin = clock::now();
 
         // Graph A: SigLIP ViT (conv patch-embed -> +pos -> layers -> post_ln), plain sequential positions.
-        ggml_init_params vpA = { size_t(256) * 1024 * 1024, nullptr, true };
-        ggml_context * VC = ggml_init(vpA);
+        ggml_context * VC = m->vision_scratch.reset(size_t(256) * 1024 * 1024);
         if (!VC) { std::fprintf(stderr, "vla(smolvla): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, m->vit_image, m->vit_image, 3); ggml_set_input(t_px);
         ggml_tensor * conv = ggml_conv_2d(VC, m->vit_patch_w, t_px, (int) m->vit_patch, (int) m->vit_patch, 0, 0, 1, 1);
@@ -1449,28 +1451,21 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         ggml_set_output(post_ln);
         ggml_cgraph * gA = ggml_new_graph_custom(VC, 8192, false);
         ggml_build_forward_expand(gA, post_ln);
-        ggml_gallocr_t vgA = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m->backend));
-        if (!vgA || !ggml_gallocr_alloc_graph(vgA, gA)) {
+        if (!m->vision_scratch.alloc(m->backend, gA)) {
             std::fprintf(stderr, "vla(smolvla): vision gallocr A alloc failed\n");
-            if (vgA) ggml_gallocr_free(vgA);
-            ggml_free(VC);
             return {};
         }
 
         // Graph B: pixel-shuffle connector, a single bias-free matmul (c4 -> hidden).
-        ggml_init_params vpB = { size_t(64) * 1024 * 1024, nullptr, true };
-        ggml_context * MC = ggml_init(vpB);
-        if (!MC) { std::fprintf(stderr, "vla(smolvla): ggml_init(connector ctx) failed\n"); ggml_gallocr_free(vgA); ggml_free(VC); return {}; }
+        ggml_context * MC = m->connector_scratch.reset(size_t(64) * 1024 * 1024);
+        if (!MC) { std::fprintf(stderr, "vla(smolvla): ggml_init(connector ctx) failed\n"); return {}; }
         ggml_tensor * t_shuf = ggml_new_tensor_2d(MC, GGML_TYPE_F32, c4, K); ggml_set_input(t_shuf);
         ggml_tensor * img_embeds = ggml_mul_mat(MC, m->mm_fc, t_shuf);
         ggml_set_output(img_embeds);
         ggml_cgraph * gB = ggml_new_graph(MC);
         ggml_build_forward_expand(gB, img_embeds);
-        ggml_gallocr_t vgB = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m->backend));
-        if (!vgB || !ggml_gallocr_alloc_graph(vgB, gB)) {
+        if (!m->connector_scratch.alloc(m->backend, gB)) {
             std::fprintf(stderr, "vla(smolvla): vision gallocr B alloc failed\n");
-            if (vgB) ggml_gallocr_free(vgB);
-            ggml_gallocr_free(vgA); ggml_free(MC); ggml_free(VC);
             return {};
         }
 
@@ -1490,7 +1485,6 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
             }
             ggml_backend_tensor_get(img_embeds, img_emb_pre.data() + size_t(v) * per_view_n, 0, ggml_nbytes(img_embeds));
         }
-        ggml_gallocr_free(vgB); ggml_free(MC); ggml_gallocr_free(vgA); ggml_free(VC);
         if (!vok) return {};
         m->stats.ms_vision = std::chrono::duration<float, std::milli>(clock::now() - t_vision_begin).count();
     }

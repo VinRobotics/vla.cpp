@@ -23,6 +23,7 @@
 #include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
+#include "models/scratch_ctx.h"
 
 #include <chrono>
 #include <cmath>
@@ -93,6 +94,8 @@ struct VlaAdapterModelArch : public ModelArchBase {
     ggml_backend_t backend = nullptr;
     bool is_gpu = false; int n_threads = default_cpu_threads();
     ggml_context * ctx_weights = nullptr;
+    scratch_ctx vision_scratch;
+    scratch_ctx main_scratch;
     ggml_backend_buffer_t weight_buf = nullptr;
     ggml_type mt = GGML_TYPE_BF16;
 
@@ -289,7 +292,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     std::vector<float> proj_host((size_t)HC*NP*n_views);
     {
         const auto tv=clock::now();
-        ggml_init_params vp={(size_t)64*1024*1024,nullptr,true}; ggml_context*C=ggml_init(vp);
+        ggml_context*C=vision_scratch.reset((size_t)64*1024*1024);
         std::vector<ggml_tensor*> px_d(n_views), px_s(n_views);
         std::vector<ggml_tensor*> cmb(n_views);
         for(int v=0; v<n_views; ++v){
@@ -304,16 +307,14 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         ph=ggml_add(C,ggml_mul_mat(C,pj_fc2w,ph),pj_fc2b); ph=ggml_gelu_erf(C,ph);
         ggml_tensor*proj=ggml_add(C,ggml_mul_mat(C,pj_fc3w,ph),pj_fc3b); ggml_set_output(proj);
         ggml_cgraph*vg=ggml_new_graph_custom(C,16384,false); ggml_build_forward_expand(vg,proj);
-        ggml_gallocr_t ga=ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if(!ga||!ggml_gallocr_alloc_graph(ga,vg)){ std::fprintf(stderr,"vla(vla_adapter): vision gallocr failed\n"); if(ga)ggml_gallocr_free(ga); ggml_free(C); return {}; }
+        if(!vision_scratch.alloc(backend,vg)){ std::fprintf(stderr,"vla(vla_adapter): vision gallocr failed\n"); return {}; }
         std::vector<float> dbuf, sbuf;
         for(int v=0;v<n_views;++v){
             normalize_tower(in.images[v],S,DMEAN,DSTD,dbuf); ggml_backend_tensor_set(px_d[v],dbuf.data(),0,ggml_nbytes(px_d[v]));
             normalize_tower(in.images[v],S,SMEAN,SSTD,sbuf); ggml_backend_tensor_set(px_s[v],sbuf.data(),0,ggml_nbytes(px_s[v]));
         }
-        if(ggml_backend_graph_compute(backend,vg)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(vla_adapter): vision compute failed\n"); ggml_gallocr_free(ga); ggml_free(C); return {}; }
+        if(ggml_backend_graph_compute(backend,vg)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(vla_adapter): vision compute failed\n"); return {}; }
         ggml_backend_tensor_get(proj,proj_host.data(),0,proj_host.size()*sizeof(float));
-        ggml_gallocr_free(ga); ggml_free(C);
         stats.ms_vision = std::chrono::duration<float,std::milli>(clock::now()-tv).count();
     }
 
@@ -332,7 +333,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     const int64_t NPATCH = NP * n_views;
     const int64_t SEQ = 1 + NPATCH + (NPROMPT-1) + num_tokens + 1;
     const auto ti=clock::now();
-    ggml_init_params mp={(size_t)128*1024*1024,nullptr,true}; ggml_context*C=ggml_init(mp);
+    ggml_context*C=main_scratch.reset((size_t)128*1024*1024);
 
     ggml_tensor*t_ids=ggml_new_tensor_1d(C,GGML_TYPE_I32,NPROMPT+num_tokens+1); ggml_set_input(t_ids);
     ggml_tensor*emb=ggml_get_rows(C,token_embd,t_ids);
@@ -418,8 +419,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     ggml_tensor*norm_actions=ggml_add(C,ggml_mul_mat(C,h_fc2w,xn),h_fc2b); ggml_set_output(norm_actions);
 
     ggml_cgraph*gf=ggml_new_graph_custom(C,65536,false); ggml_build_forward_expand(gf,norm_actions);
-    ggml_gallocr_t ga=ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if(!ga||!ggml_gallocr_alloc_graph(ga,gf)){ std::fprintf(stderr,"vla(vla_adapter): main gallocr failed\n"); if(ga)ggml_gallocr_free(ga); ggml_free(C); return {}; }
+    if(!main_scratch.alloc(backend,gf)){ std::fprintf(stderr,"vla(vla_adapter): main gallocr failed\n"); return {}; }
 
     { std::vector<int32_t> ids(NPROMPT+num_tokens+1);
       for(int64_t i=0;i<NPROMPT;++i) ids[i]=in.lang_tokens[i];
@@ -440,10 +440,9 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(cc,cb.data(),0,ggml_nbytes(cc)); ggml_backend_tensor_set(ss,sb.data(),0,ggml_nbytes(ss)); };
     fill_cs(cT,sT,chunk); fill_cs(cA,sA,num_tokens+1); fill_cs(cK,sK,NPATCH);
 
-    if(ggml_backend_graph_compute(backend,gf)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(vla_adapter): main compute failed\n"); ggml_gallocr_free(ga); ggml_free(C); return {}; }
+    if(ggml_backend_graph_compute(backend,gf)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(vla_adapter): main compute failed\n"); return {}; }
     std::vector<float> na((size_t)action_dim*chunk);
     ggml_backend_tensor_get(norm_actions,na.data(),0,na.size()*sizeof(float));
-    ggml_gallocr_free(ga); ggml_free(C);
     stats.ms_inference = std::chrono::duration<float,std::milli>(clock::now()-ti).count();
 
     const int64_t W = cfg.max_action_dim>0 ? cfg.max_action_dim : action_dim;

@@ -22,6 +22,7 @@
 #include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
+#include "models/scratch_ctx.h"
 #include "models/vision_common.h"
 
 #include <algorithm>
@@ -110,6 +111,8 @@ struct Pi05ModelArch : public ModelArchBase {
     bool                  is_gpu      = false;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_context *        ctx_weights = nullptr;
+    scratch_ctx           vision_scratch;
+    scratch_ctx           main_scratch;
     std::string           ckpt_path_;
     // Opened once at load: reopening per predict re-parses the whole GGUF header.
     gguf_reader           io{"pi05"};
@@ -595,8 +598,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         n_img_tokens = (int64_t) in.n_images * K;
         img_emb_host.assign((size_t) in.n_images * K * H, 0.0f);
 
-        ggml_init_params vp = { (size_t) 128 * 1024 * 1024, nullptr, true };
-        ggml_context * VC = ggml_init(vp);
+        ggml_context * VC = vision_scratch.reset((size_t) 128 * 1024 * 1024);
         if (!VC) { std::fprintf(stderr, "vla(pi05): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vit_image_size, vit_image_size, 3); ggml_set_input(t_px);
         ggml_tensor * conv = ggml_conv_2d(VC, vit_patch_w, t_px, (int) vit_patch_size, (int) vit_patch_size, 0, 0, 1, 1);
@@ -613,26 +615,23 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
 
         ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
         ggml_build_forward_expand(vg, vit_emb);
-        ggml_gallocr_t vga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!vga || !ggml_gallocr_alloc_graph(vga, vg)) {
+
+        if (!vision_scratch.alloc(backend, vg)) {
             std::fprintf(stderr, "vla(pi05): vision gallocr alloc failed\n");
-            if (vga) ggml_gallocr_free(vga);
-            ggml_free(VC);
             return {};
         }
         const auto tv0 = clk::now();
         std::vector<float> chw;
         for (int v = 0; v < in.n_images; ++v) {
-            if (!preprocess_image_chw("pi05", in.images[v], vit_image_size, chw)) { ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+            if (!preprocess_image_chw("pi05", in.images[v], vit_image_size, chw)) { return {}; }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(pi05): vision compute failed (view %d)\n", v);
-                ggml_gallocr_free(vga); ggml_free(VC); return {};
+                return {};
             }
             ggml_backend_tensor_get(vit_emb, img_emb_host.data() + (size_t) v * K * H, 0, ggml_nbytes(vit_emb));
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now() - tv0).count();
-        ggml_gallocr_free(vga); ggml_free(VC);
 
         // Undo the 1/sqrt(hidden) the shared vision graph applies; pi05 wants raw
         // projector features. Inside this branch on purpose: precomputed_img_emb
@@ -654,8 +653,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         if (!io.fetch_rows_f32("token_embd.weight", lang_ids, lang_rows.data(), hidden_pl)) return {};
     }
 
-    ggml_init_params cp = { (size_t) 64 * 1024 * 1024, nullptr,  true };
-    ggml_context * C = ggml_init(cp);
+    ggml_context * C = main_scratch.reset((size_t) 64 * 1024 * 1024);
     if (!C) { std::fprintf(stderr, "vla(pi05): ggml_init(ctx_compute) failed\n"); return {}; }
 
     ggml_tensor * t_image_emb = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_img_tokens); ggml_set_input(t_image_emb);
@@ -705,11 +703,9 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     ggml_cgraph * gf = ggml_new_graph_custom(C,  16384,  false);
     ggml_build_forward_expand(gf, x_final);
 
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!galloc || !ggml_gallocr_alloc_graph(galloc, gf)) {
+
+    if (!main_scratch.alloc(backend, gf)) {
         std::fprintf(stderr, "vla(pi05): ggml_gallocr_alloc_graph failed (out of memory?)\n");
-        if (galloc) ggml_gallocr_free(galloc);
-        ggml_free(C);
         return {};
     }
 
@@ -738,15 +734,11 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     stats.ms_inference = std::chrono::duration<float, std::milli>(clk::now() - ti0).count();
     if (st != GGML_STATUS_SUCCESS) {
         std::fprintf(stderr, "vla(pi05): ggml_backend_graph_compute failed (%d)\n", (int) st);
-        ggml_gallocr_free(galloc);
-        ggml_free(C);
         return {};
     }
 
     std::vector<float> out((size_t) chunk * max_ad);
     ggml_backend_tensor_get(x_final, out.data(), 0, out.size() * sizeof(float));
-    ggml_gallocr_free(galloc);
-    ggml_free(C);
 
     if (!std::getenv("VLA_PI05_SKIP_UNNORM")) {
         for (int64_t t = 0; t < chunk; ++t) {

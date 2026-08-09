@@ -21,6 +21,7 @@
 #include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
+#include "models/scratch_ctx.h"
 #include "models/dit_common.h"
 #include "models/qwen3vl_vit.h"
 
@@ -56,6 +57,9 @@ struct VlaJepaModelArch : public ModelArchBase {
     bool                  is_gpu      = false;
     int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
+    scratch_ctx           vision_scratch;
+    scratch_ctx           lm_scratch;
+    scratch_ctx           head_scratch;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_F32;
 
@@ -397,8 +401,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         }
         if (inj_patches.empty() && !in.images) { std::fprintf(stderr, "vla(vla_jepa): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
 
-        ggml_init_params vp = { (size_t) 512 * 1024 * 1024, nullptr, true };
-        ggml_context * VC = ggml_init(vp);
+        ggml_context * VC = vision_scratch.reset((size_t) 512 * 1024 * 1024);
         if (!VC) { std::fprintf(stderr, "vla(vla_jepa): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_patches = ggml_new_tensor_2d(VC, GGML_TYPE_F32, vit_patch_flat, n_patches); ggml_set_input(t_patches);
         ggml_tensor * t_pos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, vit_hidden, n_patches);     ggml_set_input(t_pos);
@@ -419,8 +422,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         ggml_cgraph * vg = ggml_new_graph_custom(VC, 16384, false);
         ggml_build_forward_expand(vg, vit_embeds);
         for (int j = 0; j < 3; ++j) ggml_build_forward_expand(vg, ds_out[j]);
-        ggml_gallocr_t vga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!vga || !ggml_gallocr_alloc_graph(vga, vg)) { std::fprintf(stderr, "vla(vla_jepa): vision gallocr alloc failed\n"); if (vga) ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+        if (!vision_scratch.alloc(backend, vg)) { std::fprintf(stderr, "vla(vla_jepa): vision gallocr alloc failed\n"); return {}; }
         const auto tv0 = std::chrono::steady_clock::now();
         std::vector<float> patches;
         bool vok = true;
@@ -440,7 +442,6 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
             if (dump_prefix) { char nm[32]; std::snprintf(nm, sizeof(nm), "vit_view%lld", (long long) v); char path[1024]; std::snprintf(path, sizeof(path), "%s_%s_%lldx%lld.f32", dump_prefix, nm, (long long) H, (long long) K); FILE * fp = std::fopen(path, "wb"); if (fp) { std::fwrite(img_emb_host.data() + v * K * H, sizeof(float), (size_t) K * H, fp); std::fclose(fp); } }
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - tv0).count();
-        ggml_gallocr_free(vga); ggml_free(VC);
         if (!vok) return {};
         const int64_t n_img = n_views * K;
 
@@ -472,8 +473,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         std::vector<std::vector<float>> ds_pad(3);
         for (int j = 0; j < 3; ++j) { ds_pad[j].assign((size_t) SEQ * H, 0.0f); for (int64_t k = 0; k < n_img; ++k) std::memcpy(ds_pad[j].data() + (size_t) image_pos_idx[k] * H, ds_host[j].data() + (size_t) k * H, H * sizeof(float)); }
 
-        ggml_init_params cp = { (size_t) 512 * 1024 * 1024, nullptr, true };
-        ggml_context * C = ggml_init(cp);
+        ggml_context * C = lm_scratch.reset((size_t) 512 * 1024 * 1024);
         if (!C) { std::fprintf(stderr, "vla(vla_jepa): ggml_init(LM ctx) failed\n"); return {}; }
         ggml_tensor * t_embeds = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);   ggml_set_input(t_embeds);
         ggml_tensor * t_pos2   = ggml_new_tensor_1d(C, GGML_TYPE_I32, 4 * SEQ);  ggml_set_input(t_pos2);
@@ -492,8 +492,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         ggml_set_output(conditioning);
         ggml_cgraph * lg = ggml_new_graph_custom(C, 32768, false);
         ggml_build_forward_expand(lg, conditioning);
-        ggml_gallocr_t lga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!lga || !ggml_gallocr_alloc_graph(lga, lg)) { std::fprintf(stderr, "vla(vla_jepa): LM gallocr alloc failed\n"); if (lga) ggml_gallocr_free(lga); ggml_free(C); return {}; }
+        if (!lm_scratch.alloc(backend, lg)) { std::fprintf(stderr, "vla(vla_jepa): LM gallocr alloc failed\n"); return {}; }
 
         ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
 
@@ -528,15 +527,13 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         for (int j = 0; j < 3; ++j) ggml_backend_tensor_set(t_ds[j], ds_pad[j].data(), 0, ggml_nbytes(t_ds[j]));
 
         const auto tp0 = std::chrono::steady_clock::now();
-        if (ggml_backend_graph_compute(backend, lg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(vla_jepa): LM compute failed\n"); ggml_gallocr_free(lga); ggml_free(C); return {}; }
+        if (ggml_backend_graph_compute(backend, lg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(vla_jepa): LM compute failed\n"); return {}; }
         stats.ms_prefill = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - tp0).count();
         if (dump_prefix) { dump_t("eagle", eagle); dump_t("conditioning", conditioning); }
         ggml_backend_tensor_get(conditioning, cond_host.data(), 0, cond_host.size() * sizeof(float));
-        ggml_gallocr_free(lga); ggml_free(C);
     }
 
-    ggml_init_params hp = { (size_t) 256 * 1024 * 1024, nullptr, true };
-    ggml_context * C = ggml_init(hp);
+    ggml_context * C = head_scratch.reset((size_t) 256 * 1024 * 1024);
     if (!C) { std::fprintf(stderr, "vla(vla_jepa): ggml_init(head ctx) failed\n"); return {}; }
     ggml_tensor * t_cond  = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, num_future); ggml_set_input(t_cond);
     ggml_tensor * t_state = ggml_new_tensor_2d(C, GGML_TYPE_F32, state_dim, 1);  ggml_set_input(t_state);
@@ -585,8 +582,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
     ggml_cgraph * hg = ggml_new_graph_custom(C, 65536, false);
     ggml_build_forward_expand(hg, actions);
     if (dump_prefix) for (int64_t s = 0; s < num_steps; ++s) { ggml_build_forward_expand(hg, step_seq[s]); ggml_build_forward_expand(hg, step_pred[s]); ggml_build_forward_expand(hg, step_vel[s]); ggml_build_forward_expand(hg, step_act[s]); }
-    ggml_gallocr_t hga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!hga || !ggml_gallocr_alloc_graph(hga, hg)) { std::fprintf(stderr, "vla(vla_jepa): head gallocr alloc failed\n"); if (hga) ggml_gallocr_free(hga); ggml_free(C); return {}; }
+    if (!head_scratch.alloc(backend, hg)) { std::fprintf(stderr, "vla(vla_jepa): head gallocr alloc failed\n"); return {}; }
 
     ggml_backend_tensor_set(t_cond, cond_host.data(), 0, ggml_nbytes(t_cond));
     { std::vector<float> st(state_dim, 0.0f); for (int64_t i = 0; i < state_dim; ++i) st[i] = in.state ? in.state[i] : 0.0f; ggml_backend_tensor_set(t_state, st.data(), 0, ggml_nbytes(t_state)); }
@@ -594,7 +590,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
     for (int64_t s = 0; s < num_steps; ++s) { ggml_backend_tensor_set(t_tau[s], c_tau[(size_t) s].data(), 0, ggml_nbytes(t_tau[s])); ggml_backend_tensor_set(t_tproj[s], c_tproj[(size_t) s].data(), 0, ggml_nbytes(t_tproj[s])); }
 
     const auto td0 = std::chrono::steady_clock::now();
-    if (ggml_backend_graph_compute(backend, hg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(vla_jepa): head compute failed\n"); ggml_gallocr_free(hga); ggml_free(C); return {}; }
+    if (ggml_backend_graph_compute(backend, hg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(vla_jepa): head compute failed\n"); return {}; }
     stats.ms_denoise = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - td0).count();
     stats.ms_inference = stats.ms_prefill + stats.ms_denoise;
 
@@ -608,7 +604,6 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
 
     std::vector<float> out((size_t) AH * AD);
     ggml_backend_tensor_get(actions, out.data(), 0, out.size() * sizeof(float));
-    ggml_gallocr_free(hga); ggml_free(C);
     stats.ms_total = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return out;
 }

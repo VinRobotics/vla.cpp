@@ -21,6 +21,7 @@
 #include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
+#include "models/scratch_ctx.h"
 
 #include <chrono>
 #include <cmath>
@@ -61,6 +62,8 @@ struct Evo1ModelArch : public ModelArchBase {
     bool                  is_gpu      = false;
     int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
+    scratch_ctx           vision_scratch;
+    scratch_ctx           main_scratch;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_BF16;
 
@@ -427,36 +430,30 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         }
         n_views = in.n_images;
 
-        ggml_init_params vp = {  (size_t) 32 * 1024 * 1024,  nullptr,  true };
-        ggml_context * VC = ggml_init(vp);
+        ggml_context * VC = vision_scratch.reset((size_t) 32 * 1024 * 1024);
         if (!VC) { std::fprintf(stderr, "vla(evo1): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, image_size, image_size, 3); ggml_set_input(t_px);
         ggml_tensor * t_ie = build_internvit_view(VC, *this, t_px);
         ggml_set_output(t_ie);
         ggml_cgraph * vg = ggml_new_graph_custom(VC,  8192,  false);
         ggml_build_forward_expand(vg, t_ie);
-        ggml_gallocr_t vga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!vga || !ggml_gallocr_alloc_graph(vga, vg)) {
+        if (!vision_scratch.alloc(backend, vg)) {
             std::fprintf(stderr, "vla(evo1): vision ggml_gallocr_alloc_graph failed\n");
-            if (vga) ggml_gallocr_free(vga);
-            ggml_free(VC);
             return {};
         }
         img_emb_host.assign((size_t) n_views * num_image_token * lm_hidden, 0.0f);
         std::vector<float> chw;
         const auto tv0 = std::chrono::steady_clock::now();
         for (int64_t v = 0; v < n_views; ++v) {
-            if (!preprocess_image_chw(in.images[v], image_size, chw)) { ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+            if (!preprocess_image_chw(in.images[v], image_size, chw)) { return {}; }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(evo1): vision graph compute failed (view %lld)\n", (long long) v);
-                ggml_gallocr_free(vga); ggml_free(VC); return {};
+                return {};
             }
             ggml_backend_tensor_get(t_ie, img_emb_host.data() + v * num_image_token * lm_hidden, 0, ggml_nbytes(t_ie));
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - tv0).count();
-        ggml_gallocr_free(vga);
-        ggml_free(VC);
         img_emb_ptr = img_emb_host.data();
     } else {
         std::fprintf(stderr, "vla(evo1): no images and no precomputed_img_emb in the request\n");
@@ -544,8 +541,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         }
     }
 
-    ggml_init_params cp = {  (size_t) 96 * 1024 * 1024,  nullptr,  true };
-    ggml_context * C = ggml_init(cp);
+    ggml_context * C = main_scratch.reset((size_t) 96 * 1024 * 1024);
     if (!C) { std::fprintf(stderr, "vla(evo1): ggml_init(ctx_compute) failed\n"); return {}; }
 
     const int64_t E = embed_dim, hd_dit = E / dit_heads;
@@ -633,11 +629,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_cgraph * gf = ggml_new_graph_custom(C,  32768,  false);
     ggml_build_forward_expand(gf, x_action);
 
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!galloc || !ggml_gallocr_alloc_graph(galloc, gf)) {
+    if (!main_scratch.alloc(backend, gf)) {
         std::fprintf(stderr, "vla(evo1): ggml_gallocr_alloc_graph failed\n");
-        if (galloc) ggml_gallocr_free(galloc);
-        ggml_free(C);
         return {};
     }
     ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
@@ -657,14 +650,12 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     const auto tc1 = std::chrono::steady_clock::now();
     if (st != GGML_STATUS_SUCCESS) {
         std::fprintf(stderr, "vla(evo1): ggml_backend_graph_compute failed (%d)\n", (int) st);
-        ggml_gallocr_free(galloc); ggml_free(C); return {};
+        return {};
     }
     stats.ms_inference = std::chrono::duration<float, std::milli>(tc1 - tc0).count();
 
     std::vector<float> x_final((size_t) action_dim);
     ggml_backend_tensor_get(x_action, x_final.data(), 0, x_final.size() * sizeof(float));
-    ggml_gallocr_free(galloc);
-    ggml_free(C);
 
     std::vector<float> out((size_t) horizon * per_a);
     for (int64_t hstep = 0; hstep < horizon; ++hstep)

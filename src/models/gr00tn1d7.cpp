@@ -21,6 +21,7 @@
 #include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
+#include "models/scratch_ctx.h"
 #include "models/dit_common.h"
 #include "models/qwen3vl_vit.h"
 
@@ -58,6 +59,7 @@ struct Gr00tN1d7ModelArch : public ModelArchBase {
     bool                  is_gpu      = false;
     int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
+    scratch_ctx           vision_scratch;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_F32;
 
@@ -525,8 +527,7 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         img_emb_host.assign((size_t) n_views * K * H, 0.0f);
         for (int j = 0; j < 3; ++j) ds_host[j].assign((size_t) n_views * K * H, 0.0f);
 
-        ggml_init_params vp = { (size_t) 512 * 1024 * 1024, nullptr, true };
-        ggml_context * VC = ggml_init(vp);
+        ggml_context * VC = vision_scratch.reset((size_t) 512 * 1024 * 1024);
         if (!VC) { std::fprintf(stderr, "vla(gr00tn1d7): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_patches = ggml_new_tensor_2d(VC, GGML_TYPE_F32, vit_patch_flat, n_patches); ggml_set_input(t_patches);
         ggml_tensor * t_pos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, vit_hidden, n_patches);     ggml_set_input(t_pos);
@@ -548,8 +549,7 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         ggml_cgraph * vg = ggml_new_graph_custom(VC, 16384, false);
         ggml_build_forward_expand(vg, vit_embeds);
         for (int j = 0; j < 3; ++j) ggml_build_forward_expand(vg, ds_out[j]);
-        ggml_gallocr_t vga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!vga || !ggml_gallocr_alloc_graph(vga, vg)) { std::fprintf(stderr, "vla(gr00tn1d7): vision gallocr alloc failed\n"); if (vga) ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+        if (!vision_scratch.alloc(backend, vg)) { std::fprintf(stderr, "vla(gr00tn1d7): vision gallocr alloc failed\n"); return {}; }
         const auto tv0 = std::chrono::steady_clock::now();
         std::vector<float> patches;
         bool vok = true;
@@ -565,7 +565,6 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
             for (int j = 0; j < 3; ++j) ggml_backend_tensor_get(ds_out[j], ds_host[j].data() + v * K * H, 0, ggml_nbytes(ds_out[j]));
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - tv0).count();
-        ggml_gallocr_free(vga); ggml_free(VC);
         if (!vok) return {};
         img_emb_ptr = img_emb_host.data();
     } else {
