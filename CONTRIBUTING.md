@@ -45,13 +45,13 @@ the binaries fetch them:
 Six sites, all mechanical. `smolvla` is the reference for a two-file (mmproj +
 ckpt) model, `bitvla` for a vision-baked one.
 
-1. `src/arch.h` — add to `enum class Arch`.
-2. `src/arch.h` — declare `<name>_create(mmproj_path, ckpt_path, config_path)`.
-3. `src/model.cpp` — add `<name>.architecture` to the `try_str` list in
+1. `src/arch.h` - add to `enum class Arch`.
+2. `src/arch.h` - declare `<name>_create(mmproj_path, ckpt_path, config_path)`.
+3. `src/model.cpp` - add `<name>.architecture` to the `try_str` list in
    `detect_arch_gguf`.
-4. `src/model.cpp` — map the string to the enum in the same function.
-5. `src/model.cpp` — add a `case` to the `model_load` switch.
-6. `CMakeLists.txt` — add `src/models/<name>.cpp` to `vla_core`.
+4. `src/model.cpp` - map the string to the enum in the same function.
+5. `src/model.cpp` - add a `case` to the `model_load` switch.
+6. `CMakeLists.txt` - add `src/models/<name>.cpp` to `vla_core`.
 
 Then write `src/models/<name>.cpp`. Before adding a helper, check
 `src/models/`: `gguf_reader.h` (tensor and KV reads), `vision_common.h`
