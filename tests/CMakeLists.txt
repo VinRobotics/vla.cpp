@@ -27,6 +27,12 @@ target_link_libraries(test_dit_common PRIVATE ggml)
 target_compile_options(test_dit_common PRIVATE -Wall -Wextra)
 add_test(NAME dit_common COMMAND test_dit_common)
 
+add_executable(test_qwen3vl_vit test_qwen3vl_vit.cpp)
+target_include_directories(test_qwen3vl_vit PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_qwen3vl_vit PRIVATE ggml)
+target_compile_options(test_qwen3vl_vit PRIVATE -Wall -Wextra)
+add_test(NAME qwen3vl_vit COMMAND test_qwen3vl_vit)
+
 add_executable(test_config_guard test_config_guard.cpp)
 target_include_directories(test_config_guard PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(test_config_guard PRIVATE -Wall -Wextra)

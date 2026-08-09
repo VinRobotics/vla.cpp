@@ -64,7 +64,12 @@ int main(int argc, char** argv) {
         views[v] = ImageView{ imgbuf[v].data(), W, H, PixelFormat::U8 };
     }
 
+    // VLA-JEPA needs its <embodied> tokens; the others ignore the extras.
     std::vector<int32_t> lang = {1, 100, 200, 300, 400, 2};
+    if (const char* tok = std::getenv("VLA_EXTRA_TOKEN")) {
+        const char* cnt = std::getenv("VLA_EXTRA_COUNT");
+        lang.insert(lang.end(), (size_t)(cnt ? std::atoi(cnt) : 1), (int32_t)std::atoi(tok));
+    }
     std::vector<float>   state((size_t)cfg.max_state_dim, 0.0f);
     for (int i = 0; i < (int)cfg.real_state_dim; ++i) state[i] = 0.01f * (float)(i + 1);
 
