@@ -20,7 +20,7 @@ env:
 
 jobs:
   linux:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -28,9 +28,18 @@ jobs:
           - name: linux-x86_64-cpu
             cmake: -DGGML_CUDA=OFF
             cuda: false
+            runner: ubuntu-24.04
           - name: linux-x86_64-cuda
             cmake: -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;86;89;120
             cuda: true
+            runner: ubuntu-24.04
+          # Jetson and other aarch64 boards. Native arm64 runner, CPU only: the
+          # hosted images carry no CUDA for arm64, so a Jetson GPU build still
+          # has to happen on the device.
+          - name: linux-aarch64-cpu
+            cmake: -DGGML_CUDA=OFF
+            cuda: false
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -62,6 +71,8 @@ jobs:
           for b in $BINARIES; do cp "build/$b" "$out/"; done
           cp build/libvla.so "$out/"
           cp include/vla.h LICENSE.md README.md "$out/"
+          # vla-cli --text runs this; VLA_TOKENIZE_SCRIPT points at it.
+          mkdir -p "$out/scripts" && cp scripts/tokenize_prompt.py "$out/scripts/"
           tar -czf "$out.tar.gz" "$out"
 
       - uses: actions/upload-artifact@v4
@@ -89,6 +100,7 @@ jobs:
           for b in $BINARIES; do cp "build/$b" "$out/"; done
           cp build/libvla.dylib "$out/"
           cp include/vla.h LICENSE.md README.md "$out/"
+          mkdir -p "$out/scripts" && cp scripts/tokenize_prompt.py "$out/scripts/"
           # Metal needs the shader library next to the binary.
           find build -name 'default.metallib' -exec cp {} "$out/" \;
           tar -czf "$out.tar.gz" "$out"

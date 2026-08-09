@@ -13,13 +13,14 @@
 // limitations under the License.
 
 // One-shot action prediction from the command line. Loads a model, decodes an
-// image plus an already-tokenized instruction, runs one predict(), and prints
-// the action chunk. No server, no simulator. Tokenization stays in the Python
-// client, so language is passed as token ids here.
+// image plus an instruction, runs one predict(), and prints the action chunk.
+// No server, no simulator. There is no tokenizer in the C++ core, so --text
+// shells out to scripts/tokenize_prompt.py; --tokens takes ids directly.
 //
 //   vla-cli [--mmproj m.gguf] --ckpt c.gguf --image img.jpg [--image img2.jpg]
-//           --tokens id,id,... [--state f,f,...] [--pretty]
+//           (--text "pick up the bowl" | --tokens id,id,...) [--state f,f,...] [--pretty]
 
+#include "arch.h"
 #include "model.h"
 #include "serving/hf_fetch.h"
 
@@ -93,15 +94,84 @@ bool load_image(const char * path, std::vector<uint8_t> & buf, int & w, int & h)
     return true;
 }
 
+const char * arch_slug(Arch a) {
+    switch (a) {
+        case Arch::SMOLVLA:     return "smolvla";
+        case Arch::PI0:         return "pi0";
+        case Arch::PI05:        return "pi05";
+        case Arch::EVO1:        return "evo1";
+        case Arch::GR00T_N1_5:  return "gr00t_n1_5";
+        case Arch::GR00T_N1_6:  return "gr00t_n1_6";
+        case Arch::GR00T_N1_7:  return "gr00t_n1_7";
+        case Arch::BITVLA:      return "bitvla";
+        case Arch::VLA_ADAPTER: return "vla_adapter";
+        case Arch::OPENVLA_OFT: return "openvla_oft";
+        case Arch::VLA_JEPA:    return "vla_jepa";
+    }
+    return "";
+}
+
+// The instruction reaches a shell command, so keep it to plain prose.
+bool text_ok(const std::string & s) {
+    if (s.empty() || s.size() > 512) return false;
+    for (const char c : s) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == ' ' || c == '.' || c == ',' ||
+                        c == '-' || c == '_' || c == '\'';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+// Ask scripts/tokenize_prompt.py for the ids, using the tokenizer the arch was
+// trained with. Returns "" and explains on stderr.
+std::string tokenize_text(const std::string & ckpt, const std::string & text) {
+    Arch arch;
+    if (!detect_arch_from_ckpt(ckpt, &arch)) {
+        std::fprintf(stderr, "vla-cli: cannot detect the arch of %s for --text\n", ckpt.c_str());
+        return "";
+    }
+    if (!text_ok(text)) {
+        std::fprintf(stderr, "vla-cli: --text takes plain prose (letters, digits, space . , - _ ')\n");
+        return "";
+    }
+    std::string esc;
+    for (const char c : text) { if (c == '\'') esc += "'\\''"; else esc += c; }
+    // Env first so a packaged binary can point at its own copy of the script.
+    const char * env = std::getenv("VLA_TOKENIZE_SCRIPT");
+    const std::string script = (env && *env) ? std::string(env)
+                                             : std::string(VLA_SOURCE_DIR) + "/scripts/tokenize_prompt.py";
+    const char * py = std::getenv("VLA_PYTHON");
+    const std::string interp = (py && *py) ? std::string(py) : std::string("python3");
+    const std::string cmd = "'" + interp + "' '" + script + "' --arch " + arch_slug(arch) +
+                            " --text '" + esc + "'";
+
+    FILE * fp = popen(cmd.c_str(), "r");
+    if (!fp) { std::fprintf(stderr, "vla-cli: cannot run %s\n", cmd.c_str()); return ""; }
+    std::string out;
+    char buf[4096];
+    while (std::fgets(buf, sizeof(buf), fp)) out += buf;
+    if (pclose(fp) != 0) {
+        std::fprintf(stderr,
+                     "vla-cli: tokenizing failed. Install the client extras with\n"
+                     "         pip install -e \".[client]\"\n"
+                     "         (VLA_PYTHON selects a different interpreter)\n");
+        return "";
+    }
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    return out;
+}
+
 void usage(const char * prog) {
     std::fprintf(stderr,
         "usage: %s [--mmproj m.gguf] (--ckpt c.gguf | -hf user/repo) --image img.jpg [--image ...]\n"
-        "          --tokens id,id,... [--state f,f,...] [--pretty]\n"
+        "          (--text \"...\" | --tokens id,id,...) [--state f,f,...] [--pretty]\n"
         "  --mmproj   vision-tower GGUF (SmolVLA/pi0/pi0.5); omit for baked-vision archs\n"
         "  --ckpt     model checkpoint GGUF\n"
         "  -hf        HuggingFace repo, user/repo[:file.gguf], cached under $VLA_CACHE\n"
         "  --image    image file, repeat for multi-view (decoded via stb_image)\n"
-        "  --tokens   language token ids, comma-separated (tokenize in the client)\n"
+        "  --text     instruction, tokenized by scripts/tokenize_prompt.py (needs transformers)\n"
+        "  --tokens   language token ids, comma-separated, if you tokenized already\n"
         "  --state    proprioception floats, comma-separated (default zeros)\n"
         "  --pretty   print one action row (max_action_dim values) per line\n",
         prog);
@@ -110,7 +180,7 @@ void usage(const char * prog) {
 }  // namespace
 
 int main(int argc, char ** argv) {
-    std::string mmproj, ckpt, hf, tokens_s, state_s;
+    std::string mmproj, ckpt, hf, tokens_s, state_s, text_s;
     std::vector<std::string> image_paths;
     bool pretty = false;
 
@@ -125,6 +195,7 @@ int main(int argc, char ** argv) {
         else if (a == "-hf")       hf   = need("-hf");
         else if (a == "--image")   image_paths.push_back(need("--image"));
         else if (a == "--tokens")  tokens_s = need("--tokens");
+        else if (a == "--text")    text_s = need("--text");
         else if (a == "--state")   state_s = need("--state");
         else if (a == "--pretty")  pretty = true;
         else if (a == "-h" || a == "--help") { usage(argv[0]); return 0; }
@@ -135,7 +206,13 @@ int main(int argc, char ** argv) {
         ckpt = vla::hf_resolve(hf);
         if (ckpt.empty()) return 1;
     }
-    if (ckpt.empty() || image_paths.empty() || tokens_s.empty()) { usage(argv[0]); return 1; }
+    if (ckpt.empty() || image_paths.empty() || (tokens_s.empty() && text_s.empty())) { usage(argv[0]); return 1; }
+    if (!tokens_s.empty() && !text_s.empty()) { std::fprintf(stderr, "vla-cli: pass --text or --tokens, not both\n"); return 1; }
+    if (!text_s.empty()) {
+        tokens_s = tokenize_text(ckpt, text_s);
+        if (tokens_s.empty()) return 1;
+        std::fprintf(stderr, "vla-cli: --text tokenized to %s\n", tokens_s.c_str());
+    }
 
     // Validate the cheap args before loading the model.
     std::vector<int32_t> lang;

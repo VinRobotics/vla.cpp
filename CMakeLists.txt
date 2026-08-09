@@ -232,6 +232,8 @@ target_include_directories(vla-cli PRIVATE
     ${llama_SOURCE_DIR}/vendor/stb
 )
 target_link_libraries(vla-cli PRIVATE vla_core)
+# --text shells out to the tokenizer script; VLA_TOKENIZE_SCRIPT overrides it.
+target_compile_definitions(vla-cli PRIVATE VLA_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Latency for one checkpoint, emits the README table rows.
 add_executable(vla-bench
