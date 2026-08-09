@@ -52,12 +52,10 @@ jobs:
         with:
           path: build/_deps
           key: llama-b10326-${{ runner.os }}
-      - name: build vla-server + vlm-server + vla-cli (CPU, -Wall -Wextra)
+      # Everything, not a target list: ctest registers tests this job must build,
+      # and a named list goes stale the next time one is added.
+      - name: build + ctest (CPU, -Wall -Wextra)
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF -DVLA_BUILD_TESTS=ON
-          cmake --build build -j"$(nproc)" --target vla-server vlm-server vla-cli
-      # Not in cpp-unit: these need ggml headers, so llama.cpp must be fetched.
-      - name: ctest
-        run: |
-          cmake --build build -j"$(nproc)" --target test_dit_common test_qwen3vl_vit
+          cmake --build build -j"$(nproc)"
           ctest --test-dir build --output-on-failure
