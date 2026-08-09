@@ -143,7 +143,7 @@ OpenVLA-OFT.
 
 `vla.cpp` defaults `GGML_SYCL_ENABLE_VMM=0` when it brings up SYCL, which avoids
 it and is the faster of the two workarounds (disabling oneDNN with
-`GGML_SYCL_DISABLE_DNN=1` also clears the crash, but costs ~8%). It is only a
+`GGML_SYCL_ENABLE_DNN=0` also clears the crash, but costs ~8%). It is only a
 default: set `GGML_SYCL_ENABLE_VMM=1` explicitly to keep the pool on hardware
 where it pays off.
 

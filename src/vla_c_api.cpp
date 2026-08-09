@@ -20,6 +20,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 namespace {
@@ -50,8 +51,11 @@ vla_model * vla_model_load(const char * mmproj_path, const char * ckpt_path,
                                          ckpt_path,
                                          config_path ? config_path : "");
         if (!m) return nullptr;
+        // Owns the engine until the handle exists, so a throwing new does not
+        // strand the whole model.
+        std::unique_ptr<vla::Model, void (*)(vla::Model *)> guard(m, vla::model_free);
         auto * h = new vla_model();
-        h->m = m;
+        h->m = guard.release();
         return h;
     } catch (...) {
         return nullptr;

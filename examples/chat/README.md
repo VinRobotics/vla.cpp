@@ -2,9 +2,9 @@
 
 A minimal **streaming image+text chat** client for `vlm-server`, the llama.cpp +
 libmtmd chat runtime (`src/vlm/engine.cpp`) behind a ZMQ daemon. Send text and
-images, get a streamed reply. The design rationale lives in
-[docs/VLM-SERVER.md](../../docs/VLM-SERVER.md); this README is how to **run** it,
-plus the validation numbers for the SmolVLM2-500M-Instruct setup.
+images, get a streamed reply. The layering is sketched in
+[docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md); this README is how to **run**
+it, plus the validation numbers for the SmolVLM2-500M-Instruct setup.
 
 ```
 examples/chat/
