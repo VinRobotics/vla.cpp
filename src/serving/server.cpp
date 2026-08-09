@@ -150,16 +150,19 @@ std::string make_error_response(uint64_t request_id, const std::string & msg) {
     return resp.SerializeAsString();
 }
 
-// Discard frames after the first; true means the request was malformed. Must run
-// to completion: a queued frame keeps REP in receive state and send throws EFSM.
-bool drain_extra_frames(zmq::socket_t & sock) {
-    bool extra = false;
+// Discard frames after the first. Must run to completion: a queued frame keeps
+// REP in receive state and send throws EFSM. Stalled means the peer announced a
+// frame it never sent, so no reply is possible until the rest arrives.
+enum class Drain { Clean, Extra, Stalled };
+
+Drain drain_extra_frames(zmq::socket_t & sock) {
+    Drain d = Drain::Clean;
     while (sock.get(zmq::sockopt::rcvmore)) {
         zmq::message_t junk;
-        if (!sock.recv(junk, zmq::recv_flags::none)) break;
-        extra = true;
+        if (!sock.recv(junk, zmq::recv_flags::none)) return Drain::Stalled;
+        d = Drain::Extra;
     }
-    return extra;
+    return d;
 }
 
 int find_non_finite(const float * data, int n) {
@@ -276,6 +279,9 @@ int main(int argc, char ** argv) {
     // 64 MiB is above any real request (16 views of 512x512 F32 RGB is ~50 MiB) and
     // low enough to bound protobuf's expansion during ParseFromArray.
     sock.set(zmq::sockopt::maxmsgsize, int64_t(64) * 1024 * 1024);
+    // A peer that sends a frame with SNDMORE and then stalls would otherwise park
+    // this single-threaded loop in recv for good, starving every other client.
+    sock.set(zmq::sockopt::rcvtimeo, 5000);
     sock.bind(bind_addr);
     std::printf("vla-server: bound to %s. ready.\n", bind_addr.c_str());
 
@@ -331,7 +337,13 @@ int main(int argc, char ** argv) {
 
         // Without this an unauthenticated client shuts the server down with one
         // two-frame request: the reply fails and send_reply sets g_shutdown.
-        if (drain_extra_frames(sock)) {
+        const Drain drained = drain_extra_frames(sock);
+        if (drained == Drain::Stalled) {
+            // Back to the poll rather than blocking here, so shutdown still works.
+            std::fprintf(stderr, "vla-server: peer stalled mid-request\n");
+            continue;
+        }
+        if (drained == Drain::Extra) {
             send_reply(make_error_response(0, "expected a single-frame request"));
             continue;
         }

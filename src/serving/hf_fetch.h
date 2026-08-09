@@ -27,7 +27,9 @@ namespace vla {
 // Repo ids reach a shell command, so reject anything outside this set.
 inline bool hf_token_ok(const std::string & s, bool allow_slash) {
     if (s.empty() || s.size() > 200) return false;
-    if (s.front() == '-' || s.find("..") != std::string::npos) return false;
+    // A leading '/' would make fs::path join replace the cache root instead of
+    // extending it, putting the download anywhere on disk.
+    if (s.front() == '-' || s.front() == '/' || s.find("..") != std::string::npos) return false;
     for (const char c : s) {
         const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                         (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' ||
@@ -89,6 +91,13 @@ inline std::string hf_resolve(const std::string & spec) {
     fs::create_directories(dir, ec);
     if (ec) {
         std::fprintf(stderr, "vla: cannot create %s: %s\n", dir.string().c_str(), ec.message().c_str());
+        return "";
+    }
+
+    // The cache root reaches the shell too, and it comes from VLA_CACHE or HOME.
+    // A single quote in either would close the quoting and run the rest.
+    if (dir.string().find('\'') != std::string::npos) {
+        std::fprintf(stderr, "vla: refusing a cache path containing a quote: %s\n", dir.string().c_str());
         return "";
     }
 

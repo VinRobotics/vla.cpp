@@ -112,6 +112,9 @@ int main(int argc, char ** argv) {
     sock.set(zmq::sockopt::linger, 0);
     // Per frame only; the recv loop caps the multipart total.
     sock.set(zmq::sockopt::maxmsgsize, int64_t(64) * 1024 * 1024);
+    // A peer that sends a frame with SNDMORE and then stalls would otherwise park
+    // this single-threaded loop in recv for good, starving every other client.
+    sock.set(zmq::sockopt::rcvtimeo, 5000);
     sock.bind(bind_addr);
     std::printf("vlm-server: bound to %s. ready.\n", bind_addr.c_str());
 
