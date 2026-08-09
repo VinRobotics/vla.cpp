@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "model.h"
+#include "serving/hf_fetch.h"
 #include "serving/vla.pb.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -171,11 +172,13 @@ int find_non_finite(const float * data, int n) {
 void usage(const char * prog) {
     std::fprintf(stderr,
         "usage: %s [--bind ADDR] [--timing-detail none|phase] [--config PATH] "
-        "[<mmproj.gguf>] <ckpt>\n"
+        "[<mmproj.gguf>] (<ckpt> | -hf user/repo[:file.gguf])\n"
         "  <mmproj.gguf>           vision-tower mmproj GGUF (SigLIP / PaliGemma /\n"
         "                          connector). Required for SmolVLA, π0, Evo-1, GR00T.\n"
         "                          Omit for BitVLA - its vision tower is baked into\n"
         "                          the combined ckpt GGUF.\n"
+        "  -hf                     HuggingFace repo, user/repo[:file.gguf]; downloaded\n"
+        "                          on a miss and cached under $VLA_CACHE.\n"
         "  <ckpt>                  SmolVLA .safetensors or .gguf, or any of the other\n"
         "                          supported architectures' .gguf; the architecture is\n"
         "                          auto-detected from the checkpoint.\n"
@@ -200,6 +203,7 @@ int main(int argc, char ** argv) {
     std::string bind_addr   = "tcp://*:5555";
     std::string mmproj_path;
     std::string ckpt_path;
+    std::string hf_spec;
     std::string config_path;
     vla::TimingDetail timing_detail = vla::TimingDetail::NONE;
 
@@ -208,6 +212,8 @@ int main(int argc, char ** argv) {
         std::string a = argv[i];
         if (a == "--bind" && i + 1 < argc) {
             bind_addr = argv[++i];
+        } else if (a == "-hf" && i + 1 < argc) {
+            hf_spec = argv[++i];
         } else if (a == "--config" && i + 1 < argc) {
             config_path = argv[++i];
         } else if (a == "--timing-detail" && i + 1 < argc) {
@@ -226,14 +232,17 @@ int main(int argc, char ** argv) {
             positionals.push_back(std::move(a));
         }
     }
-    if (positionals.size() == 1) {
+    if (!hf_spec.empty() && positionals.empty()) {
+        ckpt_path = vla::hf_resolve(hf_spec);
+        if (ckpt_path.empty()) return 1;
+    } else if (positionals.size() == 1) {
         ckpt_path = positionals[0];
     } else if (positionals.size() == 2) {
         mmproj_path = positionals[0];
         ckpt_path   = positionals[1];
     } else {
         std::fprintf(stderr,
-                     "vla-server: expected 1 or 2 positional args "
+                     "vla-server: expected -hf, or 1 or 2 positional args "
                      "(<mmproj.gguf> <ckpt> for SmolVLA/π0/Evo-1/GR00T, "
                      "or just <ckpt> for BitVLA), got %zu\n",
                      positionals.size());

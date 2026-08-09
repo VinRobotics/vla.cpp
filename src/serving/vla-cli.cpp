@@ -21,6 +21,7 @@
 //           --tokens id,id,... [--state f,f,...] [--pretty]
 
 #include "model.h"
+#include "serving/hf_fetch.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
@@ -94,10 +95,11 @@ bool load_image(const char * path, std::vector<uint8_t> & buf, int & w, int & h)
 
 void usage(const char * prog) {
     std::fprintf(stderr,
-        "usage: %s [--mmproj m.gguf] --ckpt c.gguf --image img.jpg [--image ...]\n"
+        "usage: %s [--mmproj m.gguf] (--ckpt c.gguf | -hf user/repo) --image img.jpg [--image ...]\n"
         "          --tokens id,id,... [--state f,f,...] [--pretty]\n"
         "  --mmproj   vision-tower GGUF (SmolVLA/pi0/pi0.5); omit for baked-vision archs\n"
         "  --ckpt     model checkpoint GGUF\n"
+        "  -hf        HuggingFace repo, user/repo[:file.gguf], cached under $VLA_CACHE\n"
         "  --image    image file, repeat for multi-view (decoded via stb_image)\n"
         "  --tokens   language token ids, comma-separated (tokenize in the client)\n"
         "  --state    proprioception floats, comma-separated (default zeros)\n"
@@ -108,7 +110,7 @@ void usage(const char * prog) {
 }  // namespace
 
 int main(int argc, char ** argv) {
-    std::string mmproj, ckpt, tokens_s, state_s;
+    std::string mmproj, ckpt, hf, tokens_s, state_s;
     std::vector<std::string> image_paths;
     bool pretty = false;
 
@@ -120,12 +122,18 @@ int main(int argc, char ** argv) {
         };
         if      (a == "--mmproj")  mmproj = need("--mmproj");
         else if (a == "--ckpt")    ckpt = need("--ckpt");
+        else if (a == "-hf")       hf   = need("-hf");
         else if (a == "--image")   image_paths.push_back(need("--image"));
         else if (a == "--tokens")  tokens_s = need("--tokens");
         else if (a == "--state")   state_s = need("--state");
         else if (a == "--pretty")  pretty = true;
         else if (a == "-h" || a == "--help") { usage(argv[0]); return 0; }
         else { std::fprintf(stderr, "vla-cli: unknown argument %s\n", a.c_str()); usage(argv[0]); return 1; }
+    }
+    if (!hf.empty()) {
+        if (!ckpt.empty()) { std::fprintf(stderr, "vla-cli: pass --ckpt or -hf, not both\n"); return 1; }
+        ckpt = vla::hf_resolve(hf);
+        if (ckpt.empty()) return 1;
     }
     if (ckpt.empty() || image_paths.empty() || tokens_s.empty()) { usage(argv[0]); return 1; }
 

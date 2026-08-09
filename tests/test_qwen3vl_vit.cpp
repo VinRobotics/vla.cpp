@@ -25,7 +25,7 @@ using namespace vla;
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); ++fails; } } while (0)
 
-// 4x4 grid, 2x2 merge: patches arrive grouped by block, not in raster order.
+// 4x4 grid, 2x2 merge: patches group by block, not raster order.
 static void test_merge_block_coords() {
     std::vector<int64_t> row, col;
     merge_block_coords(4, 4, 2, row, col);
@@ -35,7 +35,7 @@ static void test_merge_block_coords() {
     for (int i = 0; i < 16; ++i) { CHECK(row[i] == want_r[i]); CHECK(col[i] == want_c[i]); }
 }
 
-// Half-split layout: the second half of the table repeats the first.
+// Second half of the table repeats the first.
 static void test_vit_rope_tables() {
     std::vector<int64_t> row = {0, 1}, col = {0, 2};
     std::vector<float> c, s;
@@ -47,14 +47,12 @@ static void test_vit_rope_tables() {
             CHECK(c[p * hd + i] == c[p * hd + hd / 2 + i]);
             CHECK(s[p * hd + i] == s[p * hd + hd / 2 + i]);
         }
-    // Position 0 has zero angle on every frequency.
     for (int64_t i = 0; i < hd; ++i) { CHECK(c[i] == 1.0f); CHECK(s[i] == 0.0f); }
-    // Row 1, col 2 with inv_freq[0] == 1: row half is cos(1), col half is cos(2).
     CHECK(std::fabs(c[hd + 0] - std::cos(1.0f)) < 1e-6f);
     CHECK(std::fabs(c[hd + hd / 4] - std::cos(2.0f)) < 1e-6f);
 }
 
-// Same grid as the source table is an identity resample.
+// Same grid in and out is an identity resample.
 static void test_interp_pos_embed_identity() {
     const int64_t side = 2, hidden = 2;
     std::vector<float> table = {0,10, 1,11, 2,12, 3,13};
@@ -70,7 +68,7 @@ static void test_interp_pos_embed_identity() {
     }
 }
 
-// Upsampling 2x2 to 3x3 puts the midpoint at the mean of the four corners.
+// 2x2 to 3x3 puts the midpoint at the mean of the corners.
 static void test_interp_pos_embed_bilinear() {
     const int64_t side = 2, hidden = 1;
     std::vector<float> table = {0, 2, 4, 6};
@@ -82,7 +80,7 @@ static void test_interp_pos_embed_bilinear() {
         if (row[s] == 1 && col[s] == 1) CHECK(std::fabs(out[s] - 3.0f) < 1e-6f);
 }
 
-// A wrong-sized view must be rejected before any pixel is read.
+// Wrong-sized view must be rejected before any pixel is read.
 static void test_preprocess_rejects_bad_view() {
     std::vector<uint8_t> px(3 * 4 * 4, 0);
     std::vector<int64_t> row, col;
@@ -94,8 +92,7 @@ static void test_preprocess_rejects_bad_view() {
     CHECK(!preprocess_image_patches("test", null, 4, 2, 2, row, col, out));
 }
 
-// U8 128 maps to ~0 after the 0.5/0.5 normalization, and every temporal slice
-// repeats the same value.
+// Every temporal slice repeats the same value.
 static void test_preprocess_values() {
     const int64_t side = 2, ps = 1, tps = 2;
     std::vector<uint8_t> px((size_t) 3 * side * side, 128);

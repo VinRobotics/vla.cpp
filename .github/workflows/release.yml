@@ -1,0 +1,132 @@
+# Tagged binaries and a container image. build.yml already compiles all of this
+# on every push; this is the same work with the artifacts kept.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build (dry run, nothing is published)
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  BINARIES: vla-server vlm-server vla-cli vla-bench
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64-cpu
+            cmake: -DGGML_CUDA=OFF
+            cuda: false
+          - name: linux-x86_64-cuda
+            cmake: -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;86;89;120
+            cuda: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential cmake git ca-certificates pkg-config \
+            libzmq3-dev cppzmq-dev libprotobuf-dev protobuf-compiler
+
+      - name: cuda toolkit
+        if: matrix.cuda
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends cuda-toolkit-12-6
+          echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
+
+      - name: build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake }}
+          cmake --build build -j"$(nproc)" --target $BINARIES vla
+
+      - name: package
+        run: |
+          out="vla.cpp-${{ github.ref_name }}-${{ matrix.name }}"
+          mkdir -p "$out"
+          for b in $BINARIES; do cp "build/$b" "$out/"; done
+          cp build/libvla.so "$out/"
+          cp include/vla.h LICENSE.md README.md "$out/"
+          tar -czf "$out.tar.gz" "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: '*.tar.gz'
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: brew install cmake zeromq cppzmq protobuf
+
+      - name: build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON
+          cmake --build build -j"$(sysctl -n hw.ncpu)" --target $BINARIES vla
+
+      - name: package
+        run: |
+          out="vla.cpp-${{ github.ref_name }}-macos-arm64-metal"
+          mkdir -p "$out"
+          for b in $BINARIES; do cp "build/$b" "$out/"; done
+          cp build/libvla.dylib "$out/"
+          cp include/vla.h LICENSE.md README.md "$out/"
+          # Metal needs the shader library next to the binary.
+          find build -name 'default.metallib' -exec cp {} "$out/" \;
+          tar -czf "$out.tar.gz" "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-metal
+          path: '*.tar.gz'
+
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    needs: [linux, macos, docker]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true

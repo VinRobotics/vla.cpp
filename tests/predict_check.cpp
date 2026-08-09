@@ -18,13 +18,15 @@
 // others read it, so fixed noise is reproducible for all archs).
 //
 //   predict_check <ckpt.gguf> [mmproj.gguf] [n_images]
-//   env: VLA_IMG_SIZE (square input, default 224), VLA_BENCH_ITERS (>0 = time it)
+//   env: VLA_IMG_SIZE (square input, default 224), VLA_BENCH_ITERS (>0 = time it),
+//        VLA_TIMING=phase, VLA_EXTRA_TOKEN / VLA_EXTRA_COUNT
 
 #include "model.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <ctime>
 #include <vector>
 
@@ -85,7 +87,8 @@ int main(int argc, char** argv) {
     in.n_lang        = (int)lang.size();
     in.state         = state.data();
     in.noise         = noise.data();
-    in.timing_detail = TimingDetail::NONE;
+    const char* td = std::getenv("VLA_TIMING");
+    in.timing_detail = (td && std::string(td) == "phase") ? TimingDetail::PHASE : TimingDetail::NONE;
 
     std::vector<float> act = predict(m, in);
     std::printf("action_len=%zu\n", act.size());

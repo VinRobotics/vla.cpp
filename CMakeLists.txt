@@ -233,8 +233,14 @@ target_include_directories(vla-cli PRIVATE
 )
 target_link_libraries(vla-cli PRIVATE vla_core)
 
+# Latency for one checkpoint, emits the README table rows.
+add_executable(vla-bench
+    src/serving/vla-bench.cpp
+)
+target_link_libraries(vla-bench PRIVATE vla_core)
+
 # --- First-party build hygiene (never applied to the vendored llama.cpp subtree) --
-set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla vla-server vlm-server vla-cli)
+set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla vla-server vlm-server vla-cli vla-bench)
 
 foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)
     # Warn on our own C++ only; nvcc device code keeps its own diagnostics.

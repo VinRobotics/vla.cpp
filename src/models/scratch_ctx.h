@@ -33,7 +33,6 @@ public:
     scratch_ctx & operator=(const scratch_ctx &) = delete;
     ~scratch_ctx() { release(); }
 
-    // Empty context sized for `arena` bytes of tensor headers, or null on failure.
     ggml_context * reset(size_t arena) {
         if (ctx_) { ggml_reset(ctx_); return ctx_; }
         ggml_init_params p = { arena, nullptr, true };

@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Qwen3-VL vision tower, shared verbatim by GR00T N1.7 and VLA-JEPA. The LM and
-// action heads differ, so they stay in their own files.
+// Qwen3-VL vision tower, shared by GR00T N1.7 and VLA-JEPA.
 
 #pragma once
 
@@ -36,7 +35,6 @@ constexpr float QWEN3VL_STD [3] = {0.5f, 0.5f, 0.5f};
 struct VitLayerW { ggml_tensor *ln1w,*ln1b,*ln2w,*ln2b,*Wqkv,*bqkv,*Wo,*bo,*Wfc1,*bfc1,*Wfc2,*bfc2; };
 struct MergerW   { ggml_tensor *nw,*nb,*fc1w,*fc1b,*fc2w,*fc2b; };
 
-// Half-split rotation, matching the Qwen3-VL reference.
 inline ggml_tensor * rope2d(ggml_context * C, ggml_tensor * x, ggml_tensor * cos_t, ggml_tensor * sin_t) {
     const int64_t hd = x->ne[0], S = x->ne[1], Hh = x->ne[2]; const int64_t half = hd / 2;
     ggml_tensor * x1 = ggml_cont(C, ggml_view_3d(C, x, half, S, Hh, x->nb[1], x->nb[2], 0));
@@ -47,7 +45,6 @@ inline ggml_tensor * rope2d(ggml_context * C, ggml_tensor * x, ggml_tensor * cos
 
 inline bool fa_enabled() { static const bool e = (std::getenv("VLA_FLASH_ATTN") != nullptr); return e; }
 
-// K and V must be F16 for ggml_flash_attn_ext; the accumulator stays F32.
 inline ggml_tensor * flash_attn(ggml_context * C, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
                                 ggml_tensor * mask, float scale) {
     ggml_tensor * kf = (k->type == GGML_TYPE_F16) ? k : ggml_cast(C, k, GGML_TYPE_F16);
@@ -85,7 +82,7 @@ inline ggml_tensor * build_vit_layer(ggml_context * C, const VitLayerW & w, ggml
     return ggml_add(C, h1, ff);
 }
 
-// pre_merge normalizes before the space-to-depth reshape, the deepstack taps after.
+// pre_merge normalizes before the reshape, the deepstack taps after.
 inline ggml_tensor * build_merger(ggml_context * C, const MergerW & w, ggml_tensor * x,
                                   int64_t hidden, int64_t merge2, float ln_eps, bool pre_merge) {
     const int64_t n_patches = x->ne[1], c_merged = hidden * merge2 * merge2, n_merged = n_patches / (merge2 * merge2);
@@ -101,7 +98,7 @@ inline ggml_tensor * build_merger(ggml_context * C, const MergerW & w, ggml_tens
     return ggml_add(C, ggml_mul_mat(C, w.fc2w, ggml_gelu(C, z1)), w.fc2b);
 }
 
-// Patch order after the spatial merge: row/col of each patch in the m x m block.
+// Patch row/col after the spatial merge.
 inline void merge_block_coords(int64_t gh, int64_t gw, int64_t m, std::vector<int64_t> & row, std::vector<int64_t> & col) {
     const int64_t S = gh * gw; row.assign(S, 0); col.assign(S, 0);
     for (int64_t s = 0; s < S; ++s) {
@@ -125,7 +122,7 @@ inline void vit_rope_tables(const std::vector<int64_t> & row, const std::vector<
     }
 }
 
-// Bilinear resample of the pretrained num_side x num_side position table onto gh x gw.
+// Bilinear resample of the pretrained position table onto gh x gw.
 inline void interp_pos_embed(const std::vector<float> & table, int64_t num_side, int64_t hidden,
                              const std::vector<int64_t> & row, const std::vector<int64_t> & col, int64_t gh, int64_t gw,
                              std::vector<float> & out) {
@@ -144,8 +141,7 @@ inline void interp_pos_embed(const std::vector<float> & table, int64_t num_side,
     }
 }
 
-// HWC to flat patches in CLIP normalization. No resize: the view must already be
-// side x side. arch only labels the error.
+// HWC to flat patches. No resize: the view must already be side x side.
 inline bool preprocess_image_patches(const char * arch, const ImageView & v, int64_t side, int64_t ps, int64_t tps,
                                      const std::vector<int64_t> & row, const std::vector<int64_t> & col,
                                      std::vector<float> & out) {
