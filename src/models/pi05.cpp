@@ -23,6 +23,7 @@
 #include "gguf.h"
 #include "models/gguf_reader.h"
 #include "models/scratch_ctx.h"
+#include "models/dit_common.h"
 #include "models/vision_common.h"
 
 #include <algorithm>
@@ -71,19 +72,6 @@ struct ExpertLayerW {
 
 // SigLIP-So400m vision block weights (PaliGemma tower, built in-tree like gr00tn1d5).
 struct SigLipLayerW { ggml_tensor *ln1w,*ln1b,*ln2w,*ln2b,*Wq,*bq,*Wk,*bk,*Wv,*bv,*Wo,*bo,*Wfc1,*bfc1,*Wfc2,*bfc2; };
-
-std::vector<float> sinusoidal_time_emb(double t, int64_t dim, double min_p, double max_p) {
-    const int64_t half = dim / 2;
-    std::vector<float> out(dim);
-    for (int64_t i = 0; i < half; ++i) {
-        const double frac   = (half == 1) ? 0.0 : double(i) / double(half - 1);
-        const double period = min_p * std::pow(max_p / min_p, frac);
-        const double s      = (2.0 * M_PI / period) * t;
-        out[i]        = (float) std::sin(s);
-        out[half + i] = (float) std::cos(s);
-    }
-    return out;
-}
 
 bool ends_with(const std::string & s, const char * sfx) {
     const size_t n = std::strlen(sfx);

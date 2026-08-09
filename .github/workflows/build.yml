@@ -20,7 +20,7 @@ jobs:
       # Compiled directly: pure, no llama.cpp or protobuf/zmq needed.
       - name: pure unit tests
         run: |
-          for t in test_vision_common test_rope_conventions test_config_guard; do
+          for t in test_vision_common test_rope_conventions; do
             g++ -std=c++17 -Isrc -Wall -Wextra -fsanitize=address,undefined \
                 -fno-omit-frame-pointer "tests/$t.cpp" -o "/tmp/$t"
             "/tmp/$t"

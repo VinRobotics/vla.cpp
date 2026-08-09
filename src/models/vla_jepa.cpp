@@ -562,7 +562,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
             std::memcpy(pp.data() + (size_t) 3 * SEQ, pp.data(), (size_t) SEQ * sizeof(int32_t));
             ggml_backend_tensor_set(t_pos2, pp.data(), 0, ggml_nbytes(t_pos2));
         }
-        if (c_mask_seq != SEQ) { c_mask.assign((size_t) SEQ * SEQ, 0.0f); const float NEG = -std::numeric_limits<float>::infinity(); for (int64_t q = 0; q < SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) c_mask[q * SEQ + kv] = (kv <= q) ? 0.0f : NEG; c_mask_seq = SEQ; }
+        if (c_mask_seq != SEQ) { build_causal_mask(SEQ, c_mask); c_mask_seq = SEQ; }
         ggml_backend_tensor_set(t_lmmask, c_mask.data(), 0, ggml_nbytes(t_lmmask));
         ggml_backend_tensor_set(t_emb_idx, emb_pos_idx.data(), 0, ggml_nbytes(t_emb_idx));
         for (int j = 0; j < 3; ++j) ggml_backend_tensor_set(t_ds[j], ds_pad[j].data(), 0, ggml_nbytes(t_ds[j]));

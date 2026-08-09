@@ -24,6 +24,7 @@
 #include "gguf.h"
 #include "models/gguf_reader.h"
 #include "models/scratch_ctx.h"
+#include "models/dit_common.h"
 
 #include <chrono>
 #include <cmath>
@@ -459,8 +460,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
       ggml_backend_tensor_set(t_ids,ids.data(),0,ggml_nbytes(t_ids)); }
     ggml_backend_tensor_set(t_proj,proj_host.data(),0,ggml_nbytes(t_proj));
     { std::vector<int32_t> pp(SEQ); for(int64_t i=0;i<SEQ;++i)pp[i]=(int32_t)i; ggml_backend_tensor_set(t_pos,pp.data(),0,ggml_nbytes(t_pos)); }
-    { std::vector<float> mk((size_t)SEQ*SEQ); const float NI=-std::numeric_limits<float>::infinity();
-      for(int64_t q=0;q<SEQ;++q) for(int64_t k=0;k<SEQ;++k) mk[q*SEQ+k]=(k<=q)?0.0f:NI;
+    { std::vector<float> mk; build_causal_mask(SEQ, mk);
       ggml_backend_tensor_set(t_mask,mk.data(),0,ggml_nbytes(t_mask)); }
     { std::vector<float> sv(proprio_dim,0.0f); for(int64_t i=0;i<proprio_dim && in.state;++i) sv[i]=in.state[i];
       ggml_backend_tensor_set(t_state,sv.data(),0,ggml_nbytes(t_state)); }

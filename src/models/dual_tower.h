@@ -57,8 +57,10 @@ inline ggml_tensor* tower(ggml_context*C, ggml_tensor*pix, ggml_tensor*pw, ggml_
                           ggml_tensor*cls, ggml_tensor*reg, const std::vector<ViTLayerW>&blk,
                           int64_t hidden, int64_t heads, int64_t hd, int64_t inter, int64_t patch, float eps, bool prefix){
     (void)inter;
-    const int64_t NP=256, nprefix=prefix?5:0, N=NP+nprefix;
     ggml_tensor*conv=ggml_conv_2d(C,pw,pix,patch,patch,0,0,1,1);
+    // Patch count from the conv, not a constant: both callers run 224/14 today,
+    // and a different input size would otherwise reshape into the wrong grid.
+    const int64_t NP=conv->ne[0]*conv->ne[1], nprefix=prefix?5:0, N=NP+nprefix;
     ggml_tensor*pt=ggml_cont(C,ggml_transpose(C,ggml_reshape_2d(C,conv,NP,hidden)));
     pt=ggml_add(C,pt,pb); pt=ggml_add(C,pt,pos);
     ggml_tensor*x=pt;

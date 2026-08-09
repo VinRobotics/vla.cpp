@@ -33,7 +33,9 @@ target_link_libraries(test_qwen3vl_vit PRIVATE ggml)
 target_compile_options(test_qwen3vl_vit PRIVATE -Wall -Wextra)
 add_test(NAME qwen3vl_vit COMMAND test_qwen3vl_vit)
 
+# Links vla_core: it calls the real config_is_sane rather than a copy.
 add_executable(test_config_guard test_config_guard.cpp)
 target_include_directories(test_config_guard PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_config_guard PRIVATE vla_core)
 target_compile_options(test_config_guard PRIVATE -Wall -Wextra)
 add_test(NAME config_guard COMMAND test_config_guard)

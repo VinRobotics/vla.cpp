@@ -21,14 +21,9 @@
 #include <cassert>
 #include <cstdio>
 
-// Mirrors config_is_sane() in src/model.cpp.
-static bool sane(const vla::Config & c) {
-    if (c.real_state_dim  < 0 || c.max_state_dim  < 0) return false;
-    if (c.real_action_dim < 0 || c.max_action_dim < 0) return false;
-    if (c.max_state_dim  > 0 && c.real_state_dim  > c.max_state_dim)  return false;
-    if (c.max_action_dim > 0 && c.real_action_dim > c.max_action_dim) return false;
-    return true;
-}
+// The real guard, not a copy: a reimplementation here could not fail on a
+// regression in src/model.cpp.
+static bool sane(const vla::Config & c) { return vla::config_is_sane(c); }
 
 int main() {
     vla::Config c{};

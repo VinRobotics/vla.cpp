@@ -788,11 +788,7 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         std::memcpy(pp.data() + (size_t) 3 * SEQ, pp.data() + (size_t) 0 * SEQ, (size_t) SEQ * sizeof(int32_t));
         ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos));
     }
-    if (c_mask_seq != SEQ) {
-        c_mask.assign((size_t) SEQ * SEQ, 0.0f); const float NEG = -std::numeric_limits<float>::infinity();
-        for (int64_t q = 0; q < SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) c_mask[q * SEQ + kv] = (kv <= q) ? 0.0f : NEG;
-        c_mask_seq = SEQ;
-    }
+    if (c_mask_seq != SEQ) { build_causal_mask(SEQ, c_mask); c_mask_seq = SEQ; }
     ggml_backend_tensor_set(t_lmmask, c_mask.data(), 0, ggml_nbytes(t_lmmask));
     { std::vector<float> st(max_state_dim, 0.0f); for (int64_t i = 0; i < max_state_dim; ++i) st[i] = in.state ? in.state[i] : 0.0f; ggml_backend_tensor_set(t_state, st.data(), 0, ggml_nbytes(t_state)); }
     ggml_backend_tensor_set(t_x0, x_init.data(), 0, ggml_nbytes(t_x0));

@@ -87,8 +87,8 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
     return ok;
 }
 
-// predict() sizes buffers from the max_* dims and loops to the real_* dims, so
-// real > max writes out of bounds. Checked here once for all archs.
+}  // namespace
+
 bool config_is_sane(const Config& c) {
     struct { const char* name; int64_t real; int64_t max; } pairs[] = {
         { "state",  c.real_state_dim,  c.max_state_dim  },
@@ -108,6 +108,8 @@ bool config_is_sane(const Config& c) {
     }
     return true;
 }
+
+namespace {
 
 bool detect_arch_safetensors(const std::string& path, Arch* out) {
     std::ifstream f(path, std::ios::binary);

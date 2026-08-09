@@ -19,6 +19,7 @@
 #include "model.h"
 #include "vision_common.h"
 #include "scratch_ctx.h"
+#include "dit_common.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -685,20 +686,6 @@ std::string hf_to_gguf(const std::string & n) {
     return n;
 }
 
-std::vector<float> sinusoidal_time_emb(double timestep, int64_t dim,
-                                       double min_period, double max_period) {
-    const int64_t half = dim / 2;
-    std::vector<float> out(dim);
-    for (int64_t i = 0; i < half; ++i) {
-        const double frac   = (half == 1) ? 0.0 : double(i) / double(half - 1);
-        const double period = min_period * std::pow(max_period / min_period, frac);
-        const double scale  = 2.0 * M_PI / period;
-        const double s      = scale * timestep;
-        out[i]        = static_cast<float>(std::sin(s));
-        out[half + i] = static_cast<float>(std::cos(s));
-    }
-    return out;
-}
 
 ggml_tensor * rope_q_or_k(ggml_context * ctx, ggml_tensor * x,
                           ggml_tensor * positions, const Config & cfg) {

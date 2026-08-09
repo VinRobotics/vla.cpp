@@ -213,4 +213,12 @@ struct Stats {
  */
 const Stats& last_stats(const Model* m);
 
+/**
+ * @brief Reject a config whose real_* dims exceed its max_* dims.
+ *
+ * predict() sizes buffers from the max_* dims and loops to the real_* dims, so
+ * real > max writes out of bounds. Checked once for all archs at load.
+ */
+bool config_is_sane(const Config& c);
+
 }
