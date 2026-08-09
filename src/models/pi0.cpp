@@ -92,8 +92,6 @@ struct Pi0ModelArch : public ModelArchBase {
     std::vector<float> predict(const Inputs& in) override;
 
     ggml_backend_t        backend     = nullptr;
-    bool                  is_cuda     = false;
-    bool                  is_gpu      = false;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_context *        ctx_weights = nullptr;
     scratch_ctx           vision_scratch;
@@ -348,8 +346,6 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
         const Backend b = backend_init("vla(pi0)", m->n_threads);
         if (!b.handle) { return nullptr; }
         m->backend = b.handle;
-        m->is_cuda = b.is_cuda;
-        m->is_gpu  = b.is_gpu;
     }
 
     // The SigLIP tower is now bundled in the ckpt GGUF; mmproj_path is ignored.

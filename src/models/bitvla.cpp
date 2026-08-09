@@ -98,7 +98,6 @@ struct BitvlaModelArch : public ModelArchBase {
     gguf_reader           emb_reader{"bitvla"};   // stays open for per-step token-embedding row fetches
     std::vector<float>    stop_embed;   // cached constant stop-token embedding row
     ggml_backend_t        backend     = nullptr;
-    bool                  is_cuda     = false;
     int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
     scratch_ctx           vision_scratch;

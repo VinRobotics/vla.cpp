@@ -92,7 +92,7 @@ struct VlaAdapterModelArch : public ModelArchBase {
     }
 
     ggml_backend_t backend = nullptr;
-    bool is_gpu = false; int n_threads = default_cpu_threads();
+    int n_threads = default_cpu_threads();
     ggml_context * ctx_weights = nullptr;
     scratch_ctx vision_scratch;
     scratch_ctx main_scratch;
@@ -190,7 +190,6 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
         const Backend b = backend_init("vla(vla_adapter)", m->n_threads);
         if (!b.handle) { return nullptr; }
         m->backend = b.handle;
-        m->is_gpu  = b.is_gpu;
     }
 
     ggml_init_params wp = { (size_t)64*1024*1024, nullptr, true };

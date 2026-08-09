@@ -54,8 +54,6 @@ struct Gr00tN1d6ModelArch : public ModelArchBase {
     // Opened once at load: reopening per predict re-parses the whole GGUF header.
     gguf_reader           io{"gr00tn1d6"};
     ggml_backend_t        backend     = nullptr;
-    bool                  is_cuda     = false;
-    bool                  is_gpu      = false;
     int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
     scratch_ctx           vision_scratch;
@@ -308,8 +306,6 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
         const Backend b = backend_init("vla(gr00tn1d6)", m->n_threads);
         if (!b.handle) { return nullptr; }
         m->backend = b.handle;
-        m->is_cuda = b.is_cuda;
-        m->is_gpu  = b.is_gpu;
     }
 
     ggml_init_params wp = {  (size_t) 32 * 1024 * 1024,  nullptr,  true };

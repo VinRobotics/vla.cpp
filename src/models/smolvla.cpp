@@ -299,8 +299,6 @@ struct SmolVLAModelArch : public ModelArchBase {
 
     ggml_backend_t        backend     = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
-    bool                  is_cuda     = false;
-    bool                  is_gpu      = false;
 
     ggml_type             weight_dtype = GGML_TYPE_BF16;
 
@@ -925,8 +923,6 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
         const Backend b = backend_init("vla", default_cpu_threads());
         if (!b.handle) { delete m; return nullptr; }
         m->backend = b.handle;
-        m->is_cuda = b.is_cuda;
-        m->is_gpu  = b.is_gpu;
     }
     vram_probe(m->backend, "after backend init");
 

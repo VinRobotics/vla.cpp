@@ -68,9 +68,7 @@ inline void setenv_default(const char * key, const char * val) {
 /// Outcome of @ref backend_init. @c handle is null only if even the CPU backend
 /// failed to come up, which callers treat as a fatal load error.
 struct Backend {
-    ggml_backend_t handle  = nullptr;
-    bool           is_cuda = false;
-    bool           is_gpu  = false;
+    ggml_backend_t handle = nullptr;
 };
 
 /// GPU ordinal for CUDA and SYCL; `VLA_DEVICE` overrides. Junk is rejected, not
@@ -102,8 +100,6 @@ inline Backend backend_init(const char * tag, int n_threads) {
         const int dev = backend_device_index();
         b.handle = ggml_backend_cuda_init(dev);
         if (b.handle) {
-            b.is_cuda = true;
-            b.is_gpu  = true;
             std::printf("%s: backend = CUDA (device %d)\n", tag, dev);
         } else {
             std::fprintf(stderr, "%s: ggml_backend_cuda_init failed; falling back to CPU\n", tag);
@@ -134,7 +130,6 @@ inline Backend backend_init(const char * tag, int n_threads) {
             std::fprintf(stderr, "%s: SYCL device %d out of range (%d visible); falling back to CPU\n",
                          tag, dev, n_dev);
         } else if ((b.handle = ggml_backend_sycl_init(dev)) != nullptr) {
-            b.is_gpu = true;
             char desc[256] = { 0 };
             ggml_backend_sycl_get_device_description(dev, desc, sizeof(desc));
             std::printf("%s: backend = SYCL (device %d: %s)\n", tag, dev, desc);
@@ -146,7 +141,6 @@ inline Backend backend_init(const char * tag, int n_threads) {
     {
         b.handle = ggml_backend_metal_init();
         if (b.handle) {
-            b.is_gpu = true;
             std::printf("%s: backend = Metal\n", tag);
         } else {
             std::fprintf(stderr, "%s: ggml_backend_metal_init failed; falling back to CPU\n", tag);
