@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vla-cpp"
-version = "0.1.1"
+version = "0.2.0"
 description = "Python bindings for vla.cpp, a C++ inference engine for Vision-Language-Action models."
 readme = "README.md"
 requires-python = ">=3.9"
