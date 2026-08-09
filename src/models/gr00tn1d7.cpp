@@ -99,16 +99,20 @@ struct Gr00tN1d7ModelArch : public ModelArchBase {
     gguf_reader                     io;
     bool build_caches();
 
-    struct MainGraph {
-        ggml_context * C = nullptr; ggml_gallocr_t galloc = nullptr; ggml_cgraph * gf = nullptr;
+    struct MainKey {
+        int64_t seq=-1, n_img=-1, seq_txt=-1, nsteps=-1; bool deepstack=false;
+        bool operator==(const MainKey & o) const {
+            return seq==o.seq && n_img==o.n_img && seq_txt==o.seq_txt &&
+                   nsteps==o.nsteps && deepstack==o.deepstack;
+        }
+    };
+    struct MainIO {
         ggml_tensor *t_embeds=nullptr,*t_pos=nullptr,*t_lmmask=nullptr,*t_state=nullptr,*t_x0=nullptr;
         ggml_tensor *t_ds[3]={nullptr,nullptr,nullptr};
         ggml_tensor *t_img_idx=nullptr,*t_txt_idx=nullptr,*actions=nullptr;
         std::vector<ggml_tensor*> t_tau, t_tproj;
-        int64_t seq=-1,n_img=-1,seq_txt=-1,nsteps=-1; bool deepstack=false; bool valid=false;
-        void release() { if (galloc) ggml_gallocr_free(galloc); if (C) ggml_free(C);
-                         galloc=nullptr; C=nullptr; gf=nullptr; valid=false; t_tau.clear(); t_tproj.clear(); }
-    } mg;
+    };
+    graph_cache<MainKey, MainIO> mg;
 
     std::vector<float> predict(const Inputs& in) override;
 };
@@ -629,19 +633,16 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     else { std::mt19937 rng((uint32_t) std::chrono::steady_clock::now().time_since_epoch().count()); std::normal_distribution<float> nd(0.f, 1.f); for (auto & v : x_init) v = nd(rng); }
 
     // On by default: 16% faster, bit-identical. Set VLA_GR00T_GRAPH_CACHE=0 to opt out.
+    // Dumping adds graph outputs, so it always rebuilds.
     const char * gc = std::getenv("VLA_GR00T_GRAPH_CACHE");
     const bool use_cache = (!gc || std::strcmp(gc, "0") != 0) && !do_dump;
-    const bool reuse = use_cache && mg.valid && mg.seq == SEQ && mg.n_img == n_img &&
-                       mg.seq_txt == SEQ_TXT && mg.nsteps == num_steps && mg.deepstack == inject_deepstack;
+    if (!use_cache) mg.release();
 
     ggml_tensor * eagle = nullptr, * vl_embs = nullptr;
     std::vector<ggml_tensor*> lm_h_dump, vlsa_dump;
-    if (!reuse) {
-    if (mg.C) mg.release();
-    ggml_init_params cp = { (size_t) 256 * 1024 * 1024, nullptr, true };
-    ggml_context * C = ggml_init(cp);
-    if (!C) { std::fprintf(stderr, "vla(gr00tn1d7): ggml_init(ctx_compute) failed\n"); return {}; }
-
+    const MainKey mkey{ SEQ, n_img, SEQ_TXT, num_steps, inject_deepstack };
+    const bool built = mg.ensure(backend, mkey, (size_t) 256 * 1024 * 1024,
+                                 [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
     ggml_tensor * t_embeds = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);          ggml_set_input(t_embeds);
     ggml_tensor * t_pos    = ggml_new_tensor_1d(C, GGML_TYPE_I32, 4 * SEQ);         ggml_set_input(t_pos);
     ggml_tensor * t_lmmask = ggml_new_tensor_2d(C, GGML_TYPE_F32, SEQ, SEQ);        ggml_set_input(t_lmmask);
@@ -719,25 +720,22 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     }
     ggml_set_name(actions, "action_pred"); ggml_set_output(actions);
 
+    gio.t_embeds=t_embeds; gio.t_pos=t_pos; gio.t_lmmask=t_lmmask; gio.t_state=t_state; gio.t_x0=t_x0;
+    gio.t_ds[0]=t_ds[0]; gio.t_ds[1]=t_ds[1]; gio.t_ds[2]=t_ds[2];
+    gio.t_img_idx=t_img_idx; gio.t_txt_idx=t_txt_idx; gio.t_tau=t_tau; gio.t_tproj=t_tproj; gio.actions=actions;
+
     ggml_cgraph * gf = ggml_new_graph_custom(C, 65536, false);
     ggml_build_forward_expand(gf, actions);
+    return gf;
+    });
+    if (!built) { std::fprintf(stderr, "vla(gr00tn1d7): main graph build failed\n"); return {}; }
 
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!galloc || !ggml_gallocr_alloc_graph(galloc, gf)) { std::fprintf(stderr, "vla(gr00tn1d7): gallocr alloc failed\n"); if (galloc) ggml_gallocr_free(galloc); ggml_free(C); return {}; }
-
-        mg.C=C; mg.galloc=galloc; mg.gf=gf;
-        mg.t_embeds=t_embeds; mg.t_pos=t_pos; mg.t_lmmask=t_lmmask; mg.t_state=t_state; mg.t_x0=t_x0;
-        mg.t_ds[0]=t_ds[0]; mg.t_ds[1]=t_ds[1]; mg.t_ds[2]=t_ds[2];
-        mg.t_img_idx=t_img_idx; mg.t_txt_idx=t_txt_idx; mg.t_tau=t_tau; mg.t_tproj=t_tproj; mg.actions=actions;
-        mg.seq=SEQ; mg.n_img=n_img; mg.seq_txt=SEQ_TXT; mg.nsteps=num_steps; mg.deepstack=inject_deepstack;
-        mg.valid = use_cache;
-    }
-
-    ggml_context * C = mg.C; ggml_cgraph * gf = mg.gf; ggml_gallocr_t galloc = mg.galloc; (void) C; (void) galloc;
-    ggml_tensor * t_embeds = mg.t_embeds, * t_pos = mg.t_pos, * t_lmmask = mg.t_lmmask, * t_state = mg.t_state, * t_x0 = mg.t_x0;
-    ggml_tensor * t_ds[3] = { mg.t_ds[0], mg.t_ds[1], mg.t_ds[2] };
-    ggml_tensor * t_img_idx = mg.t_img_idx, * t_txt_idx = mg.t_txt_idx, * actions = mg.actions;
-    std::vector<ggml_tensor*> & t_tau = mg.t_tau; std::vector<ggml_tensor*> & t_tproj = mg.t_tproj;
+    MainIO & gio = mg.io();
+    ggml_cgraph * gf = mg.graph();
+    ggml_tensor * t_embeds = gio.t_embeds, * t_pos = gio.t_pos, * t_lmmask = gio.t_lmmask, * t_state = gio.t_state, * t_x0 = gio.t_x0;
+    ggml_tensor * t_ds[3] = { gio.t_ds[0], gio.t_ds[1], gio.t_ds[2] };
+    ggml_tensor * t_img_idx = gio.t_img_idx, * t_txt_idx = gio.t_txt_idx, * actions = gio.actions;
+    std::vector<ggml_tensor*> & t_tau = gio.t_tau; std::vector<ggml_tensor*> & t_tproj = gio.t_tproj;
 
     ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
     {

@@ -15,6 +15,10 @@
 // Compute context and graph allocator reused across predict calls; rebuilding
 // them costs 2-4 ms on the larger graphs. One scratch per graph role, and
 // tensors die at the next reset.
+//
+// graph_cache keeps the built graph too, for the archs whose shape depends on a
+// small key. ggml-cuda can then capture and replay it, which needs the node list
+// to stay put.
 
 #pragma once
 
@@ -23,6 +27,7 @@
 #include "ggml-backend.h"
 
 #include <cstddef>
+#include <utility>
 
 namespace vla {
 
@@ -53,6 +58,54 @@ public:
 private:
     ggml_context * ctx_    = nullptr;
     ggml_gallocr_t galloc_ = nullptr;
+};
+
+// Key is whatever shape the graph depends on (it needs operator==); IO holds the
+// input/output tensor handles the arch fills in each call. build(ctx, io) emits
+// the graph and returns it, or null to fail the call.
+template <class Key, class IO>
+class graph_cache {
+public:
+    graph_cache() = default;
+    graph_cache(const graph_cache &) = delete;
+    graph_cache & operator=(const graph_cache &) = delete;
+    ~graph_cache() { release(); }
+
+    template <class Build>
+    bool ensure(ggml_backend_t backend, const Key & key, size_t arena, Build && build) {
+        if (valid_ && key_ == key) return true;
+        release();
+        ggml_init_params p = { arena, nullptr, true };
+        ctx_ = ggml_init(p);
+        if (!ctx_) return false;
+        io_ = IO{};
+        gf_ = build(ctx_, io_);
+        if (!gf_) { release(); return false; }
+        galloc_ = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+        if (!galloc_ || !ggml_gallocr_alloc_graph(galloc_, gf_)) { release(); return false; }
+        key_   = key;
+        valid_ = true;
+        return true;
+    }
+
+    IO &          io()    { return io_; }
+    ggml_cgraph * graph() { return gf_; }
+
+    void release() {
+        if (galloc_) { ggml_gallocr_free(galloc_); galloc_ = nullptr; }
+        if (ctx_)    { ggml_free(ctx_);            ctx_    = nullptr; }
+        gf_ = nullptr;
+        io_ = IO{};
+        valid_ = false;
+    }
+
+private:
+    ggml_context * ctx_    = nullptr;
+    ggml_gallocr_t galloc_ = nullptr;
+    ggml_cgraph *  gf_     = nullptr;
+    Key            key_{};
+    IO             io_{};
+    bool           valid_  = false;
 };
 
 }  // namespace vla

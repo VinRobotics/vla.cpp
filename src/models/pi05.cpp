@@ -110,7 +110,17 @@ struct Pi05ModelArch : public ModelArchBase {
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_context *        ctx_weights = nullptr;
     scratch_ctx           vision_scratch;
-    scratch_ctx           main_scratch;
+
+    struct MainKey {
+        int64_t n_img=-1, n_lang=-1, nsteps=-1;
+        bool operator==(const MainKey & o) const { return n_img==o.n_img && n_lang==o.n_lang && nsteps==o.nsteps; }
+    };
+    struct MainIO {
+        ggml_tensor *t_image_emb=nullptr,*t_lang_emb=nullptr,*t_prefix_pos=nullptr;
+        ggml_tensor *t_x0=nullptr,*t_suffix_pos=nullptr,*x_final=nullptr;
+        std::vector<ggml_tensor*> t_time;
+    };
+    graph_cache<MainKey, MainIO> main_graph;
     std::string           ckpt_path_;
     // Opened once at load: reopening per predict re-parses the whole GGUF header.
     gguf_reader           io{"pi05"};
@@ -649,9 +659,10 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         if (!io.fetch_rows_f32("token_embd.weight", lang_ids, lang_rows.data(), hidden_pl)) return {};
     }
 
-    ggml_context * C = main_scratch.reset((size_t) 64 * 1024 * 1024);
-    if (!C) { std::fprintf(stderr, "vla(pi05): ggml_init(ctx_compute) failed\n"); return {}; }
-
+    // Prefix + expert graph depends only on the token counts and step count.
+    const MainKey mkey{ n_img_tokens, n_lang, num_steps };
+    const bool built = main_graph.ensure(backend, mkey, (size_t) 64 * 1024 * 1024,
+                                         [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
     ggml_tensor * t_image_emb = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_img_tokens); ggml_set_input(t_image_emb);
     ggml_tensor * t_lang_emb  = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_lang);       ggml_set_input(t_lang_emb);
     ggml_tensor * t_prefix_pos= ggml_new_tensor_1d(C, GGML_TYPE_I32, n_prefix);                ggml_set_input(t_prefix_pos);
@@ -696,14 +707,21 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     ggml_tensor * x_final = x_t;
     ggml_set_output(x_final);
 
+    gio.t_image_emb=t_image_emb; gio.t_lang_emb=t_lang_emb; gio.t_prefix_pos=t_prefix_pos;
+    gio.t_x0=t_x0; gio.t_suffix_pos=t_suffix_pos; gio.t_time=t_time; gio.x_final=x_final;
+
     ggml_cgraph * gf = ggml_new_graph_custom(C,  16384,  false);
     ggml_build_forward_expand(gf, x_final);
+    return gf;
+    });
+    if (!built) { std::fprintf(stderr, "vla(pi05): main graph build failed\n"); return {}; }
 
-
-    if (!main_scratch.alloc(backend, gf)) {
-        std::fprintf(stderr, "vla(pi05): ggml_gallocr_alloc_graph failed (out of memory?)\n");
-        return {};
-    }
+    MainIO & gio = main_graph.io();
+    ggml_cgraph * gf = main_graph.graph();
+    ggml_tensor * t_image_emb = gio.t_image_emb, * t_lang_emb = gio.t_lang_emb;
+    ggml_tensor * t_prefix_pos = gio.t_prefix_pos, * t_x0 = gio.t_x0;
+    ggml_tensor * t_suffix_pos = gio.t_suffix_pos, * x_final = gio.x_final;
+    std::vector<ggml_tensor*> & t_time = gio.t_time;
 
     ggml_backend_tensor_set(t_image_emb, img_emb_host.data(), 0, ggml_nbytes(t_image_emb));
     ggml_backend_tensor_set(t_lang_emb,  lang_rows.data(),    0, ggml_nbytes(t_lang_emb));

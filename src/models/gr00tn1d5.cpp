@@ -59,7 +59,16 @@ struct Gr00tN1d5ModelArch : public ModelArchBase {
     int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
     scratch_ctx           vision_scratch;
-    scratch_ctx           main_scratch;
+
+    struct MainKey {
+        int64_t seq=-1, nsteps=-1;
+        bool operator==(const MainKey & o) const { return seq==o.seq && nsteps==o.nsteps; }
+    };
+    struct MainIO {
+        ggml_tensor *t_embeds=nullptr,*t_pos=nullptr,*t_lmmask=nullptr,*t_state=nullptr,*t_x0=nullptr,*actions=nullptr;
+        std::vector<ggml_tensor*> t_tau, t_tproj;
+    };
+    graph_cache<MainKey, MainIO> main_graph;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_F32;
 
@@ -438,9 +447,10 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     if (in.noise) std::memcpy(x_init.data(), in.noise, x_init.size() * sizeof(float));
     else { std::mt19937 rng((uint32_t) std::chrono::steady_clock::now().time_since_epoch().count()); std::normal_distribution<float> nd(0.f, 1.f); for (auto & v : x_init) v = nd(rng); }
 
-    ggml_context * C = main_scratch.reset((size_t) 128 * 1024 * 1024);
-    if (!C) { std::fprintf(stderr, "vla(gr00tn1d5): ggml_init(ctx_compute) failed\n"); return {}; }
-
+    // LM + VLSA + DiT graph depends only on the padded length and step count.
+    const MainKey mkey{ SEQ, num_steps };
+    const bool built = main_graph.ensure(backend, mkey, (size_t) 128 * 1024 * 1024,
+                                         [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
     ggml_tensor * t_embeds = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);          ggml_set_input(t_embeds);
     ggml_tensor * t_pos    = ggml_new_tensor_1d(C, GGML_TYPE_I32, SEQ);             ggml_set_input(t_pos);
     ggml_tensor * t_lmmask = ggml_new_tensor_2d(C, GGML_TYPE_F32, SEQ, SEQ);        ggml_set_input(t_lmmask);
@@ -498,10 +508,20 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     }
     ggml_set_name(actions, "action_pred"); ggml_set_output(actions);
 
+    gio.t_embeds=t_embeds; gio.t_pos=t_pos; gio.t_lmmask=t_lmmask; gio.t_state=t_state;
+    gio.t_x0=t_x0; gio.t_tau=t_tau; gio.t_tproj=t_tproj; gio.actions=actions;
+
     ggml_cgraph * gf = ggml_new_graph_custom(C, 32768, false);
     ggml_build_forward_expand(gf, actions);
+    return gf;
+    });
+    if (!built) { std::fprintf(stderr, "vla(gr00tn1d5): main graph build failed\n"); return {}; }
 
-    if (!main_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(gr00tn1d5): gallocr alloc failed\n"); return {}; }
+    MainIO & gio = main_graph.io();
+    ggml_cgraph * gf = main_graph.graph();
+    ggml_tensor * t_embeds = gio.t_embeds, * t_pos = gio.t_pos, * t_lmmask = gio.t_lmmask;
+    ggml_tensor * t_state = gio.t_state, * t_x0 = gio.t_x0, * actions = gio.actions;
+    std::vector<ggml_tensor*> & t_tau = gio.t_tau; std::vector<ggml_tensor*> & t_tproj = gio.t_tproj;
 
     ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
     { std::vector<int32_t> pp(SEQ); for (int64_t i = 0; i < SEQ; ++i) pp[i] = (int32_t) i; ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos)); }

@@ -94,7 +94,15 @@ struct OpenVlaOftModelArch : public ModelArchBase {
     int n_threads = default_cpu_threads();
     ggml_context * ctx_weights = nullptr;
     scratch_ctx vision_scratch;
-    scratch_ctx main_scratch;
+
+    struct MainKey {
+        int64_t seq=-1, n_views=-1, n_lang=-1;
+        bool operator==(const MainKey & o) const { return seq==o.seq && n_views==o.n_views && n_lang==o.n_lang; }
+    };
+    struct MainIO {
+        ggml_tensor *t_ids=nullptr,*t_state=nullptr,*t_proj=nullptr,*act0=nullptr,*t_pos=nullptr,*norm_actions=nullptr;
+    };
+    graph_cache<MainKey, MainIO> main_graph;
     ggml_backend_buffer_t weight_buf = nullptr;
     ggml_type mt = GGML_TYPE_BF16;
 
@@ -303,8 +311,10 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     const int64_t ACT_START = NUM_PATCHES + NUM_PROMPT_TOKENS;
     const int64_t SEQ = 1 + NUM_PATCHES + (L-1) + n_act + 1;
     const auto ti=clock::now();
-    ggml_context*C=main_scratch.reset((size_t)256*1024*1024);
-
+    // LM + action head graph depends only on the sequence layout.
+    const MainKey mkey{ SEQ, n_views, L };
+    const bool built = main_graph.ensure(backend, mkey, (size_t)256*1024*1024,
+                                         [&](ggml_context*C, MainIO & gio)->ggml_cgraph*{
     ggml_tensor*t_ids=ggml_new_tensor_1d(C,GGML_TYPE_I32,L+1); ggml_set_input(t_ids);
     ggml_tensor*emb=ggml_get_rows(C,token_embd,t_ids);
     if(emb->type!=GGML_TYPE_F32) emb=ggml_cast(C,emb,GGML_TYPE_F32);
@@ -362,8 +372,18 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     hh=LN(C,hh,h_ln2w,h_ln2b,head_ln_eps);
     ggml_tensor*norm_actions=ggml_add(C,ggml_mul_mat(C,h_fc2w,hh),h_fc2b); ggml_set_output(norm_actions);
 
+    gio.t_ids=t_ids; gio.t_state=t_state; gio.t_proj=t_proj; gio.act0=act0;
+    gio.t_pos=t_pos; gio.norm_actions=norm_actions;
+
     ggml_cgraph*gf=ggml_new_graph_custom(C,16384,false); ggml_build_forward_expand(gf,norm_actions);
-    if(!main_scratch.alloc(backend,gf)){ std::fprintf(stderr,"vla(openvla_oft): main gallocr failed\n"); return {}; }
+    return gf;
+    });
+    if(!built){ std::fprintf(stderr,"vla(openvla_oft): main graph build failed\n"); return {}; }
+
+    MainIO & gio = main_graph.io();
+    ggml_cgraph * gf = main_graph.graph();
+    ggml_tensor*t_ids=gio.t_ids,*t_state=gio.t_state,*t_proj=gio.t_proj;
+    ggml_tensor*act0=gio.act0,*t_pos=gio.t_pos,*norm_actions=gio.norm_actions;
 
     { std::vector<int32_t> ids(L+1);
       for(int64_t i=0;i<L;++i) ids[i]=in.lang_tokens[i];

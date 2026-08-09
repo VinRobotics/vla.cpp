@@ -61,7 +61,16 @@ struct Evo1ModelArch : public ModelArchBase {
     int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
     scratch_ctx           vision_scratch;
-    scratch_ctx           main_scratch;
+
+    struct MainKey {
+        int64_t seq=-1, nsteps=-1;
+        bool operator==(const MainKey & o) const { return seq==o.seq && nsteps==o.nsteps; }
+    };
+    struct MainIO {
+        ggml_tensor *t_embeds=nullptr,*t_pos=nullptr,*t_lmmask=nullptr,*t_qmask=nullptr;
+        ggml_tensor *t_state=nullptr,*t_x=nullptr,*t_amask=nullptr,*x_action=nullptr;
+    };
+    graph_cache<MainKey, MainIO> main_graph;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_BF16;
 
@@ -538,9 +547,10 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         }
     }
 
-    ggml_context * C = main_scratch.reset((size_t) 96 * 1024 * 1024);
-    if (!C) { std::fprintf(stderr, "vla(evo1): ggml_init(ctx_compute) failed\n"); return {}; }
-
+    // LM + DiT graph depends only on the padded length and step count.
+    const MainKey mkey{ SEQ, num_steps };
+    const bool built = main_graph.ensure(backend, mkey, (size_t) 96 * 1024 * 1024,
+                                         [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
     const int64_t E = embed_dim, hd_dit = E / dit_heads;
     const float   scale_dit = 1.0f / std::sqrt((float) hd_dit);
     const int64_t Nctx = SEQ + 1;
@@ -623,13 +633,21 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_set_name(x_action, "x_final");
     ggml_set_output(x_action);
 
+    gio.t_embeds=t_embeds; gio.t_pos=t_pos; gio.t_lmmask=t_lmmask; gio.t_qmask=t_qmask;
+    gio.t_state=t_state; gio.t_x=t_x; gio.t_amask=t_amask; gio.x_action=x_action;
+
     ggml_cgraph * gf = ggml_new_graph_custom(C,  32768,  false);
     ggml_build_forward_expand(gf, x_action);
+    return gf;
+    });
+    if (!built) { std::fprintf(stderr, "vla(evo1): main graph build failed\n"); return {}; }
 
-    if (!main_scratch.alloc(backend, gf)) {
-        std::fprintf(stderr, "vla(evo1): ggml_gallocr_alloc_graph failed\n");
-        return {};
-    }
+    MainIO & gio = main_graph.io();
+    ggml_cgraph * gf = main_graph.graph();
+    ggml_tensor * t_embeds = gio.t_embeds, * t_pos = gio.t_pos, * t_lmmask = gio.t_lmmask;
+    ggml_tensor * t_qmask = gio.t_qmask, * t_state = gio.t_state, * t_x = gio.t_x;
+    ggml_tensor * t_amask = gio.t_amask, * x_action = gio.x_action;
+
     ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
     { std::vector<int32_t> pp(SEQ); for (int64_t i = 0; i < SEQ; ++i) pp[i] = (int32_t) i; ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos)); }
     { std::vector<float> mk((size_t) SEQ * SEQ); const float NEG = -std::numeric_limits<float>::infinity();

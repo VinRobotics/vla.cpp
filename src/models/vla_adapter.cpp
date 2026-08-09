@@ -95,7 +95,17 @@ struct VlaAdapterModelArch : public ModelArchBase {
     int n_threads = default_cpu_threads();
     ggml_context * ctx_weights = nullptr;
     scratch_ctx vision_scratch;
-    scratch_ctx main_scratch;
+
+    struct MainKey {
+        int64_t seq=-1, n_views=-1, nprompt=-1;
+        bool operator==(const MainKey & o) const { return seq==o.seq && n_views==o.n_views && nprompt==o.nprompt; }
+    };
+    struct MainIO {
+        ggml_tensor *t_ids=nullptr,*t_proj=nullptr,*t_pos=nullptr,*t_mask=nullptr;
+        ggml_tensor *t_state=nullptr,*t_x0=nullptr,*norm_actions=nullptr;
+        ggml_tensor *cT=nullptr,*sT=nullptr,*cA=nullptr,*sA=nullptr,*cK=nullptr,*sK=nullptr;
+    };
+    graph_cache<MainKey, MainIO> main_graph;
     ggml_backend_buffer_t weight_buf = nullptr;
     ggml_type mt = GGML_TYPE_BF16;
 
@@ -340,8 +350,10 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     const int64_t NPATCH = NP * n_views;
     const int64_t SEQ = 1 + NPATCH + (NPROMPT-1) + num_tokens + 1;
     const auto ti=clock::now();
-    ggml_context*C=main_scratch.reset((size_t)128*1024*1024);
-
+    // LM + action head graph depends only on the sequence layout.
+    const MainKey mkey{ SEQ, n_views, NPROMPT };
+    const bool built = main_graph.ensure(backend, mkey, (size_t)128*1024*1024,
+                                         [&](ggml_context*C, MainIO & gio)->ggml_cgraph*{
     ggml_tensor*t_ids=ggml_new_tensor_1d(C,GGML_TYPE_I32,NPROMPT+num_tokens+1); ggml_set_input(t_ids);
     ggml_tensor*emb=ggml_get_rows(C,token_embd,t_ids);
     if(emb->type!=GGML_TYPE_F32) emb=ggml_cast(C,emb,GGML_TYPE_F32);
@@ -425,8 +437,20 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     ggml_tensor*xn=LN(C,hx,h_ln2w,h_ln2b,head_ln_eps);
     ggml_tensor*norm_actions=ggml_add(C,ggml_mul_mat(C,h_fc2w,xn),h_fc2b); ggml_set_output(norm_actions);
 
+    gio.t_ids=t_ids; gio.t_proj=t_proj; gio.t_pos=t_pos; gio.t_mask=t_mask;
+    gio.t_state=t_state; gio.t_x0=t_x0; gio.norm_actions=norm_actions;
+    gio.cT=cT; gio.sT=sT; gio.cA=cA; gio.sA=sA; gio.cK=cK; gio.sK=sK;
+
     ggml_cgraph*gf=ggml_new_graph_custom(C,65536,false); ggml_build_forward_expand(gf,norm_actions);
-    if(!main_scratch.alloc(backend,gf)){ std::fprintf(stderr,"vla(vla_adapter): main gallocr failed\n"); return {}; }
+    return gf;
+    });
+    if(!built){ std::fprintf(stderr,"vla(vla_adapter): main graph build failed\n"); return {}; }
+
+    MainIO & gio = main_graph.io();
+    ggml_cgraph * gf = main_graph.graph();
+    ggml_tensor*t_ids=gio.t_ids,*t_proj=gio.t_proj,*t_pos=gio.t_pos,*t_mask=gio.t_mask;
+    ggml_tensor*t_state=gio.t_state,*t_x0=gio.t_x0,*norm_actions=gio.norm_actions;
+    ggml_tensor*cT=gio.cT,*sT=gio.sT,*cA=gio.cA,*sA=gio.sA,*cK=gio.cK,*sK=gio.sK;
 
     { std::vector<int32_t> ids(NPROMPT+num_tokens+1);
       for(int64_t i=0;i<NPROMPT;++i) ids[i]=in.lang_tokens[i];
