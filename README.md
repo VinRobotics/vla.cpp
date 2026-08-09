@@ -56,7 +56,6 @@ cmake --build build -j$(nproc)
 # CUDA build (set CMAKE_CUDA_ARCHITECTURES for your GPU):
 cmake -B build \
     -DGGML_CUDA=ON \
-    -DGGML_CUDA_GRAPHS=ON \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURE
 cmake --build build -j$(nproc)
@@ -94,21 +93,25 @@ WSL2 and Apple Silicon are both tested.
 Once the binaries are built, run one CPU prediction without a server or simulator:
 
 ```bash
-pip install -U "huggingface_hub[cli]"
+pip install -U "huggingface_hub[cli]" transformers
 
 # -hf fetches and caches the checkpoint (under $VLA_CACHE, default ~/.cache/vla)
 ./build/vla-cli -hf vrfai/smolvla-libero-gguf \
-    --image assets/front.jpg --tokens 1,100,200,2 --pretty
+    --image assets/front.jpg --text "pick up the black bowl" --pretty
 
 # or point at a file you already have
 ./build/vla-cli --ckpt models/smolvla/smolvla-libero.gguf \
-    --image assets/front.jpg --tokens 1,100,200,2 --pretty
+    --image assets/front.jpg --text "pick up the black bowl" --pretty
 ```
 
 `vla-cli` runs a single prediction without a server or simulator: give it a model,
-an image, and the tokenized instruction, and it prints the action chunk. Handy for
+an image, and an instruction, and it prints the action chunk. Handy for
 smoke-testing a GGUF or scripting a quick inference.
-`--tokens` are language token ids from the client tokenizer.
+
+There is no tokenizer in the C++ core, so `--text` calls
+`scripts/tokenize_prompt.py` with the tokenizer the architecture was trained on
+(`VLA_PYTHON` picks the interpreter, `VLA_TOKENIZE_SCRIPT` the script). Pass
+`--tokens 1,100,200,2` instead if you already have ids.
 `--pretty` prints one action row per line;
 `--state` sets proprioception (defaults to zeros).
 
@@ -264,24 +267,47 @@ transport, no simulator, no claim about task success.
 ```
 
 RTX 5090, driver 595.84, CUDA 13.2, 24-core host, weights as shipped, 20 reps
-after 3 warmups, each model at its native input size and view count.
+after 3 warmups, best of three sweeps, each model at its native input size and
+view count.
 
 | Model | Views | Input | min ms | p50 ms | p90 ms | vision ms |
 |---|--:|--:|--:|--:|--:|--:|
-| VLA-Adapter | 1 | 224 | 19.2 | 20.2 | 21.0 |  9.1 |
-| VLA-JEPA    | 1 | 256 | 20.7 | 21.8 | 23.4 |  6.2 |
-| BitVLA      | 1 | 224 | 24.2 | 25.2 | 26.5 |  5.5 |
-| GR00T N1.5  | 1 | 224 | 27.7 | 29.8 | 31.7 |  5.7 |
-| GR00T N1.7  | 1 | 256 | 31.0 | 32.8 | 34.0 |  6.2 |
-| GR00T N1.6  | 1 | 224 | 35.2 | 37.4 | 39.6 |  6.3 |
-| OpenVLA-OFT | 1 | 224 | 47.1 | 49.5 | 51.4 |  9.9 |
-| SmolVLA     | 2 | 512 | 47.9 | 52.4 | 56.5 | 18.8 |
-| pi0         | 2 | 224 | 49.4 | 54.0 | 57.9 | 12.0 |
-| pi0.5       | 2 | 224 | 53.0 | 55.9 | 57.6 | 10.7 |
-| Evo-1       | 1 | 448 | 54.8 | 58.4 | 61.8 | 17.5 |
+| VLA-Adapter | 1 | 224 | 18.2 | 19.8 | 21.1 |  9.4 |
+| VLA-JEPA    | 1 | 256 | 19.9 | 21.5 | 22.9 |  6.3 |
+| BitVLA      | 1 | 224 | 23.6 | 25.3 | 26.4 |  5.4 |
+| GR00T N1.5  | 1 | 224 | 28.2 | 29.4 | 30.5 |  5.9 |
+| GR00T N1.7  | 1 | 256 | 31.0 | 33.4 | 34.6 |  6.2 |
+| GR00T N1.6  | 1 | 224 | 33.4 | 35.7 | 37.3 |  6.3 |
+| OpenVLA-OFT | 1 | 224 | 47.4 | 49.2 | 50.2 | 10.3 |
+| SmolVLA     | 2 | 512 | 47.8 | 49.6 | 54.0 | 16.1 |
+| pi0         | 2 | 224 | 48.9 | 52.1 | 55.0 | 11.6 |
+| Evo-1       | 1 | 448 | 52.2 | 55.2 | 57.3 | 17.8 |
+| pi0.5       | 2 | 224 | 53.4 | 56.1 | 59.3 | 11.4 |
 
 Jetson and Apple targets are absent: they have not been re-measured with
 `vla-bench`.
+
+### Task success
+
+Latency says nothing about whether a policy works. LIBERO-Object, 10 tasks and 20
+episodes per model, terminated episodes counted as failures:
+
+| Model | Chunk replay | Success rate |
+|---|--:|--:|
+| BitVLA     |  8 | 100.0% |
+| GR00T N1.7 | 16 |  98.0% |
+| GR00T N1.5 | 16 |  96.0% |
+| Evo-1      |  8 |  94.5% |
+| SmolVLA    |  4 |  90.5% |
+| π0         | 32 |  87.5% |
+| GR00T N1.6 | 16 |  86.5% |
+
+From [eval/reports/report-rtx-3060.md](eval/reports/report-rtx-3060.md), swept on
+an RTX 3060 at commit `dcc29a3` (2026-05-24). It predates π0.5, VLA-Adapter,
+OpenVLA-OFT and VLA-JEPA, which have not been swept. Jetson AGX Orin and Orin
+Nano runs are in the same directory. Success rate belongs to the checkpoint, not
+the engine; `vla_predict_check` in [CONTRIBUTING.md](CONTRIBUTING.md) is how a
+change is shown to leave it alone.
 
 ---
 
