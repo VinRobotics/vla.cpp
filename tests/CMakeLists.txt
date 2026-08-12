@@ -43,3 +43,13 @@ add_test(NAME config_guard COMMAND test_config_guard)
 # The A/B harness for the two BitVLA ternary-GEMM tilings (bitvla_gemm_check.cu)
 # was never committed, so there is no target for it here. VLA_BITVLA_NARROW_GEMM=1
 # still selects the old one-tile-per-CTA kernel for a hand-run comparison.
+
+# Regression test for the in-tree BF16 CUDA kernels and the ggml hook they ride
+# on. Skips itself (exit 0) when no CUDA device is present.
+if(GGML_CUDA)
+    add_executable(test_bf16_cuda_ops test_bf16_cuda_ops.cpp)
+    target_include_directories(test_bf16_cuda_ops PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_bf16_cuda_ops PRIVATE vla_cuda_ops ggml)
+    target_compile_options(test_bf16_cuda_ops PRIVATE -Wall -Wextra)
+    add_test(NAME bf16_cuda_ops COMMAND test_bf16_cuda_ops)
+endif()

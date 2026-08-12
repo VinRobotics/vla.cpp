@@ -23,6 +23,7 @@
 #include "models/gguf_reader.h"
 #include "models/scratch_ctx.h"
 #include "models/act_dtype.h"
+#include "cuda/vla_cuda_ops.h"
 
 #include <chrono>
 #include <algorithm>
@@ -377,6 +378,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
         if (std::getenv("VLA_EVO1_BF16_ACT")) {
             if (b.is_cuda && m->matmul_type == GGML_TYPE_BF16) {
                 m->act_type = GGML_TYPE_BF16;
+                cuda_register_bf16_ops();   // installs the in-tree BF16 CUDA kernels
                 std::printf("vla(evo1): activations = BF16 (VLA_EVO1_BF16_ACT)\n");
             } else {
                 std::fprintf(stderr, "vla(evo1): VLA_EVO1_BF16_ACT ignored - needs CUDA and BF16 weights\n");

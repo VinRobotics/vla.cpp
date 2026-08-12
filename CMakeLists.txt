@@ -34,12 +34,13 @@ set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 # llama.cpp fetched + pinned at configure; bump = one-line GIT_TAG change.
 #
-# The fetched ggml is patched in place to support BF16 activations (adds
-# ggml_mul_mat_t plus BF16 CUDA elementwise/norm kernels) — src/models/*.cpp
-# call ggml_mul_mat_t, so this is required to compile, not optional. The script
-# is idempotent, so a re-configure over an already-patched tree is a no-op; it
+# The fetched ggml gets one addition: a function-pointer hook at the top of the
+# CUDA op dispatch, so the in-tree BF16 kernels in src/cuda/ can take an op
+# before ggml does. That hook is the whole modification — the kernels are
+# ordinary first-party code and need no patching. Left unregistered the pointer
+# is null and ggml behaves exactly as shipped. The script is idempotent, and
 # fails loudly rather than half-applying if an anchor stops matching after a
-# GIT_TAG bump. See scripts/patch_ggml_bf16_activations.py.
+# GIT_TAG bump. See scripts/patch_ggml_cuda_ext_hook.py.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 include(FetchContent)
 FetchContent_Declare(llama
@@ -47,7 +48,7 @@ FetchContent_Declare(llama
     GIT_TAG        b10331
     GIT_SHALLOW    TRUE
     PATCH_COMMAND  ${Python3_EXECUTABLE}
-                   ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_bf16_activations.py
+                   ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_cuda_ext_hook.py
                    <SOURCE_DIR>
 )
 FetchContent_MakeAvailable(llama)
@@ -113,6 +114,25 @@ if(GGML_CUDA)
     target_link_libraries(vla_core PRIVATE bitvla_cuda_kernels)
     target_compile_definitions(vla_core PUBLIC VLA_BITVLA_CUDA_KERNELS)
     target_include_directories(vla_core PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
+
+    # BF16 activation kernels. These run through the extension hook the fetched
+    # ggml carries (scripts/patch_ggml_cuda_ext_hook.py); the hook resolves
+    # ggml_cuda_ext_forward out of ggml-cuda, hence the explicit link.
+    add_library(vla_cuda_ops STATIC src/cuda/vla_cuda_bf16.cu)
+    target_include_directories(vla_cuda_ops PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${llama_SOURCE_DIR}/ggml/include
+    )
+    set_target_properties(vla_cuda_ops PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_compile_features(vla_cuda_ops PRIVATE cxx_std_17)
+    target_compile_options(vla_cuda_ops PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3 -Xptxas=-O3>
+    )
+    target_link_libraries(vla_cuda_ops PUBLIC CUDA::cublas CUDA::cudart ggml-cuda)
+    target_link_libraries(vla_core PRIVATE vla_cuda_ops)
 endif()
 
 # Intel GPUs (Arc / Flex / Data Center Max / Xe iGPU) through oneAPI SYCL.
