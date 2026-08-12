@@ -22,6 +22,7 @@
 #include "gguf.h"
 #include "models/gguf_reader.h"
 #include "models/scratch_ctx.h"
+#include "models/act_dtype.h"
 
 #include <chrono>
 #include <algorithm>
@@ -77,6 +78,10 @@ struct Evo1ModelArch : public ModelArchBase {
     graph_cache<MainKey, MainIO> main_graph;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_BF16;
+    // Activation dtype carried between ops. F32 by default; BF16 under
+    // VLA_EVO1_BF16_ACT, which removes the per-GEMM F32<->BF16 round trip ggml
+    // pays when BF16 weights meet F32 activations. See mm_act/as_type below.
+    ggml_type             act_type    = GGML_TYPE_F32;
 
     int64_t lm_hidden=896, lm_layers=14, n_q=14, n_kv=2, lm_head_dim=64, lm_inter=4864;
     int64_t embed_dim=896, dit_layers=8, dit_heads=8, mlp_head_hidden=1024;
@@ -109,15 +114,27 @@ struct Evo1ModelArch : public ModelArchBase {
 
 namespace {
 
+// BF16 activation path (VLA_EVO1_BF16_ACT=1); see models/act_dtype.h for what
+// mm_act/as_type do and why. The split here: GEMMs, bias adds, residuals,
+// norms and activations in BF16; attention scores, softmax and RoPE in F32;
+// and the flow-matching Euler integrator in F32 so 32 steps of dt = 1/32 do
+// not quantise. At act_type == GGML_TYPE_F32 the graph is unchanged.
+
 ggml_tensor * build_qwen2_layer(ggml_context * C, const Evo1ModelArch & m, const Qwen2LayerW & w,
                                 ggml_tensor * h, ggml_tensor * positions, ggml_tensor * mask, int64_t seq,
                                 ggml_tensor * qmask = nullptr) {
     const int64_t hd = m.lm_head_dim, n_q = m.n_q, n_kv = m.n_kv, hq = n_q * hd;
+    const ggml_type at = m.act_type;
     const float scale = 1.0f / std::sqrt((float) hd);
     ggml_tensor * h_n1 = ggml_mul(C, ggml_rms_norm(C, h, m.lm_rms_eps), w.attn_norm);
-    ggml_tensor * qp = ggml_add(C, ggml_mul_mat(C, w.Wq, h_n1), w.bq);
-    ggml_tensor * kp = ggml_add(C, ggml_mul_mat(C, w.Wk, h_n1), w.bk);
-    ggml_tensor * vp = ggml_add(C, ggml_mul_mat(C, w.Wv, h_n1), w.bv);
+    ggml_tensor * qp = ggml_add(C, mm_act(C, w.Wq, h_n1, at), w.bq);
+    ggml_tensor * kp = ggml_add(C, mm_act(C, w.Wk, h_n1, at), w.bk);
+    ggml_tensor * vp = ggml_add(C, mm_act(C, w.Wv, h_n1, at), w.bv);
+    // RoPE, scores and softmax stay F32 (autocast keeps softmax in fp32, and the
+    // flash-attention experiment showed evo1's SR is sensitive to attention precision)
+    qp = as_type(C, qp, GGML_TYPE_F32);
+    kp = as_type(C, kp, GGML_TYPE_F32);
+    vp = as_type(C, vp, GGML_TYPE_F32);
     ggml_tensor * q_rope = ggml_rope_ext(C, ggml_reshape_3d(C, qp, hd, n_q,  seq), positions, nullptr, (int) hd, GGML_ROPE_TYPE_NEOX, 0, m.lm_rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
     ggml_tensor * k_rope = ggml_rope_ext(C, ggml_reshape_3d(C, kp, hd, n_kv, seq), positions, nullptr, (int) hd, GGML_ROPE_TYPE_NEOX, 0, m.lm_rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, q_rope, 0, 2, 1, 3));
@@ -127,13 +144,13 @@ ggml_tensor * build_qwen2_layer(ggml_context * C, const Evo1ModelArch & m, const
     ggml_tensor * aw = ggml_soft_max_ext(C, kq, mask, scale, 0.0f);
     ggml_tensor * kqv = ggml_mul_mat(C, V, aw);
     ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), hq, seq);
-    ggml_tensor * attn_out = ggml_mul_mat(C, w.Wo, att);
+    ggml_tensor * attn_out = mm_act(C, w.Wo, as_type(C, att, at), at);
     if (qmask) attn_out = ggml_mul(C, attn_out, qmask);
     ggml_tensor * h_attn = ggml_add(C, h, attn_out);
     ggml_tensor * h_n2 = ggml_mul(C, ggml_rms_norm(C, h_attn, m.lm_rms_eps), w.ffn_norm);
-    ggml_tensor * gate = ggml_silu(C, ggml_mul_mat(C, w.Wgate, h_n2));
-    ggml_tensor * up   = ggml_mul_mat(C, w.Wup, h_n2);
-    return ggml_add(C, h_attn, ggml_mul_mat(C, w.Wdown, ggml_mul(C, gate, up)));
+    ggml_tensor * gate = ggml_silu(C, mm_act(C, w.Wgate, h_n2, at));
+    ggml_tensor * up   = mm_act(C, w.Wup, h_n2, at);
+    return ggml_add(C, h_attn, mm_act(C, w.Wdown, ggml_mul(C, gate, up), at));
 }
 
 bool preprocess_image_chw(const ImageView & v, int64_t side, std::vector<float> & out) {
@@ -201,9 +218,12 @@ ggml_tensor * evo1_flash_attn(ggml_context * C, ggml_tensor * q, ggml_tensor * k
 ggml_tensor * build_internvit_layer(ggml_context * C, const Evo1ModelArch & m, const ViTLayerW & w,
                                     ggml_tensor * x, int64_t N) {
     const int64_t H = m.vit_hidden, n_heads = m.vit_heads, hd = H / n_heads;
+    const ggml_type at = m.act_type;
     const float scale = 1.0f / std::sqrt((float) hd);
     ggml_tensor * x_n1 = ggml_add(C, ggml_mul(C, ggml_norm(C, x, m.vit_ln_eps), w.n1w), w.n1b);
-    ggml_tensor * qkv = ggml_add(C, ggml_mul_mat(C, w.Wqkv, x_n1), w.bqkv);
+    ggml_tensor * qkv = ggml_add(C, mm_act(C, w.Wqkv, x_n1, at), w.bqkv);
+    // one cast of the packed QKV rather than three of its slices
+    qkv = as_type(C, qkv, GGML_TYPE_F32);
     ggml_tensor * q = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 0 * H * ggml_element_size(qkv)));
     ggml_tensor * k = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 1 * H * ggml_element_size(qkv)));
     ggml_tensor * v = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 2 * H * ggml_element_size(qkv)));
@@ -220,12 +240,12 @@ ggml_tensor * build_internvit_layer(ggml_context * C, const Evo1ModelArch & m, c
         ggml_tensor * kqv = ggml_mul_mat(C, V, aw);
         att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), H, N);
     }
-    ggml_tensor * attn_out = ggml_add(C, ggml_mul_mat(C, w.Wproj, att), w.bproj);
+    ggml_tensor * attn_out = ggml_add(C, mm_act(C, w.Wproj, as_type(C, att, at), at), w.bproj);
     ggml_tensor * x1 = ggml_add(C, x, ggml_mul(C, attn_out, w.ls1));
     ggml_tensor * x_n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, x1, m.vit_ln_eps), w.n2w), w.n2b);
-    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc1, x_n2), w.bfc1);
+    ggml_tensor * ff = ggml_add(C, mm_act(C, w.Wfc1, x_n2, at), w.bfc1);
     ff = ggml_gelu_erf(C, ff);
-    ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, ff), w.bfc2);
+    ff = ggml_add(C, mm_act(C, w.Wfc2, ff, at), w.bfc2);
     return ggml_add(C, x1, ggml_mul(C, ff, w.ls2));
 }
 
@@ -236,7 +256,9 @@ ggml_tensor * build_internvit_view(ggml_context * C, const Evo1ModelArch & m, gg
     ggml_tensor * conv = ggml_conv_2d(C, m.vit_patch_w, pixels, (int) m.patch_size, (int) m.patch_size, 0, 0, 1, 1);
     ggml_tensor * patches = ggml_add(C, ggml_cont(C, ggml_transpose(C, ggml_reshape_2d(C, conv, n_patches, H))), m.vit_patch_b);
     ggml_tensor * cls2d = ggml_reshape_2d(C, m.vit_cls, H, 1);
-    ggml_tensor * x = ggml_add(C, ggml_concat(C, cls2d, patches, 1), m.vit_pos);
+    // patch embed (conv_2d) and the positional add stay F32; the tower runs in
+    // the activation dtype from here
+    ggml_tensor * x = as_type(C, ggml_add(C, ggml_concat(C, cls2d, patches, 1), m.vit_pos), m.act_type);
 
     for (int64_t i = 0; i < m.vit_layers; ++i) x = build_internvit_layer(C, m, m.vit[i], x, n_tok);
 
@@ -247,9 +269,10 @@ ggml_tensor * build_internvit_view(ggml_context * C, const Evo1ModelArch & m, gg
     ggml_tensor * s4 = ggml_cont(C, ggml_permute(C, s3, 0, 2, 1, 3));
     ggml_tensor * shuf = ggml_reshape_2d(C, s4, shuf_c, sgrid * sgrid);
     ggml_tensor * x_ln = ggml_add(C, ggml_mul(C, ggml_norm(C, shuf, m.proj_ln_eps), m.mm_ln_w), m.mm_ln_b);
-    ggml_tensor * hh = ggml_add(C, ggml_mul_mat(C, m.mm_W1, x_ln), m.mm_b1);
+    ggml_tensor * hh = ggml_add(C, mm_act(C, m.mm_W1, x_ln, m.act_type), m.mm_b1);
     hh = ggml_gelu_erf(C, hh);
-    return ggml_add(C, ggml_mul_mat(C, m.mm_W2, hh), m.mm_b2);
+    // the view embeddings are read back to the host as F32
+    return as_type(C, ggml_add(C, mm_act(C, m.mm_W2, hh, m.act_type), m.mm_b2), GGML_TYPE_F32);
 }
 
 ggml_tensor * inproj_split_w(ggml_context * C, ggml_tensor * Win, int64_t E, int64_t k) {
@@ -349,6 +372,16 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
         const Backend b = backend_init("vla(evo1)", m->n_threads);
         if (!b.handle) { return nullptr; }
         m->backend = b.handle;
+
+        // BF16 activations need BF16-resident weights and the CUDA BF16 GEMM path.
+        if (std::getenv("VLA_EVO1_BF16_ACT")) {
+            if (b.is_cuda && m->matmul_type == GGML_TYPE_BF16) {
+                m->act_type = GGML_TYPE_BF16;
+                std::printf("vla(evo1): activations = BF16 (VLA_EVO1_BF16_ACT)\n");
+            } else {
+                std::fprintf(stderr, "vla(evo1): VLA_EVO1_BF16_ACT ignored - needs CUDA and BF16 weights\n");
+            }
+        }
     }
 
     ggml_init_params wp = {  (size_t) 32 * 1024 * 1024,
@@ -632,12 +665,14 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_tensor * t_x        = ggml_new_tensor_1d(C, GGML_TYPE_F32, action_dim);         ggml_set_input(t_x);
     ggml_tensor * t_amask    = ggml_new_tensor_1d(C, GGML_TYPE_F32, per_a);              ggml_set_input(t_amask);
 
-    ggml_tensor * h = t_embeds;
+    const ggml_type at = act_type;
+
+    ggml_tensor * h = as_type(C, t_embeds, at);
     for (int64_t i = 0; i < lm_layers; ++i) h = build_qwen2_layer(C, *this, lm[i], h, t_pos, t_lmmask, SEQ, t_qmask);
     ggml_tensor * context = ggml_mul(C, ggml_rms_norm(C, h, lm_rms_eps), lm_output_norm);
 
-    ggml_tensor * se = ggml_relu(C, ggml_add(C, ggml_mul_mat(C, state_W1, t_state), state_b1));
-    ggml_tensor * state_tok = ggml_add(C, ggml_mul_mat(C, state_W2, se), state_b2);
+    ggml_tensor * se = ggml_relu(C, ggml_add(C, mm_act(C, state_W1, as_type(C, t_state, at), at), state_b1));
+    ggml_tensor * state_tok = ggml_add(C, mm_act(C, state_W2, se, at), state_b2);
     ggml_tensor * context_tokens = ggml_concat(C, context, ggml_reshape_2d(C, state_tok, E, 1), 1);
 
     struct DC { ggml_tensor *Wq, *bq, *K, *V; };
@@ -650,22 +685,23 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         dc[i].bq = inproj_split_b(C, w.bin, E, 0);
         ggml_tensor * bk = inproj_split_b(C, w.bin, E, 1);
         ggml_tensor * bv = inproj_split_b(C, w.bin, E, 2);
-        ggml_tensor * kp = ggml_add(C, ggml_mul_mat(C, Wk, context_tokens), bk);
-        ggml_tensor * vp = ggml_add(C, ggml_mul_mat(C, Wv, context_tokens), bv);
+        // cross-attention K/V feed the F32 attention core
+        ggml_tensor * kp = as_type(C, ggml_add(C, mm_act(C, Wk, context_tokens, at), bk), GGML_TYPE_F32);
+        ggml_tensor * vp = as_type(C, ggml_add(C, mm_act(C, Wv, context_tokens, at), bv), GGML_TYPE_F32);
         dc[i].K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, kp, hd_dit, dit_heads, Nctx), 0, 2, 1, 3));
         dc[i].V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, vp, hd_dit, dit_heads, Nctx), 1, 2, 0, 3));
     }
 
     auto denoise = [&](ggml_tensor * x_seq_masked, int64_t time_index) -> ggml_tensor * {
         ggml_tensor * time_emb = ggml_cont(C, ggml_view_1d(C, time_pos, E, (size_t) time_index * E * sizeof(float)));
-        ggml_tensor * ae = ggml_relu(C, ggml_add(C, ggml_mul_mat(C, ae_W1, x_seq_masked), ae_b1));
+        ggml_tensor * ae = ggml_relu(C, ggml_add(C, mm_act(C, ae_W1, x_seq_masked, at), ae_b1));
         ae = ggml_add(C, ae, ae_pos);
-        ae = ggml_relu(C, ggml_add(C, ggml_mul_mat(C, ae_W2, ae), ae_b2));
-        ggml_tensor * x = ggml_add(C, ggml_mul_mat(C, ae_W3, ae), ae_b3);
+        ae = ggml_relu(C, ggml_add(C, mm_act(C, ae_W2, ae, at), ae_b2));
+        ggml_tensor * x = ggml_add(C, mm_act(C, ae_W3, ae, at), ae_b3);
         for (int64_t i = 0; i < dit_layers; ++i) {
             const auto & w = dit[i]; const auto & c = dc[i];
             ggml_tensor * x_q = ggml_add(C, ggml_mul(C, ggml_norm(C, x, proj_ln_eps), w.n1w), w.n1b);
-            ggml_tensor * qp = ggml_add(C, ggml_mul_mat(C, c.Wq, x_q), c.bq);
+            ggml_tensor * qp = as_type(C, ggml_add(C, mm_act(C, c.Wq, x_q, at), c.bq), GGML_TYPE_F32);
             ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, qp, hd_dit, dit_heads, horizon), 0, 2, 1, 3));
             ggml_tensor * kq = ggml_mul_mat(C, c.K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
             // The Evo-1 reference cross-attends over the full padded context
@@ -673,20 +709,21 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale_dit, 0.0f);
             ggml_tensor * kqv = ggml_mul_mat(C, c.V, aw);
             ggml_tensor * att_pre = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), E, horizon);
-            ggml_tensor * attn_out = ggml_add(C, ggml_mul_mat(C, w.Wo, att_pre), w.bo);
+            ggml_tensor * attn_out = ggml_add(C, mm_act(C, w.Wo, as_type(C, att_pre, at), at), w.bo);
             ggml_tensor * x1 = ggml_add(C, x, attn_out);
             ggml_tensor * x2 = ggml_add(C, ggml_mul(C, ggml_norm(C, x1, proj_ln_eps), w.n2w), w.n2b);
             x2 = ggml_add(C, x2, time_emb);
-            ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.f1w, x2), w.f1b);
+            ggml_tensor * ff = ggml_add(C, mm_act(C, w.f1w, x2, at), w.f1b);
             ff = ggml_gelu_erf(C, ff);
-            ff = ggml_add(C, ggml_mul_mat(C, w.f2w, ff), w.f2b);
+            ff = ggml_add(C, mm_act(C, w.f2w, ff, at), w.f2b);
             x = ggml_add(C, x1, ff);
         }
         ggml_tensor * x_no = ggml_add(C, ggml_mul(C, ggml_norm(C, x, proj_ln_eps), norm_out_w), norm_out_b);
         ggml_tensor * x_flat = ggml_reshape_1d(C, ggml_cont(C, x_no), horizon * E);
-        ggml_tensor * x_pooled = ggml_add(C, ggml_mul_mat(C, seq_pool_w, x_flat), seq_pool_b);
-        ggml_tensor * mh = ggml_relu(C, ggml_add(C, ggml_mul_mat(C, head_W1, x_pooled), head_b1));
-        return ggml_add(C, ggml_mul_mat(C, head_W2, mh), head_b2);
+        ggml_tensor * x_pooled = ggml_add(C, mm_act(C, seq_pool_w, x_flat, at), seq_pool_b);
+        ggml_tensor * mh = ggml_relu(C, ggml_add(C, mm_act(C, head_W1, x_pooled, at), head_b1));
+        // the Euler integrator below accumulates in F32
+        return as_type(C, ggml_add(C, mm_act(C, head_W2, mh, at), head_b2), GGML_TYPE_F32);
     };
 
     const float dt = 1.0f / (float) num_steps;
@@ -694,7 +731,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     for (int64_t step = 0; step < num_steps; ++step) {
         const int64_t time_index = (int64_t) ((double) step / (double) num_steps * 1000.0);
         ggml_tensor * x_seq = ggml_reshape_2d(C, x_action, per_a, horizon);
-        ggml_tensor * x_seq_masked = ggml_mul(C, x_seq, t_amask);
+        ggml_tensor * x_seq_masked = as_type(C, ggml_mul(C, x_seq, t_amask), at);
         ggml_tensor * v_t = denoise(x_seq_masked, time_index);
         x_action = ggml_add(C, x_action, ggml_scale(C, v_t, dt));
     }

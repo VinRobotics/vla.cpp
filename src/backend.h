@@ -69,6 +69,10 @@ inline void setenv_default(const char * key, const char * val) {
 /// failed to come up, which callers treat as a fatal load error.
 struct Backend {
     ggml_backend_t handle = nullptr;
+    /// True only for a live CUDA backend, never for the CPU fallback. The BF16
+    /// activation path needs the CUDA BF16 GEMM and elementwise kernels, so
+    /// archs gate on this rather than on the compiled-in accelerator.
+    bool           is_cuda = false;
 };
 
 /// GPU ordinal for CUDA and SYCL; `VLA_DEVICE` overrides. Junk is rejected, not
@@ -100,6 +104,7 @@ inline Backend backend_init(const char * tag, int n_threads) {
         const int dev = backend_device_index();
         b.handle = ggml_backend_cuda_init(dev);
         if (b.handle) {
+            b.is_cuda = true;
             std::printf("%s: backend = CUDA (device %d)\n", tag, dev);
         } else {
             std::fprintf(stderr, "%s: ggml_backend_cuda_init failed; falling back to CPU\n", tag);

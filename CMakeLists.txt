@@ -33,11 +33,22 @@ set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 # llama.cpp fetched + pinned at configure; bump = one-line GIT_TAG change.
+#
+# The fetched ggml is patched in place to support BF16 activations (adds
+# ggml_mul_mat_t plus BF16 CUDA elementwise/norm kernels) — src/models/*.cpp
+# call ggml_mul_mat_t, so this is required to compile, not optional. The script
+# is idempotent, so a re-configure over an already-patched tree is a no-op; it
+# fails loudly rather than half-applying if an anchor stops matching after a
+# GIT_TAG bump. See scripts/patch_ggml_bf16_activations.py.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 include(FetchContent)
 FetchContent_Declare(llama
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp
     GIT_TAG        b10331
     GIT_SHALLOW    TRUE
+    PATCH_COMMAND  ${Python3_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_bf16_activations.py
+                   <SOURCE_DIR>
 )
 FetchContent_MakeAvailable(llama)
 
