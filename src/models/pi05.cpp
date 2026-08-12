@@ -19,14 +19,12 @@
 #include "ggml-cpu.h"
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
-#ifdef GGML_USE_CUDA
-#include "ggml-cuda.h"
-#endif
-#ifdef GGML_USE_METAL
-#include "ggml-metal.h"
-#endif
+#include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
+#include "models/scratch_ctx.h"
+#include "models/dit_common.h"
+#include "models/vision_common.h"
 
 #include <algorithm>
 #include <chrono>
@@ -75,19 +73,6 @@ struct ExpertLayerW {
 // SigLIP-So400m vision block weights (PaliGemma tower, built in-tree like gr00tn1d5).
 struct SigLipLayerW { ggml_tensor *ln1w,*ln1b,*ln2w,*ln2b,*Wq,*bq,*Wk,*bk,*Wv,*bv,*Wo,*bo,*Wfc1,*bfc1,*Wfc2,*bfc2; };
 
-std::vector<float> sinusoidal_time_emb(double t, int64_t dim, double min_p, double max_p) {
-    const int64_t half = dim / 2;
-    std::vector<float> out(dim);
-    for (int64_t i = 0; i < half; ++i) {
-        const double frac   = (half == 1) ? 0.0 : double(i) / double(half - 1);
-        const double period = min_p * std::pow(max_p / min_p, frac);
-        const double s      = (2.0 * M_PI / period) * t;
-        out[i]        = (float) std::sin(s);
-        out[half + i] = (float) std::cos(s);
-    }
-    return out;
-}
-
 bool ends_with(const std::string & s, const char * sfx) {
     const size_t n = std::strlen(sfx);
     return s.size() >= n && s.compare(s.size() - n, n, sfx) == 0;
@@ -110,11 +95,23 @@ struct Pi05ModelArch : public ModelArchBase {
     std::vector<float> predict(const Inputs& in) override;
 
     ggml_backend_t        backend     = nullptr;
-    bool                  is_cuda     = false;
-    bool                  is_gpu      = false;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_context *        ctx_weights = nullptr;
+    scratch_ctx           vision_scratch;
+
+    struct MainKey {
+        int64_t n_img=-1, n_lang=-1, nsteps=-1;
+        bool operator==(const MainKey & o) const { return n_img==o.n_img && n_lang==o.n_lang && nsteps==o.nsteps; }
+    };
+    struct MainIO {
+        ggml_tensor *t_image_emb=nullptr,*t_lang_emb=nullptr,*t_prefix_pos=nullptr;
+        ggml_tensor *t_x0=nullptr,*t_suffix_pos=nullptr,*x_final=nullptr;
+        std::vector<ggml_tensor*> t_time;
+    };
+    graph_cache<MainKey, MainIO> main_graph;
     std::string           ckpt_path_;
+    // Opened once at load: reopening per predict re-parses the whole GGUF header.
+    gguf_reader           io{"pi05"};
     ggml_type             matmul_type = GGML_TYPE_BF16;
     int64_t               adarms_cond_dim = 0;
 
@@ -143,7 +140,7 @@ struct Pi05ModelArch : public ModelArchBase {
     bool quantile_norm = false;
 
     std::mt19937 rng{std::random_device{}()};
-    int n_threads = 4;
+    int n_threads = default_cpu_threads();
 };
 
 namespace {
@@ -171,23 +168,6 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_
 }
 
 // CHW-planar float image in [-1,1] for ggml_conv_2d (SigLIP mean/std 0.5).
-bool preprocess_image_chw(const ImageView & v, int64_t side, std::vector<float> & out) {
-    if (v.w != (int) side || v.h != (int) side || !v.data) {
-        std::fprintf(stderr, "vla(pi05): image view is %dx%d, expected %lldx%lld\n",
-                     v.w, v.h, (long long) side, (long long) side);
-        return false;
-    }
-    out.assign((size_t) 3 * side * side, 0.0f);
-    for (int64_t h = 0; h < side; ++h)
-        for (int64_t w = 0; w < side; ++w)
-            for (int64_t c = 0; c < 3; ++c) {
-                float px;
-                if (v.format == PixelFormat::U8) px = ((const uint8_t *) v.data)[(h * side + w) * 3 + c] / 255.0f;
-                else                              px = ((const float  *) v.data)[(h * side + w) * 3 + c];
-                out[c * side * side + h * side + w] = px * 2.0f - 1.0f;
-            }
-    return true;
-}
 
 ggml_tensor * build_vlm_layer(
         ggml_context * ctx, const VlmLayerW & w,
@@ -374,7 +354,12 @@ bool load_stats(gguf_reader & g, Pi05ModelArch & m) {
         const ggml_tensor * t = g.meta(name);
         if (!t) { std::printf("vla(pi05): %s missing - identity\n", name); return; }
         if (t->ne[0] != (int64_t) dst.size()) { std::printf("vla(pi05): %s dim mismatch - identity\n", name); return; }
-        if (!g.read_raw(name, dst.data())) std::printf("vla(pi05): %s read failed - identity\n", name);
+        const std::vector<float> identity = dst;
+        if (!g.read_raw(name, dst.data(), dst.size() * sizeof(float))) {
+            // A short read leaves dst half-overwritten.
+            dst = identity;
+            std::printf("vla(pi05): %s read failed - identity\n", name);
+        }
     };
     read1d("state_mean",  m.state_mean);
     read1d("state_std",   m.state_std);
@@ -414,8 +399,8 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     m->ckpt_path_  = ckpt_path;
     m->matmul_type = std::getenv("VLA_PI05_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
-    gguf_reader g("pi05");
-    if (!g.open(ckpt_path)) return nullptr;
+    if (!m->io.open(ckpt_path)) return nullptr;
+    gguf_reader & g = m->io;
     if (!g.has("pi05.architecture") || g.str("pi05.architecture") != "pi05") {
         std::fprintf(stderr, "vla(pi05): '%s' is not a π0.5 GGUF (pi05.architecture missing/wrong)\n",
                      ckpt_path.c_str());
@@ -435,24 +420,11 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
                 (long long) cfg.n_lang, (long long) m->adarms_cond_dim,
                 m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
-#ifdef GGML_USE_CUDA
-    m->backend = ggml_backend_cuda_init( 0);
-    if (m->backend) { m->is_cuda = true; m->is_gpu = true; std::printf("vla(pi05): backend = CUDA (device 0)\n"); }
-    else            { std::fprintf(stderr, "vla(pi05): ggml_backend_cuda_init failed; falling back to CPU\n"); }
-#elif defined(GGML_USE_METAL)
-    m->backend = ggml_backend_metal_init();
-    if (m->backend) { m->is_gpu = true; std::printf("vla(pi05): backend = Metal\n"); }
-    else            { std::fprintf(stderr, "vla(pi05): ggml_backend_metal_init failed; falling back to CPU\n"); }
-#endif
+    m->n_threads = default_cpu_threads();
     {
-        const unsigned hw = std::thread::hardware_concurrency();
-        m->n_threads = (hw == 0) ? 4 : (int) std::min(hw, 8u);
-    }
-    if (!m->backend) {
-        m->backend = ggml_backend_cpu_init();
-        if (!m->backend) { std::fprintf(stderr, "vla(pi05): ggml_backend_cpu_init failed\n"); return nullptr; }
-        ggml_backend_cpu_set_n_threads(m->backend, m->n_threads);
-        std::printf("vla(pi05): backend = CPU (%d threads)\n", m->n_threads);
+        const Backend b = backend_init("vla(pi05)", m->n_threads);
+        if (!b.handle) { return nullptr; }
+        m->backend = b.handle;
     }
 
     // The SigLIP tower is now bundled in the ckpt GGUF; mmproj_path is ignored.
@@ -478,10 +450,12 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     }
     ggml_context * W = m->ctx_weights;
     std::vector<ggml_tensor *> weights;
+    // A miss returns before pushing, so the null scan below cannot see it.
+    bool missing = false;
 
     auto mk = [&](const char * name, ggml_type type, int n_dims, const int64_t * ne) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name); return nullptr; }
+        if (!gt) { std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name); missing = true; return nullptr; }
         ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), n_dims, ne);
         ggml_set_name(t, name);
         weights.push_back(t);
@@ -489,12 +463,12 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     };
     auto mk_mm = [&](const char * name) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name); return nullptr; }
+        if (!gt) { std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name); missing = true; return nullptr; }
         return mk(name, m->matmul_type, GGML_MAX_DIMS, gt->ne);
     };
     auto mk_f32 = [&](const char * name) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name); return nullptr; }
+        if (!gt) { std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name); missing = true; return nullptr; }
         return mk(name, GGML_TYPE_F32, GGML_MAX_DIMS, gt->ne);
     };
 
@@ -561,6 +535,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     m->W_tin  = mk_f32("time_mlp_in.weight");      m->b_tin  = mk_f32("time_mlp_in.bias");
     m->W_tout = mk_f32("time_mlp_out.weight");     m->b_tout = mk_f32("time_mlp_out.bias");
     m->W_aout = mk_f32("action_out_proj.weight");  m->b_aout = mk_f32("action_out_proj.bias");
+    if (missing) { std::fprintf(stderr, "vla(pi05): checkpoint is missing weights\n"); return nullptr; }
     for (ggml_tensor * t : weights) if (!t) { std::fprintf(stderr, "vla(pi05): weight tensor creation failed\n"); return nullptr; }
     if (!m->ex_final_w || !m->ex_final_b || !m->W_ain || !m->b_ain || !m->W_tin || !m->b_tin ||
         !m->W_tout || !m->b_tout || !m->W_aout || !m->b_aout) {
@@ -617,8 +592,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         n_img_tokens = (int64_t) in.n_images * K;
         img_emb_host.assign((size_t) in.n_images * K * H, 0.0f);
 
-        ggml_init_params vp = { (size_t) 128 * 1024 * 1024, nullptr, true };
-        ggml_context * VC = ggml_init(vp);
+        ggml_context * VC = vision_scratch.reset((size_t) 128 * 1024 * 1024);
         if (!VC) { std::fprintf(stderr, "vla(pi05): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vit_image_size, vit_image_size, 3); ggml_set_input(t_px);
         ggml_tensor * conv = ggml_conv_2d(VC, vit_patch_w, t_px, (int) vit_patch_size, (int) vit_patch_size, 0, 0, 1, 1);
@@ -635,29 +609,27 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
 
         ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
         ggml_build_forward_expand(vg, vit_emb);
-        ggml_gallocr_t vga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!vga || !ggml_gallocr_alloc_graph(vga, vg)) {
+
+        if (!vision_scratch.alloc(backend, vg)) {
             std::fprintf(stderr, "vla(pi05): vision gallocr alloc failed\n");
-            if (vga) ggml_gallocr_free(vga);
-            ggml_free(VC);
             return {};
         }
         const auto tv0 = clk::now();
         std::vector<float> chw;
         for (int v = 0; v < in.n_images; ++v) {
-            if (!preprocess_image_chw(in.images[v], vit_image_size, chw)) { ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+            if (!preprocess_image_chw("pi05", in.images[v], vit_image_size, chw)) { return {}; }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(pi05): vision compute failed (view %d)\n", v);
-                ggml_gallocr_free(vga); ggml_free(VC); return {};
+                return {};
             }
             ggml_backend_tensor_get(vit_emb, img_emb_host.data() + (size_t) v * K * H, 0, ggml_nbytes(vit_emb));
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now() - tv0).count();
-        ggml_gallocr_free(vga); ggml_free(VC);
 
-        // π0.5's image tokens are the raw PaliGemma projector features: this undoes
-        // the 1/sqrt(hidden) the shared vision graph applies (π0 keeps them scaled).
+        // Undo the 1/sqrt(hidden) the shared vision graph applies; pi05 wants raw
+        // projector features. Inside this branch on purpose: precomputed_img_emb
+        // replaces the tower and is already LM-ready.
         const float img_scale = (float) std::sqrt((double) hidden_pl);
         for (float & x : img_emb_host) x *= img_scale;
     }
@@ -672,15 +644,13 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     std::vector<int32_t> lang_ids(in.lang_tokens, in.lang_tokens + n_lang);
     std::vector<float> lang_rows((size_t) n_lang * hidden_pl);
     {
-        gguf_reader g("pi05");
-        if (!g.open(ckpt_path_)) return {};
-        if (!g.fetch_rows_f32("token_embd.weight", lang_ids, lang_rows.data(), hidden_pl)) return {};
+        if (!io.fetch_rows_f32("token_embd.weight", lang_ids, lang_rows.data(), hidden_pl)) return {};
     }
 
-    ggml_init_params cp = { (size_t) 64 * 1024 * 1024, nullptr,  true };
-    ggml_context * C = ggml_init(cp);
-    if (!C) { std::fprintf(stderr, "vla(pi05): ggml_init(ctx_compute) failed\n"); return {}; }
-
+    // Prefix + expert graph depends only on the token counts and step count.
+    const MainKey mkey{ n_img_tokens, n_lang, num_steps };
+    const bool built = main_graph.ensure(backend, mkey, (size_t) 64 * 1024 * 1024,
+                                         [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
     ggml_tensor * t_image_emb = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_img_tokens); ggml_set_input(t_image_emb);
     ggml_tensor * t_lang_emb  = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_lang);       ggml_set_input(t_lang_emb);
     ggml_tensor * t_prefix_pos= ggml_new_tensor_1d(C, GGML_TYPE_I32, n_prefix);                ggml_set_input(t_prefix_pos);
@@ -725,16 +695,21 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     ggml_tensor * x_final = x_t;
     ggml_set_output(x_final);
 
+    gio.t_image_emb=t_image_emb; gio.t_lang_emb=t_lang_emb; gio.t_prefix_pos=t_prefix_pos;
+    gio.t_x0=t_x0; gio.t_suffix_pos=t_suffix_pos; gio.t_time=t_time; gio.x_final=x_final;
+
     ggml_cgraph * gf = ggml_new_graph_custom(C,  16384,  false);
     ggml_build_forward_expand(gf, x_final);
+    return gf;
+    });
+    if (!built) { std::fprintf(stderr, "vla(pi05): main graph build failed\n"); return {}; }
 
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!galloc || !ggml_gallocr_alloc_graph(galloc, gf)) {
-        std::fprintf(stderr, "vla(pi05): ggml_gallocr_alloc_graph failed (out of memory?)\n");
-        if (galloc) ggml_gallocr_free(galloc);
-        ggml_free(C);
-        return {};
-    }
+    MainIO & gio = main_graph.io();
+    ggml_cgraph * gf = main_graph.graph();
+    ggml_tensor * t_image_emb = gio.t_image_emb, * t_lang_emb = gio.t_lang_emb;
+    ggml_tensor * t_prefix_pos = gio.t_prefix_pos, * t_x0 = gio.t_x0;
+    ggml_tensor * t_suffix_pos = gio.t_suffix_pos, * x_final = gio.x_final;
+    std::vector<ggml_tensor*> & t_time = gio.t_time;
 
     ggml_backend_tensor_set(t_image_emb, img_emb_host.data(), 0, ggml_nbytes(t_image_emb));
     ggml_backend_tensor_set(t_lang_emb,  lang_rows.data(),    0, ggml_nbytes(t_lang_emb));
@@ -761,15 +736,11 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     stats.ms_inference = std::chrono::duration<float, std::milli>(clk::now() - ti0).count();
     if (st != GGML_STATUS_SUCCESS) {
         std::fprintf(stderr, "vla(pi05): ggml_backend_graph_compute failed (%d)\n", (int) st);
-        ggml_gallocr_free(galloc);
-        ggml_free(C);
         return {};
     }
 
     std::vector<float> out((size_t) chunk * max_ad);
     ggml_backend_tensor_get(x_final, out.data(), 0, out.size() * sizeof(float));
-    ggml_gallocr_free(galloc);
-    ggml_free(C);
 
     if (!std::getenv("VLA_PI05_SKIP_UNNORM")) {
         for (int64_t t = 0; t < chunk; ++t) {

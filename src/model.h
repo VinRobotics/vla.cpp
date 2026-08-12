@@ -76,6 +76,10 @@ struct Config {
     int     rope_n_dims;      ///< RoPE rotation width (per head).
     int     rope_mode;        ///< RoPE variant (NeoX / GPT-J / etc).
     float   rope_freq_base;   ///< RoPE base frequency.
+
+    /// True if @ref predict already applied the dataset statistics. False for the
+    /// GR00T family and VLA-JEPA, whose callers un-normalise from a stats JSON.
+    bool    denormalized = true;
 };
 
 /// Opaque engine handle; created by @ref model_load and released by
@@ -87,7 +91,10 @@ struct Model;
  */
 enum class TimingDetail {
     NONE,   ///< Only @c ms_total is populated.
-    PHASE,  ///< Per-phase timings (vision, prefill, denoise, ...).
+    /// Per-phase timings (vision, prefill, denoise, ...). SmolVLA uses a second
+    /// builder here that does not pad the prefix to @c n_lang; same positions and
+    /// masking, so it differs from @c NONE only by float reduction order.
+    PHASE,
 };
 
 /**
@@ -120,7 +127,9 @@ struct Inputs {
     const ImageView* images;          ///< Camera views (host memory).
     int              n_images;        ///< Number of @ref images.
 
-    /// Pre-computed image embeddings; bypasses the vision tower.
+    /// Pre-computed image embeddings, [n_img_views * n_img, hidden]; bypasses the
+    /// vision tower. Passed to the LM as-is, so the scale is arch-specific: pi0
+    /// expects the projector output times 1/sqrt(hidden), pi0.5 expects it raw.
     const float*     precomputed_img_emb = nullptr;
     int              n_img_views         = 0; ///< Number of views in
                                               ///  @ref precomputed_img_emb.
@@ -173,9 +182,8 @@ const Config& model_config(const Model* m);
 /**
  * @brief Run one forward pass.
  *
- * Returns the predicted action chunk, normalised to the model's training
- * statistics. The caller is responsible for un-normalising into world
- * units. NaN/Inf inputs cause the call to abort.
+ * See @ref Config::denormalized for whether the result is in world units.
+ * NaN/Inf inputs cause the call to abort.
  *
  * @param m  A handle from @ref model_load.
  * @param in Filled-in @ref Inputs struct.
@@ -204,5 +212,13 @@ struct Stats {
  * @return Reference valid until the next @ref predict call.
  */
 const Stats& last_stats(const Model* m);
+
+/**
+ * @brief Reject a config whose real_* dims exceed its max_* dims.
+ *
+ * predict() sizes buffers from the max_* dims and loops to the real_* dims, so
+ * real > max writes out of bounds. Checked once for all archs at load.
+ */
+bool config_is_sane(const Config& c);
 
 }

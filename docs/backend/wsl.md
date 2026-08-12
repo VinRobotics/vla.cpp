@@ -1,10 +1,9 @@
 # `vla.cpp` on Windows (WSL2 + CUDA)
 
 `vla.cpp` targets Linux and macOS. On Windows the supported path is **WSL2**
-with an Ubuntu distribution: the toolchain (`libzmq`, `protobuf`, `pkg-config`,
-the bash `patches/patch.sh` script) and the CUDA build all run natively inside
-the Linux environment, while still using the host NVIDIA GPU through the
-WSL CUDA driver.
+with an Ubuntu distribution: the toolchain (`libzmq`, `protobuf`, `pkg-config`)
+and the CUDA build all run natively inside the Linux environment, while still
+using the host NVIDIA GPU through the WSL CUDA driver.
 
 ## Prerequisites
 

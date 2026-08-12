@@ -2,9 +2,9 @@
 
 A minimal **streaming image+text chat** client for `vlm-server`, the llama.cpp +
 libmtmd chat runtime (`src/vlm/engine.cpp`) behind a ZMQ daemon. Send text and
-images, get a streamed reply. The design rationale lives in
-[docs/VLM-SERVER.md](../../docs/VLM-SERVER.md); this README is how to **run** it,
-plus the validation numbers for the SmolVLM2-500M-Instruct setup.
+images, get a streamed reply. The layering is sketched in
+[docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md); this README is how to **run**
+it, plus the validation numbers for the SmolVLM2-500M-Instruct setup.
 
 ```
 examples/chat/
@@ -61,9 +61,12 @@ eval $CONV "$SRC" --mmproj \
 The LM conversion resolves the hparams (hidden 960, ff 2560, 15 heads / 5 KV,
 rope θ 1e5) and bakes the SmolVLM2 chat template into the GGUF KV store; the
 `--mmproj` pass writes 198 vision tensors. Sanity-check the pair with
-`llama-mtmd-cli`:
+`llama-mtmd-cli`. It is not part of the default build, so ask for it by name
+first:
 
 ```bash
+cmake --build build-cuda --target llama-mtmd-cli
+
 ./build-cuda/bin/llama-mtmd-cli \
     -m "$OUT/smolvlm2-500m-instruct-f16.gguf" \
     --mmproj "$OUT/mmproj-smolvlm2-500m-instruct-f16.gguf" \

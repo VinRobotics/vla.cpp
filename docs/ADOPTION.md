@@ -1,29 +1,31 @@
 # Adoption notes
 
-vla.cpp is technically solid (7 architectures, self-contained GGUFs, CUDA + Jetson,
-real benchmarks). The gap to llama.cpp-style reach is mostly distribution, not code.
-Ordered by leverage:
+The engine works; the gap is distribution.
 
-1. **Publish on GitHub.** The repo lives on Bitbucket (`bitbucket.org/vinrobotics/vla.cpp`)
-   while the README already links a `github.com/VinRobotics/vla.cpp` URL. llama.cpp's reach
-   came from GitHub visibility, issues, and PRs. A public GitHub mirror is the single biggest
-   lever; nothing else here matters as much.
+Done:
 
-2. **Ship the models.** All seven GGUFs are already published under
-   [`vrfai`](https://huggingface.co/vrfai) on the Hub - the README's "coming soon" rows are
-   stale (now fixed). Keep the model table pointing at the real repos so the policies are
-   one `hf download` away.
+1. **C ABI.** `include/vla.h` and `libvla`. `src/model.h` is C++ only, so
+   without it nothing outside C++ can link the engine.
+2. **Python bindings.** `bindings/python`, ctypes over the ABI.
+3. **Prebuilt binaries.** `.github/workflows/release.yml` publishes
+   linux-x86_64 (CPU and CUDA), linux-aarch64 (CPU, for Jetson-class boards),
+   macos-arm64-metal and a Docker image on tag.
+4. **One-command model fetch.** `-hf user/repo[:file.gguf]` on `vla-cli`,
+   `vla-server` and `vla-bench`, cached under `$VLA_CACHE`.
+5. **Reproducible benchmarks.** `vla-bench` emits the README table rows.
+6. **Contributor path.** `CONTRIBUTING.md` has the six-site walkthrough for
+   adding an architecture, plus issue and PR templates.
+7. **Instruction in, action out.** `vla-cli --text` tokenizes with the
+   architecture's own tokenizer, so the quickstart no longer needs raw ids.
 
-3. **Cut releases.** `v0.1.0` is the first tag (see `CHANGELOG.md`). Tagged releases +
-   changelog give users something to pin and cite.
+Left:
 
-4. **Rotate the committed credential.** The local `.git/config` remote URL embeds an
-   access token (`https://<token>@bitbucket.org/...`). It is never pushed (git config is not
-   tracked), so this is hygiene, not a live leak - but rotate it and use a credential helper
-   or SSH remote instead of an inline token.
+- **Jetson CUDA binaries.** The aarch64 job is CPU only: the hosted arm64 image
+  carries no CUDA, so a Jetson GPU build still happens on the device.
+- **PyPI.** The wheel is built from `bindings/python` but nothing publishes it.
+- **`ci/baselines/rtx3090.json`** still disagrees with the README table, which is
+  now RTX 5090 numbers from `vla-bench`. Re-record the baselines on one machine.
+- **Success rates.** The README table comes from a May 2026 RTX 3060 sweep and
+  covers seven of the eleven archs. A fresh sweep would cover the rest.
 
-5. **Lower the build bar (optional).** A CUDA `Dockerfile` now exists; publishing a prebuilt
-   image (and, later, macOS/Metal or ROCm backends) removes the from-source step that stops
-   most drive-by users.
-
-None of these change inference behaviour; they change who can find and run it.
+None of these change inference behaviour.

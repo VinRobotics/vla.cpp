@@ -98,15 +98,62 @@ def _percentile(xs: list[float], p: float) -> float:
     idx = max(0, min(len(s) - 1, int(round(p * (len(s) - 1)))))
     return s[idx]
 
-def _make_client(backend: str, addr: str):
+def _summarize(xs: list[float]) -> dict | None:
+    if not xs:
+        return None
+    return {
+        "n":      len(xs),
+        "mean":   round(statistics.fmean(xs), 3),
+        "median": round(statistics.median(xs), 3),
+        "p95":    round(_percentile(xs, 0.95), 3),
+        "p99":    round(_percentile(xs, 0.99), 3),
+        "min":    round(min(xs), 3),
+        "max":    round(max(xs), 3),
+    }
+
+def _make_client(backend: str, addr: str, args):
 
     if backend == "lerobot":
+        # The PyTorch reference client wraps its ZMQ client in LIBEROSimAdapter,
+        # which converts a raw LIBERO observation into the format each policy
+        # expects (see pytorch_ref/utils/sim_adapters/libero.py) and picks the
+        # parser from the server-reported arch. Without it every request fails
+        # with "ObservationProcessorStep requires an observation in the
+        # transition". That package only exists under pytorch_ref, so it has to
+        # go ahead of eval/ on the path — the two utils.service copies are
+        # functionally identical, so which one wins does not matter.
+        sys.path.insert(0, str(ROOT / "pytorch_ref"))
         from utils.service import RobotInferenceClient
-        return RobotInferenceClient(host=_host_of(addr), port=_port_of(addr))
+        from utils.sim_adapters.libero import LIBEROSimAdapter
+        return LIBEROSimAdapter(
+            client=RobotInferenceClient(host=_host_of(addr), port=_port_of(addr))
+        )
     elif backend == "vla-cpp":
+        # Mirror run_sim_client_direct.py exactly: the arch preset selects the
+        # tokenizer / image size / state dim, and evo1 + the GR00T family each
+        # need their own pipeline adapter. Building a bare VlaCppClient here
+        # would silently benchmark every arch as if it were smolvla.
         from client.vla_cpp_client import VlaCppClient
-        client = VlaCppClient(vla_addr=addr)
-        return client
+        from client.adapters import (
+            LeRobotPipelineAdapter,
+            Evo1PipelineAdapter,
+            Gr00tPipelineAdapter,
+            Gr00tN15PipelineAdapter,
+        )
+        client = VlaCppClient(
+            vla_addr=addr,
+            arch=args.arch,
+            tokenizer_name=args.tokenizer,
+            n_action_steps=args.n_action_steps,
+            stats_json=args.stats_json,
+        )
+        if args.arch == "evo1":
+            return Evo1PipelineAdapter(client=client)
+        if args.arch == "gr00t_n1_5":
+            return Gr00tN15PipelineAdapter(client=client)
+        if args.arch in ("gr00t_n1_6", "gr00t_n1_7"):
+            return Gr00tPipelineAdapter(client=client)
+        return LeRobotPipelineAdapter(client=client)
     else:
         raise ValueError(f"unknown backend: {backend}")
 
@@ -135,6 +182,22 @@ def main() -> int:
     ap.add_argument("--vram-interval-s", type=float, default=0.25)
     ap.add_argument("--output", type=Path, required=True,
         help="Path to write the stats JSON.")
+    ap.add_argument("--variant", default=None,
+        help="Label for this configuration, e.g. 'vla.cpp', 'eager', "
+             "'compile-reduce-overhead'. Recorded in the stats JSON so the "
+             "collector can build the comparison table.")
+    ap.add_argument("--model", default=None,
+        help="Model name recorded in the stats JSON, e.g. 'smolvla'.")
+    # vla-cpp backend only: the arch preset and its per-arch client wiring.
+    ap.add_argument("--arch", default="smolvla",
+        help="[vla-cpp] arch of the served GGUF; selects tokenizer/preset/adapter.")
+    ap.add_argument("--tokenizer", default=None,
+        help="[vla-cpp] HF id or local dir overriding the arch's default tokenizer.")
+    ap.add_argument("--stats-json", default=None,
+        help="[vla-cpp] dataset_statistics.json, required by the GR00T arches.")
+    ap.add_argument("--n-action-steps", type=int, default=1,
+        help="Actions replayed per prediction. Keep at 1 for latency runs so "
+             "every call is a real forward pass rather than a queue pop.")
     args = ap.parse_args()
 
     pid = args.server_pid or _find_server_pid(args.addr)
@@ -148,7 +211,17 @@ def main() -> int:
         print(f"VRAM (pre-warmup) = {v} MiB", flush=True)
 
     print(f"connecting to {args.addr} as backend={args.backend} ...", flush=True)
-    client = _make_client(args.backend, args.addr)
+    client = _make_client(args.backend, args.addr, args)
+
+    # Both backends wrap their ZMQ client in a pipeline adapter, and neither
+    # adapter forwards attribute access. Reach the client underneath: the
+    # vla-cpp path reads `_last_response` off it, the lerobot path calls the
+    # server's latency endpoints on it.
+    inner = getattr(client, "_client", client)
+    if args.backend == "vla-cpp" and not hasattr(inner, "_last_response"):
+        print("warning: could not reach VlaCppClient._last_response; "
+              "server-side latency will be empty", flush=True)
+        inner = None
 
     output_dir = args.output.parent / "_bench_videos"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -171,6 +244,17 @@ def main() -> int:
         if done or trunc:
             obs, _info = env.reset()
 
+    # The PyTorch server times select_action internally (see
+    # pytorch_ref/utils/service.py). Drop the samples accumulated during warmup
+    # so the compiled variants aren't charged for their first-call compilation.
+    if args.backend == "lerobot":
+        try:
+            dropped = inner.call_endpoint("reset_latencies", requires_input=False)
+            print(f"dropped {dropped.get('dropped')} warmup latency samples", flush=True)
+        except RuntimeError as e:
+            print(f"warning: server has no reset_latencies endpoint ({e}); "
+                  f"server-side latency will include warmup", flush=True)
+
     sampler = None
     if pid is not None:
         sampler = VramSampler(pid, interval_s=args.vram_interval_s)
@@ -191,8 +275,8 @@ def main() -> int:
         step_latencies_ms.append(1000.0 * (t1 - t0))
         n_inference_calls += 1
 
-        if args.backend == "vla-cpp" and hasattr(client, "_last_response"):
-            r = client._last_response
+        if args.backend == "vla-cpp" and inner is not None:
+            r = inner._last_response
             if r is not None:
                 server_latencies.append({
                     "total":     r.latency_ms_total,
@@ -213,6 +297,24 @@ def main() -> int:
             n_episodes_terminated += 1
             obs, _info = env.reset()
     t_run1 = time.time()
+
+    # Server-side inference time, the metric the vla.cpp/torch.compile
+    # comparison is built on: it excludes ZMQ transport and image
+    # serialization, which the client-observed step_ms above includes.
+    #   - lerobot : timed in the server process around select_action
+    #   - vla-cpp : reported by the C++ server in each response
+    server_infer_ms: list[float] = []
+    if args.backend == "lerobot":
+        try:
+            server_infer_ms = list(
+                inner.call_endpoint("get_latencies", requires_input=False)
+                     .get("infer_ms", [])
+            )
+        except RuntimeError as e:
+            print(f"warning: could not fetch server latencies ({e})", flush=True)
+    else:
+        server_infer_ms = [s["total"] for s in server_latencies]
+
     env.close()
 
     if sampler is not None:
@@ -226,6 +328,7 @@ def main() -> int:
         "task_id":      args.task_id,
         "n_steps":      args.n_steps,
         "warmup_steps": args.warmup_steps,
+        "n_action_steps": args.n_action_steps,
         "wall_time_s":  round(t_run1 - t_run0, 3),
         "counters": {
             "inference_calls":     n_inference_calls,
@@ -247,8 +350,18 @@ def main() -> int:
             "peak":      max(vram) if vram else None,
             "mean":      round(statistics.fmean(vram), 1) if vram else None,
         },
+        "server_ms": _summarize(server_infer_ms),
         "server_latency_breakdown": server_latencies,
+        # Raw per-call series. Summary statistics cannot distinguish a uniformly
+        # slower stack from one that hits the same floor but occasionally
+        # stalls, and that distinction is the whole question on gr00t_n1_5.
+        "server_ms_raw": [round(x, 3) for x in server_infer_ms],
+        "step_ms_raw":   [round(x, 3) for x in step_latencies_ms],
     }
+    if args.variant:
+        stats["variant"] = args.variant
+    if args.model:
+        stats["model"] = args.model
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(stats, indent=2))
@@ -274,6 +387,12 @@ def main() -> int:
         print(f"server-internal : total={statistics.fmean(ms):.1f}  "
               f"vision={statistics.fmean(v):.1f}  "
               f"inference={statistics.fmean(i):.1f}  (means)")
+    if stats["server_ms"]:
+        s = stats["server_ms"]
+        print(f"server ms       : mean={s['mean']}  med={s['median']}  "
+              f"p95={s['p95']}  p99={s['p99']}  max={s['max']}  (n={s['n']})")
+    else:
+        print("server ms       : unavailable")
     print(f"\nwrote {args.output}")
     return 0
 

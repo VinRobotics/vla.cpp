@@ -17,10 +17,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: pixel-shuffle channel order
+      # Compiled directly: pure, no llama.cpp or protobuf/zmq needed.
+      - name: pure unit tests
         run: |
-          g++ -std=c++17 -Isrc -Wall -Wextra tests/test_vision_common.cpp -o /tmp/test_vision_common
-          /tmp/test_vision_common
+          for t in test_vision_common test_rope_conventions; do
+            g++ -std=c++17 -Isrc -Wall -Wextra -fsanitize=address,undefined \
+                -fno-omit-frame-pointer "tests/$t.cpp" -o "/tmp/$t"
+            "/tmp/$t"
+          done
 
   py-tooling:
     runs-on: ubuntu-24.04
@@ -31,6 +35,8 @@ jobs:
           python-version: '3.11'
       - name: converter remap
         run: python tests/py/test_converters.py
+      - name: binding struct parity
+        run: python tests/py/test_bindings.py
 
   build-gate:
     runs-on: ubuntu-24.04
@@ -45,8 +51,11 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: build/_deps
-          key: llama-b9866-${{ runner.os }}
-      - name: build vla-server + vlm-server + vla-cli (CPU, -Wall -Wextra)
+          key: llama-b10331-${{ runner.os }}
+      # Everything, not a target list: ctest registers tests this job must build,
+      # and a named list goes stale the next time one is added.
+      - name: build + ctest (CPU, -Wall -Wextra)
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF
-          cmake --build build -j"$(nproc)" --target vla-server vlm-server vla-cli
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF -DVLA_BUILD_TESTS=ON
+          cmake --build build -j"$(nproc)"
+          ctest --test-dir build --output-on-failure

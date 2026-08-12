@@ -28,17 +28,26 @@
 #include "model.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <thread>
 
 namespace vla {
 
-// Default CPU thread count for the in-tree loaders: all cores, capped at 8,
-// with a safe fallback when the hardware count is unknown.
+// CPU threads for the in-tree loaders; VLA_N_THREADS overrides. Cap measured on
+// a 24-core host: 8 to 16 is 38-41% faster on vla_adapter, evo1 and gr00tn1d5,
+// and 24 is slower than 16. Output is bit-identical either way.
 inline int default_cpu_threads() {
+    if (const char * e = std::getenv("VLA_N_THREADS")) {
+        char * end = nullptr;
+        const long n = std::strtol(e, &end, 10);
+        if (*end == '\0' && n > 0 && n <= 1024) return (int) n;
+        std::fprintf(stderr, "vla: ignoring VLA_N_THREADS='%s'\n", e);
+    }
     const unsigned hw = std::thread::hardware_concurrency();
-    return hw == 0 ? 4 : (int) std::min(hw, 8u);
+    return hw == 0 ? 4 : (int) std::min(hw, 16u);
 }
 
 /**

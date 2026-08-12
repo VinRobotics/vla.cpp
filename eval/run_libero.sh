@@ -135,8 +135,12 @@ echo "[config] MODEL=${MODEL}"
 
 cd "${REPO_ROOT}"
 
-echo "[build] cmake --build build"
-cmake --build build -j"$(nproc)"
+if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
+    echo "[build] skipped (SKIP_BUILD=1)"
+else
+    echo "[build] cmake --build build"
+    cmake --build build -j"$(nproc)"
+fi
 
 if [[ ! -x "${SERVER_BIN}" ]]; then
     echo "ERROR: ${SERVER_BIN} not found after build." >&2

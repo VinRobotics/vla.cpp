@@ -87,6 +87,30 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
     return ok;
 }
 
+}  // namespace
+
+bool config_is_sane(const Config& c) {
+    struct { const char* name; int64_t real; int64_t max; } pairs[] = {
+        { "state",  c.real_state_dim,  c.max_state_dim  },
+        { "action", c.real_action_dim, c.max_action_dim },
+    };
+    for (const auto& p : pairs) {
+        if (p.real < 0 || p.max < 0) {
+            std::fprintf(stderr, "vla: negative %s dim (real=%lld max=%lld)\n",
+                         p.name, (long long) p.real, (long long) p.max);
+            return false;
+        }
+        if (p.max > 0 && p.real > p.max) {
+            std::fprintf(stderr, "vla: real_%s_dim %lld exceeds max_%s_dim %lld\n",
+                         p.name, (long long) p.real, p.name, (long long) p.max);
+            return false;
+        }
+    }
+    return true;
+}
+
+namespace {
+
 bool detect_arch_safetensors(const std::string& path, Arch* out) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
@@ -183,6 +207,10 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
             break;
     }
     if (!impl) return nullptr;
+    if (!config_is_sane(impl->cfg)) {
+        std::fprintf(stderr, "vla: refusing to load %s\n", ckpt_path.c_str());
+        return nullptr;
+    }
 
     auto* m = new Model();
     m->impl = std::move(impl);

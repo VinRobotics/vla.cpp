@@ -18,14 +18,12 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include "ggml-backend.h"
-#ifdef GGML_USE_CUDA
-#include "ggml-cuda.h"
-#endif
-#ifdef GGML_USE_METAL
-#include "ggml-metal.h"
-#endif
+#include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
+#include "models/scratch_ctx.h"
+#include "models/dit_common.h"
+#include "models/qwen3vl_vit.h"
 
 #include <chrono>
 #include <cmath>
@@ -44,11 +42,6 @@ namespace vla {
 namespace {
 
 
-constexpr float CLIP_MEAN[3] = {0.5f, 0.5f, 0.5f};
-constexpr float CLIP_STD [3] = {0.5f, 0.5f, 0.5f};
-
-struct VitLayerW   { ggml_tensor *ln1w,*ln1b,*ln2w,*ln2b,*Wqkv,*bqkv,*Wo,*bo,*Wfc1,*bfc1,*Wfc2,*bfc2; };
-struct MergerW     { ggml_tensor *nw,*nb,*fc1w,*fc1b,*fc2w,*fc2b; };
 struct Qwen3LayerW { ggml_tensor *attn_norm,*Wq,*Wk,*Wv,*Wo,*q_norm,*k_norm,*ffn_norm,*Wgate,*Wup,*Wdown; };
 struct DitLayerW   { ggml_tensor *adaln_w,*adaln_b,*Wq,*bq,*Wk,*bk,*Wv,*bv,*Wo,*bo,*Wff0,*bff0,*Wff2,*bff2; };
 
@@ -60,10 +53,28 @@ struct VlaJepaModelArch : public ModelArchBase {
 
     std::string           gguf_path;
     ggml_backend_t        backend     = nullptr;
-    bool                  is_cuda     = false;
-    bool                  is_gpu      = false;
     int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
+    scratch_ctx           vision_scratch;
+    struct LmKey {
+        int64_t seq=-1, nfuture=-1;
+        bool operator==(const LmKey & o) const { return seq==o.seq && nfuture==o.nfuture; }
+    };
+    struct LmIO {
+        ggml_tensor *t_embeds=nullptr,*t_pos2=nullptr,*t_lmmask=nullptr,*t_emb_idx=nullptr;
+        ggml_tensor *t_ds[3]={nullptr,nullptr,nullptr};
+        ggml_tensor *eagle=nullptr,*conditioning=nullptr;
+    };
+    struct HeadKey {
+        int64_t nsteps=-1;
+        bool operator==(const HeadKey & o) const { return nsteps==o.nsteps; }
+    };
+    struct HeadIO {
+        ggml_tensor *t_cond=nullptr,*t_state=nullptr,*t_x0=nullptr,*actions=nullptr;
+        std::vector<ggml_tensor*> t_tau, t_tproj;
+    };
+    graph_cache<LmKey, LmIO>     lm_graph;
+    graph_cache<HeadKey, HeadIO> head_graph;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_F32;
 
@@ -106,57 +117,6 @@ struct VlaJepaModelArch : public ModelArchBase {
 };
 
 namespace {
-
-ggml_tensor * adaln(ggml_context * C, ggml_tensor * x, ggml_tensor * temb, ggml_tensor * lw, ggml_tensor * lb, int64_t dim, float eps) {
-    ggml_tensor * cond = ggml_add(C, ggml_mul_mat(C, lw, ggml_silu(C, temb)), lb);
-    ggml_tensor * sc = ggml_view_1d(C, cond, dim, 0), * sh = ggml_view_1d(C, cond, dim, (size_t) dim * sizeof(float));
-    ggml_tensor * xn = ggml_norm(C, x, eps);
-    return ggml_add(C, ggml_add(C, xn, ggml_mul(C, xn, sc)), sh);
-}
-
-ggml_tensor * rope2d(ggml_context * C, ggml_tensor * x, ggml_tensor * cos_t, ggml_tensor * sin_t) {
-    const int64_t hd = x->ne[0], S = x->ne[1], Hh = x->ne[2]; const int64_t half = hd / 2;
-    ggml_tensor * x1 = ggml_cont(C, ggml_view_3d(C, x, half, S, Hh, x->nb[1], x->nb[2], 0));
-    ggml_tensor * x2 = ggml_cont(C, ggml_view_3d(C, x, half, S, Hh, x->nb[1], x->nb[2], (size_t) half * x->nb[0]));
-    ggml_tensor * rot = ggml_concat(C, ggml_neg(C, x2), x1, 0);
-    return ggml_add(C, ggml_mul(C, x, cos_t), ggml_mul(C, rot, sin_t));
-}
-
-ggml_tensor * build_vit_layer(ggml_context * C, const VitLayerW & w, ggml_tensor * x, ggml_tensor * cos_t, ggml_tensor * sin_t,
-                              int64_t seq, int64_t heads, int64_t hd, int64_t hidden, float ln_eps) {
-    const float scale = 1.0f / std::sqrt((float) hd);
-    ggml_tensor * n1 = ggml_add(C, ggml_mul(C, ggml_norm(C, x, ln_eps), w.ln1w), w.ln1b);
-    ggml_tensor * qkv = ggml_add(C, ggml_mul_mat(C, w.Wqkv, n1), w.bqkv);
-    ggml_tensor * q = ggml_cont(C, ggml_view_2d(C, qkv, hidden, seq, qkv->nb[1], 0));
-    ggml_tensor * k = ggml_cont(C, ggml_view_2d(C, qkv, hidden, seq, qkv->nb[1], (size_t) hidden * qkv->nb[0]));
-    ggml_tensor * v = ggml_cont(C, ggml_view_2d(C, qkv, hidden, seq, qkv->nb[1], (size_t) 2 * hidden * qkv->nb[0]));
-    ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, hd, heads, seq), 0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, hd, heads, seq), 0, 2, 1, 3));
-    Q = rope2d(C, Q, cos_t, sin_t); K = rope2d(C, K, cos_t, sin_t);
-    ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, heads, seq), 1, 2, 0, 3));
-    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-    ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
-    ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
-    ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
-    ggml_tensor * n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.ln2w), w.ln2b);
-    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, ggml_gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);
-    return ggml_add(C, h1, ff);
-}
-
-ggml_tensor * build_merger(ggml_context * C, const MergerW & w, ggml_tensor * x, int64_t hidden, int64_t merge2, float ln_eps, bool pre_merge) {
-    ggml_tensor * m;
-    if (pre_merge) {
-        ggml_tensor * xn = ggml_add(C, ggml_mul(C, ggml_norm(C, x, ln_eps), w.nw), w.nb);
-        const int64_t n_patches = x->ne[1], c_merged = hidden * merge2 * merge2, n_merged = n_patches / (merge2 * merge2);
-        m = ggml_reshape_2d(C, ggml_cont(C, xn), c_merged, n_merged);
-    } else {
-        const int64_t n_patches = x->ne[1], c_merged = hidden * merge2 * merge2, n_merged = n_patches / (merge2 * merge2);
-        ggml_tensor * mr = ggml_reshape_2d(C, ggml_cont(C, x), c_merged, n_merged);
-        m = ggml_add(C, ggml_mul(C, ggml_norm(C, mr, ln_eps), w.nw), w.nb);
-    }
-    ggml_tensor * z1 = ggml_add(C, ggml_mul_mat(C, w.fc1w, m), w.fc1b);
-    return ggml_add(C, ggml_mul_mat(C, w.fc2w, ggml_gelu(C, z1)), w.fc2b);
-}
 
 ggml_tensor * build_qwen3_layer(ggml_context * C, const VlaJepaModelArch & m, const Qwen3LayerW & w,
                                 ggml_tensor * h, ggml_tensor * positions, ggml_tensor * mask, int64_t seq) {
@@ -209,80 +169,6 @@ ggml_tensor * build_dit_block(ggml_context * C, const VlaJepaModelArch & m, cons
     return ggml_add(C, h1, ff);
 }
 
-void merge_block_coords(int64_t gh, int64_t gw, int64_t m, std::vector<int64_t> & row, std::vector<int64_t> & col) {
-    const int64_t S = gh * gw; row.assign(S, 0); col.assign(S, 0);
-    for (int64_t s = 0; s < S; ++s) {
-        int64_t t = s; const int64_t wj = t % m; t /= m; const int64_t wi = t % m; t /= m;
-        const int64_t bc = t % (gw / m); t /= (gw / m); const int64_t br = t;
-        row[s] = br * m + wi; col[s] = bc * m + wj;
-    }
-}
-
-void vit_rope_tables(const std::vector<int64_t> & row, const std::vector<int64_t> & col, int64_t hd, double theta,
-                     std::vector<float> & cos_t, std::vector<float> & sin_t) {
-    const int64_t S = (int64_t) row.size(), nf = hd / 4;
-    std::vector<double> invf(nf);
-    for (int64_t i = 0; i < nf; ++i) invf[i] = 1.0 / std::pow(theta, (double)(2 * i) / (double)(hd / 2));
-    cos_t.assign((size_t) S * hd, 0.0f); sin_t.assign((size_t) S * hd, 0.0f);
-    for (int64_t s = 0; s < S; ++s) {
-        std::vector<double> emb(hd);
-        for (int64_t i = 0; i < nf; ++i) { emb[i] = (double) row[s] * invf[i]; emb[nf + i] = (double) col[s] * invf[i]; }
-        for (int64_t i = 0; i < hd / 2; ++i) emb[hd / 2 + i] = emb[i];
-        for (int64_t i = 0; i < hd; ++i) { cos_t[s * hd + i] = (float) std::cos(emb[i]); sin_t[s * hd + i] = (float) std::sin(emb[i]); }
-    }
-}
-
-void interp_pos_embed(const std::vector<float> & table, int64_t num_side, int64_t hidden,
-                      const std::vector<int64_t> & row, const std::vector<int64_t> & col, int64_t gh, int64_t gw,
-                      std::vector<float> & out) {
-    const int64_t S = (int64_t) row.size();
-    out.assign((size_t) S * hidden, 0.0f);
-    auto src_coord = [&](int64_t k, int64_t g) -> double { return (g <= 1) ? 0.0 : (double) k * (double)(num_side - 1) / (double)(g - 1); };
-    for (int64_t s = 0; s < S; ++s) {
-        const double hy = src_coord(row[s], gh), wx = src_coord(col[s], gw);
-        const int64_t h0 = (int64_t) std::floor(hy), w0 = (int64_t) std::floor(wx);
-        const int64_t h1 = std::min(h0 + 1, num_side - 1), w1 = std::min(w0 + 1, num_side - 1);
-        const double dh = hy - h0, dw = wx - w0;
-        const double c00 = (1 - dh) * (1 - dw), c01 = (1 - dh) * dw, c10 = dh * (1 - dw), c11 = dh * dw;
-        const float * T00 = &table[(h0 * num_side + w0) * hidden]; const float * T01 = &table[(h0 * num_side + w1) * hidden];
-        const float * T10 = &table[(h1 * num_side + w0) * hidden]; const float * T11 = &table[(h1 * num_side + w1) * hidden];
-        for (int64_t c = 0; c < hidden; ++c) out[s * hidden + c] = (float)(c00 * T00[c] + c01 * T01[c] + c10 * T10[c] + c11 * T11[c]);
-    }
-}
-
-bool preprocess_image_patches(const ImageView & v, int64_t side, int64_t ps, int64_t tps,
-                              const std::vector<int64_t> & row, const std::vector<int64_t> & col, std::vector<float> & out) {
-    if (v.w != (int) side || v.h != (int) side || !v.data) {
-        std::fprintf(stderr, "vla(vla_jepa): image view is %dx%d, expected %lldx%lld\n", v.w, v.h, (long long) side, (long long) side); return false;
-    }
-    const int64_t S = (int64_t) row.size(), pf = 3 * tps * ps * ps;
-    out.assign((size_t) pf * S, 0.0f);
-    auto px = [&](int64_t r, int64_t c, int64_t ch) -> float {
-        if (v.format == PixelFormat::U8) return ((const uint8_t *) v.data)[(r * side + c) * 3 + ch] / 255.0f;
-        return ((const float *) v.data)[(r * side + c) * 3 + ch];
-    };
-    for (int64_t s = 0; s < S; ++s)
-        for (int64_t ch = 0; ch < 3; ++ch)
-            for (int64_t ph = 0; ph < ps; ++ph)
-                for (int64_t pw = 0; pw < ps; ++pw) {
-                    const float val = (px(row[s] * ps + ph, col[s] * ps + pw, ch) - CLIP_MEAN[ch]) / CLIP_STD[ch];
-                    for (int64_t t = 0; t < tps; ++t) out[s * pf + ch * tps * ps * ps + t * ps * ps + ph * ps + pw] = val;
-                }
-    return true;
-}
-
-void timesteps_proj(int64_t bucket, std::vector<float> & out) {
-    const int64_t half = 128; const float lm = std::log(10000.0f); const float t = (float) bucket;
-    out.assign(256, 0.0f);
-    for (int64_t i = 0; i < half; ++i) { const float emb = t * std::exp(-lm * (float) i / (float) (half - 1)); out[i] = std::cos(emb); out[half + i] = std::sin(emb); }
-}
-
-void action_sinusoid(int64_t bucket, int64_t dim, int64_t T, std::vector<float> & out) {
-    const int64_t half = dim / 2; const float step = std::log(10000.0f) / (float) half; const float t = (float) bucket;
-    out.assign((size_t) T * dim, 0.0f);
-    for (int64_t tk = 0; tk < T; ++tk) for (int64_t i = 0; i < half; ++i) { const float emb = t * std::exp(-(float) i * step); out[tk * dim + i] = std::sin(emb); out[tk * dim + half + i] = std::cos(emb); }
-}
-
 bool load_config(const gguf_reader & g, VlaJepaModelArch & m, Config & cfg) {
     auto U = [&](const char * k, int64_t & dst) { if (g.has(k)) dst = (int64_t) g.u32(k); };
     auto F = [&](const char * k, float & dst)   { if (g.has(k)) dst = g.f32(k); };
@@ -307,6 +193,20 @@ bool load_config(const gguf_reader & g, VlaJepaModelArch & m, Config & cfg) {
     F(fk("vit_rope_theta"), m.vit_rope_base); F(fk("dit_ln_eps"), m.dit_ln_eps); F(fk("dit_norm_out_eps"), m.dit_norm_out_eps);
     if (g.has(fk("lm_rope_theta"))) m.lm_rope_base = (float) g.f64(fk("lm_rope_theta"));
 
+    // merge_block_coords only enumerates the patch grid exactly when the spatial
+    // merge divides it; otherwise it emits rows past the position table.
+    if (m.patch_size <= 0 || m.spatial_merge <= 0 || m.image_target_size % m.patch_size != 0 ||
+        (m.image_target_size / m.patch_size) % m.spatial_merge != 0) {
+        std::fprintf(stderr, "vla(vla_jepa): image %lld / patch %lld / merge %lld do not divide evenly\n",
+                     (long long) m.image_target_size, (long long) m.patch_size, (long long) m.spatial_merge);
+        return false;
+    }
+    // timesteps_proj always emits 256 floats into the time-projection input.
+    if (m.time_proj_dim != 256) {
+        std::fprintf(stderr, "vla(vla_jepa): time_proj_dim %lld, expected 256\n", (long long) m.time_proj_dim);
+        return false;
+    }
+
     cfg = Config{};
     cfg.n_img = (m.image_target_size / m.patch_size / m.spatial_merge) * (m.image_target_size / m.patch_size / m.spatial_merge);
     cfg.n_lang = 1024; cfg.n_state = 1;
@@ -315,6 +215,9 @@ bool load_config(const gguf_reader & g, VlaJepaModelArch & m, Config & cfg) {
     cfg.hidden = m.lm_hidden; cfg.n_q_heads = m.n_q; cfg.n_kv_heads = m.n_kv; cfg.head_dim = m.lm_head_dim; cfg.n_layers = m.lm_layers;
     cfg.num_steps = (int) m.num_steps; cfg.rms_eps = m.lm_rms_eps;
     cfg.rope_n_dims = (int) m.lm_head_dim; cfg.rope_mode = GGML_ROPE_TYPE_IMROPE; cfg.rope_freq_base = m.lm_rope_base;
+    // Raw output: this arch expects the client to apply the dataset statistics
+    // (see the --stats-json flag in eval/client).
+    cfg.denormalized = false;
     cfg.norm_eps = 1e-8f;
     return true;
 }
@@ -349,19 +252,10 @@ std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
                 (long long) m->action_horizon, (long long) m->action_dim, (long long) m->state_dim, (long long) m->num_future, (long long) m->num_steps,
                 m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
-#ifdef GGML_USE_CUDA
-    m->backend = ggml_backend_cuda_init(0);
-    if (m->backend) { m->is_cuda = true; m->is_gpu = true; std::printf("vla(vla_jepa): backend = CUDA (device 0)\n"); }
-    else            std::fprintf(stderr, "vla(vla_jepa): ggml_backend_cuda_init failed; falling back to CPU\n");
-#elif defined(GGML_USE_METAL)
-    m->backend = ggml_backend_metal_init();
-    if (m->backend) { m->is_gpu = true; std::printf("vla(vla_jepa): backend = Metal\n"); }
-#endif
-    if (!m->backend) {
-        m->backend = ggml_backend_cpu_init();
-        if (!m->backend) { std::fprintf(stderr, "vla(vla_jepa): ggml_backend_cpu_init failed\n"); return nullptr; }
-        ggml_backend_cpu_set_n_threads(m->backend, m->n_threads);
-        std::printf("vla(vla_jepa): backend = CPU (%d threads)\n", m->n_threads);
+    {
+        const Backend b = backend_init("vla(vla_jepa)", m->n_threads);
+        if (!b.handle) { return nullptr; }
+        m->backend = b.handle;
     }
 
     ggml_init_params wp = {  (size_t) 32 * 1024 * 1024,  nullptr,  true };
@@ -534,8 +428,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         }
         if (inj_patches.empty() && !in.images) { std::fprintf(stderr, "vla(vla_jepa): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
 
-        ggml_init_params vp = { (size_t) 512 * 1024 * 1024, nullptr, true };
-        ggml_context * VC = ggml_init(vp);
+        ggml_context * VC = vision_scratch.reset((size_t) 512 * 1024 * 1024);
         if (!VC) { std::fprintf(stderr, "vla(vla_jepa): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_patches = ggml_new_tensor_2d(VC, GGML_TYPE_F32, vit_patch_flat, n_patches); ggml_set_input(t_patches);
         ggml_tensor * t_pos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, vit_hidden, n_patches);     ggml_set_input(t_pos);
@@ -556,8 +449,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         ggml_cgraph * vg = ggml_new_graph_custom(VC, 16384, false);
         ggml_build_forward_expand(vg, vit_embeds);
         for (int j = 0; j < 3; ++j) ggml_build_forward_expand(vg, ds_out[j]);
-        ggml_gallocr_t vga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!vga || !ggml_gallocr_alloc_graph(vga, vg)) { std::fprintf(stderr, "vla(vla_jepa): vision gallocr alloc failed\n"); if (vga) ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+        if (!vision_scratch.alloc(backend, vg)) { std::fprintf(stderr, "vla(vla_jepa): vision gallocr alloc failed\n"); return {}; }
         const auto tv0 = std::chrono::steady_clock::now();
         std::vector<float> patches;
         bool vok = true;
@@ -565,7 +457,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
             if (!inj_patches.empty()) {
                 ggml_backend_tensor_set(t_patches, inj_patches.data() + v * n_patches * vit_patch_flat, 0, ggml_nbytes(t_patches));
             } else {
-                if (!preprocess_image_patches(in.images[v], side, ps, temporal_patch, c_grow, c_gcol, patches)) { vok = false; break; }
+                if (!preprocess_image_patches("vla_jepa", in.images[v], side, ps, temporal_patch, c_grow, c_gcol, patches)) { vok = false; break; }
                 ggml_backend_tensor_set(t_patches, patches.data(), 0, ggml_nbytes(t_patches));
             }
             ggml_backend_tensor_set(t_pos, c_pos_interp.data(), 0, ggml_nbytes(t_pos));
@@ -577,7 +469,6 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
             if (dump_prefix) { char nm[32]; std::snprintf(nm, sizeof(nm), "vit_view%lld", (long long) v); char path[1024]; std::snprintf(path, sizeof(path), "%s_%s_%lldx%lld.f32", dump_prefix, nm, (long long) H, (long long) K); FILE * fp = std::fopen(path, "wb"); if (fp) { std::fwrite(img_emb_host.data() + v * K * H, sizeof(float), (size_t) K * H, fp); std::fclose(fp); } }
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - tv0).count();
-        ggml_gallocr_free(vga); ggml_free(VC);
         if (!vok) return {};
         const int64_t n_img = n_views * K;
 
@@ -609,9 +500,9 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         std::vector<std::vector<float>> ds_pad(3);
         for (int j = 0; j < 3; ++j) { ds_pad[j].assign((size_t) SEQ * H, 0.0f); for (int64_t k = 0; k < n_img; ++k) std::memcpy(ds_pad[j].data() + (size_t) image_pos_idx[k] * H, ds_host[j].data() + (size_t) k * H, H * sizeof(float)); }
 
-        ggml_init_params cp = { (size_t) 512 * 1024 * 1024, nullptr, true };
-        ggml_context * C = ggml_init(cp);
-        if (!C) { std::fprintf(stderr, "vla(vla_jepa): ggml_init(LM ctx) failed\n"); return {}; }
+        const LmKey lkey{ SEQ, num_future };
+        const bool lm_built = lm_graph.ensure(backend, lkey, (size_t) 512 * 1024 * 1024,
+                                              [&](ggml_context * C, LmIO & gio) -> ggml_cgraph * {
         ggml_tensor * t_embeds = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);   ggml_set_input(t_embeds);
         ggml_tensor * t_pos2   = ggml_new_tensor_1d(C, GGML_TYPE_I32, 4 * SEQ);  ggml_set_input(t_pos2);
         ggml_tensor * t_lmmask = ggml_new_tensor_2d(C, GGML_TYPE_F32, SEQ, SEQ); ggml_set_input(t_lmmask);
@@ -627,10 +518,22 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         ggml_set_output(eagle);
         ggml_tensor * conditioning = ggml_get_rows(C, eagle, t_emb_idx);
         ggml_set_output(conditioning);
+        gio.t_embeds=t_embeds; gio.t_pos2=t_pos2; gio.t_lmmask=t_lmmask; gio.t_emb_idx=t_emb_idx;
+        gio.t_ds[0]=t_ds[0]; gio.t_ds[1]=t_ds[1]; gio.t_ds[2]=t_ds[2];
+        gio.eagle=eagle; gio.conditioning=conditioning;
+
         ggml_cgraph * lg = ggml_new_graph_custom(C, 32768, false);
         ggml_build_forward_expand(lg, conditioning);
-        ggml_gallocr_t lga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!lga || !ggml_gallocr_alloc_graph(lga, lg)) { std::fprintf(stderr, "vla(vla_jepa): LM gallocr alloc failed\n"); if (lga) ggml_gallocr_free(lga); ggml_free(C); return {}; }
+        return lg;
+        });
+        if (!lm_built) { std::fprintf(stderr, "vla(vla_jepa): LM graph build failed\n"); return {}; }
+
+        LmIO & gio = lm_graph.io();
+        ggml_cgraph * lg = lm_graph.graph();
+        ggml_tensor * t_embeds = gio.t_embeds, * t_pos2 = gio.t_pos2, * t_lmmask = gio.t_lmmask;
+        ggml_tensor * t_emb_idx = gio.t_emb_idx;
+        ggml_tensor * t_ds[3] = { gio.t_ds[0], gio.t_ds[1], gio.t_ds[2] };
+        ggml_tensor * eagle = gio.eagle, * conditioning = gio.conditioning;
 
         ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
 
@@ -659,22 +562,24 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
             std::memcpy(pp.data() + (size_t) 3 * SEQ, pp.data(), (size_t) SEQ * sizeof(int32_t));
             ggml_backend_tensor_set(t_pos2, pp.data(), 0, ggml_nbytes(t_pos2));
         }
-        if (c_mask_seq != SEQ) { c_mask.assign((size_t) SEQ * SEQ, 0.0f); const float NEG = -std::numeric_limits<float>::infinity(); for (int64_t q = 0; q < SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) c_mask[q * SEQ + kv] = (kv <= q) ? 0.0f : NEG; c_mask_seq = SEQ; }
+        if (c_mask_seq != SEQ) { build_causal_mask(SEQ, c_mask); c_mask_seq = SEQ; }
         ggml_backend_tensor_set(t_lmmask, c_mask.data(), 0, ggml_nbytes(t_lmmask));
         ggml_backend_tensor_set(t_emb_idx, emb_pos_idx.data(), 0, ggml_nbytes(t_emb_idx));
         for (int j = 0; j < 3; ++j) ggml_backend_tensor_set(t_ds[j], ds_pad[j].data(), 0, ggml_nbytes(t_ds[j]));
 
         const auto tp0 = std::chrono::steady_clock::now();
-        if (ggml_backend_graph_compute(backend, lg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(vla_jepa): LM compute failed\n"); ggml_gallocr_free(lga); ggml_free(C); return {}; }
+        if (ggml_backend_graph_compute(backend, lg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(vla_jepa): LM compute failed\n"); return {}; }
         stats.ms_prefill = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - tp0).count();
         if (dump_prefix) { dump_t("eagle", eagle); dump_t("conditioning", conditioning); }
         ggml_backend_tensor_get(conditioning, cond_host.data(), 0, cond_host.size() * sizeof(float));
-        ggml_gallocr_free(lga); ggml_free(C);
     }
 
-    ggml_init_params hp = { (size_t) 256 * 1024 * 1024, nullptr, true };
-    ggml_context * C = ggml_init(hp);
-    if (!C) { std::fprintf(stderr, "vla(vla_jepa): ggml_init(head ctx) failed\n"); return {}; }
+    // Dumping adds graph outputs, so it always rebuilds.
+    std::vector<ggml_tensor *> step_seq, step_pred, step_vel, step_act;
+    if (dump_prefix) head_graph.release();
+    const HeadKey hkey{ num_steps };
+    const bool head_built = head_graph.ensure(backend, hkey, (size_t) 256 * 1024 * 1024,
+                                              [&](ggml_context * C, HeadIO & gio) -> ggml_cgraph * {
     ggml_tensor * t_cond  = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, num_future); ggml_set_input(t_cond);
     ggml_tensor * t_state = ggml_new_tensor_2d(C, GGML_TYPE_F32, state_dim, 1);  ggml_set_input(t_state);
     ggml_tensor * t_x0    = ggml_new_tensor_2d(C, GGML_TYPE_F32, AD, AH);        ggml_set_input(t_x0);
@@ -684,7 +589,8 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
     ggml_tensor * state_features = ggml_add(C, ggml_mul_mat(C, se_l2W, ggml_relu(C, ggml_add(C, ggml_mul_mat(C, se_l1W, t_state), se_l1b))), se_l2b);
     ggml_tensor * future = future_tokens;
     const float dt = 1.0f / (float) num_steps;
-    std::vector<ggml_tensor *> step_seq(num_steps), step_pred(num_steps), step_vel(num_steps), step_act(num_steps);
+    step_seq.assign(num_steps, nullptr); step_pred.assign(num_steps, nullptr);
+    step_vel.assign(num_steps, nullptr);  step_act.assign(num_steps, nullptr);
 
     ggml_tensor * actions = t_x0;
     for (int64_t s = 0; s < num_steps; ++s) {
@@ -719,11 +625,20 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         if (dump_prefix) { ggml_set_output(step_seq[s]); ggml_set_output(step_pred[s]); ggml_set_output(step_vel[s]); ggml_set_output(step_act[s]); }
     }
     ggml_set_output(actions);
+    gio.t_cond=t_cond; gio.t_state=t_state; gio.t_x0=t_x0; gio.actions=actions;
+    gio.t_tau=t_tau; gio.t_tproj=t_tproj;
+
     ggml_cgraph * hg = ggml_new_graph_custom(C, 65536, false);
     ggml_build_forward_expand(hg, actions);
     if (dump_prefix) for (int64_t s = 0; s < num_steps; ++s) { ggml_build_forward_expand(hg, step_seq[s]); ggml_build_forward_expand(hg, step_pred[s]); ggml_build_forward_expand(hg, step_vel[s]); ggml_build_forward_expand(hg, step_act[s]); }
-    ggml_gallocr_t hga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!hga || !ggml_gallocr_alloc_graph(hga, hg)) { std::fprintf(stderr, "vla(vla_jepa): head gallocr alloc failed\n"); if (hga) ggml_gallocr_free(hga); ggml_free(C); return {}; }
+    return hg;
+    });
+    if (!head_built) { std::fprintf(stderr, "vla(vla_jepa): head graph build failed\n"); return {}; }
+
+    HeadIO & hio = head_graph.io();
+    ggml_cgraph * hg = head_graph.graph();
+    ggml_tensor * t_cond = hio.t_cond, * t_state = hio.t_state, * t_x0 = hio.t_x0, * actions = hio.actions;
+    std::vector<ggml_tensor*> & t_tau = hio.t_tau; std::vector<ggml_tensor*> & t_tproj = hio.t_tproj;
 
     ggml_backend_tensor_set(t_cond, cond_host.data(), 0, ggml_nbytes(t_cond));
     { std::vector<float> st(state_dim, 0.0f); for (int64_t i = 0; i < state_dim; ++i) st[i] = in.state ? in.state[i] : 0.0f; ggml_backend_tensor_set(t_state, st.data(), 0, ggml_nbytes(t_state)); }
@@ -731,7 +646,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
     for (int64_t s = 0; s < num_steps; ++s) { ggml_backend_tensor_set(t_tau[s], c_tau[(size_t) s].data(), 0, ggml_nbytes(t_tau[s])); ggml_backend_tensor_set(t_tproj[s], c_tproj[(size_t) s].data(), 0, ggml_nbytes(t_tproj[s])); }
 
     const auto td0 = std::chrono::steady_clock::now();
-    if (ggml_backend_graph_compute(backend, hg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(vla_jepa): head compute failed\n"); ggml_gallocr_free(hga); ggml_free(C); return {}; }
+    if (ggml_backend_graph_compute(backend, hg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(vla_jepa): head compute failed\n"); return {}; }
     stats.ms_denoise = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - td0).count();
     stats.ms_inference = stats.ms_prefill + stats.ms_denoise;
 
@@ -745,7 +660,6 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
 
     std::vector<float> out((size_t) AH * AD);
     ggml_backend_tensor_get(actions, out.data(), 0, out.size() * sizeof(float));
-    ggml_gallocr_free(hga); ggml_free(C);
     stats.ms_total = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return out;
 }

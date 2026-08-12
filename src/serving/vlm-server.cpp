@@ -15,11 +15,20 @@
 #include "vlm/engine.h"
 #include "serving/vlm.pb.h"
 
+// stbi_info_from_memory only, to preflight JPEG dimensions before mtmd decodes.
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_STATIC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include "stb_image.h"
+#pragma GCC diagnostic pop
+
 #include <zmq.hpp>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <csignal>
 #include <cstdio>
 #include <string>
@@ -101,8 +110,11 @@ int main(int argc, char ** argv) {
     zmq::context_t zctx( 1);
     zmq::socket_t  sock(zctx, zmq::socket_type::router);
     sock.set(zmq::sockopt::linger, 0);
-    // cap inbound messages so one oversized request cannot exhaust memory.
-    sock.set(zmq::sockopt::maxmsgsize, int64_t(256) * 1024 * 1024);
+    // Per frame only; the recv loop caps the multipart total.
+    sock.set(zmq::sockopt::maxmsgsize, int64_t(64) * 1024 * 1024);
+    // A peer that sends a frame with SNDMORE and then stalls would otherwise park
+    // this single-threaded loop in recv for good, starving every other client.
+    sock.set(zmq::sockopt::rcvtimeo, 5000);
     sock.bind(bind_addr);
     std::printf("vlm-server: bound to %s. ready.\n", bind_addr.c_str());
 
@@ -132,9 +144,15 @@ int main(int argc, char ** argv) {
         }
         if (!(poll[0].revents & ZMQ_POLLIN)) continue;
 
+        // maxmsgsize bounds each frame but not how many, so a peer could stream
+        // sub-limit frames until memory runs out.
+        constexpr size_t kMaxEnvFrames = 8;
+        constexpr size_t kMaxEnvBytes  = 64 * 1024;
+
         std::vector<std::string> env;
         std::string payload;
-        bool recv_ok = true, have_payload = false;
+        size_t env_bytes = 0;
+        bool recv_ok = true, have_payload = false, env_overflow = false;
         for (;;) {
             zmq::message_t part;
             try {
@@ -146,12 +164,22 @@ int main(int argc, char ** argv) {
                 recv_ok = false; break;
             }
             if (sock.get(zmq::sockopt::rcvmore)) {
-                env.emplace_back(static_cast<const char*>(part.data()), part.size());
+                env_bytes += part.size();
+                if (env.size() >= kMaxEnvFrames || env_bytes > kMaxEnvBytes) {
+                    // Keep draining so the socket stays sane, but stop accumulating.
+                    env_overflow = true;
+                } else {
+                    env.emplace_back(static_cast<const char*>(part.data()), part.size());
+                }
             } else {
                 payload.assign(static_cast<const char*>(part.data()), part.size());
                 have_payload = true;
                 break;
             }
+        }
+        if (env_overflow) {
+            std::fprintf(stderr, "vlm-server: oversized ROUTER envelope; request dropped\n");
+            continue;
         }
         if (!recv_ok || !have_payload || env.empty()) continue;
 
@@ -181,6 +209,20 @@ int main(int argc, char ** argv) {
             send_reply(make_error_stream(rid, "ChatRequest has no messages"));
             continue;
         }
+        // One 60 MiB payload of tiny messages would cost template formatting and
+        // tokenization far beyond anything n_ctx could consume.
+        constexpr int    kMaxMessages  = 512;
+        constexpr size_t kMaxTextBytes = 4u * 1024 * 1024;
+        if (req.messages_size() > kMaxMessages) {
+            send_reply(make_error_stream(rid, "too many messages (max 512)"));
+            continue;
+        }
+        size_t text_bytes = 0;
+        for (const auto & m : req.messages()) text_bytes += m.content().size();
+        if (text_bytes > kMaxTextBytes) {
+            send_reply(make_error_stream(rid, "message text too large (max 4 MiB)"));
+            continue;
+        }
         if (req.images_size() > 16) {
             send_reply(make_error_stream(rid, "too many image views (max 16)"));
             continue;
@@ -194,6 +236,18 @@ int main(int argc, char ** argv) {
             vlm::Image out;
             if (im.encoding() == vlm_chat::Image::JPEG) {
                 const auto & d = im.data();
+                // Header first: mtmd decodes with no dimension guard.
+                int jw = 0, jh = 0, jc = 0;
+                if (d.size() > size_t(INT_MAX) ||
+                    !stbi_info_from_memory(reinterpret_cast<const stbi_uc*>(d.data()),
+                                           static_cast<int>(d.size()), &jw, &jh, &jc) ||
+                    jw <= 0 || jh <= 0 ||
+                    jw > int(kMaxImageDim) || jh > int(kMaxImageDim)) {
+                    char buf[96]; std::snprintf(buf, sizeof(buf),
+                        "image[%d] JPEG dims %dx%d rejected (max %u)", v, jw, jh, kMaxImageDim);
+                    send_reply(make_error_stream(rid, buf));
+                    decode_ok = false; break;
+                }
                 if (!engine.decode_image_buf(
                         reinterpret_cast<const uint8_t*>(d.data()), d.size(), out)) {
                     char buf[64]; std::snprintf(buf, sizeof(buf), "image[%d] JPEG decode failed", v);

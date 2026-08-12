@@ -18,14 +18,12 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include "ggml-backend.h"
-#ifdef GGML_USE_CUDA
-#include "ggml-cuda.h"
-#endif
-#ifdef GGML_USE_METAL
-#include "ggml-metal.h"
-#endif
+#include "backend.h"
 #include "gguf.h"
 #include "models/gguf_reader.h"
+#include "models/scratch_ctx.h"
+#include "models/vision_common.h"
+#include "models/dit_common.h"
 
 #include <chrono>
 #include <cmath>
@@ -55,11 +53,22 @@ struct Gr00tN1d5ModelArch : public ModelArchBase {
     ~Gr00tN1d5ModelArch() override;
 
     std::string           gguf_path;
+    // Opened once at load: reopening per predict re-parses the whole GGUF header.
+    gguf_reader           io{"gr00tn1d5"};
     ggml_backend_t        backend     = nullptr;
-    bool                  is_cuda     = false;
-    bool                  is_gpu      = false;
     int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
+    scratch_ctx           vision_scratch;
+
+    struct MainKey {
+        int64_t seq=-1, nsteps=-1;
+        bool operator==(const MainKey & o) const { return seq==o.seq && nsteps==o.nsteps; }
+    };
+    struct MainIO {
+        ggml_tensor *t_embeds=nullptr,*t_pos=nullptr,*t_lmmask=nullptr,*t_state=nullptr,*t_x0=nullptr,*actions=nullptr;
+        std::vector<ggml_tensor*> t_tau, t_tproj;
+    };
+    graph_cache<MainKey, MainIO> main_graph;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_F32;
 
@@ -93,20 +102,6 @@ struct Gr00tN1d5ModelArch : public ModelArchBase {
 };
 
 namespace {
-
-ggml_tensor * cat_linear(ggml_context * C, ggml_tensor * W3d, ggml_tensor * b2d, int64_t id, ggml_tensor * x) {
-    const int64_t out = W3d->ne[0], in = W3d->ne[1];
-    ggml_tensor * W_id = ggml_view_2d(C, W3d, out, in, W3d->nb[1], (size_t) id * W3d->nb[2]);
-    ggml_tensor * y = ggml_mul_mat(C, ggml_cont(C, ggml_transpose(C, W_id)), x);
-    return ggml_add(C, y, ggml_view_1d(C, b2d, out, (size_t) id * b2d->nb[1]));
-}
-
-ggml_tensor * adaln(ggml_context * C, ggml_tensor * x, ggml_tensor * temb, ggml_tensor * lw, ggml_tensor * lb, int64_t dim, float eps) {
-    ggml_tensor * cond = ggml_add(C, ggml_mul_mat(C, lw, ggml_silu(C, temb)), lb);
-    ggml_tensor * sc = ggml_view_1d(C, cond, dim, 0), * sh = ggml_view_1d(C, cond, dim, (size_t) dim * sizeof(float));
-    ggml_tensor * xn = ggml_norm(C, x, eps);
-    return ggml_add(C, ggml_add(C, xn, ggml_mul(C, xn, sc)), sh);
-}
 
 ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_tensor * x,
                                  int64_t seq, int64_t heads, int64_t head_dim, int64_t hidden, float ln_eps) {
@@ -203,33 +198,6 @@ ggml_tensor * build_dit_block(ggml_context * C, const Gr00tN1d5ModelArch & m, co
     return ggml_add(C, h1, ff);
 }
 
-bool preprocess_image_chw(const ImageView & v, int64_t side, std::vector<float> & out) {
-    if (v.w != (int) side || v.h != (int) side || !v.data) {
-        std::fprintf(stderr, "vla(gr00tn1d5): image view is %dx%d, expected %lldx%lld\n", v.w, v.h, (long long) side, (long long) side); return false;
-    }
-    out.assign((size_t) 3 * side * side, 0.0f);
-    for (int64_t h = 0; h < side; ++h)
-        for (int64_t w = 0; w < side; ++w)
-            for (int64_t c = 0; c < 3; ++c) {
-                float px;
-                if (v.format == PixelFormat::U8) px = ((const uint8_t *) v.data)[(h * side + w) * 3 + c] / 255.0f;
-                else                              px = ((const float  *) v.data)[(h * side + w) * 3 + c];
-                out[c * side * side + h * side + w] = px * 2.0f - 1.0f;
-            }
-    return true;
-}
-
-void timesteps_proj(int64_t bucket, std::vector<float> & out) {
-    const int64_t half = 128; const float lm = std::log(10000.0f); const float t = (float) bucket;
-    out.assign(256, 0.0f);
-    for (int64_t i = 0; i < half; ++i) { const float emb = t * std::exp(-lm * (float) i / (float) (half - 1)); out[i] = std::cos(emb); out[half + i] = std::sin(emb); }
-}
-
-void action_sinusoid(int64_t bucket, int64_t dim, int64_t T, std::vector<float> & out) {
-    const int64_t half = dim / 2; const float step = std::log(10000.0f) / (float) half; const float t = (float) bucket;
-    out.assign((size_t) T * dim, 0.0f);
-    for (int64_t tk = 0; tk < T; ++tk) for (int64_t i = 0; i < half; ++i) { const float emb = t * std::exp(-(float) i * step); out[tk * dim + i] = std::sin(emb); out[tk * dim + half + i] = std::cos(emb); }
-}
 
 bool load_config(const gguf_reader & g, Gr00tN1d5ModelArch & m, Config & cfg) {
     auto U = [&](const char * k, int64_t & dst) { if (g.has(k)) dst = (int64_t) g.u32(k); };
@@ -268,6 +236,9 @@ bool load_config(const gguf_reader & g, Gr00tN1d5ModelArch & m, Config & cfg) {
     cfg.hidden = m.lm_hidden; cfg.n_q_heads = m.n_q; cfg.n_kv_heads = m.n_kv; cfg.head_dim = m.lm_head_dim; cfg.n_layers = m.lm_layers;
     cfg.num_steps = (int) m.num_steps; cfg.rms_eps = m.lm_rms_eps;
     cfg.rope_n_dims = (int) m.lm_head_dim; cfg.rope_mode = GGML_ROPE_TYPE_NEOX; cfg.rope_freq_base = m.lm_rope_base;
+    // Raw output: this arch expects the client to apply the dataset statistics
+    // (see the --stats-json flag in eval/client).
+    cfg.denormalized = false;
     cfg.norm_eps = 1e-8f;
     return true;
 }
@@ -290,8 +261,8 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
     m->gguf_path   = ckpt_path;
     m->matmul_type = std::getenv("VLA_GR00T_BF16_WEIGHTS") ? GGML_TYPE_BF16 : GGML_TYPE_F32;
 
-    gguf_reader g("gr00tn1d5");
-    if (!g.open(ckpt_path)) return nullptr;
+    if (!m->io.open(ckpt_path)) return nullptr;
+    gguf_reader & g = m->io;
     if (!g.has("gr00t_n1_5.architecture")) { std::fprintf(stderr, "vla(gr00tn1d5): %s is not a gr00t_n1_5 GGUF\n", ckpt_path.c_str()); return nullptr; }
     if (!load_config(g, *m, m->cfg)) return nullptr;
     std::printf("vla(gr00tn1d5): vit=%lldd×%lldL×%lldh n_img_tok=%lld  lm=Qwen3 %lldd×%lldL (%lldq/%lldkv×%lld)  "
@@ -303,20 +274,10 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
                 (long long) m->action_horizon, (long long) m->action_dim, (long long) m->num_steps, (long long) m->embodiment_id,
                 m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
-#ifdef GGML_USE_CUDA
-    m->backend = ggml_backend_cuda_init(0);
-    if (m->backend) { m->is_cuda = true; m->is_gpu = true; std::printf("vla(gr00tn1d5): backend = CUDA (device 0)\n"); }
-    else            std::fprintf(stderr, "vla(gr00tn1d5): ggml_backend_cuda_init failed; falling back to CPU\n");
-#elif defined(GGML_USE_METAL)
-    m->backend = ggml_backend_metal_init();
-    if (m->backend) { m->is_gpu = true; std::printf("vla(gr00tn1d5): backend = Metal\n"); }
-    else            std::fprintf(stderr, "vla(gr00tn1d5): ggml_backend_metal_init failed; falling back to CPU\n");
-#endif
-    if (!m->backend) {
-        m->backend = ggml_backend_cpu_init();
-        if (!m->backend) { std::fprintf(stderr, "vla(gr00tn1d5): ggml_backend_cpu_init failed\n"); return nullptr; }
-        ggml_backend_cpu_set_n_threads(m->backend, m->n_threads);
-        std::printf("vla(gr00tn1d5): backend = CPU (%d threads)\n", m->n_threads);
+    {
+        const Backend b = backend_init("vla(gr00tn1d5)", m->n_threads);
+        if (!b.handle) { return nullptr; }
+        m->backend = b.handle;
     }
 
     ggml_init_params wp = {  (size_t) 32 * 1024 * 1024,  nullptr,  true };
@@ -425,8 +386,7 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     } else if (in.images && in.n_images > 0) {
         n_views = in.n_images;
         img_emb_host.assign((size_t) n_views * K * H, 0.0f);
-        ggml_init_params vp = { (size_t) 64 * 1024 * 1024, nullptr, true };
-        ggml_context * VC = ggml_init(vp);
+        ggml_context * VC = vision_scratch.reset((size_t) 64 * 1024 * 1024);
         if (!VC) { std::fprintf(stderr, "vla(gr00tn1d5): ggml_init(vision ctx) failed\n"); return {}; }
         const int64_t grid = image_size / patch_size;
         ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, image_size, image_size, 3); ggml_set_input(t_px);
@@ -439,18 +399,16 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
         ggml_set_output(vit_emb);
         ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
         ggml_build_forward_expand(vg, vit_emb);
-        ggml_gallocr_t vga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!vga || !ggml_gallocr_alloc_graph(vga, vg)) { std::fprintf(stderr, "vla(gr00tn1d5): vision gallocr alloc failed\n"); if (vga) ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+        if (!vision_scratch.alloc(backend, vg)) { std::fprintf(stderr, "vla(gr00tn1d5): vision gallocr alloc failed\n"); return {}; }
         const auto tv0 = std::chrono::steady_clock::now();
         std::vector<float> chw;
         for (int64_t v = 0; v < n_views; ++v) {
-            if (!preprocess_image_chw(in.images[v], image_size, chw)) { ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+            if (!preprocess_image_chw("gr00tn1d5", in.images[v], image_size, chw)) { return {}; }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
-            if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(gr00tn1d5): vision compute failed\n"); ggml_gallocr_free(vga); ggml_free(VC); return {}; }
+            if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(gr00tn1d5): vision compute failed\n"); return {}; }
             ggml_backend_tensor_get(vit_emb, img_emb_host.data() + v * K * H, 0, ggml_nbytes(vit_emb));
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - tv0).count();
-        ggml_gallocr_free(vga); ggml_free(VC);
         img_emb_ptr = img_emb_host.data();
     } else {
         std::fprintf(stderr, "vla(gr00tn1d5): no images and no precomputed_img_emb in the request\n"); return {};
@@ -475,10 +433,8 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     const int64_t SEQ = (int64_t) input_ids.size();
     if (SEQ > max_seq_len) { std::fprintf(stderr, "vla(gr00tn1d5): prompt too long (%lld > %lld)\n", (long long) SEQ, (long long) max_seq_len); return {}; }
 
-    gguf_reader g("gr00tn1d5");
-    if (!g.open(gguf_path)) return {};
     std::vector<float> inputs_embeds((size_t) SEQ * H);
-    if (!g.fetch_rows_f32("token_embd.weight", input_ids, inputs_embeds.data(), H)) return {};
+    if (!io.fetch_rows_f32("token_embd.weight", input_ids, inputs_embeds.data(), H)) return {};
     {   int64_t k = 0;
         for (int64_t p = 0; p < SEQ; ++p) if (input_ids[p] == (int32_t) image_token_index) {
             if (k >= n_img) { std::fprintf(stderr, "vla(gr00tn1d5): more <image> tokens than ViT embeds\n"); return {}; }
@@ -491,10 +447,10 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     if (in.noise) std::memcpy(x_init.data(), in.noise, x_init.size() * sizeof(float));
     else { std::mt19937 rng((uint32_t) std::chrono::steady_clock::now().time_since_epoch().count()); std::normal_distribution<float> nd(0.f, 1.f); for (auto & v : x_init) v = nd(rng); }
 
-    ggml_init_params cp = { (size_t) 128 * 1024 * 1024, nullptr, true };
-    ggml_context * C = ggml_init(cp);
-    if (!C) { std::fprintf(stderr, "vla(gr00tn1d5): ggml_init(ctx_compute) failed\n"); return {}; }
-
+    // LM + VLSA + DiT graph depends only on the padded length and step count.
+    const MainKey mkey{ SEQ, num_steps };
+    const bool built = main_graph.ensure(backend, mkey, (size_t) 128 * 1024 * 1024,
+                                         [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
     ggml_tensor * t_embeds = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);          ggml_set_input(t_embeds);
     ggml_tensor * t_pos    = ggml_new_tensor_1d(C, GGML_TYPE_I32, SEQ);             ggml_set_input(t_pos);
     ggml_tensor * t_lmmask = ggml_new_tensor_2d(C, GGML_TYPE_F32, SEQ, SEQ);        ggml_set_input(t_lmmask);
@@ -552,11 +508,20 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     }
     ggml_set_name(actions, "action_pred"); ggml_set_output(actions);
 
+    gio.t_embeds=t_embeds; gio.t_pos=t_pos; gio.t_lmmask=t_lmmask; gio.t_state=t_state;
+    gio.t_x0=t_x0; gio.t_tau=t_tau; gio.t_tproj=t_tproj; gio.actions=actions;
+
     ggml_cgraph * gf = ggml_new_graph_custom(C, 32768, false);
     ggml_build_forward_expand(gf, actions);
+    return gf;
+    });
+    if (!built) { std::fprintf(stderr, "vla(gr00tn1d5): main graph build failed\n"); return {}; }
 
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!galloc || !ggml_gallocr_alloc_graph(galloc, gf)) { std::fprintf(stderr, "vla(gr00tn1d5): gallocr alloc failed\n"); if (galloc) ggml_gallocr_free(galloc); ggml_free(C); return {}; }
+    MainIO & gio = main_graph.io();
+    ggml_cgraph * gf = main_graph.graph();
+    ggml_tensor * t_embeds = gio.t_embeds, * t_pos = gio.t_pos, * t_lmmask = gio.t_lmmask;
+    ggml_tensor * t_state = gio.t_state, * t_x0 = gio.t_x0, * actions = gio.actions;
+    std::vector<ggml_tensor*> & t_tau = gio.t_tau; std::vector<ggml_tensor*> & t_tproj = gio.t_tproj;
 
     ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
     { std::vector<int32_t> pp(SEQ); for (int64_t i = 0; i < SEQ; ++i) pp[i] = (int32_t) i; ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos)); }
@@ -575,12 +540,11 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     const auto tc0 = std::chrono::steady_clock::now();
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
     const auto tc1 = std::chrono::steady_clock::now();
-    if (st != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(gr00tn1d5): graph compute failed (%d)\n", (int) st); ggml_gallocr_free(galloc); ggml_free(C); return {}; }
+    if (st != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(gr00tn1d5): graph compute failed (%d)\n", (int) st); return {}; }
     stats.ms_inference = std::chrono::duration<float, std::milli>(tc1 - tc0).count();
 
     std::vector<float> out((size_t) AH * AD);
     ggml_backend_tensor_get(actions, out.data(), 0, out.size() * sizeof(float));
-    ggml_gallocr_free(galloc); ggml_free(C);
     stats.ms_total = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return out;
 }

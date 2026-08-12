@@ -1,6 +1,6 @@
 [project]
 name = "vla-cpp-tooling"
-version = "0.1.1"
+version = "0.2.0"
 description = "Python tooling for vla.cpp: HuggingFace -> GGUF converters and the ZeroMQ eval client."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,7 +23,10 @@ client = [
     "msgpack-numpy>=0.4.8",
     "pillow>=10",
     "torch>=2.5",
-    "transformers>=4.51,<4.52",
+    # Only used for AutoTokenizer/AutoProcessor.from_pretrained (the pi0 PaliGemma
+    # tokenizer). Capped below 5.0: the v5 line is a breaking rewrite we have not
+    # tested against.
+    "transformers>=4.51,<5",
     "numpy>=1.24",
 ]
 

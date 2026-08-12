@@ -2,6 +2,28 @@
 
 Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://keepachangelog.com).
 
+## [0.2.0] - 2026-08-09
+
+### Added
+- SYCL backend for Intel GPUs (Arc, Flex, Data Center Max, Xe iGPU). `VLA_DEVICE` picks the ordinal on CUDA and SYCL alike. See `docs/backend/sycl.md`.
+- Stable C ABI (`include/vla.h`, `libvla`) and Python bindings over it (`bindings/python`).
+- Four more architectures: π0.5, VLA-Adapter, OpenVLA-OFT and VLA-JEPA.
+- `vla-bench` for engine-only latency, and `-hf user/repo[:file.gguf]` to fetch a checkpoint on first use.
+- `vla-cli --text`, tokenized by `scripts/tokenize_prompt.py` with the tokenizer the architecture was trained on.
+- Release workflow publishing Linux x86-64 (CPU and CUDA), Linux aarch64 (CPU), macOS Metal and a GHCR image.
+
+### Changed
+- One shared backend ladder (`src/backend.h`) instead of a copy per arch. CMake rejects two accelerators in one build directory.
+- Shared headers for the Qwen3-VL tower, the DINOv2+SigLIP dual tower, the DiT time embeddings, the causal mask and CHW image preprocessing.
+- `vla::graph_cache` keeps the compute graph across `predict` calls in nine architectures, not just GR00T N1.7. Output is unchanged.
+- llama.cpp pinned at b10331. GR00T N1.5 and N1.6 shift by up to 4.6e-4 on actions peaking near 0.87, from an upstream ggml kernel change in the SigLIP tower they share. The other nine architectures are bit-identical.
+
+### Fixed
+- Reject checkpoint geometry that contradicts itself before it sizes a buffer, in smolvla, bitvla, gr00tn1d6, vla_adapter and the Qwen3-VL position resample.
+- A peer that stalls mid-message no longer parks either server.
+- Treat a missing state vector as zeros in every architecture rather than dereferencing it.
+- Build every registered test before `ctest`, so the four that were never built stop reporting as not run.
+
 ## [0.1.1] - 2026-07-04
 
 ### Added
@@ -40,5 +62,6 @@ expert + dataset stats), CPU or CUDA, no external mmproj and no patch to llama.c
 - llama.cpp is fetched + pinned via CMake `FetchContent` (tag `b9866`); bumping is a
   one-line `GIT_TAG` change. Removed the `patches/` fetch script.
 
+[0.2.0]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.2.0
 [0.1.1]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.1.0

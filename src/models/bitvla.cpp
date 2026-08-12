@@ -23,6 +23,7 @@
 #endif
 #include "gguf.h"
 #include "models/gguf_reader.h"
+#include "models/scratch_ctx.h"
 
 #ifdef VLA_BITVLA_CUDA_KERNELS
 #include "kernels/bitvla/bitvla_lm_cuda.h"
@@ -97,9 +98,12 @@ struct BitvlaModelArch : public ModelArchBase {
     gguf_reader           emb_reader{"bitvla"};   // stays open for per-step token-embedding row fetches
     std::vector<float>    stop_embed;   // cached constant stop-token embedding row
     ggml_backend_t        backend     = nullptr;
-    bool                  is_cuda     = false;
     int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
+    scratch_ctx           vision_scratch;
+    scratch_ctx           proprio_scratch;
+    scratch_ctx           lm_scratch;
+    scratch_ctx           head_scratch;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_F32;
     bool                  packed_int2 = false;
@@ -338,6 +342,22 @@ bool load_config(const gguf_reader & g, BitvlaModelArch & m, Config & cfg) {
     I("bitvla.tokens.stop_id",           m.stop_id);
     m.packed_int2 = g.has("bitvla.quant.int2_packed") && g.u32("bitvla.quant.int2_packed") != 0;
 
+    // predict() sizes the patch buffer from n_patches but fills it by walking the
+    // image grid, so a KV that disagrees with the geometry overruns the buffer.
+    if (m.patch_size <= 0 || m.image_size <= 0 || m.image_size % m.patch_size != 0 ||
+        m.n_patches != (m.image_size / m.patch_size) * (m.image_size / m.patch_size)) {
+        std::fprintf(stderr, "vla(bitvla): n_patches %lld does not match image %lld / patch %lld\n",
+                     (long long) m.n_patches, (long long) m.image_size, (long long) m.patch_size);
+        return false;
+    }
+    // The CUDA LM writes seq*q_heads*head_dim into buffers sized seq*hidden.
+    if (m.lm_kv <= 0 || m.lm_head_dim <= 0 || m.lm_q % m.lm_kv != 0 ||
+        m.lm_q * m.lm_head_dim != m.lm_hidden) {
+        std::fprintf(stderr, "vla(bitvla): lm q_heads %lld x head_dim %lld does not match hidden %lld\n",
+                     (long long) m.lm_q, (long long) m.lm_head_dim, (long long) m.lm_hidden);
+        return false;
+    }
+
     const std::string js = g.str("bitvla.statistics_json");
     if (js.empty()) {
         std::fprintf(stderr, "vla(bitvla): bitvla.statistics_json KV missing - un-normalization will pass-through\n");
@@ -543,6 +563,8 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                 (double) m->lm_rope_base, (long long) m->num_actions_chunk, (long long) m->action_dim,
                 (long long) m->vocab_size, m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
+    // Not backend_init: the ggml graph stays on CPU and the LM offloads through
+    // the ternary CUDA kernels below.
     m->backend = ggml_backend_cpu_init();
     if (!m->backend) { std::fprintf(stderr, "vla(bitvla): ggml_backend_cpu_init failed\n"); return nullptr; }
     ggml_backend_cpu_set_n_threads(m->backend, m->n_threads);
@@ -659,13 +681,23 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
         if (cudaGetDeviceCount(&dev_count) == cudaSuccess && dev_count > 0) {
             cudaSetDevice(0);
 
+            // The ladder kernels dereference the scale pointer unconditionally, so
+            // a missing sidecar is a device-side OOB read, not a soft failure.
+            bool scales_ok = true;
+
             auto load_bit = [&](ggml_tensor * t, int64_t N, int64_t K) -> std::pair<int8_t*, float*> {
                 if (m->packed_int2) {
                     int8_t * dp = upload_int8((const uint8_t*) t->data, ggml_nbytes(t), m->cuda_devptrs);
                     std::string nm = ggml_get_name(t);
                     std::string sn = nm.substr(0, nm.size() - 7) + ".scale";
                     std::vector<float> sc = g.read_f32(sn.c_str());
-                    float * dws = sc.empty() ? nullptr : upload_f32_scales(sc.data(), (int) sc.size(), m->cuda_devptrs);
+                    if (sc.empty()) {
+                        std::fprintf(stderr, "vla(bitvla): int2 tensor %s has no %s sidecar\n",
+                                     nm.c_str(), sn.c_str());
+                        scales_ok = false;
+                        return { dp, nullptr };
+                    }
+                    float * dws = upload_f32_scales(sc.data(), (int) sc.size(), m->cuda_devptrs);
                     return { dp, dws };
                 }
                 float ws;
@@ -679,7 +711,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                 (int) m->lm_inter, (int) m->lm_layers, m->lm_rope_base, m->lm_rms_eps, max_seq);
             if (m->lm_cuda_ctx) {
                 bool pack_ok = true;
-                for (int64_t L = 0; L < m->lm_layers && pack_ok; ++L) {
+                for (int64_t L = 0; L < m->lm_layers && pack_ok && scales_ok; ++L) {
                     bitvla_lm_layer_cuda lyr{};
 
                     lyr.attn_norm_w     = upload_bf16_from_f32((const float*) m->lm[L].attn_norm->data,     m->lm_hidden, m->cuda_devptrs);
@@ -697,8 +729,14 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
 
                     if (m->packed_int2) {
                         lyr.gate_up_packed = upload_int8((const uint8_t*) m->lm[L].Wgate_up->data, ggml_nbytes(m->lm[L].Wgate_up), m->cuda_devptrs);
-                        std::vector<float> sc = g.read_f32(("lm.blk." + std::to_string(L) + ".ffn_gate_up.scale").c_str());
-                        lyr.gate_up_ws = upload_f32_scales(sc.data(), (int) sc.size(), m->cuda_devptrs);
+                        const std::string sn = "lm.blk." + std::to_string(L) + ".ffn_gate_up.scale";
+                        std::vector<float> sc = g.read_f32(sn.c_str());
+                        if (sc.empty()) {
+                            std::fprintf(stderr, "vla(bitvla): missing %s\n", sn.c_str());
+                            scales_ok = false;
+                        } else {
+                            lyr.gate_up_ws = upload_f32_scales(sc.data(), (int) sc.size(), m->cuda_devptrs);
+                        }
                     } else {
                         std::vector<float> ws2;
                         lyr.gate_up_packed = pack_and_upload_fused(
@@ -711,7 +749,10 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                     { auto r = load_bit(m->lm[L].Wdown, m->lm_hidden, m->lm_inter); lyr.down_packed = r.first; lyr.down_ws = r.second; }
                     bitvla_lm_cuda_set_layer(m->lm_cuda_ctx, (int) L, &lyr);
                 }
-                if (pack_ok) {
+                if (!scales_ok) {
+                    std::fprintf(stderr, "vla(bitvla): int2 scale sidecars incomplete; refusing the CUDA LM\n");
+                }
+                if (pack_ok && scales_ok) {
                     __nv_bfloat16* onorm = upload_bf16_from_f32((const float*) m->lm_output_norm->data, m->lm_hidden, m->cuda_devptrs);
                     bitvla_lm_cuda_set_output_norm(m->lm_cuda_ctx, onorm);
 
@@ -888,6 +929,10 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                 if (!t) continue;
                 const size_t nb = ggml_nbytes(t);
                 void* copy = std::malloc(nb);
+                if (!copy) {
+                    std::fprintf(stderr, "vla(bitvla): out of memory keeping %zu bytes of CPU weights\n", nb);
+                    return nullptr;
+                }
                 std::memcpy(copy, t->data, nb);
                 t->data = copy;
                 m->cpu_kept_ptrs.push_back(copy);
@@ -1014,9 +1059,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
 #endif
             {
 
-            std::vector<uint8_t> meta_buf((size_t) 24 * 1024 * 1024);
-            ggml_init_params gp = { meta_buf.size(), meta_buf.data(), true };
-            ggml_context * ctx = ggml_init(gp);
+            ggml_context * ctx = vision_scratch.reset((size_t) 24 * 1024 * 1024);
 
             ggml_tensor * x_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, patch_flat, N);
             ggml_set_name(x_in, "patches");
@@ -1032,18 +1075,16 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
             ggml_tensor * mm2 = ggml_add(ctx, ggml_mul_mat(ctx, mm_l2_w, mmg), mm_l2_b);
             ggml_set_name(mm2, "img_embeds");
 
-            ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+
             ggml_cgraph * gf = ggml_new_graph_custom(ctx,  4096,  false);
             ggml_build_forward_expand(gf, mm2);
-            if (!ggml_gallocr_alloc_graph(galloc, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr_alloc_graph failed (view %lld)\n", (long long) v); ggml_gallocr_free(galloc); ggml_free(ctx); return {}; }
+            if (!vision_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr_alloc_graph failed (view %lld)\n", (long long) v); return {}; }
             ggml_backend_tensor_set(x_in, patches.data(), 0, ggml_nbytes(x_in));
             if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(bitvla): vision graph compute failed (view %lld)\n", (long long) v);
-                ggml_gallocr_free(galloc); ggml_free(ctx); return {};
+                return {};
             }
             ggml_backend_tensor_get(mm2, img_embeds_host.data() + (size_t) v * N * hidden_l, 0, (size_t) N * hidden_l * sizeof(float));
-            ggml_gallocr_free(galloc);
-            ggml_free(ctx);
             }
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now() - t_v0).count();
@@ -1055,17 +1096,18 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
     _dump_manifest(std::string("mm_proj_out fp32 ") + std::to_string(n_views) + " " + std::to_string(N) + " " + std::to_string(hidden_l));
 
     std::vector<float> proprio_embed_host((size_t) hidden_l);
+    // Like the other archs: a caller may leave the proprio vector out.
+    std::vector<float> state_host((size_t) proprio_dim, 0.0f);
+    if (in.state) std::memcpy(state_host.data(), in.state, (size_t) proprio_dim * sizeof(float));
 #ifdef VLA_BITVLA_CUDA_KERNELS
     if (cuda_fp32head_ready) {
-        if (bitvla_fp32head_proprio_forward(fp32head_cuda_ctx, in.state, proprio_embed_host.data(), 0) != 0) {
+        if (bitvla_fp32head_proprio_forward(fp32head_cuda_ctx, state_host.data(), proprio_embed_host.data(), 0) != 0) {
             std::fprintf(stderr, "vla(bitvla): CUDA proprio forward failed\n"); return {};
         }
     } else
 #endif
     {
-        std::vector<uint8_t> meta_buf((size_t) 4 * 1024 * 1024);
-        ggml_init_params gp = { meta_buf.size(), meta_buf.data(), true };
-        ggml_context * ctx = ggml_init(gp);
+        ggml_context * ctx = proprio_scratch.reset((size_t) 4 * 1024 * 1024);
         ggml_tensor * x_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, proprio_dim, 1);
         ggml_set_name(x_in, "state");
         ggml_tensor * h1     = ggml_add(ctx, ggml_mul_mat(ctx, pp_fc1_w, x_in), pp_fc1_b);
@@ -1073,14 +1115,12 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         ggml_tensor * out    = ggml_add(ctx, ggml_mul_mat(ctx, pp_fc2_w, h1_gel), pp_fc2_b);
         ggml_set_name(out, "proprio_embed");
 
-        ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
         ggml_cgraph * gf = ggml_new_graph(ctx);
         ggml_build_forward_expand(gf, out);
-        if (!ggml_gallocr_alloc_graph(galloc, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr failed (proprio)\n"); ggml_gallocr_free(galloc); ggml_free(ctx); return {}; }
-        ggml_backend_tensor_set(x_in, in.state, 0, ggml_nbytes(x_in));
-        if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): proprio compute failed\n"); ggml_gallocr_free(galloc); ggml_free(ctx); return {}; }
+        if (!proprio_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr failed (proprio)\n"); return {}; }
+        ggml_backend_tensor_set(x_in, state_host.data(), 0, ggml_nbytes(x_in));
+        if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): proprio compute failed\n"); return {}; }
         ggml_backend_tensor_get(out, proprio_embed_host.data(), 0, (size_t) hidden_l * sizeof(float));
-        ggml_gallocr_free(galloc); ggml_free(ctx);
     }
 
     _dump_bin("proprio_features", proprio_embed_host.data(), proprio_embed_host.size());
@@ -1201,9 +1241,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
     } else
 #endif
     {
-        std::vector<uint8_t> meta_buf((size_t) 64 * 1024 * 1024);
-        ggml_init_params gp = { meta_buf.size(), meta_buf.data(), true };
-        ggml_context * ctx = ggml_init(gp);
+        ggml_context * ctx = lm_scratch.reset((size_t) 64 * 1024 * 1024);
         ggml_tensor * x_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden_l, seq);
         ggml_set_name(x_in, "inputs_embeds");
         ggml_tensor * positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, seq);
@@ -1221,10 +1259,9 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         ggml_tensor * action_hidden = ggml_get_rows(ctx, h_norm, action_ids);
         ggml_set_name(action_hidden, "action_hidden");
 
-        ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
         ggml_cgraph * gf = ggml_new_graph_custom(ctx,  32768,  false);
         ggml_build_forward_expand(gf, action_hidden);
-        if (!ggml_gallocr_alloc_graph(galloc, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr failed (lm)\n"); ggml_gallocr_free(galloc); ggml_free(ctx); return {}; }
+        if (!lm_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr failed (lm)\n"); return {}; }
 
         ggml_backend_tensor_set(x_in, inputs_embeds.data(), 0, ggml_nbytes(x_in));
         std::vector<int32_t> pos_v(seq);
@@ -1234,9 +1271,8 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         for (int64_t i = 0; i < n_action; ++i) aids[i] = (int32_t) (seq - 2 - n_action + i);
         ggml_backend_tensor_set(action_ids, aids.data(), 0, ggml_nbytes(action_ids));
 
-        if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): lm prefill compute failed\n"); ggml_gallocr_free(galloc); ggml_free(ctx); return {}; }
+        if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): lm prefill compute failed\n"); return {}; }
         ggml_backend_tensor_get(action_hidden, last_hidden_at_actions.data(), 0, (size_t) n_action * hidden_l * sizeof(float));
-        ggml_gallocr_free(galloc); ggml_free(ctx);
     }
     if (timing_phase) stats.ms_prefill = std::chrono::duration<float, std::milli>(clk::now() - t_p0).count();
 
@@ -1258,9 +1294,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
     } else
 #endif
     {
-        std::vector<uint8_t> meta_buf((size_t) 8 * 1024 * 1024);
-        ggml_init_params gp = { meta_buf.size(), meta_buf.data(), true };
-        ggml_context * ctx = ggml_init(gp);
+        ggml_context * ctx = head_scratch.reset((size_t) 8 * 1024 * 1024);
 
         ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, in_dim, chunk);
         ggml_set_name(x, "x");
@@ -1281,14 +1315,12 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         ggml_tensor * y   = ggml_add(ctx, ggml_mul_mat(ctx, ah_fc2_w, ln2), ah_fc2_b);
         ggml_set_name(y, "y");
 
-        ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
         ggml_cgraph * gf = ggml_new_graph(ctx);
         ggml_build_forward_expand(gf, y);
-        if (!ggml_gallocr_alloc_graph(galloc, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr failed (action_head)\n"); ggml_gallocr_free(galloc); ggml_free(ctx); return {}; }
+        if (!head_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr failed (action_head)\n"); return {}; }
         ggml_backend_tensor_set(x, last_hidden_at_actions.data(), 0, ggml_nbytes(x));
-        if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): action_head compute failed\n"); ggml_gallocr_free(galloc); ggml_free(ctx); return {}; }
+        if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): action_head compute failed\n"); return {}; }
         ggml_backend_tensor_get(y, normalized_actions.data(), 0, (size_t) chunk * action_dim * sizeof(float));
-        ggml_gallocr_free(galloc); ggml_free(ctx);
     }
     if (timing_phase) stats.ms_denoise = std::chrono::duration<float, std::milli>(clk::now() - t_d0).count();
 

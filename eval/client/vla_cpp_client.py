@@ -737,6 +737,25 @@ class VlaCppClient:
     _EVO1_IMG_CTX           = "<IMG_CONTEXT>"
     _EVO1_NUM_IMAGE_TOKEN   = 256
     _EVO1_MAX_TEXT_LENGTH   = 1024
+    _EVO1_NOISE_LEN         = 50 * 24   # horizon * per_action_dim
+
+    def _maybe_add_fixed_noise(self, req, n: int | None) -> None:
+        """Attach a reproducible noise vector when VLA_FIXED_NOISE_SEED is set.
+
+        Without it the server draws flow-matching noise from a clock-seeded RNG,
+        so two servers cannot be compared action-for-action. Pinning the noise
+        client-side makes a kernel change (e.g. swapping in flash attention)
+        verifiable: same inputs plus same noise must give the same actions.
+        """
+        seed = os.environ.get("VLA_FIXED_NOISE_SEED")
+        if seed is None or not n:
+            return
+        # Vary per step but reproducibly, so a replay of the same episode sends
+        # the same sequence of noise vectors.
+        rng = np.random.default_rng(int(seed) + self._step)
+        # Evo-1 is trained on uniform[-1,1]; matching that keeps the check in
+        # the distribution the model actually sees.
+        req.noise.extend(rng.uniform(-1.0, 1.0, size=n).astype(np.float32).tolist())
 
     def _predict_chunk_evo1(self, observations: dict[str, Any]) -> np.ndarray:
 
@@ -815,6 +834,7 @@ class VlaCppClient:
         req.lang_tokens.extend(input_ids_full[:n_real].tolist())
         req.state.extend(state_padded.tolist())
         req.attention_mask.extend(attn_mask.tolist())
+        self._maybe_add_fixed_noise(req, self._EVO1_NOISE_LEN)
 
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()

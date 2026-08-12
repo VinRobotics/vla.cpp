@@ -62,12 +62,40 @@ extern "C" void bitlinear_int8xint2(int8_t* input0, int8_t* input1, __nv_bfloat1
     }
 }
 
+// The wide kernel amortises the shared A block over 4 column tiles instead of
+// 1 (see ladder_int8xint2_kernel_m_wide). It is the default; set
+// VLA_BITVLA_NARROW_GEMM=1 to fall back to the one-tile-per-CTA kernel, which
+// is what the A/B correctness harness and any regression bisect want.
+static bool bitlinear_use_wide() {
+    static const bool wide = (std::getenv("VLA_BITVLA_NARROW_GEMM") == nullptr);
+    return wide;
+}
+
 extern "C" void bitlinear_int8xint2_m(
     int8_t* input0, int8_t* input1,
     __nv_bfloat16* output0,
     float* s, float* ws,
     int M, int N, int K, cudaStream_t stream)
 {
+    if (bitlinear_use_wide()) {
+#define WIDE(NN, KK, WS) \
+    launch_ladder_int8xint2_m_wide<NN, KK, WS, 128, bitvla_n_tiles_for(NN, KK)>( \
+        input0, input1, output0, s, ws, M, stream)
+        if      (N == 2560  && K == 2560) WIDE(2560,  2560, 1);
+        else if (N == 640   && K == 2560) WIDE(640,   2560, 1);
+        else if (N == 13824 && K == 2560) WIDE(13824, 2560, 2);
+        else if (N == 2560  && K == 6912) WIDE(2560,  6912, 1);
+
+        else if (N == 1152  && K == 1152) WIDE(1152,  1152, 1);
+        else if (N == 4304  && K == 1152) WIDE(4304,  1152, 1);
+        else if (N == 1152  && K == 4352) WIDE(1152,  4352, 1);
+
+        else if (N == 3840  && K == 2560) WIDE(3840,  2560, 3);
+        else
+            bitlinear_unsupported_shape("bitlinear_int8xint2_m", M, N, K);
+#undef WIDE
+        return;
+    }
 
     if      (N == 2560  && K == 2560) launch_ladder_int8xint2_m<2560,  2560, 1, 128>(input0, input1, output0, s, ws, M, stream);
     else if (N == 640   && K == 2560) launch_ladder_int8xint2_m<640,   2560, 1, 128>(input0, input1, output0, s, ws, M, stream);

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "model.h"
+#include "serving/hf_fetch.h"
 #include "serving/vla.pb.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -55,6 +56,20 @@ bool decode_image(const vla::Image & img,
         if (data.size() > size_t(INT_MAX)) {
             std::fprintf(stderr, "vla-server: JPEG payload too large (%zu bytes)\n",
                          data.size());
+            return false;
+        }
+        // Header first: stbi_load allocates 3*w*h before returning, so a small JPEG
+        // declaring huge dimensions would allocate gigabytes before any check.
+        if (!stbi_info_from_memory(
+                reinterpret_cast<const unsigned char *>(data.data()),
+                static_cast<int>(data.size()), &w, &h, &ch)) {
+            std::fprintf(stderr, "vla-server: stbi_info_from_memory failed: %s\n",
+                         stbi_failure_reason());
+            return false;
+        }
+        if (w <= 0 || h <= 0 || w > int(kMaxImageDim) || h > int(kMaxImageDim)) {
+            std::fprintf(stderr, "vla-server: JPEG dims %dx%d out of range (max %u)\n",
+                         w, h, kMaxImageDim);
             return false;
         }
         unsigned char * px = stbi_load_from_memory(
@@ -110,6 +125,14 @@ bool decode_image(const vla::Image & img,
 
         f32.resize(pixels);
         std::memcpy(f32.data(), img.data().data(), expected);
+        // State and noise are swept for NaN/Inf; pixels were not, so a bad pixel
+        // came back out as a robot action.
+        for (size_t i = 0; i < pixels; ++i) {
+            if (!std::isfinite(f32[i])) {
+                std::fprintf(stderr, "vla-server: F32_RGB_01 pixel %zu is not finite\n", i);
+                return false;
+            }
+        }
         view = { f32.data(), int(img.width()), int(img.height()),
                  vla::PixelFormat::F32_RGB_01 };
         return true;
@@ -127,6 +150,21 @@ std::string make_error_response(uint64_t request_id, const std::string & msg) {
     return resp.SerializeAsString();
 }
 
+// Discard frames after the first. Must run to completion: a queued frame keeps
+// REP in receive state and send throws EFSM. Stalled means the peer announced a
+// frame it never sent, so no reply is possible until the rest arrives.
+enum class Drain { Clean, Extra, Stalled };
+
+Drain drain_extra_frames(zmq::socket_t & sock) {
+    Drain d = Drain::Clean;
+    while (sock.get(zmq::sockopt::rcvmore)) {
+        zmq::message_t junk;
+        if (!sock.recv(junk, zmq::recv_flags::none)) return Drain::Stalled;
+        d = Drain::Extra;
+    }
+    return d;
+}
+
 int find_non_finite(const float * data, int n) {
     for (int i = 0; i < n; ++i) {
         if (!std::isfinite(data[i])) return i;
@@ -137,11 +175,13 @@ int find_non_finite(const float * data, int n) {
 void usage(const char * prog) {
     std::fprintf(stderr,
         "usage: %s [--bind ADDR] [--timing-detail none|phase] [--config PATH] "
-        "[<mmproj.gguf>] <ckpt>\n"
+        "[<mmproj.gguf>] (<ckpt> | -hf user/repo[:file.gguf])\n"
         "  <mmproj.gguf>           vision-tower mmproj GGUF (SigLIP / PaliGemma /\n"
         "                          connector). Required for SmolVLA, π0, Evo-1, GR00T.\n"
         "                          Omit for BitVLA - its vision tower is baked into\n"
         "                          the combined ckpt GGUF.\n"
+        "  -hf                     HuggingFace repo, user/repo[:file.gguf]; downloaded\n"
+        "                          on a miss and cached under $VLA_CACHE.\n"
         "  <ckpt>                  SmolVLA .safetensors or .gguf, or any of the other\n"
         "                          supported architectures' .gguf; the architecture is\n"
         "                          auto-detected from the checkpoint.\n"
@@ -166,6 +206,7 @@ int main(int argc, char ** argv) {
     std::string bind_addr   = "tcp://*:5555";
     std::string mmproj_path;
     std::string ckpt_path;
+    std::string hf_spec;
     std::string config_path;
     vla::TimingDetail timing_detail = vla::TimingDetail::NONE;
 
@@ -174,6 +215,8 @@ int main(int argc, char ** argv) {
         std::string a = argv[i];
         if (a == "--bind" && i + 1 < argc) {
             bind_addr = argv[++i];
+        } else if (a == "-hf" && i + 1 < argc) {
+            hf_spec = argv[++i];
         } else if (a == "--config" && i + 1 < argc) {
             config_path = argv[++i];
         } else if (a == "--timing-detail" && i + 1 < argc) {
@@ -192,14 +235,17 @@ int main(int argc, char ** argv) {
             positionals.push_back(std::move(a));
         }
     }
-    if (positionals.size() == 1) {
+    if (!hf_spec.empty() && positionals.empty()) {
+        ckpt_path = vla::hf_resolve(hf_spec);
+        if (ckpt_path.empty()) return 1;
+    } else if (positionals.size() == 1) {
         ckpt_path = positionals[0];
     } else if (positionals.size() == 2) {
         mmproj_path = positionals[0];
         ckpt_path   = positionals[1];
     } else {
         std::fprintf(stderr,
-                     "vla-server: expected 1 or 2 positional args "
+                     "vla-server: expected -hf, or 1 or 2 positional args "
                      "(<mmproj.gguf> <ckpt> for SmolVLA/π0/Evo-1/GR00T, "
                      "or just <ckpt> for BitVLA), got %zu\n",
                      positionals.size());
@@ -230,8 +276,12 @@ int main(int argc, char ** argv) {
     zmq::context_t zctx( 1);
     zmq::socket_t  sock(zctx, zmq::socket_type::rep);
     sock.set(zmq::sockopt::linger, 0);
-    // cap inbound messages so one oversized request cannot exhaust memory.
-    sock.set(zmq::sockopt::maxmsgsize, int64_t(256) * 1024 * 1024);
+    // 64 MiB is above any real request (16 views of 512x512 F32 RGB is ~50 MiB) and
+    // low enough to bound protobuf's expansion during ParseFromArray.
+    sock.set(zmq::sockopt::maxmsgsize, int64_t(64) * 1024 * 1024);
+    // A peer that sends a frame with SNDMORE and then stalls would otherwise park
+    // this single-threaded loop in recv for good, starving every other client.
+    sock.set(zmq::sockopt::rcvtimeo, 5000);
     sock.bind(bind_addr);
     std::printf("vla-server: bound to %s. ready.\n", bind_addr.c_str());
 
@@ -282,6 +332,19 @@ int main(int argc, char ** argv) {
             if (e.num() == EINTR) continue;
             if (e.num() == ETERM) break;
             std::fprintf(stderr, "vla-server: zmq error: %s\n", e.what());
+            continue;
+        }
+
+        // Without this an unauthenticated client shuts the server down with one
+        // two-frame request: the reply fails and send_reply sets g_shutdown.
+        const Drain drained = drain_extra_frames(sock);
+        if (drained == Drain::Stalled) {
+            // Back to the poll rather than blocking here, so shutdown still works.
+            std::fprintf(stderr, "vla-server: peer stalled mid-request\n");
+            continue;
+        }
+        if (drained == Drain::Extra) {
+            send_reply(make_error_response(0, "expected a single-frame request"));
             continue;
         }
 
