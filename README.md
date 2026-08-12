@@ -61,21 +61,6 @@ cmake -B build \
 cmake --build build -j$(nproc)
 ```
 
-```bash
-# Intel GPU build (Arc / Flex / Max / Xe iGPU). ggml's SYCL sources need the
-# oneAPI DPC++ driver, so the whole project is compiled by icpx:
-source /opt/intel/oneapi/setvars.sh
-cmake -B build \
-    -DGGML_SYCL=ON \
-    -DCMAKE_C_COMPILER=icx \
-    -DCMAKE_CXX_COMPILER=icpx \
-    -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-```
-
-The driver and oneAPI setup that this needs is in
-[docs/backend/sycl.md](docs/backend/sycl.md).
-
 If CMake cannot find CUDA, point the environment at it explicitly:
 
 ```bash
@@ -84,7 +69,7 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
 
 Check [docs/backend](docs/backend) for compiling `vla.cpp` on other platforms.
-WSL2 and Apple Silicon are both tested.
+WSL2, Apple Silicon, and Intel GPU are all tested.
 
 ---
 
@@ -316,19 +301,19 @@ change is shown to leave it alone.
 Support matrix of models (rows) against platforms (columns). Legend: `Y` =
 supported (released and benchmarked), `~` = in progress, `-` = planned.
 
-| Model | CPU (x86-64 / ARM) | CUDA | SYCL (Intel) | Metal | OpenVINO | Hexagon |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | - | - |
-| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | - | - |
-| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | ~ | - | - |
-| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | ~ | - | - |
-| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | ~ | - | - |
-| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | - | - |
-| [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | ~ | - | - |
-| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | ~ | - | - |
-| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | ~ | - | - |
-| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | ~ | - | - |
-| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | ~ | - | - |
+| Model | CPU (x86-64 / ARM) | CUDA | SYCL (Intel) | Metal | OpenVINO |
+|---|:--:|:--:|:--:|:--:|:--:|
+| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | - | 
+| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | - | 
+| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | ~ | - | 
+| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | ~ | - | 
+| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | ~ | - | 
+| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | - | 
+| [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | ~ | - | 
+| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | ~ | - | 
+| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | ~ | - | 
+| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | ~ | - | 
+| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | ~ | - | 
 
 ---
 
