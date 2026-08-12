@@ -352,6 +352,11 @@ def main() -> int:
         },
         "server_ms": _summarize(server_infer_ms),
         "server_latency_breakdown": server_latencies,
+        # Raw per-call series. Summary statistics cannot distinguish a uniformly
+        # slower stack from one that hits the same floor but occasionally
+        # stalls, and that distinction is the whole question on gr00t_n1_5.
+        "server_ms_raw": [round(x, 3) for x in server_infer_ms],
+        "step_ms_raw":   [round(x, 3) for x in step_latencies_ms],
     }
     if args.variant:
         stats["variant"] = args.variant
