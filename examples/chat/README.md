@@ -61,9 +61,12 @@ eval $CONV "$SRC" --mmproj \
 The LM conversion resolves the hparams (hidden 960, ff 2560, 15 heads / 5 KV,
 rope θ 1e5) and bakes the SmolVLM2 chat template into the GGUF KV store; the
 `--mmproj` pass writes 198 vision tensors. Sanity-check the pair with
-`llama-mtmd-cli`:
+`llama-mtmd-cli`. It is not part of the default build, so ask for it by name
+first:
 
 ```bash
+cmake --build build-cuda --target llama-mtmd-cli
+
 ./build-cuda/bin/llama-mtmd-cli \
     -m "$OUT/smolvlm2-500m-instruct-f16.gguf" \
     --mmproj "$OUT/mmproj-smolvlm2-500m-instruct-f16.gguf" \
