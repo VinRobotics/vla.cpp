@@ -39,3 +39,7 @@ target_include_directories(test_config_guard PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_config_guard PRIVATE vla_core)
 target_compile_options(test_config_guard PRIVATE -Wall -Wextra)
 add_test(NAME config_guard COMMAND test_config_guard)
+
+# The A/B harness for the two BitVLA ternary-GEMM tilings (bitvla_gemm_check.cu)
+# was never committed, so there is no target for it here. VLA_BITVLA_NARROW_GEMM=1
+# still selects the old one-tile-per-CTA kernel for a hand-run comparison.
