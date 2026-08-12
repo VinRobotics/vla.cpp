@@ -355,6 +355,18 @@ struct SmolVLAModelArch : public ModelArchBase {
 
 namespace {
 
+// Fused attention in the SigLIP tower. OPT-IN (VLA_SMOLVLA_FA=1), not default.
+// It cuts the vision stage from 33.2 ms to 22.1 ms (total 68.5 -> 55.8 ms), which
+// is enough to beat compiled PyTorch — but ggml's CUDA flash attention computes
+// K/V at F16 regardless of input type (fattn.cu accepts F32 K/V only by
+// reinterpreting it as F16), and that measured 92/100 on libero_object against
+// 96/100 for explicit attention. evo1 showed the same ~4-5 pp drop, so the
+// default stays on the accuracy-preserving path.
+static inline bool siglip_fa_enabled() {
+    static const bool enabled = (std::getenv("VLA_SMOLVLA_FA") != nullptr);
+    return enabled;
+}
+
 // One pre-norm SigLIP encoder block (SmolVLM2 tower), same graph as the other
 // in-tree models. Bidirectional attention, F32 score accumulation, tanh GELU.
 ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_tensor * x,
@@ -366,10 +378,25 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_
     ggml_tensor * v = ggml_add(C, ggml_mul_mat(C, w.Wv, n1), w.bv);
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, head_dim, heads, seq), 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, head_dim, heads, seq), 0, 2, 1, 3));
-    ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
-    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-    ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
-    ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
+    ggml_tensor * att;
+    if (siglip_fa_enabled()) {
+        // The tower runs 1024 tokens (512/16 grid) over 12 layers, so the
+        // explicit path below materialises a 1024x1024 score matrix per head —
+        // written by the matmul, read and rewritten by the softmax, then read
+        // again by the AV matmul. That traffic, not the FLOPs, is why the vision
+        // stage is roughly half of smolvla's latency. K/V stay F32 so the
+        // numerics match the explicit path; the expert layers below already call
+        // this op the same way.
+        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 0, 2, 1, 3));
+        ggml_tensor * fa = ggml_flash_attn_ext(C, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+        att = ggml_reshape_2d(C, fa, hidden, seq);
+    } else {
+        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
+        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
+        att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
+    }
     ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
     ggml_tensor * n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.ln2w), w.ln2b);
     ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, ggml_gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);

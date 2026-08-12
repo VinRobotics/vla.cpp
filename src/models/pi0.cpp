@@ -130,6 +130,16 @@ namespace {
 // One pre-norm SigLIP encoder block, identical to gr00tn1d5's in-tree tower
 // (the PaliGemma vision tower is the same SigLIP-So400m/14). Bidirectional
 // attention (nullptr mask), F32 score accumulation, tanh GELU FFN.
+// Fused attention for the SigLIP tower and the PaliGemma/expert stack.
+// OPT-IN (VLA_PI0_FA=1): pi0's score matrices are small (~560 keys, 8 heads), so
+// fusing them only moved 111.4 ms -> 107.5 ms (3.5%). ggml's FA computes K/V at
+// F16 regardless of the input type, and on evo1 that cost measurable success
+// rate — not a trade worth taking here for 3.5%.
+static inline bool pi0_fa_enabled() {
+    static const bool enabled = (std::getenv("VLA_PI0_FA") != nullptr);
+    return enabled;
+}
+
 ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_tensor * x,
                                  int64_t seq, int64_t heads, int64_t head_dim, int64_t hidden, float ln_eps) {
     const float scale = 1.0f / std::sqrt((float) head_dim);
@@ -139,10 +149,20 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_
     ggml_tensor * v = ggml_add(C, ggml_mul_mat(C, w.Wv, n1), w.bv);
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, head_dim, heads, seq), 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, head_dim, heads, seq), 0, 2, 1, 3));
-    ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
-    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-    ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
-    ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
+    ggml_tensor * att;
+    if (pi0_fa_enabled()) {
+        // Avoids materialising the per-head score matrix; K/V stay F32 so the
+        // numerics track the explicit path below.
+        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 0, 2, 1, 3));
+        ggml_tensor * fa = ggml_flash_attn_ext(C, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+        att = ggml_reshape_2d(C, fa, hidden, seq);
+    } else {
+        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
+        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
+        att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
+    }
     ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
     ggml_tensor * n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.ln2w), w.ln2b);
     ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, ggml_gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);
@@ -191,18 +211,27 @@ ggml_tensor * build_gemma_layer(
         V_full = ggml_concat(ctx, cached_V, v_h,     2);
     }
 
+    const float scale = 1.f / std::sqrt((float) hd);
     ggml_tensor * Q = ggml_cont(ctx, ggml_permute(ctx, q_rope, 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(ctx, ggml_permute(ctx, K_full, 0, 2, 1, 3));
-    ggml_tensor * V = ggml_cont(ctx, ggml_permute(ctx, V_full, 1, 2, 0, 3));
-
-    ggml_tensor * kq = ggml_mul_mat(ctx, K, Q);
-    ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-    const float scale = 1.f / std::sqrt((float) hd);
-    ggml_tensor * attn = ggml_soft_max_ext(ctx, kq, mask, scale,  0.f);
-    ggml_tensor * kqv  = ggml_mul_mat(ctx, V, attn);
-
-    ggml_tensor * att_pre = ggml_reshape_2d(ctx,
-        ggml_cont(ctx, ggml_permute(ctx, kqv, 0, 2, 1, 3)), qf, seq);
+    ggml_tensor * att_pre;
+    if (pi0_fa_enabled()) {
+        ggml_tensor * V = ggml_cont(ctx, ggml_permute(ctx, V_full, 0, 2, 1, 3));
+        // ggml_flash_attn_ext asserts an F16 mask. The mask holds only 0 and
+        // -inf, both exactly representable in F16, so the cast is lossless.
+        ggml_tensor * mask_f16 = mask ? ggml_cast(ctx, mask, GGML_TYPE_F16) : nullptr;
+        ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, K, V, mask_f16, scale, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+        att_pre = ggml_reshape_2d(ctx, fa, qf, seq);
+    } else {
+        ggml_tensor * V = ggml_cont(ctx, ggml_permute(ctx, V_full, 1, 2, 0, 3));
+        ggml_tensor * kq = ggml_mul_mat(ctx, K, Q);
+        ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        ggml_tensor * attn = ggml_soft_max_ext(ctx, kq, mask, scale,  0.f);
+        ggml_tensor * kqv  = ggml_mul_mat(ctx, V, attn);
+        att_pre = ggml_reshape_2d(ctx,
+            ggml_cont(ctx, ggml_permute(ctx, kqv, 0, 2, 1, 3)), qf, seq);
+    }
     ggml_tensor * o_out = ggml_mul_mat(ctx, w.Wo, att_pre);
     ggml_tensor * h1    = ggml_add(ctx, x_in, o_out);
 
