@@ -48,6 +48,9 @@
 extern "C" {
 typedef bool (*ggml_cuda_ext_forward_t)(struct ggml_tensor * dst, void * stream);
 extern ggml_cuda_ext_forward_t ggml_cuda_ext_forward;
+
+typedef bool (*ggml_cuda_ext_fused_binbcast_t)(struct ggml_tensor * dst, int n_fuse, void * stream);
+extern ggml_cuda_ext_fused_binbcast_t ggml_cuda_ext_fused_binbcast;
 }
 
 namespace {
@@ -128,6 +131,108 @@ bool bin_bcast(ggml_tensor * dst, cudaStream_t stream) {
             es(src1,0), es(src1,1), es(src1,2), es(src1,3),
             es(dst,0), es(dst,1), es(dst,2), es(dst,3));
     }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// fused elementwise binary: dst = (((src0 op src1) op src2) ... op src[n_fuse])
+// ---------------------------------------------------------------------------
+//
+// ggml fuses runs of up to 8 ADD or MUL nodes in ggml_cuda_try_fuse and hands
+// the run over as one synthetic node: src[0] is the base, src[1..n_fuse] are the
+// addends, dst->data is the last node's output. The fusion check upstream only
+// admits a run when every addend has the same layout, which is why one stride
+// set covers all of them.
+//
+// Accumulation is in float with a single conversion at the end, matching ggml's
+// own k_bin_bcast: `float result = (float) src0[..]; result = bin_op(result, ..);
+// dst[i0] = (dst_t) result;`. Doing it any other way would make a fused run
+// disagree with the unfused one.
+
+constexpr int MAX_FUSE = 8;
+
+template <typename S1>
+struct SrcPtrs { const S1 * p[MAX_FUSE]; };
+
+template <BinOp op, typename S1>
+__global__ void k_fused_bin_bcast_bf16(
+        const __nv_bfloat16 * __restrict__ src0, const SrcPtrs<S1> srcs, const int n_fuse,
+        __nv_bfloat16 * __restrict__ dst,
+        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int64_t ne3,
+        const int64_t s00, const int64_t s01, const int64_t s02, const int64_t s03,
+        const int64_t ne10, const int64_t ne11, const int64_t ne12, const int64_t ne13,
+        const int64_t s10, const int64_t s11, const int64_t s12, const int64_t s13,
+        const int64_t d0, const int64_t d1, const int64_t d2, const int64_t d3) {
+    const int64_t total = ne0*ne1*ne2*ne3;
+    for (int64_t idx = (int64_t) blockIdx.x*blockDim.x + threadIdx.x; idx < total;
+         idx += (int64_t) gridDim.x*blockDim.x) {
+        const int64_t i0 =  idx                  % ne0;
+        const int64_t i1 = (idx / ne0)           % ne1;
+        const int64_t i2 = (idx / (ne0*ne1))     % ne2;
+        const int64_t i3 =  idx / (ne0*ne1*ne2);
+
+        const int64_t j = (i0 % ne10)*s10 + (i1 % ne11)*s11 +
+                          (i2 % ne12)*s12 + (i3 % ne13)*s13;
+
+        float acc = bf2f(src0[i0*s00 + i1*s01 + i2*s02 + i3*s03]);
+        for (int k = 0; k < n_fuse; ++k) {
+            const float b = (float) srcs.p[k][j];
+            acc = (op == BinOp::Add) ? acc + b : acc * b;
+        }
+        dst[i0*d0 + i1*d1 + i2*d2 + i3*d3] = f2bf(acc);
+    }
+}
+
+template <BinOp op>
+bool fused_bin_bcast(ggml_tensor * dst, int n_fuse, cudaStream_t stream) {
+    if (n_fuse < 2 || n_fuse > MAX_FUSE) return false;
+
+    const ggml_tensor * src0 = dst->src[0];
+    if (!src0) return false;
+    if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16) return false;
+    if (!ggml_are_same_shape(src0, dst)) return false;
+
+    // src[1] fixes the layout and type every other addend must match; the
+    // upstream fusion check guarantees it, and this re-checks rather than
+    // trusting it, because getting it wrong reads out of bounds.
+    const ggml_tensor * src1 = dst->src[1];
+    if (!src1) return false;
+    if (src1->type != GGML_TYPE_BF16 && src1->type != GGML_TYPE_F32) return false;
+    if (!ggml_can_repeat(src1, src0)) return false;
+
+    for (int k = 1; k < n_fuse; ++k) {
+        const ggml_tensor * s = dst->src[k + 1];
+        if (!s || s->type != src1->type) return false;
+        if (!ggml_are_same_shape(s, src1)) return false;
+        for (int d = 0; d < GGML_MAX_DIMS; ++d) {
+            if (s->nb[d] != src1->nb[d]) return false;
+        }
+    }
+
+    const int64_t total  = ggml_nelements(dst);
+    const int64_t blocks = (total + BLOCK - 1) / BLOCK;
+    const int     grid   = (int) (blocks < 65535 ? blocks : 65535);
+
+#define VLA_LAUNCH_FUSED(TYPE)                                                    \
+    do {                                                                          \
+        SrcPtrs<TYPE> srcs{};                                                     \
+        for (int k = 0; k < n_fuse; ++k) srcs.p[k] = (const TYPE *) dst->src[k + 1]->data; \
+        k_fused_bin_bcast_bf16<op, TYPE><<<grid, BLOCK, 0, stream>>>(             \
+            (const __nv_bfloat16 *) src0->data, srcs, n_fuse,                     \
+            (__nv_bfloat16 *) dst->data,                                          \
+            dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],                       \
+            es(src0,0), es(src0,1), es(src0,2), es(src0,3),                       \
+            src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],                   \
+            es(src1,0), es(src1,1), es(src1,2), es(src1,3),                       \
+            es(dst,0), es(dst,1), es(dst,2), es(dst,3));                          \
+    } while (0)
+
+    if (src1->type == GGML_TYPE_BF16) {
+        VLA_LAUNCH_FUSED(__nv_bfloat16);
+    } else {
+        VLA_LAUNCH_FUSED(float);
+    }
+#undef VLA_LAUNCH_FUSED
     return true;
 }
 
@@ -340,6 +445,17 @@ bool mul_mat(ggml_tensor * dst, cudaStream_t stream) {
 // hook entry point
 // ---------------------------------------------------------------------------
 
+extern "C" bool vla_cuda_bf16_fused_binbcast(ggml_tensor * dst, int n_fuse, void * stream_v) {
+    if (!dst) return false;
+    cudaStream_t stream = (cudaStream_t) stream_v;
+
+    switch (dst->op) {
+        case GGML_OP_ADD: return fused_bin_bcast<BinOp::Add>(dst, n_fuse, stream);
+        case GGML_OP_MUL: return fused_bin_bcast<BinOp::Mul>(dst, n_fuse, stream);
+        default: return false;
+    }
+}
+
 extern "C" bool vla_cuda_bf16_forward(ggml_tensor * dst, void * stream_v) {
     if (!dst) return false;
     cudaStream_t stream = (cudaStream_t) stream_v;
@@ -368,6 +484,14 @@ namespace vla {
 // Called once, after the CUDA backend is up. Idempotent.
 void cuda_register_bf16_ops() {
     ggml_cuda_ext_forward = vla_cuda_bf16_forward;
+
+    // Fusion runs in ggml_backend_cuda_graph_compute, upstream of
+    // ggml_cuda_compute_forward, so the pointer above never sees a fused node.
+    // Without this second one a fused BF16 add reaches a kernel that handles
+    // F32/F16 only and GGML_ABORTs ("unsupported types for fusion: dst: bf16,
+    // src0: bf16, src1: f32"), and declining fusion instead costs ~18 ms/call
+    // on evo1 -- enough to make BF16 activations a net loss.
+    ggml_cuda_ext_fused_binbcast = vla_cuda_bf16_fused_binbcast;
 }
 
 }  // namespace vla
