@@ -16,6 +16,7 @@
 // distilled action-expert weights and force num_steps = 1 at the denoise loops.
 
 #include "arch.h"
+#include "modules/encoder.h"
 #include "options.h"
 #include "model.h"
 #include "modules/preprocess.h"
@@ -282,7 +283,6 @@ struct ExpertLayerW {
 };
 
 // SigLIP-B/16 vision block weights (SmolVLM2 tower, built in-tree).
-struct SigLipLayerW { ggml_tensor *ln1w,*ln1b,*ln2w,*ln2b,*Wq,*bq,*Wk,*bk,*Wv,*bv,*Wo,*bo,*Wfc1,*bfc1,*Wfc2,*bfc2; };
 
 }
 
@@ -298,7 +298,7 @@ struct SmolVLAModelArch : public ModelArchBase {
     float   vit_ln_eps = 1e-6f;
     ggml_tensor * vit_patch_w = nullptr, * vit_patch_b = nullptr, * vit_pos = nullptr;
     ggml_tensor * vit_post_ln_w = nullptr, * vit_post_ln_b = nullptr, * mm_fc = nullptr;
-    std::vector<SigLipLayerW> vit;
+    std::vector<EncBlockW> vit;
 
     ggml_backend_t        backend     = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
@@ -367,7 +367,7 @@ namespace {
 
 // One pre-norm SigLIP encoder block (SmolVLM2 tower), same graph as the other
 // in-tree models. Bidirectional attention, F32 score accumulation, tanh GELU.
-ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_tensor * x,
+ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_tensor * x,
                                  int64_t seq, int64_t heads, int64_t head_dim, int64_t hidden, float ln_eps) {
     const float scale = 1.0f / std::sqrt((float) head_dim);
     ggml_tensor * n1 = ggml_add(C, ggml_mul(C, ggml_norm(C, x, ln_eps), w.ln1w), w.ln1b);
@@ -1076,7 +1076,7 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
         pending_f32.push_back({std::string(VP) + "post_layernorm.bias",   m->vit_post_ln_b, {H}});
         m->vit.resize(m->vit_layers);
         for (int64_t i = 0; i < m->vit_layers; ++i) {
-            SigLipLayerW & w = m->vit[i];
+            EncBlockW & w = m->vit[i];
             char pb[256]; std::snprintf(pb, sizeof(pb), "%sencoder.layers.%lld.", VP, (long long) i);
             const std::string pf = pb;
             w.ln1w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H); w.ln1b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
