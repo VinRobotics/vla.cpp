@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include "arch.h"
+#include "modules/gemma_expert.h"
+#include "modules/siglip_vit.h"
 #include "options.h"
 #include "model.h"
 
@@ -47,21 +49,6 @@ namespace vla {
 
 namespace {
 
-
-struct GemmaLayerW {
-    ggml_tensor * ln_in   = nullptr;
-    ggml_tensor * Wq      = nullptr;
-    ggml_tensor * Wk      = nullptr;
-    ggml_tensor * Wv      = nullptr;
-    ggml_tensor * Wo      = nullptr;
-    ggml_tensor * ln_post = nullptr;
-    ggml_tensor * Wgate   = nullptr;
-    ggml_tensor * Wup     = nullptr;
-    ggml_tensor * Wdown   = nullptr;
-};
-
-// SigLIP-So400m vision block weights (PaliGemma tower, built in-tree like gr00tn1d5).
-struct SigLipLayerW { ggml_tensor *ln1w,*ln1b,*ln2w,*ln2b,*Wq,*bq,*Wk,*bk,*Wv,*bv,*Wo,*bo,*Wfc1,*bfc1,*Wfc2,*bfc2; };
 
 // The +1 RMSNorm fixup is a Gemma quirk that must only touch the language towers,
 // never the SigLIP LayerNorms (whose names would otherwise never match anyway).
@@ -111,15 +98,11 @@ struct Pi0ModelArch : public ModelArchBase {
     int64_t vit_hidden = 1152, vit_layers = 27, vit_heads = 16;
     int64_t vit_image_size = 224, vit_patch_size = 14, vit_n_tokens = 256;
     float   vit_ln_eps = 1e-6f;
-    ggml_tensor * vit_patch_w = nullptr, * vit_patch_b = nullptr, * vit_pos = nullptr;
-    ggml_tensor * vit_post_ln_w = nullptr, * vit_post_ln_b = nullptr;
-    std::vector<SigLipLayerW> vit;
+    SigLipTower   vit;
     ggml_tensor * mm_proj_w = nullptr, * mm_proj_b = nullptr;
 
-    std::vector<GemmaLayerW> pl_layers;
-
-    std::vector<GemmaLayerW> ex_layers;
-    ggml_tensor * ex_final_norm = nullptr;
+    GemmaStack    pl;
+    GemmaStack    ex;
 
     ggml_tensor * W_sp = nullptr,  * b_sp = nullptr;
     ggml_tensor * W_ain = nullptr, * b_ain = nullptr;
@@ -146,7 +129,7 @@ namespace {
 // cost. (The evo1 SR drop this used to cite did not reproduce.)
 // VLA_PI0_BF16_ACT is the better lever here: 9.1%, and its SR was measured.
 
-ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_tensor * x,
+ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_tensor * x,
                                  int64_t seq, int64_t heads, int64_t head_dim, int64_t hidden, float ln_eps,
                                  ggml_type at) {
     const float scale = 1.0f / std::sqrt((float) head_dim);
@@ -420,97 +403,25 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
         m->ctx_weights = ggml_init(wp);
         if (!m->ctx_weights) { std::fprintf(stderr, "vla(pi0): ggml_init(ctx_weights) failed\n"); return nullptr; }
     }
-    ggml_context * W = m->ctx_weights;
-    std::vector<ggml_tensor *> weights;
-    // A miss returns before pushing, so the null scan below cannot see it.
-    bool missing = false;
+    WeightLoader L("pi0", g, m->ctx_weights, m->matmul_type);
 
-    auto mk = [&](const char * name, ggml_type type, int n_dims, const int64_t * ne) -> ggml_tensor * {
-        const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); missing = true; return nullptr; }
-        ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), n_dims, ne);
-        ggml_set_name(t, name);
-        weights.push_back(t);
-        return t;
-    };
+    m->vit.declare(L, "vit", m->vit_layers);
+    m->mm_proj_w = L.gemm   ("mm.proj.weight");
+    m->mm_proj_b = L.opt_f32("mm.proj.bias");
 
-    auto mk_mm = [&](const char * name) -> ggml_tensor * {
-        const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); missing = true; return nullptr; }
-        return mk(name, m->matmul_type, GGML_MAX_DIMS, gt->ne);
-    };
-    auto mk_f32 = [&](const char * name) -> ggml_tensor * {
-        const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(pi0): missing tensor %s\n", name); missing = true; return nullptr; }
-        return mk(name, GGML_TYPE_F32, GGML_MAX_DIMS, gt->ne);
-    };
+    m->pl.declare(L, "vlm", cfg.n_layers, false);
+    m->ex.declare(L, "aex", cfg.n_layers, true);
 
-    auto load_layer = [&](const char * tower, int i, GemmaLayerW & lw) -> bool {
-        char b[256];
-        auto suf = [&](const char * s) { std::snprintf(b, sizeof(b), "%s.blk.%d.%s", tower, i, s); return b; };
-        lw.ln_in   = mk_f32(suf("attn_norm.weight"));
-        lw.Wq      = mk_mm (suf("attn_q.weight"));
-        lw.Wk      = mk_mm (suf("attn_k.weight"));
-        lw.Wv      = mk_mm (suf("attn_v.weight"));
-        lw.Wo      = mk_mm (suf("attn_o.weight"));
-        lw.ln_post = mk_f32(suf("ffn_norm.weight"));
-        lw.Wgate   = mk_mm (suf("ffn_gate.weight"));
-        lw.Wup     = mk_mm (suf("ffn_up.weight"));
-        lw.Wdown   = mk_mm (suf("ffn_down.weight"));
-        return lw.ln_in && lw.Wq && lw.Wk && lw.Wv && lw.Wo && lw.ln_post && lw.Wgate && lw.Wup && lw.Wdown;
-    };
+    m->W_sp   = L.f32("state_proj.weight");          m->b_sp   = L.f32("state_proj.bias");
+    m->W_ain  = L.f32("action_in_proj.weight");      m->b_ain  = L.f32("action_in_proj.bias");
+    m->W_at1  = L.f32("action_time_mlp_in.weight");  m->b_at1  = L.f32("action_time_mlp_in.bias");
+    m->W_at2  = L.f32("action_time_mlp_out.weight"); m->b_at2  = L.f32("action_time_mlp_out.bias");
+    m->W_aout = L.f32("action_out_proj.weight");     m->b_aout = L.f32("action_out_proj.bias");
 
-    // Vision tower weights (SigLIP-So400m + PaliGemma projector), bundled in the ckpt GGUF.
-    m->vit_patch_w   = mk_f32("vit.patch_embd.weight");
-    m->vit_patch_b   = mk_f32("vit.patch_embd.bias");
-    m->vit_pos       = mk_f32("vit.pos_embd");
-    m->vit_post_ln_w = mk_f32("vit.post_ln.weight");
-    m->vit_post_ln_b = mk_f32("vit.post_ln.bias");
-    m->vit.resize(m->vit_layers);
-    for (int64_t i = 0; i < m->vit_layers; ++i) {
-        char p[64];
-        auto N = [&](const char * s) { std::snprintf(p, sizeof(p), "vit.blk.%lld.%s", (long long) i, s); return (const char *) p; };
-        auto & w = m->vit[i];
-        w.ln1w=mk_f32(N("ln1.weight")); w.ln1b=mk_f32(N("ln1.bias")); w.ln2w=mk_f32(N("ln2.weight")); w.ln2b=mk_f32(N("ln2.bias"));
-        w.Wq=mk_mm(N("attn_q.weight")); w.bq=mk_f32(N("attn_q.bias")); w.Wk=mk_mm(N("attn_k.weight")); w.bk=mk_f32(N("attn_k.bias"));
-        w.Wv=mk_mm(N("attn_v.weight")); w.bv=mk_f32(N("attn_v.bias")); w.Wo=mk_mm(N("attn_o.weight")); w.bo=mk_f32(N("attn_o.bias"));
-        w.Wfc1=mk_mm(N("fc1.weight")); w.bfc1=mk_f32(N("fc1.bias")); w.Wfc2=mk_mm(N("fc2.weight")); w.bfc2=mk_f32(N("fc2.bias"));
-    }
-    m->mm_proj_w = mk_mm("mm.proj.weight");
-    m->mm_proj_b = g.meta("mm.proj.bias") ? mk_f32("mm.proj.bias") : nullptr;  // PaliGemma projector bias (optional)
+    if (!L.upload(m->backend, &m->weight_buf)) return nullptr;
 
-    m->pl_layers.resize(cfg.n_layers);
-    m->ex_layers.resize(cfg.n_layers);
-    for (int64_t i = 0; i < cfg.n_layers; ++i) {
-        if (!load_layer("vlm", (int) i, m->pl_layers[i])) return nullptr;
-        if (!load_layer("aex", (int) i, m->ex_layers[i])) return nullptr;
-    }
-    m->ex_final_norm = mk_f32("aex.output_norm.weight");
-    m->W_sp   = mk_f32("state_proj.weight");          m->b_sp   = mk_f32("state_proj.bias");
-    m->W_ain  = mk_f32("action_in_proj.weight");      m->b_ain  = mk_f32("action_in_proj.bias");
-    m->W_at1  = mk_f32("action_time_mlp_in.weight");  m->b_at1  = mk_f32("action_time_mlp_in.bias");
-    m->W_at2  = mk_f32("action_time_mlp_out.weight"); m->b_at2  = mk_f32("action_time_mlp_out.bias");
-    m->W_aout = mk_f32("action_out_proj.weight");     m->b_aout = mk_f32("action_out_proj.bias");
-    if (missing) { std::fprintf(stderr, "vla(pi0): checkpoint is missing weights\n"); return nullptr; }
-    for (ggml_tensor * t : weights) if (!t) { std::fprintf(stderr, "vla(pi0): weight tensor creation failed\n"); return nullptr; }
-    if (!m->ex_final_norm || !m->W_sp || !m->b_sp || !m->W_ain || !m->b_ain ||
-        !m->W_at1 || !m->b_at1 || !m->W_at2 || !m->b_at2 || !m->W_aout || !m->b_aout) {
-        std::fprintf(stderr, "vla(pi0): failed to wire projection / norm tensors\n"); return nullptr;
-    }
-
-    m->weight_buf = ggml_backend_alloc_ctx_tensors(m->ctx_weights, m->backend);
-    if (!m->weight_buf) { std::fprintf(stderr, "vla(pi0): ggml_backend_alloc_ctx_tensors failed (out of memory?)\n"); return nullptr; }
-    for (ggml_tensor * t : weights) {
-        std::vector<uint8_t> bytes = g.read_convert(t->name, t->type, is_gemma_norm(t->name));
-        if (bytes.size() != ggml_nbytes(t)) {
-            std::fprintf(stderr, "vla(pi0): upload size mismatch for %s (%zu vs %zu)\n",
-                         t->name, bytes.size(), ggml_nbytes(t));
-            return nullptr;
-        }
-        ggml_backend_tensor_set(t, bytes.data(), 0, bytes.size());
-    }
     std::printf("vla(pi0): resident weights = %.2f GiB\n",
-                ggml_backend_buffer_get_size(m->weight_buf) / (1024.0 * 1024.0 * 1024.0));
+                ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0*1024.0));
 
     if (!load_stats(g, *m)) return nullptr;
     std::printf("vla(pi0): model loaded (n_threads=%d)\n", m->n_threads);
@@ -552,13 +463,13 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
         ggml_context * VC = vision_scratch.reset((size_t) 128 * 1024 * 1024);
         if (!VC) { std::fprintf(stderr, "vla(pi0): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vit_image_size, vit_image_size, 3); ggml_set_input(t_px);
-        ggml_tensor * conv = ggml_conv_2d(VC, vit_patch_w, t_px, (int) vit_patch_size, (int) vit_patch_size, 0, 0, 1, 1);
+        ggml_tensor * conv = ggml_conv_2d(VC, vit.patch_w, t_px, (int) vit_patch_size, (int) vit_patch_size, 0, 0, 1, 1);
         ggml_tensor * patches = ggml_cont(VC, ggml_transpose(VC, ggml_reshape_2d(VC, conv, grid * grid, vit_hidden)));
         // patch embed (conv_2d) stays F32; the tower runs in the activation dtype
-        ggml_tensor * h = as_type(VC, ggml_add(VC, ggml_add(VC, patches, vit_patch_b), vit_pos), act_type);
+        ggml_tensor * h = as_type(VC, ggml_add(VC, ggml_add(VC, patches, vit.patch_b), vit.pos), act_type);
         for (int64_t i = 0; i < vit_layers; ++i)
-            h = build_siglip_layer(VC, vit[i], h, K, vit_heads, vit_hidden / vit_heads, vit_hidden, vit_ln_eps, act_type);
-        h = ggml_add(VC, ggml_mul(VC, ggml_norm(VC, h, vit_ln_eps), vit_post_ln_w), vit_post_ln_b);
+            h = build_siglip_layer(VC, vit.enc.blk[i], h, K, vit_heads, vit_hidden / vit_heads, vit_hidden, vit_ln_eps, act_type);
+        h = ggml_add(VC, ggml_mul(VC, ggml_norm(VC, h, vit_ln_eps), vit.post_ln_w), vit.post_ln_b);
         // PaliGemma projector: linear (+ optional bias), then 1/sqrt(hidden) scale (matches clip.cpp siglip.cpp).
         ggml_tensor * proj = mm_act(VC, mm_proj_w, h, act_type);
         if (mm_proj_b) proj = ggml_add(VC, proj, mm_proj_b);
@@ -626,7 +537,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     {
         ggml_tensor * h = prefix_embs;
         for (int64_t i = 0; i < n_layers; ++i) {
-            h = build_gemma_layer(C, pl_layers[i], h, t_prefix_pos, cfg, n_prefix, rope_base,
+            h = build_gemma_layer(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix, rope_base,
                                    nullptr,  nullptr,  nullptr,
                                   &cK[i], &cV[i], act_type);
         }
@@ -640,11 +551,11 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     for (int step = 0; step < num_steps; ++step) {
         ggml_tensor * h = build_embed_suffix(C, *this, t_state, x_t, t_time[step]);
         for (int64_t i = 0; i < n_layers; ++i) {
-            h = build_gemma_layer(C, ex_layers[i], h, t_suffix_pos, cfg, n_suf, rope_base,
+            h = build_gemma_layer(C, ex.blk[i], h, t_suffix_pos, cfg, n_suf, rope_base,
                                    cK[i],  cV[i],  t_full_mask,
                                    nullptr,  nullptr, act_type);
         }
-        ggml_tensor * h_final = ggml_mul(C, ggml_rms_norm(C, h, cfg.rms_eps), ex_final_norm);
+        ggml_tensor * h_final = ggml_mul(C, ggml_rms_norm(C, h, cfg.rms_eps), ex.output_norm);
         // row stride follows h_final's dtype, which is BF16 on the BF16 path
         const size_t rb = (size_t) hidden_ex * ggml_element_size(h_final);
         ggml_tensor * h_actions = ggml_view_2d(C, h_final, hidden_ex, chunk,  rb,  rb);
