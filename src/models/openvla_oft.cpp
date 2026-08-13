@@ -118,9 +118,7 @@ struct OpenVlaOftModelArch : public ModelArchBase {
     float   head_ln_eps=1e-5f;
     int64_t stop_id=2;
 
-    ggml_tensor *d_patch_w,*d_patch_b,*d_cls,*d_reg,*d_pos; std::vector<ViTLayerW> dvit;
-    ggml_tensor *s_patch_w,*s_patch_b,*s_pos;               std::vector<ViTLayerW> svit;
-    ggml_tensor *pj_fc1w,*pj_fc1b,*pj_fc2w,*pj_fc2b,*pj_fc3w,*pj_fc3b;
+    DualTower vis;
     ggml_tensor *token_embd,*lm_out_norm; std::vector<LMLayerW> lm;
     ggml_tensor *pp_fc1w,*pp_fc1b,*pp_fc2w,*pp_fc2b;
     ggml_tensor *h_ln1w,*h_ln1b,*h_fc1w,*h_fc1b,*h_ln2w,*h_ln2b,*h_fc2w,*h_fc2b; std::vector<HeadBlkW> hblk;
@@ -180,34 +178,12 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
     m->ctx_weights = ggml_init(wp);
     ggml_context * W = m->ctx_weights;
     bool ok = true;
-    auto mk=[&](const char*name, ggml_type ty)->ggml_tensor*{ const ggml_tensor*gt=g.meta(name);
-        if(!gt){ std::fprintf(stderr,"vla(openvla_oft): missing %s\n",name); ok=false; return nullptr; }
-        ggml_tensor*t=ggml_new_tensor(W,g.resident_type(gt,ty),ggml_n_dims(gt),gt->ne); ggml_set_name(t,name); return t; };
-    auto mm=[&](const char*n){ return mk(n,m->mt); };
-    auto f32=[&](const char*n){ return mk(n,GGML_TYPE_F32); };
+    WeightLoader L("openvla_oft", g, m->ctx_weights, m->mt);
+    auto mk  = [&](const char * n, ggml_type ty) { return ty == GGML_TYPE_F32 ? L.f32("%s", n) : L.gemm("%s", n); };
+    auto mm  = [&](const char * n) { return L.gemm("%s", n); };
+    auto f32 = [&](const char * n) { return L.f32("%s", n); };
 
-    m->d_patch_w=mk("vis.d.patch.weight",GGML_TYPE_F32); m->d_patch_b=f32("vis.d.patch.bias");
-    m->d_cls=f32("vis.d.cls"); m->d_reg=f32("vis.d.reg"); m->d_pos=f32("vis.d.pos");
-    m->dvit.resize(m->d_layers);
-    for(int i=0;i<m->d_layers;++i){ auto&w=m->dvit[i]; char b[64];
-        auto N=[&](const char*s){ std::snprintf(b,sizeof(b),"vis.d.blk.%d.%s",i,s); return (const char*)b; };
-        w.n1w=f32(N("ln1.weight")); w.n1b=f32(N("ln1.bias")); w.n2w=f32(N("ln2.weight")); w.n2b=f32(N("ln2.bias"));
-        w.ls1=f32(N("ls1")); w.ls2=f32(N("ls2")); w.Wqkv=mm(N("qkv.weight")); w.bqkv=f32(N("qkv.bias"));
-        w.Wproj=mm(N("proj.weight")); w.bproj=f32(N("proj.bias")); w.Wfc1=mm(N("fc1.weight")); w.bfc1=f32(N("fc1.bias"));
-        w.Wfc2=mm(N("fc2.weight")); w.bfc2=f32(N("fc2.bias")); }
-
-    m->s_patch_w=mk("vis.s.patch.weight",GGML_TYPE_F32); m->s_patch_b=f32("vis.s.patch.bias"); m->s_pos=f32("vis.s.pos");
-    m->svit.resize(m->s_layers);
-    for(int i=0;i<m->s_layers;++i){ auto&w=m->svit[i]; char b[64];
-        auto N=[&](const char*s){ std::snprintf(b,sizeof(b),"vis.s.blk.%d.%s",i,s); return (const char*)b; };
-        w.n1w=f32(N("ln1.weight")); w.n1b=f32(N("ln1.bias")); w.n2w=f32(N("ln2.weight")); w.n2b=f32(N("ln2.bias"));
-        w.ls1=nullptr; w.ls2=nullptr; w.Wqkv=mm(N("qkv.weight")); w.bqkv=f32(N("qkv.bias"));
-        w.Wproj=mm(N("proj.weight")); w.bproj=f32(N("proj.bias")); w.Wfc1=mm(N("fc1.weight")); w.bfc1=f32(N("fc1.bias"));
-        w.Wfc2=mm(N("fc2.weight")); w.bfc2=f32(N("fc2.bias")); }
-
-    m->pj_fc1w=mm("vis.proj.fc1.weight"); m->pj_fc1b=f32("vis.proj.fc1.bias");
-    m->pj_fc2w=mm("vis.proj.fc2.weight"); m->pj_fc2b=f32("vis.proj.fc2.bias");
-    m->pj_fc3w=mm("vis.proj.fc3.weight"); m->pj_fc3b=f32("vis.proj.fc3.bias");
+    m->vis.declare(L, m->d_layers, m->s_layers);
 
     m->token_embd=mm("token_embd.weight"); m->lm_out_norm=f32("lm.output_norm.weight");
     m->lm.resize(m->lm_layers);
@@ -230,15 +206,10 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
         w.lnw=f32(N("ln.weight")); w.lnb=f32(N("ln.bias")); w.linw=mm(N("lin.weight")); w.linb=f32(N("lin.bias")); }
     if(!ok){ std::fprintf(stderr,"vla(openvla_oft): weight setup failed\n"); return nullptr; }
 
-    m->weight_buf = ggml_backend_alloc_ctx_tensors(m->ctx_weights, m->backend);
-    if(!m->weight_buf){ std::fprintf(stderr,"vla(openvla_oft): alloc_ctx_tensors failed (OOM?)\n"); return nullptr; }
-    for(ggml_tensor*t=ggml_get_first_tensor(W); t; t=ggml_get_next_tensor(W,t)){
-        std::vector<uint8_t> bytes=g.read_convert(ggml_get_name(t),t->type);
-        if(bytes.empty()||bytes.size()!=ggml_nbytes(t)){ std::fprintf(stderr,"vla(openvla_oft): load %s (%zu vs %zu)\n",ggml_get_name(t),bytes.size(),ggml_nbytes(t)); return nullptr; }
-        ggml_backend_tensor_set(t,bytes.data(),0,bytes.size());
-    }
+    if (!L.upload(m->backend, &m->weight_buf)) return nullptr;
+
     std::printf("vla(openvla_oft): weights resident %.2f GiB (%s) - DINOv2+SigLIP towers + Llama-2-7B + MLPResNet L1 head\n",
-                ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0*1024.0), m->mt==GGML_TYPE_F32?"F32":"BF16");
+                ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0*1024.0), dtype_name(m->mt));
 
     m->cfg.n_suffix = m->chunk; m->cfg.max_action_dim = m->action_dim;
     m->cfg.real_action_dim = m->action_dim; m->cfg.real_state_dim = m->proprio_dim;
@@ -277,14 +248,14 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
         for(int v=0; v<n_views; ++v){
             px_d[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(px_d[v]);
             px_s[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(px_s[v]);
-            ggml_tensor*pd=tower(C,px_d[v],d_patch_w,d_patch_b,d_pos,d_cls,d_reg,dvit,d_hidden,d_heads,d_head_dim,d_inter,patch_size,vit_ln_eps,true);
-            ggml_tensor*ps=tower(C,px_s[v],s_patch_w,s_patch_b,s_pos,nullptr,nullptr,svit,s_hidden,s_heads,s_head_dim,s_inter,patch_size,vit_ln_eps,false);
+            ggml_tensor*pd=tower(C,px_d[v],vis.d_patch_w,vis.d_patch_b,vis.d_pos,vis.d_cls,vis.d_reg,vis.dvit,d_hidden,d_heads,d_head_dim,d_inter,patch_size,vit_ln_eps,true);
+            ggml_tensor*ps=tower(C,px_s[v],vis.s_patch_w,vis.s_patch_b,vis.s_pos,nullptr,nullptr,vis.svit,s_hidden,s_heads,s_head_dim,s_inter,patch_size,vit_ln_eps,false);
             cmb[v]=ggml_concat(C,pd,ps,0);
         }
         ggml_tensor*allp=cmb[0]; for(int v=1;v<n_views;++v) allp=ggml_concat(C,allp,cmb[v],1);
-        ggml_tensor*ph=ggml_add(C,ggml_mul_mat(C,pj_fc1w,allp),pj_fc1b); ph=ggml_gelu_erf(C,ph);
-        ph=ggml_add(C,ggml_mul_mat(C,pj_fc2w,ph),pj_fc2b); ph=ggml_gelu_erf(C,ph);
-        ggml_tensor*proj=ggml_add(C,ggml_mul_mat(C,pj_fc3w,ph),pj_fc3b); ggml_set_output(proj);
+        ggml_tensor*ph=ggml_add(C,ggml_mul_mat(C,vis.pj_fc1w,allp),vis.pj_fc1b); ph=ggml_gelu_erf(C,ph);
+        ph=ggml_add(C,ggml_mul_mat(C,vis.pj_fc2w,ph),vis.pj_fc2b); ph=ggml_gelu_erf(C,ph);
+        ggml_tensor*proj=ggml_add(C,ggml_mul_mat(C,vis.pj_fc3w,ph),vis.pj_fc3b); ggml_set_output(proj);
         ggml_cgraph*vg=ggml_new_graph_custom(C,16384,false); ggml_build_forward_expand(vg,proj);
         if(!vision_scratch.alloc(backend,vg)){ std::fprintf(stderr,"vla(openvla_oft): vision gallocr failed\n"); return {}; }
         std::vector<float> dbuf, sbuf;

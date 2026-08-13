@@ -19,6 +19,7 @@
 #pragma once
 
 #include "ggml.h"
+#include "loader.h"
 #include "model.h"
 
 #include <cmath>
@@ -28,6 +29,54 @@
 namespace vla {
 
 struct ViTLayerW { ggml_tensor *n1w,*n1b,*n2w,*n2b,*ls1,*ls2,*Wqkv,*bqkv,*Wproj,*bproj,*Wfc1,*bfc1,*Wfc2,*bfc2; };
+
+// DINOv2 carries CLS + 4 register tokens and LayerScale; SigLIP carries
+// neither, so its ls1/ls2 stay null and vit_block is told to skip them.
+struct DualTower {
+    ggml_tensor *d_patch_w=nullptr,*d_patch_b=nullptr,*d_cls=nullptr,*d_reg=nullptr,*d_pos=nullptr;
+    ggml_tensor *s_patch_w=nullptr,*s_patch_b=nullptr,*s_pos=nullptr;
+    std::vector<ViTLayerW> dvit, svit;
+    ggml_tensor *pj_fc1w=nullptr,*pj_fc1b=nullptr,*pj_fc2w=nullptr,*pj_fc2b=nullptr,*pj_fc3w=nullptr,*pj_fc3b=nullptr;
+
+    void declare(WeightLoader & L, int64_t d_layers, int64_t s_layers) {
+        auto blocks = [&](std::vector<ViTLayerW> & v, const char * pre, int64_t n, bool layer_scale) {
+            v.resize(n);
+            for (int64_t i=0; i<n; ++i) {
+                ViTLayerW & w = v[i];
+                w.n1w   = L.f32 ("%s.blk.%lld.ln1.weight",  pre, (long long)i);
+                w.n1b   = L.f32 ("%s.blk.%lld.ln1.bias",    pre, (long long)i);
+                w.n2w   = L.f32 ("%s.blk.%lld.ln2.weight",  pre, (long long)i);
+                w.n2b   = L.f32 ("%s.blk.%lld.ln2.bias",    pre, (long long)i);
+                w.ls1   = layer_scale ? L.f32("%s.blk.%lld.ls1", pre, (long long)i) : nullptr;
+                w.ls2   = layer_scale ? L.f32("%s.blk.%lld.ls2", pre, (long long)i) : nullptr;
+                w.Wqkv  = L.gemm("%s.blk.%lld.qkv.weight",  pre, (long long)i);
+                w.bqkv  = L.f32 ("%s.blk.%lld.qkv.bias",    pre, (long long)i);
+                w.Wproj = L.gemm("%s.blk.%lld.proj.weight", pre, (long long)i);
+                w.bproj = L.f32 ("%s.blk.%lld.proj.bias",   pre, (long long)i);
+                w.Wfc1  = L.gemm("%s.blk.%lld.fc1.weight",  pre, (long long)i);
+                w.bfc1  = L.f32 ("%s.blk.%lld.fc1.bias",    pre, (long long)i);
+                w.Wfc2  = L.gemm("%s.blk.%lld.fc2.weight",  pre, (long long)i);
+                w.bfc2  = L.f32 ("%s.blk.%lld.fc2.bias",    pre, (long long)i);
+            }
+        };
+
+        d_patch_w = L.f32("vis.d.patch.weight");
+        d_patch_b = L.f32("vis.d.patch.bias");
+        d_cls     = L.f32("vis.d.cls");
+        d_reg     = L.f32("vis.d.reg");
+        d_pos     = L.f32("vis.d.pos");
+        blocks(dvit, "vis.d", d_layers, true);
+
+        s_patch_w = L.f32("vis.s.patch.weight");
+        s_patch_b = L.f32("vis.s.patch.bias");
+        s_pos     = L.f32("vis.s.pos");
+        blocks(svit, "vis.s", s_layers, false);
+
+        pj_fc1w = L.gemm("vis.proj.fc1.weight"); pj_fc1b = L.f32("vis.proj.fc1.bias");
+        pj_fc2w = L.gemm("vis.proj.fc2.weight"); pj_fc2b = L.f32("vis.proj.fc2.bias");
+        pj_fc3w = L.gemm("vis.proj.fc3.weight"); pj_fc3b = L.f32("vis.proj.fc3.bias");
+    }
+};
 
 inline ggml_tensor * LN(ggml_context*C, ggml_tensor*x, ggml_tensor*w, ggml_tensor*b, float eps){ return ggml_add(C,ggml_mul(C,ggml_norm(C,x,eps),w),b); }
 
