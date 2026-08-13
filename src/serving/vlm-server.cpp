@@ -37,7 +37,9 @@
 namespace {
 
 std::atomic<bool> g_shutdown{false};
-void on_signal(int) { g_shutdown.store(true, std::memory_order_relaxed); }
+void on_signal(int) {
+    g_shutdown.store(true, std::memory_order_relaxed);
+}
 
 // Reject absurd image dimensions before any size arithmetic on untrusted input.
 constexpr unsigned kMaxImageDim = 8192;
@@ -137,12 +139,15 @@ int main(int argc, char ** argv) {
         try {
             zmq::poll(poll, 1, std::chrono::milliseconds(200));
         } catch (const zmq::error_t & e) {
-            if (e.num() == EINTR) continue;
-            if (e.num() == ETERM) break;
+            if (e.num() == EINTR)
+                continue;
+            if (e.num() == ETERM)
+                break;
             std::fprintf(stderr, "vlm-server: zmq error: %s\n", e.what());
             continue;
         }
-        if (!(poll[0].revents & ZMQ_POLLIN)) continue;
+        if (!(poll[0].revents & ZMQ_POLLIN))
+            continue;
 
         // maxmsgsize bounds each frame but not how many, so a peer could stream
         // sub-limit frames until memory runs out.
@@ -157,7 +162,10 @@ int main(int argc, char ** argv) {
             zmq::message_t part;
             try {
                 auto rr = sock.recv(part, zmq::recv_flags::none);
-                if (!rr) { recv_ok = false; break; }
+                if (!rr) {
+                    recv_ok = false;
+                    break;
+                }
             } catch (const zmq::error_t & e) {
                 if (e.num() != EINTR)
                     std::fprintf(stderr, "vlm-server: zmq recv error: %s\n", e.what());
@@ -181,7 +189,8 @@ int main(int argc, char ** argv) {
             std::fprintf(stderr, "vlm-server: oversized ROUTER envelope; request dropped\n");
             continue;
         }
-        if (!recv_ok || !have_payload || env.empty()) continue;
+        if (!recv_ok || !have_payload || env.empty())
+            continue;
 
         auto send_reply = [&](const std::string & body) {
             try {
@@ -218,7 +227,8 @@ int main(int argc, char ** argv) {
             continue;
         }
         size_t text_bytes = 0;
-        for (const auto & m : req.messages()) text_bytes += m.content().size();
+        for (const auto & m : req.messages())
+            text_bytes += m.content().size();
         if (text_bytes > kMaxTextBytes) {
             send_reply(make_error_stream(rid, "message text too large (max 4 MiB)"));
             continue;
@@ -281,7 +291,8 @@ int main(int argc, char ** argv) {
             }
             images.push_back(std::move(out));
         }
-        if (!decode_ok) continue;
+        if (!decode_ok)
+            continue;
 
         std::vector<vlm::Message> messages;
         messages.reserve(req.messages_size());
@@ -330,7 +341,8 @@ int main(int argc, char ** argv) {
         resp->set_latency_ms_total(ms_total);
         resp->set_latency_ms_prefill(r.ms_prefill);
         resp->set_latency_ms_decode(r.ms_decode);
-        if (r.finish_reason == "error") resp->set_error(r.error);
+        if (r.finish_reason == "error")
+            resp->set_error(r.error);
         send_reply(sm.SerializeAsString());
 
         ++served;

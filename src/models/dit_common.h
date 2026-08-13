@@ -48,14 +48,22 @@ inline ggml_tensor * adaln(ggml_context * C, ggml_tensor * x, ggml_tensor * temb
 inline void timesteps_proj(int64_t bucket, std::vector<float> & out) {
     const int64_t half = 128; const float lm = std::log(10000.0f); const float t = (float) bucket;
     out.assign(256, 0.0f);
-    for (int64_t i = 0; i < half; ++i) { const float emb = t * std::exp(-lm * (float) i / (float) (half - 1)); out[i] = std::cos(emb); out[half + i] = std::sin(emb); }
+    for (int64_t i = 0; i < half; ++i) {
+        const float emb = t * std::exp(-lm * (float) i / (float) (half - 1));
+        out[i] = std::cos(emb);
+        out[half + i] = std::sin(emb);
+    }
 }
 
 // Broadcast across the horizon. sin first, then cos.
 inline void action_sinusoid(int64_t bucket, int64_t dim, int64_t T, std::vector<float> & out) {
     const int64_t half = dim / 2; const float step = std::log(10000.0f) / (float) half; const float t = (float) bucket;
     out.assign((size_t) T * dim, 0.0f);
-    for (int64_t tk = 0; tk < T; ++tk) for (int64_t i = 0; i < half; ++i) { const float emb = t * std::exp(-(float) i * step); out[tk * dim + i] = std::sin(emb); out[tk * dim + half + i] = std::cos(emb); }
+    for (int64_t tk = 0; tk < T; ++tk) for (int64_t i = 0; i < half; ++i) {
+        const float emb = t * std::exp(-(float) i * step);
+        out[tk * dim + i] = std::sin(emb);
+        out[tk * dim + half + i] = std::cos(emb);
+    }
 }
 
 // Log-spaced periods rather than frequencies, the openpi convention shared by
@@ -78,7 +86,8 @@ inline void build_causal_mask(int64_t seq, std::vector<float> & out) {
     out.assign((size_t) seq * seq, 0.0f);
     const float NEG = -std::numeric_limits<float>::infinity();
     for (int64_t q = 0; q < seq; ++q)
-        for (int64_t kv = q + 1; kv < seq; ++kv) out[q * seq + kv] = NEG;
+        for (int64_t kv = q + 1; kv < seq; ++kv)
+            out[q * seq + kv] = NEG;
 }
 
 }  // namespace vla

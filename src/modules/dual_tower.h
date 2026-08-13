@@ -78,7 +78,9 @@ struct DualTower {
     }
 };
 
-inline ggml_tensor * LN(ggml_context*C, ggml_tensor*x, ggml_tensor*w, ggml_tensor*b, float eps){ return ggml_add(C,ggml_mul(C,ggml_norm(C,x,eps),w),b); }
+inline ggml_tensor * LN(ggml_context*C, ggml_tensor*x, ggml_tensor*w, ggml_tensor*b, float eps){
+    return ggml_add(C,ggml_mul(C,ggml_norm(C,x,eps),w),b);
+}
 
 inline ggml_tensor* vit_block(ggml_context*C, const ViTLayerW&w, ggml_tensor*x, int64_t N, int64_t hidden, int64_t heads, int64_t hd, float eps, bool ls){
     const float sc=1.0f/std::sqrt((float)hd);
@@ -113,9 +115,14 @@ inline ggml_tensor* tower(ggml_context*C, ggml_tensor*pix, ggml_tensor*pw, ggml_
     ggml_tensor*pt=ggml_cont(C,ggml_transpose(C,ggml_reshape_2d(C,conv,NP,hidden)));
     pt=ggml_add(C,pt,pb); pt=ggml_add(C,pt,pos);
     ggml_tensor*x=pt;
-    if(prefix){ ggml_tensor*tok=ggml_concat(C,ggml_reshape_2d(C,cls,hidden,1),reg,1); x=ggml_concat(C,tok,pt,1); }
-    for(size_t i=0;i<blk.size();++i) x=vit_block(C,blk[i],x,N,hidden,heads,hd,eps,prefix);
-    if(prefix) x=ggml_cont(C,ggml_view_2d(C,x,hidden,NP,x->nb[1],nprefix*x->nb[1]));
+    if(prefix){
+        ggml_tensor*tok=ggml_concat(C,ggml_reshape_2d(C,cls,hidden,1),reg,1);
+        x=ggml_concat(C,tok,pt,1);
+    }
+    for(size_t i=0;i<blk.size();++i)
+        x=vit_block(C,blk[i],x,N,hidden,heads,hd,eps,prefix);
+    if(prefix)
+        x=ggml_cont(C,ggml_view_2d(C,x,hidden,NP,x->nb[1],nprefix*x->nb[1]));
     return x;
 }
 

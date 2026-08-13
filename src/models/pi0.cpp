@@ -77,7 +77,9 @@ struct Pi0ModelArch : public ModelArchBase {
 
     struct MainKey {
         int64_t n_img=-1, n_lang=-1, nsteps=-1;
-        bool operator==(const MainKey & o) const { return n_img==o.n_img && n_lang==o.n_lang && nsteps==o.nsteps; }
+        bool operator==(const MainKey & o) const {
+            return n_img==o.n_img && n_lang==o.n_lang && nsteps==o.nsteps;
+        }
     };
     struct MainIO {
         ggml_tensor *t_image_emb=nullptr,*t_lang_emb=nullptr,*t_prefix_pos=nullptr,*t_state=nullptr;
@@ -193,8 +195,10 @@ ggml_tensor * build_gemma_layer(
     ggml_tensor * q_rope = rope_call(q_h);
     ggml_tensor * k_rope = rope_call(k_h);
 
-    if (k_out) *k_out = k_rope;
-    if (v_out) *v_out = v_h;
+    if (k_out)
+        *k_out = k_rope;
+    if (v_out)
+        *v_out = v_h;
 
     ggml_tensor * K_full = k_rope;
     ggml_tensor * V_full = v_h;
@@ -252,7 +256,10 @@ ggml_tensor * build_embed_suffix(ggml_context * ctx, const Pi0ModelArch & m,
 
 bool load_config(const gguf_reader & g, Config & cfg) {
     auto need = [&](const char * k) {
-        if (!g.has(k)) { std::fprintf(stderr, "vla(pi0): gguf missing key %s\n", k); return false; }
+        if (!g.has(k)) {
+            std::fprintf(stderr, "vla(pi0): gguf missing key %s\n", k);
+            return false;
+        }
         return true;
     };
     for (const char * k : {"pi0.hidden", "pi0.intermediate", "pi0.n_q_heads", "pi0.n_kv_heads",
@@ -260,7 +267,8 @@ bool load_config(const gguf_reader & g, Config & cfg) {
                            "pi0.chunk_size", "pi0.num_steps", "pi0.max_state_dim", "pi0.max_action_dim",
                            "pi0.real_state_dim", "pi0.real_action_dim", "pi0.tokenizer_max_length",
                            "pi0.min_period", "pi0.max_period"}) {
-        if (!need(k)) return false;
+        if (!need(k))
+            return false;
     }
     cfg = Config{};
     cfg.hidden          = g.u32("pi0.hidden");
@@ -304,8 +312,14 @@ bool load_stats(gguf_reader & g, Pi0ModelArch & m) {
     m.action_std .assign(cfg.real_action_dim, 1.f);
     auto read1d = [&](const char * name, std::vector<float> & dst) {
         const ggml_tensor * t = g.meta(name);
-        if (!t) { std::printf("vla(pi0): %s missing - identity\n", name); return; }
-        if (t->ne[0] != (int64_t) dst.size()) { std::printf("vla(pi0): %s dim mismatch - identity\n", name); return; }
+        if (!t) {
+            std::printf("vla(pi0): %s missing - identity\n", name);
+            return;
+        }
+        if (t->ne[0] != (int64_t) dst.size()) {
+            std::printf("vla(pi0): %s dim mismatch - identity\n", name);
+            return;
+        }
         const std::vector<float> identity = dst;
         if (!g.read_raw(name, dst.data(), dst.size() * sizeof(float))) {
             // A short read leaves dst half-overwritten.
@@ -323,9 +337,12 @@ bool load_stats(gguf_reader & g, Pi0ModelArch & m) {
 }
 
 Pi0ModelArch::~Pi0ModelArch() {
-    if (weight_buf)  ggml_backend_buffer_free(weight_buf);
-    if (ctx_weights) ggml_free(ctx_weights);
-    if (backend)     ggml_backend_free(backend);
+    if (weight_buf)
+        ggml_backend_buffer_free(weight_buf);
+    if (ctx_weights)
+        ggml_free(ctx_weights);
+    if (backend)
+        ggml_backend_free(backend);
 }
 
 std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
@@ -346,14 +363,16 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     m->ckpt_path_ = ckpt_path;
     m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
 
-    if (!m->io.open(ckpt_path)) return nullptr;
+    if (!m->io.open(ckpt_path))
+        return nullptr;
     gguf_reader & g = m->io;
     if (!g.has("pi0.architecture") || g.str("pi0.architecture") != "pi0") {
         std::fprintf(stderr, "vla(pi0): '%s' is not a π₀ GGUF (pi0.architecture missing/wrong)\n",
                      ckpt_path.c_str());
         return nullptr;
     }
-    if (!load_config(g, m->cfg)) return nullptr;
+    if (!load_config(g, m->cfg))
+        return nullptr;
     const Config & cfg = m->cfg;
     std::printf("vla(pi0): hidden=%lld inter=%lld heads=%lldq/%lldkv x%lld n_layers=%lld "
                 "expert_h=%lld expert_inter=%lld chunk=%lld steps=%d real_state=%lld real_action=%lld "
@@ -367,7 +386,9 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     m->n_threads = default_cpu_threads();
     {
         const Backend b = backend_init("vla(pi0)", m->n_threads);
-        if (!b.handle) { return nullptr; }
+        if (!b.handle) {
+            return nullptr;
+        }
         m->backend = b.handle;
 
         // BF16 activations need BF16-resident weights and the CUDA BF16 GEMM path.
@@ -389,7 +410,8 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
         vu("pi0.vit_hidden", m->vit_hidden); vu("pi0.vit_layers", m->vit_layers);
         vu("pi0.vit_heads",  m->vit_heads);  vu("pi0.image_size", m->vit_image_size);
         vu("pi0.patch_size", m->vit_patch_size); vu("pi0.n_img_tokens", m->vit_n_tokens);
-        if (g.has("pi0.vit_ln_eps")) m->vit_ln_eps = g.f32("pi0.vit_ln_eps");
+        if (g.has("pi0.vit_ln_eps"))
+            m->vit_ln_eps = g.f32("pi0.vit_ln_eps");
         const int64_t grid = m->vit_image_size / m->vit_patch_size;
         if (grid * grid != m->vit_n_tokens || m->vit_n_tokens != cfg.n_img) {
             std::fprintf(stderr, "vla(pi0): vit geometry mismatch (grid^2=%lld n_img_tokens=%lld cfg.n_img=%lld)\n",
@@ -401,7 +423,10 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     {
         ggml_init_params wp = {  (size_t) 16 * 1024 * 1024,  nullptr,  true };
         m->ctx_weights = ggml_init(wp);
-        if (!m->ctx_weights) { std::fprintf(stderr, "vla(pi0): ggml_init(ctx_weights) failed\n"); return nullptr; }
+        if (!m->ctx_weights) {
+            std::fprintf(stderr, "vla(pi0): ggml_init(ctx_weights) failed\n");
+            return nullptr;
+        }
     }
     WeightLoader L("pi0", g, m->ctx_weights, m->matmul_type);
 
@@ -418,12 +443,14 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     m->W_at2  = L.f32("action_time_mlp_out.weight"); m->b_at2  = L.f32("action_time_mlp_out.bias");
     m->W_aout = L.f32("action_out_proj.weight");     m->b_aout = L.f32("action_out_proj.bias");
 
-    if (!L.upload(m->backend, &m->weight_buf)) return nullptr;
+    if (!L.upload(m->backend, &m->weight_buf))
+        return nullptr;
 
     std::printf("vla(pi0): resident weights = %.2f GiB\n",
                 ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0*1024.0));
 
-    if (!load_stats(g, *m)) return nullptr;
+    if (!load_stats(g, *m))
+        return nullptr;
     std::printf("vla(pi0): model loaded (n_threads=%d)\n", m->n_threads);
     return m;
 }
@@ -472,7 +499,8 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
         h = ggml_add(VC, ggml_mul(VC, ggml_norm(VC, h, vit_ln_eps), vit.post_ln_w), vit.post_ln_b);
         // PaliGemma projector: linear (+ optional bias), then 1/sqrt(hidden) scale (matches clip.cpp siglip.cpp).
         ggml_tensor * proj = mm_act(VC, mm_proj_w, h, act_type);
-        if (mm_proj_b) proj = ggml_add(VC, proj, mm_proj_b);
+        if (mm_proj_b)
+            proj = ggml_add(VC, proj, mm_proj_b);
         // read back to the host as F32
         ggml_tensor * vit_emb = as_type(VC, ggml_scale(VC, proj, 1.0f / std::sqrt((float) proj->ne[0])), GGML_TYPE_F32);
         ggml_set_output(vit_emb);
@@ -597,15 +625,21 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     {
 
         std::vector<float> sh(max_sd, 0.f);
-        for (int64_t i = 0; i < max_sd; ++i) sh[i] = in.state ? in.state[i] : 0.f;
+        for (int64_t i = 0; i < max_sd; ++i)
+            sh[i] = in.state ? in.state[i] : 0.f;
         for (int64_t i = 0; i < cfg.real_state_dim && i < max_sd; ++i)
             sh[i] = (sh[i] - state_mean[i]) / (state_std[i] + cfg.norm_eps);
         ggml_backend_tensor_set(t_state, sh.data(), 0, ggml_nbytes(t_state));
     }
     {
         std::vector<float> x0h((size_t) max_ad * chunk);
-        if (in.noise) std::memcpy(x0h.data(), in.noise, x0h.size() * sizeof(float));
-        else { std::normal_distribution<float> nd(0.f, 1.f); for (auto & v : x0h) v = nd(rng); }
+        if (in.noise)
+            std::memcpy(x0h.data(), in.noise, x0h.size() * sizeof(float));
+        else {
+            std::normal_distribution<float> nd(0.f, 1.f);
+            for (auto & v : x0h)
+                v = nd(rng);
+        }
         ggml_backend_tensor_set(t_x0, x0h.data(), 0, ggml_nbytes(t_x0));
     }
     {
@@ -614,8 +648,12 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
         for (int64_t i = 0; i < n_suf; ++i)
             for (int64_t j = 0; j < n_total; ++j) {
                 bool allowed;
-                if (j < n_prefix) allowed = true;
-                else { const int64_t s = j - n_prefix; allowed = (i == 0) ? (s == 0) : true; }
+                if (j < n_prefix)
+                    allowed = true;
+                else {
+                    const int64_t s = j - n_prefix;
+                    allowed = (i == 0) ? (s == 0) : true;
+                }
                 mk[i * n_total + j] = allowed ? 0.f : -INFINITY;
             }
         ggml_backend_tensor_set(t_full_mask, mk.data(), 0, ggml_nbytes(t_full_mask));
@@ -624,7 +662,8 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
         const float timestep = 1.0f + (float) s * dt;
         const std::vector<float> tv = sinusoidal_time_emb(timestep, hidden_ex, cfg.min_period, cfg.max_period);
         std::vector<float> tile((size_t) hidden_ex * chunk);
-        for (int64_t c = 0; c < chunk; ++c) std::memcpy(tile.data() + c * hidden_ex, tv.data(), hidden_ex * sizeof(float));
+        for (int64_t c = 0; c < chunk; ++c)
+            std::memcpy(tile.data() + c * hidden_ex, tv.data(), hidden_ex * sizeof(float));
         ggml_backend_tensor_set(t_time[s], tile.data(), 0, ggml_nbytes(t_time[s]));
     }
 

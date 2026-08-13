@@ -61,8 +61,10 @@ ggml_tensor * EncStack::block(ggml_context * C, const EncBlockW & w, ggml_tensor
     ggml_tensor * K  = to_heads(C, k, hd, heads, seq, nv);
 
     ggml_tensor * att;
-    if (cfg.flash_attn) att = flash_attention(C, Q, K, to_heads(C, v, hd, heads, seq, nv), nullptr, scale);
-    else                att = attention(C, Q, K, to_heads_v(C, v, hd, heads, seq, nv), nullptr, scale, cfg.hidden, seq, nv);
+    if (cfg.flash_attn)
+        att = flash_attention(C, Q, K, to_heads(C, v, hd, heads, seq, nv), nullptr, scale);
+    else
+        att = attention(C, Q, K, to_heads_v(C, v, hd, heads, seq, nv), nullptr, scale, cfg.hidden, seq, nv);
 
     ggml_tensor * h1 = ggml_add(C, x, linear(C, w.Wo, w.bo, att));
     ggml_tensor * n2 = layer_norm(C, h1, w.ln2w, w.ln2b, cfg.ln_eps);

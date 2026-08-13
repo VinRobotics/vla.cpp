@@ -44,7 +44,8 @@ inline int default_cpu_threads() {
     if (const char * e = std::getenv("VLA_N_THREADS")) {
         char * end = nullptr;
         const long n = std::strtol(e, &end, 10);
-        if (*end == '\0' && n > 0 && n <= 1024) return (int) n;
+        if (*end == '\0' && n > 0 && n <= 1024)
+            return (int) n;
         std::fprintf(stderr, "vla: ignoring VLA_N_THREADS='%s'\n", e);
     }
     const unsigned hw = std::thread::hardware_concurrency();

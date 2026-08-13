@@ -51,32 +51,51 @@ bool parse_stats(const std::string & js, int64_t want, std::vector<float> & q01,
 
     const char * env = std::getenv("VLA_ADAPTER_UNNORM_KEY");
     size_t suite_pos;
-    if (env) { suite = env; suite_pos = find_key(0, suite); }
+    if (env) {
+        suite = env;
+        suite_pos = find_key(0, suite);
+    }
     else {
         size_t b = js.find('{'); size_t q = js.find('"', b);
         size_t qe = js.find('"', q + 1);
         suite = js.substr(q + 1, qe - q - 1); suite_pos = q;
     }
-    if (suite_pos == std::string::npos) { std::fprintf(stderr, "vla(vla_adapter): suite '%s' not in stats\n", suite.c_str()); return false; }
+    if (suite_pos == std::string::npos) {
+        std::fprintf(stderr, "vla(vla_adapter): suite '%s' not in stats\n", suite.c_str());
+        return false;
+    }
     size_t act = find_key(suite_pos, "action");
-    if (act == std::string::npos) return false;
+    if (act == std::string::npos)
+        return false;
     auto read_arr = [&](const std::string & key, std::vector<float> & out) -> bool {
         size_t k = find_key(act, key); if (k == std::string::npos) return false;
         size_t lb = js.find('[', k); size_t rb = js.find(']', lb);
-        if (lb == std::string::npos || rb == std::string::npos) return false;
+        if (lb == std::string::npos || rb == std::string::npos)
+            return false;
         out.clear(); size_t p = lb + 1;
         while (p < rb) {
-            while (p < rb && (js[p] == ',' || js[p] == ' ' || js[p] == '\n' || js[p] == '\t' || js[p] == '\r')) ++p;
-            if (p >= rb) break;
+            while (p < rb && (js[p] == ',' || js[p] == ' ' || js[p] == '\n' || js[p] == '\t' || js[p] == '\r'))
+                ++p;
+            if (p >= rb)
+                break;
             bool t = (js.compare(p, 4, "true") == 0), f = (js.compare(p, 5, "false") == 0);
-            if (t || f) { out.push_back(t ? 1.0f : 0.0f); p += t ? 4 : 5; }
-            else { out.push_back(std::strtof(js.c_str() + p, nullptr)); while (p < rb && js[p] != ',') ++p; }
+            if (t || f) {
+                out.push_back(t ? 1.0f : 0.0f);
+                p += t ? 4 : 5;
+            }
+            else {
+                out.push_back(std::strtof(js.c_str() + p, nullptr));
+                while (p < rb && js[p] != ',')
+                    ++p;
+            }
         }
         return true;
     };
     std::vector<float> mk;
-    if (!read_arr("q01", q01) || !read_arr("q99", q99)) return false;
-    if (!read_arr("mask", mk)) mk.assign(want, 1.0f);
+    if (!read_arr("q01", q01) || !read_arr("q99", q99))
+        return false;
+    if (!read_arr("mask", mk))
+        mk.assign(want, 1.0f);
     mask.assign(mk.size(), 1); for (size_t i = 0; i < mk.size(); ++i) mask[i] = mk[i] != 0.0f ? 1 : 0;
     return (int64_t) q01.size() == want && (int64_t) q99.size() == want;
 }
@@ -89,9 +108,12 @@ struct HeadBlkW  { ggml_tensor *Wq,*bq,*Wks,*bks,*Wvs,*bvs,*Wka,*bka,*Wva,*bva,*
 struct VlaAdapterModelArch : public ModelArchBase {
     VlaAdapterModelArch() : ModelArchBase(Arch::VLA_ADAPTER) {}
     ~VlaAdapterModelArch() override {
-        if (weight_buf)  ggml_backend_buffer_free(weight_buf);
-        if (ctx_weights) ggml_free(ctx_weights);
-        if (backend)     ggml_backend_free(backend);
+        if (weight_buf)
+            ggml_backend_buffer_free(weight_buf);
+        if (ctx_weights)
+            ggml_free(ctx_weights);
+        if (backend)
+            ggml_backend_free(backend);
     }
 
     ggml_backend_t backend = nullptr;
@@ -101,7 +123,9 @@ struct VlaAdapterModelArch : public ModelArchBase {
 
     struct MainKey {
         int64_t seq=-1, n_views=-1, nprompt=-1;
-        bool operator==(const MainKey & o) const { return seq==o.seq && n_views==o.n_views && nprompt==o.nprompt; }
+        bool operator==(const MainKey & o) const {
+            return seq==o.seq && n_views==o.n_views && nprompt==o.nprompt;
+        }
     };
     struct MainIO {
         ggml_tensor *t_ids=nullptr,*t_proj=nullptr,*t_pos=nullptr,*t_mask=nullptr;
@@ -144,7 +168,9 @@ static ggml_tensor* hrot(ggml_context*C, ggml_tensor*x, int64_t HD){
     ggml_tensor*od=ggml_cont(C,ggml_view_4d(C,xp,1,HD/2,L,H,xp->nb[1],xp->nb[2],xp->nb[3],xp->nb[0]));
     return ggml_reshape_3d(C,ggml_concat(C,ggml_scale(C,od,-1.0f),ev,0),HD,L,H);
 }
-static ggml_tensor* hheads(ggml_context*C, ggml_tensor*p, int64_t HD, int64_t NH){ return ggml_cont(C,ggml_permute(C,ggml_reshape_3d(C,p,HD,NH,p->ne[1]),0,2,1,3)); }
+static ggml_tensor* hheads(ggml_context*C, ggml_tensor*p, int64_t HD, int64_t NH){
+    return ggml_cont(C,ggml_permute(C,ggml_reshape_3d(C,p,HD,NH,p->ne[1]),0,2,1,3));
+}
 static ggml_tensor* hrope(ggml_context*C, ggml_tensor*x, ggml_tensor*cs, ggml_tensor*sn, int64_t HD){
     ggml_tensor*c=ggml_reshape_3d(C,cs,HD,x->ne[1],1),*s=ggml_reshape_3d(C,sn,HD,x->ne[1],1);
     return ggml_add(C,ggml_mul(C,x,c),ggml_mul(C,hrot(C,x,HD),s));
@@ -162,8 +188,12 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
     m->mt = opts.weight_dtype.value_or(GGML_TYPE_BF16);
 
     gguf_reader g("vla_adapter");
-    if (!g.open(ckpt_path)) return nullptr;
-    if (!g.has("vla_adapter.architecture")) { std::fprintf(stderr, "vla(vla_adapter): not a vla_adapter GGUF\n"); return nullptr; }
+    if (!g.open(ckpt_path))
+        return nullptr;
+    if (!g.has("vla_adapter.architecture")) {
+        std::fprintf(stderr, "vla(vla_adapter): not a vla_adapter GGUF\n");
+        return nullptr;
+    }
 
     auto U=[&](const char*k,int64_t&d){ if(g.has(k)) d=(int64_t)g.u32(k); };
     auto F=[&](const char*k,float&d){ if(g.has(k)) d=g.f32(k); };
@@ -194,13 +224,18 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
 
     if (g.has("vla_adapter.statistics_json")) {
         if (!parse_stats(g.str("vla_adapter.statistics_json"), m->action_dim, m->q01, m->q99, m->unnorm_mask, m->suite))
-            { std::fprintf(stderr, "vla(vla_adapter): failed to parse statistics_json\n"); return nullptr; }
+            {
+                std::fprintf(stderr, "vla(vla_adapter): failed to parse statistics_json\n");
+                return nullptr;
+            }
         std::printf("vla(vla_adapter): unnorm suite = %s (q99 dim %zu)\n", m->suite.c_str(), m->q99.size());
     }
 
     {
         const Backend b = backend_init("vla(vla_adapter)", m->n_threads);
-        if (!b.handle) { return nullptr; }
+        if (!b.handle) {
+            return nullptr;
+        }
         m->backend = b.handle;
     }
 
@@ -242,9 +277,13 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
         w.flnw=f32(N("ffn_ln.weight")); w.flnb=f32(N("ffn_ln.bias")); w.flw=mm(N("ffn_lin.weight")); w.flb=f32(N("ffn_lin.bias"));
         std::vector<float> gv=g.read_f32(N("gating")); w.rg = gv.empty()?0.0f:std::tanh(gv[0]); }
     (void)P;
-    if(!ok){ std::fprintf(stderr,"vla(vla_adapter): weight setup failed\n"); return nullptr; }
+    if(!ok){
+        std::fprintf(stderr,"vla(vla_adapter): weight setup failed\n");
+        return nullptr;
+    }
 
-    if (!L.upload(m->backend, &m->weight_buf)) return nullptr;
+    if (!L.upload(m->backend, &m->weight_buf))
+        return nullptr;
 
     std::printf("vla(vla_adapter): weights resident %.2f GiB (%s) - DINOv2+SigLIP towers + Qwen2.5-0.5B + Bridge head\n",
                 ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0*1024.0), dtype_name(m->mt));
@@ -331,7 +370,8 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
                                          [&](ggml_context*C, MainIO & gio)->ggml_cgraph*{
     ggml_tensor*t_ids=ggml_new_tensor_1d(C,GGML_TYPE_I32,NPROMPT+num_tokens+1); ggml_set_input(t_ids);
     ggml_tensor*emb=ggml_get_rows(C,token_embd,t_ids);
-    if(emb->type!=GGML_TYPE_F32) emb=ggml_cast(C,emb,GGML_TYPE_F32);
+    if(emb->type!=GGML_TYPE_F32)
+        emb=ggml_cast(C,emb,GGML_TYPE_F32);
     ggml_tensor*aqf=action_queries->type==GGML_TYPE_F32?action_queries:ggml_cast(C,action_queries,GGML_TYPE_F32);
     ggml_tensor*pre=ggml_cont(C,ggml_view_2d(C,emb,HC,NPROMPT,emb->nb[1],0));
     ggml_tensor*stop=ggml_cont(C,ggml_view_2d(C,emb,HC,1,emb->nb[1],(NPROMPT+num_tokens)*emb->nb[1]));
@@ -364,7 +404,8 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     ggml_tensor*final_norm=ggml_mul(C,ggml_rms_norm(C,lout[lm_layers-1],lm_rms_eps),lm_out_norm);
 
     std::vector<ggml_tensor*> cond(head_blocks);
-    for(int i=0;i<head_blocks-1;++i) cond[i]=lout[i];
+    for(int i=0;i<head_blocks-1;++i)
+        cond[i]=lout[i];
     cond[head_blocks-1]=final_norm;
 
     ggml_tensor*t_state=ggml_new_tensor_1d(C,GGML_TYPE_F32,proprio_dim); ggml_set_input(t_state);
@@ -428,20 +469,36 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     ggml_tensor*cT=gio.cT,*sT=gio.sT,*cA=gio.cA,*sA=gio.sA,*cK=gio.cK,*sK=gio.sK;
 
     { std::vector<int32_t> ids(NPROMPT+num_tokens+1);
-      for(int64_t i=0;i<NPROMPT;++i) ids[i]=in.lang_tokens[i];
-      for(int64_t i=0;i<num_tokens;++i) ids[NPROMPT+i]=1;
+      for(int64_t i=0;i<NPROMPT;++i)
+          ids[i]=in.lang_tokens[i];
+      for(int64_t i=0;i<num_tokens;++i)
+          ids[NPROMPT+i]=1;
       ids[NPROMPT+num_tokens]=(int32_t)stop_id;
       ggml_backend_tensor_set(t_ids,ids.data(),0,ggml_nbytes(t_ids)); }
     ggml_backend_tensor_set(t_proj,proj_host.data(),0,ggml_nbytes(t_proj));
-    { std::vector<int32_t> pp(SEQ); for(int64_t i=0;i<SEQ;++i)pp[i]=(int32_t)i; ggml_backend_tensor_set(t_pos,pp.data(),0,ggml_nbytes(t_pos)); }
+    {
+        std::vector<int32_t> pp(SEQ);
+        for(int64_t i=0;i<SEQ;++i)
+            pp[i]=(int32_t)i;
+        ggml_backend_tensor_set(t_pos,pp.data(),0,ggml_nbytes(t_pos));
+    }
     { std::vector<float> mk; build_causal_mask(SEQ, mk);
       ggml_backend_tensor_set(t_mask,mk.data(),0,ggml_nbytes(t_mask)); }
     { std::vector<float> sv(proprio_dim,0.0f); for(int64_t i=0;i<proprio_dim && in.state;++i) sv[i]=in.state[i];
       ggml_backend_tensor_set(t_state,sv.data(),0,ggml_nbytes(t_state)); }
-    { std::vector<float> zx((size_t)action_dim*HC*chunk,0.0f); ggml_backend_tensor_set(t_x0,zx.data(),0,ggml_nbytes(t_x0)); }
+    {
+        std::vector<float> zx((size_t)action_dim*HC*chunk,0.0f);
+        ggml_backend_tensor_set(t_x0,zx.data(),0,ggml_nbytes(t_x0));
+    }
 
     auto fill_cs=[&](ggml_tensor*cc,ggml_tensor*ss,int64_t Lh){ std::vector<float> cb(HD*Lh),sb(HD*Lh); const int64_t half=HD/2;
-        for(int64_t t=0;t<Lh;++t) for(int64_t mi=0;mi<HD;++mi){ int64_t j=mi%half; double inv=1.0/std::pow((double)head_rope_base,(2.0*j)/(double)HD); double a=(double)t*inv; cb[t*HD+mi]=(float)std::cos(a); sb[t*HD+mi]=(float)std::sin(a); }
+        for(int64_t t=0;t<Lh;++t) for(int64_t mi=0;mi<HD;++mi){
+            int64_t j=mi%half;
+            double inv=1.0/std::pow((double)head_rope_base,(2.0*j)/(double)HD);
+            double a=(double)t*inv;
+            cb[t*HD+mi]=(float)std::cos(a);
+            sb[t*HD+mi]=(float)std::sin(a);
+        }
         ggml_backend_tensor_set(cc,cb.data(),0,ggml_nbytes(cc)); ggml_backend_tensor_set(ss,sb.data(),0,ggml_nbytes(ss)); };
     fill_cs(cT,sT,chunk); fill_cs(cA,sA,num_tokens+1); fill_cs(cK,sK,NPATCH);
 

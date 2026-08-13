@@ -60,7 +60,9 @@ struct Gr00tN1d5ModelArch : public ModelArchBase {
 
     struct MainKey {
         int64_t seq=-1, nsteps=-1;
-        bool operator==(const MainKey & o) const { return seq==o.seq && nsteps==o.nsteps; }
+        bool operator==(const MainKey & o) const {
+            return seq==o.seq && nsteps==o.nsteps;
+        }
     };
     struct MainIO {
         ggml_tensor *t_embeds=nullptr,*t_pos=nullptr,*t_lmmask=nullptr,*t_state=nullptr,*t_x0=nullptr,*actions=nullptr;
@@ -134,7 +136,8 @@ bool load_config(const gguf_reader & g, Gr00tN1d5ModelArch & m, Config & cfg) {
     F(fk("norm_out_eps"   ), m.dit.cfg.norm_out_eps);
     F(fk("vlln_eps"       ), m.vlln_eps);
 
-    if (g.has(fk("lm_rope_theta"))) m.lm.cfg.rope.freq_base = (float) g.f64(fk("lm_rope_theta"));
+    if (g.has(fk("lm_rope_theta")))
+        m.lm.cfg.rope.freq_base = (float) g.f64(fk("lm_rope_theta"));
 
     m.vit.enc.cfg.head_dim = m.vit.enc.cfg.hidden/m.vit.enc.cfg.heads;
     m.vlsa.cfg.hidden      = m.bb_embed_dim;
@@ -151,7 +154,8 @@ bool load_config(const gguf_reader & g, Gr00tN1d5ModelArch & m, Config & cfg) {
             const std::string js  = g.str(fk("embodiment_tag_mapping"));
             const std::string key = std::string("\"")+e+"\":";
             const size_t p = js.find(key);
-            if (p != std::string::npos) m.aex.embodiment_id = std::strtol(js.c_str()+p+key.size(), nullptr, 10);
+            if (p != std::string::npos)
+                m.aex.embodiment_id = std::strtol(js.c_str()+p+key.size(), nullptr, 10);
             else std::fprintf(stderr, "vla(gr00tn1d5): embodiment tag '%s' not in embodiment_tag_mapping; using id %lld\n", e, (long long) m.aex.embodiment_id);
         }
     }
@@ -190,9 +194,12 @@ bool load_config(const gguf_reader & g, Gr00tN1d5ModelArch & m, Config & cfg) {
 }
 
 Gr00tN1d5ModelArch::~Gr00tN1d5ModelArch() {
-    if (weight_buf)  ggml_backend_buffer_free(weight_buf);
-    if (ctx_weights) ggml_free(ctx_weights);
-    if (backend)     ggml_backend_free(backend);
+    if (weight_buf)
+        ggml_backend_buffer_free(weight_buf);
+    if (ctx_weights)
+        ggml_free(ctx_weights);
+    if (backend)
+        ggml_backend_free(backend);
 }
 
 std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
@@ -206,13 +213,15 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
     m->matmul_type           = opts.weight_dtype.value_or(GGML_TYPE_BF16);
     m->lm.cfg.rope.freq_base = 1000000.0f;
 
-    if (!m->io.open(ckpt_path)) return nullptr;
+    if (!m->io.open(ckpt_path))
+        return nullptr;
     gguf_reader & g = m->io;
     if (!g.has("gr00t_n1_5.architecture")) {
         std::fprintf(stderr, "vla(gr00tn1d5): %s is not a gr00t_n1_5 GGUF\n", ckpt_path.c_str());
         return nullptr;
     }
-    if (!load_config(g, *m, m->cfg)) return nullptr;
+    if (!load_config(g, *m, m->cfg))
+        return nullptr;
 
     std::printf("vla(gr00tn1d5): vit=%lldd×%lldL×%lldh n_img_tok=%lld  lm=Qwen3 %lldd×%lldL (%lldq/%lldkv×%lld)  "
                 "dit=%lldL×%lldh×%lld(inner %lld) interleave=%lld  vlsa=%lldL×%lldh×%lld  in_emb=%lld  horizon=%lld action_dim=%lld N_steps=%lld  embodiment=%lld  resident=%s\n",
@@ -224,12 +233,16 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
                 m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
     const Backend b = backend_init("vla(gr00tn1d5)", m->n_threads);
-    if (!b.handle) return nullptr;
+    if (!b.handle)
+        return nullptr;
     m->backend = b.handle;
 
     ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };
     m->ctx_weights = ggml_init(wp);
-    if (!m->ctx_weights) { std::fprintf(stderr, "vla(gr00tn1d5): ggml_init(ctx_weights) failed\n"); return nullptr; }
+    if (!m->ctx_weights) {
+        std::fprintf(stderr, "vla(gr00tn1d5): ggml_init(ctx_weights) failed\n");
+        return nullptr;
+    }
 
     WeightLoader L("gr00tn1d5", g, m->ctx_weights, m->matmul_type);
 
@@ -247,7 +260,8 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
     m->future_tokens = L.f32("aex.future_tokens");
     m->dit.declare(L, "aex.dit");
 
-    if (!L.upload(m->backend, &m->weight_buf)) return nullptr;
+    if (!L.upload(m->backend, &m->weight_buf))
+        return nullptr;
 
     std::printf("vla(gr00tn1d5): weights resident in %.2f GiB (%s) - incl. SigLIP vision tower; embodiment id %lld\n",
                 ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0*1024.0),
@@ -344,7 +358,8 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
 
         std::vector<ggml_tensor *> Kc(dit.cfg.layers, nullptr), Vc(dit.cfg.layers, nullptr);
         for (int64_t i = 0; i < dit.cfg.layers; ++i) {
-            if (dit_interleave && (i%2 == 1)) continue;
+            if (dit_interleave && (i%2 == 1))
+                continue;
             dit.kv(C, dit.blk[i], vl_embs, &Kc[i], &Vc[i]);
         }
 
@@ -381,7 +396,8 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_set(gio.t_embeds, inputs_embeds.data(), 0, ggml_nbytes(gio.t_embeds));
 
     std::vector<int32_t> pp(SEQ);
-    for (int64_t i = 0; i < SEQ; ++i) pp[i] = (int32_t) i;
+    for (int64_t i = 0; i < SEQ; ++i)
+        pp[i] = (int32_t) i;
     ggml_backend_tensor_set(gio.t_pos, pp.data(), 0, ggml_nbytes(gio.t_pos));
 
     std::vector<float> mask;
@@ -389,7 +405,8 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_set(gio.t_lmmask, mask.data(), 0, ggml_nbytes(gio.t_lmmask));
 
     std::vector<float> st(max_state_dim, 0.0f);
-    for (int64_t i = 0; i < max_state_dim; ++i) st[i] = in.state ? in.state[i] : 0.0f;
+    for (int64_t i = 0; i < max_state_dim; ++i)
+        st[i] = in.state ? in.state[i] : 0.0f;
     ggml_backend_tensor_set(gio.t_state, st.data(), 0, ggml_nbytes(gio.t_state));
 
     ggml_backend_tensor_set(gio.t_x0, x_init.data(), 0, ggml_nbytes(gio.t_x0));

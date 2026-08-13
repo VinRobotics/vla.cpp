@@ -65,8 +65,10 @@ inline bool preprocess_image_chw(const char * arch, const ImageView & v, int64_t
         for (int64_t w = 0; w < side; ++w)
             for (int64_t c = 0; c < 3; ++c) {
                 float px;
-                if (v.format == PixelFormat::U8) px = ((const uint8_t *) v.data)[(h * side + w) * 3 + c] / 255.0f;
-                else                             px = ((const float  *) v.data)[(h * side + w) * 3 + c];
+                if (v.format == PixelFormat::U8)
+                    px = ((const uint8_t *) v.data)[(h * side + w) * 3 + c] / 255.0f;
+                else
+                    px = ((const float  *) v.data)[(h * side + w) * 3 + c];
                 out[c * side * side + h * side + w] = px * 2.0f - 1.0f;
             }
     return true;
@@ -83,7 +85,8 @@ inline bool preprocess_image_patches(const char * arch, const ImageView & v, int
     out.assign((size_t) pd*np, 0.0f);
 
     auto px = [&](int64_t r, int64_t c, int64_t ch) -> float {
-        if (v.format == PixelFormat::U8) return ((const uint8_t *) v.data)[(r*side+c)*3+ch]/255.0f;
+        if (v.format == PixelFormat::U8)
+            return ((const uint8_t *) v.data)[(r*side+c)*3+ch]/255.0f;
         return ((const float *) v.data)[(r*side+c)*3+ch];
     };
 

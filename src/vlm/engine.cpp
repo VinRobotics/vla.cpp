@@ -61,7 +61,9 @@ struct Engine::Impl {
 Engine::Engine() : impl_(std::make_unique<Impl>()) {}
 Engine::~Engine() = default;
 
-bool Engine::loaded() const { return impl_ && impl_->lctx != nullptr; }
+bool Engine::loaded() const {
+    return impl_ && impl_->lctx != nullptr;
+}
 
 bool Engine::load(const LoadParams & lp) {
     ensure_global_init();
@@ -179,7 +181,10 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
 
     int img_msg_idx = -1;
     for (int i = (int) messages.size() - 1; i >= 0; --i) {
-        if (messages[i].role == "user") { img_msg_idx = i; break; }
+        if (messages[i].role == "user") {
+            img_msg_idx = i;
+            break;
+        }
     }
     if (img_msg_idx < 0) {
         img_msg_idx = (int) messages.size() - 1;
@@ -198,7 +203,8 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
 
             if (msg.content.find(marker) == std::string::npos) {
                 std::string prefix;
-                for (size_t k = 0; k < images.size(); ++k) prefix += marker;
+                for (size_t k = 0; k < images.size(); ++k)
+                    prefix += marker;
                 msg.content = prefix + msg.content;
             }
             for (const auto & im : images) {
@@ -224,7 +230,8 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
         text.parse_special = true;
 
         std::vector<const mtmd_bitmap *> bmp_ptrs(bmps.size());
-        for (size_t k = 0; k < bmps.size(); ++k) bmp_ptrs[k] = bmps[k].ptr.get();
+        for (size_t k = 0; k < bmps.size(); ++k)
+            bmp_ptrs[k] = bmps[k].ptr.get();
 
         mtmd::input_chunks chunks(mtmd_input_chunks_init());
         if (mtmd_tokenize(impl_->vision.get(), chunks.ptr.get(), &text,

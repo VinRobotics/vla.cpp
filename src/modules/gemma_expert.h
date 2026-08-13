@@ -57,7 +57,8 @@ struct GemmaStack {
             w.Wup     = L.gemm          ("%s.blk.%lld.ffn_up.weight",    prefix, (long long)i);
             w.Wdown   = L.gemm          ("%s.blk.%lld.ffn_down.weight",  prefix, (long long)i);
         }
-        if (with_output_norm) output_norm = L.f32_gemma_norm("%s.output_norm.weight", prefix);
+        if (with_output_norm)
+            output_norm = L.f32_gemma_norm("%s.output_norm.weight", prefix);
     }
 };
 

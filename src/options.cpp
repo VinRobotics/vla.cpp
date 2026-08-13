@@ -26,21 +26,34 @@ namespace vla {
 namespace {
 
 bool parse_dtype(const std::string & v, ggml_type & out) {
-    if (v == "f32"  || v == "fp32")  { out = GGML_TYPE_F32;  return true; }
-    if (v == "bf16" || v == "bfp16") { out = GGML_TYPE_BF16; return true; }
+    if (v == "f32"  || v == "fp32")  {
+        out = GGML_TYPE_F32;
+        return true;
+    }
+    if (v == "bf16" || v == "bfp16") {
+        out = GGML_TYPE_BF16;
+        return true;
+    }
     return false;
 }
 
 bool parse_bool(const std::string & v, bool & out) {
-    if (v == "1" || v == "true"  || v == "on"  || v == "yes") { out = true;  return true; }
-    if (v == "0" || v == "false" || v == "off" || v == "no")  { out = false; return true; }
+    if (v == "1" || v == "true"  || v == "on"  || v == "yes") {
+        out = true;
+        return true;
+    }
+    if (v == "0" || v == "false" || v == "off" || v == "no")  {
+        out = false;
+        return true;
+    }
     return false;
 }
 
 bool parse_int(const std::string & v, int & out) {
     char * end = nullptr;
     const long n = std::strtol(v.c_str(), &end, 10);
-    if (end == v.c_str() || *end) return false;
+    if (end == v.c_str() || *end)
+        return false;
     out = (int) n;
     return true;
 }
@@ -56,11 +69,19 @@ bool g_flash_attn  = false;
 bool g_mm_prec_f32 = true;
 }
 
-void set_flash_attn(bool on) { g_flash_attn = on; }
-bool flash_attn_enabled()    { return g_flash_attn; }
+void set_flash_attn(bool on) {
+    g_flash_attn = on;
+}
+bool flash_attn_enabled()    {
+    return g_flash_attn;
+}
 
-void set_mm_prec_f32(bool on)  { g_mm_prec_f32 = on; }
-bool mm_prec_f32_enabled()     { return g_mm_prec_f32; }
+void set_mm_prec_f32(bool on)  {
+    g_mm_prec_f32 = on;
+}
+bool mm_prec_f32_enabled()     {
+    return g_mm_prec_f32;
+}
 
 const char * Options::usage() {
     return "  --weight-dtype f32|bf16   resident dtype for GEMM weights\n"
@@ -77,51 +98,86 @@ bool Options::parse_arg(int argc, char ** argv, int & i, std::string & err) {
     const std::string a = argv[i];
 
     auto next = [&](std::string & v) -> bool {
-        if (i+1 >= argc) { err = a+" needs a value"; return false; }
+        if (i+1 >= argc) {
+            err = a+" needs a value";
+            return false;
+        }
         v = argv[++i];
         return true;
     };
 
     if (a == "--weight-dtype" || a == "--act-dtype") {
         std::string v;
-        if (!next(v)) return false;
+        if (!next(v))
+            return false;
 
         ggml_type t;
-        if (!parse_dtype(v, t)) { err = a+": expected f32 or bf16, got '"+v+"'"; return false; }
-        if (a == "--weight-dtype") weight_dtype = t;
-        else                       act_dtype    = t;
+        if (!parse_dtype(v, t)) {
+            err = a+": expected f32 or bf16, got '"+v+"'";
+            return false;
+        }
+        if (a == "--weight-dtype")
+            weight_dtype = t;
+        else
+            act_dtype    = t;
         return true;
     }
 
     if (a == "--flash-attn") {
         bool v = true;
-        if (i+1 < argc && argv[i+1][0] != '-' && parse_bool(argv[i+1], v)) ++i;
+        if (i+1 < argc && argv[i+1][0] != '-' && parse_bool(argv[i+1], v))
+            ++i;
         flash_attn = v;
         return true;
     }
 
     if (a == "--mm-prec") {
         std::string v;
-        if (!next(v)) return false;
-        if (v == "default")  { mm_prec_f32 = false; return true; }
-        if (v == "f32")      { mm_prec_f32 = true;  return true; }
+        if (!next(v))
+            return false;
+        if (v == "default")  {
+            mm_prec_f32 = false;
+            return true;
+        }
+        if (v == "f32")      {
+            mm_prec_f32 = true;
+            return true;
+        }
         err = "--mm-prec: expected default or f32, got '"+v+"'";
         return false;
     }
 
     if (a == "--n-threads" || a == "--num-steps") {
         std::string v;
-        if (!next(v)) return false;
+        if (!next(v))
+            return false;
 
         int n = 0;
-        if (!parse_int(v, n) || n <= 0) { err = a+": expected a positive integer, got '"+v+"'"; return false; }
-        if (a == "--n-threads") n_threads = n;
-        else                    num_steps = n;
+        if (!parse_int(v, n) || n <= 0) {
+            err = a+": expected a positive integer, got '"+v+"'";
+            return false;
+        }
+        if (a == "--n-threads")
+            n_threads = n;
+        else
+            num_steps = n;
         return true;
     }
 
-    if (a == "--embodiment") { std::string v; if (!next(v)) return false; embodiment = v; return true; }
-    if (a == "--unnorm-key") { std::string v; if (!next(v)) return false; unnorm_key = v; return true; }
+    if (a == "--embodiment") {
+        std::string v;
+        if (!next(v))
+            return false;
+        embodiment = v;
+        return true;
+    }
+    if (a == "--unnorm-key") {
+        std::string v;
+        if (!next(v))
+            return false;
+        unnorm_key = v;
+        return true;
+    }
 
     err.clear();
     return false;
@@ -158,10 +214,12 @@ bool Options::reject_retired_env(std::string & err) {
 }
 
 bool Options::load_json(const std::string & path, std::string & err) {
-    if (path.empty()) return true;
+    if (path.empty())
+        return true;
 
     std::ifstream f(path);
-    if (!f) return true;
+    if (!f)
+        return true;
 
     nlohmann::json j;
     try {
@@ -170,19 +228,28 @@ bool Options::load_json(const std::string & path, std::string & err) {
         err = std::string("config json: ")+e.what();
         return false;
     }
-    if (!j.contains("runtime") || !j["runtime"].is_object()) return true;
+    if (!j.contains("runtime") || !j["runtime"].is_object())
+        return true;
     const nlohmann::json & r = j["runtime"];
 
     try {
         ggml_type t;
-        if (r.contains("weight_dtype") && parse_dtype(r["weight_dtype"].get<std::string>(), t)) weight_dtype = t;
-        if (r.contains("act_dtype")    && parse_dtype(r["act_dtype"].get<std::string>(),    t)) act_dtype    = t;
-        if (r.contains("flash_attn"))  flash_attn  = r["flash_attn"].get<bool>();
-        if (r.contains("mm_prec"))     mm_prec_f32 = r["mm_prec"].get<std::string>() == "f32";
-        if (r.contains("n_threads"))   n_threads   = r["n_threads"].get<int>();
-        if (r.contains("num_steps"))   num_steps   = r["num_steps"].get<int>();
-        if (r.contains("embodiment"))  embodiment  = r["embodiment"].get<std::string>();
-        if (r.contains("unnorm_key"))  unnorm_key  = r["unnorm_key"].get<std::string>();
+        if (r.contains("weight_dtype") && parse_dtype(r["weight_dtype"].get<std::string>(), t))
+            weight_dtype = t;
+        if (r.contains("act_dtype")    && parse_dtype(r["act_dtype"].get<std::string>(),    t))
+            act_dtype    = t;
+        if (r.contains("flash_attn"))
+            flash_attn  = r["flash_attn"].get<bool>();
+        if (r.contains("mm_prec"))
+            mm_prec_f32 = r["mm_prec"].get<std::string>() == "f32";
+        if (r.contains("n_threads"))
+            n_threads   = r["n_threads"].get<int>();
+        if (r.contains("num_steps"))
+            num_steps   = r["num_steps"].get<int>();
+        if (r.contains("embodiment"))
+            embodiment  = r["embodiment"].get<std::string>();
+        if (r.contains("unnorm_key"))
+            unnorm_key  = r["unnorm_key"].get<std::string>();
     } catch (const std::exception & e) {
         err = std::string("config json runtime: ")+e.what();
         return false;

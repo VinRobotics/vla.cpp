@@ -41,7 +41,9 @@ namespace {
 
 std::atomic<bool> g_shutdown{false};
 
-void on_signal(int) { g_shutdown.store(true, std::memory_order_relaxed); }
+void on_signal(int) {
+    g_shutdown.store(true, std::memory_order_relaxed);
+}
 
 // Reject absurd image dimensions before any size arithmetic, so an untrusted
 // width or height cannot overflow size_t or truncate to a negative int.
@@ -160,7 +162,8 @@ Drain drain_extra_frames(zmq::socket_t & sock) {
     Drain d = Drain::Clean;
     while (sock.get(zmq::sockopt::rcvmore)) {
         zmq::message_t junk;
-        if (!sock.recv(junk, zmq::recv_flags::none)) return Drain::Stalled;
+        if (!sock.recv(junk, zmq::recv_flags::none))
+            return Drain::Stalled;
         d = Drain::Extra;
     }
     return d;
@@ -168,7 +171,8 @@ Drain drain_extra_frames(zmq::socket_t & sock) {
 
 int find_non_finite(const float * data, int n) {
     for (int i = 0; i < n; ++i) {
-        if (!std::isfinite(data[i])) return i;
+        if (!std::isfinite(data[i]))
+            return i;
     }
     return -1;
 }
@@ -225,7 +229,8 @@ int main(int argc, char ** argv) {
             config_path = argv[++i];
         } else if (a == "--timing-detail" && i + 1 < argc) {
             const std::string v = argv[++i];
-            if      (v == "none")  timing_detail = vla::TimingDetail::NONE;
+            if      (v == "none")
+                timing_detail = vla::TimingDetail::NONE;
             else if (v == "phase") timing_detail = vla::TimingDetail::PHASE;
             else {
                 std::fprintf(stderr, "vla-server: bad --timing-detail value '%s'\n", v.c_str());
@@ -247,7 +252,8 @@ int main(int argc, char ** argv) {
     }
     if (!hf_spec.empty() && positionals.empty()) {
         ckpt_path = vla::hf_resolve(hf_spec);
-        if (ckpt_path.empty()) return 1;
+        if (ckpt_path.empty())
+            return 1;
     } else if (positionals.size() == 1) {
         ckpt_path = positionals[0];
     } else if (positionals.size() == 2) {
@@ -332,20 +338,26 @@ int main(int argc, char ** argv) {
         try {
             zmq::poll(poll, 1, std::chrono::milliseconds(200));
         } catch (const zmq::error_t & e) {
-            if (e.num() == EINTR) continue;
-            if (e.num() == ETERM) break;
+            if (e.num() == EINTR)
+                continue;
+            if (e.num() == ETERM)
+                break;
             std::fprintf(stderr, "vla-server: zmq error: %s\n", e.what());
             continue;
         }
-        if (!(poll[0].revents & ZMQ_POLLIN)) continue;
+        if (!(poll[0].revents & ZMQ_POLLIN))
+            continue;
 
         zmq::message_t req_msg;
         try {
             auto rr = sock.recv(req_msg, zmq::recv_flags::none);
-            if (!rr) continue;
+            if (!rr)
+                continue;
         } catch (const zmq::error_t & e) {
-            if (e.num() == EINTR) continue;
-            if (e.num() == ETERM) break;
+            if (e.num() == EINTR)
+                continue;
+            if (e.num() == ETERM)
+                break;
             std::fprintf(stderr, "vla-server: zmq error: %s\n", e.what());
             continue;
         }
@@ -402,7 +414,8 @@ int main(int argc, char ** argv) {
                     break;
                 }
             }
-            if (!tokens_ok) continue;
+            if (!tokens_ok)
+                continue;
         }
         if (req.state_size() != int(cfg.max_state_dim)) {
             char buf[128]; std::snprintf(buf, sizeof(buf),
@@ -464,7 +477,8 @@ int main(int argc, char ** argv) {
                     break;
                 }
             }
-            if (!decode_ok) continue;
+            if (!decode_ok)
+                continue;
         }
 
         std::vector<int32_t> lang_tokens(req.lang_tokens().begin(), req.lang_tokens().end());
@@ -526,7 +540,8 @@ int main(int argc, char ** argv) {
         vla::PredictResponse resp;
         resp.set_request_id(rid);
         resp.mutable_action_chunk()->Reserve(static_cast<int>(action_chunk.size()));
-        for (float v : action_chunk) resp.add_action_chunk(v);
+        for (float v : action_chunk)
+            resp.add_action_chunk(v);
         resp.set_chunk_size(static_cast<uint32_t>(cfg.n_suffix));
         resp.set_action_dim(static_cast<uint32_t>(cfg.max_action_dim));
         resp.set_latency_ms_total(st.ms_total);

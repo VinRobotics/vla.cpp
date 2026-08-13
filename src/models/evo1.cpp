@@ -73,7 +73,9 @@ struct Evo1ModelArch : public ModelArchBase {
 
     struct MainKey {
         int64_t seq=-1, nsteps=-1;
-        bool operator==(const MainKey & o) const { return seq==o.seq && nsteps==o.nsteps; }
+        bool operator==(const MainKey & o) const {
+            return seq==o.seq && nsteps==o.nsteps;
+        }
     };
     struct MainIO {
         ggml_tensor *t_embeds=nullptr,*t_pos=nullptr,*t_lmmask=nullptr,*t_qmask=nullptr;
@@ -149,7 +151,8 @@ ggml_tensor * build_qwen2_layer(ggml_context * C, const Evo1ModelArch & m, const
     ggml_tensor * kqv = ggml_mul_mat(C, V, aw);
     ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), hq, seq);
     ggml_tensor * attn_out = mm_act(C, w.Wo, as_type(C, att, at), at);
-    if (qmask) attn_out = ggml_mul(C, attn_out, qmask);
+    if (qmask)
+        attn_out = ggml_mul(C, attn_out, qmask);
     ggml_tensor * h_attn = ggml_add(C, h, attn_out);
     ggml_tensor * h_n2 = ggml_mul(C, ggml_rms_norm(C, h_attn, m.lm_rms_eps), w.ffn_norm);
     ggml_tensor * gate = ggml_silu(C, mm_act(C, w.Wgate, h_n2, at));
@@ -260,7 +263,8 @@ ggml_tensor * build_internvit_view(ggml_context * C, const Evo1ModelArch & m, gg
     // the activation dtype from here
     ggml_tensor * x = as_type(C, ggml_add(C, ggml_concat(C, cls2d, patches, 1), m.vit_pos), m.act_type);
 
-    for (int64_t i = 0; i < m.vit_layers; ++i) x = build_internvit_layer(C, m, m.vit[i], x, n_tok);
+    for (int64_t i = 0; i < m.vit_layers; ++i)
+        x = build_internvit_layer(C, m, m.vit[i], x, n_tok);
 
     ggml_tensor * pnc = ggml_cont(C, ggml_view_2d(C, x, H, n_patches, x->nb[1], x->nb[1]));
     ggml_tensor * s1 = ggml_reshape_3d(C, pnc, 2 * H, sgrid, grid);
@@ -294,11 +298,16 @@ bool load_config(const gguf_reader & g, Evo1ModelArch & m, Config & cfg) {
     u("real_state_dim", m.real_state_dim); u("real_action_dim", m.real_action_dim);
     u("vit_hidden", m.vit_hidden); u("vit_layers", m.vit_layers); u("vit_heads", m.vit_heads);
     u("vit_inter", m.vit_inter); u("image_size", m.image_size); u("patch_size", m.patch_size);
-    if (g.has("evo1.lm_rms_eps"))  m.lm_rms_eps     = g.f32("evo1.lm_rms_eps");
-    if (g.has("evo1.proj_ln_eps")) m.proj_ln_eps    = g.f32("evo1.proj_ln_eps");
-    if (g.has("evo1.norm_eps"))    m.norm_eps_denom = g.f32("evo1.norm_eps");
-    if (g.has("evo1.vit_ln_eps"))  m.vit_ln_eps     = g.f32("evo1.vit_ln_eps");
-    if (g.has("evo1.lm_rope_theta")) m.lm_rope_base = (float) g.f64("evo1.lm_rope_theta");
+    if (g.has("evo1.lm_rms_eps"))
+        m.lm_rms_eps     = g.f32("evo1.lm_rms_eps");
+    if (g.has("evo1.proj_ln_eps"))
+        m.proj_ln_eps    = g.f32("evo1.proj_ln_eps");
+    if (g.has("evo1.norm_eps"))
+        m.norm_eps_denom = g.f32("evo1.norm_eps");
+    if (g.has("evo1.vit_ln_eps"))
+        m.vit_ln_eps     = g.f32("evo1.vit_ln_eps");
+    if (g.has("evo1.lm_rope_theta"))
+        m.lm_rope_base = (float) g.f64("evo1.lm_rope_theta");
     if (m.embed_dim != m.lm_hidden) {
         std::fprintf(stderr, "vla(evo1): embed_dim (%lld) != lm_hidden (%lld) - not handled\n",
                      (long long) m.embed_dim, (long long) m.lm_hidden); return false;
@@ -339,9 +348,12 @@ bool load_config(const gguf_reader & g, Evo1ModelArch & m, Config & cfg) {
 }
 
 Evo1ModelArch::~Evo1ModelArch() {
-    if (weight_buf)  ggml_backend_buffer_free(weight_buf);
-    if (ctx_weights) ggml_free(ctx_weights);
-    if (backend)     ggml_backend_free(backend);
+    if (weight_buf)
+        ggml_backend_buffer_free(weight_buf);
+    if (ctx_weights)
+        ggml_free(ctx_weights);
+    if (backend)
+        ggml_backend_free(backend);
 }
 
 std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
@@ -356,12 +368,14 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
     m->gguf_path = ckpt_path;
     m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
 
-    if (!m->io.open(ckpt_path)) return nullptr;
+    if (!m->io.open(ckpt_path))
+        return nullptr;
     gguf_reader & g = m->io;
     if (!g.has("evo1.architecture")) {
         std::fprintf(stderr, "vla(evo1): %s is not an evo1 GGUF (no evo1.architecture KV)\n", ckpt_path.c_str()); return nullptr;
     }
-    if (!load_config(g, *m, m->cfg)) return nullptr;
+    if (!load_config(g, *m, m->cfg))
+        return nullptr;
     std::printf("vla(evo1): lm=%lldd×%lldL (%lldq/%lldkv×%lld) inter=%lld  embed=%lld dit=%lldL×%lldh  "
                 "horizon=%lld per_a=%lld N_steps=%lld  resident matmul=%s\n",
                 (long long) m->lm_hidden, (long long) m->lm_layers, (long long) m->n_q, (long long) m->n_kv,
@@ -371,7 +385,9 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
 
     {
         const Backend b = backend_init("vla(evo1)", m->n_threads);
-        if (!b.handle) { return nullptr; }
+        if (!b.handle) {
+            return nullptr;
+        }
         m->backend = b.handle;
 
         // BF16 activations need BF16-resident weights and the CUDA BF16 GEMM path.
@@ -389,7 +405,10 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
     ggml_init_params wp = {  (size_t) 32 * 1024 * 1024,
                              nullptr,  true };
     m->ctx_weights = ggml_init(wp);
-    if (!m->ctx_weights) { std::fprintf(stderr, "vla(evo1): ggml_init(ctx_weights) failed\n"); return nullptr; }
+    if (!m->ctx_weights) {
+        std::fprintf(stderr, "vla(evo1): ggml_init(ctx_weights) failed\n");
+        return nullptr;
+    }
     // The vision tower is optional here, so misses are reported by the ok chain
     // below rather than by the loader.
     WeightLoader L("evo1", g, m->ctx_weights, m->matmul_type);
@@ -465,9 +484,13 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
     } else {
         std::printf("vla(evo1): note - no vit.*/mm.* weights in the GGUF; predict() will require Inputs::precomputed_img_emb\n");
     }
-    if (!ok) { std::fprintf(stderr, "vla(evo1): weight tensor setup failed\n"); return nullptr; }
+    if (!ok) {
+        std::fprintf(stderr, "vla(evo1): weight tensor setup failed\n");
+        return nullptr;
+    }
 
-    if (!L.upload(m->backend, &m->weight_buf)) return nullptr;
+    if (!L.upload(m->backend, &m->weight_buf))
+        return nullptr;
 
     std::printf("vla(evo1): weights resident in %.2f GiB (%s)%s\n",
                 ggml_backend_buffer_get_size(m->weight_buf) / (1024.0 * 1024.0 * 1024.0),
@@ -516,7 +539,10 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         // The branches are independent, so the arithmetic per view is unchanged
         // - only the submission pattern differs.
         const size_t want_arena = (size_t) 32 * 1024 * 1024 * (size_t) std::max<int64_t>(n_views, 1);
-        if (want_arena > vision_arena) { vision_scratch.release(); vision_arena = want_arena; }
+        if (want_arena > vision_arena) {
+            vision_scratch.release();
+            vision_arena = want_arena;
+        }
         ggml_context * VC = vision_scratch.reset(vision_arena);
         if (!VC) { std::fprintf(stderr, "vla(evo1): ggml_init(vision ctx) failed\n"); return {}; }
         std::vector<ggml_tensor *> t_px((size_t) n_views), t_ie((size_t) n_views);
@@ -527,7 +553,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             ggml_set_output(t_ie[v]);
         }
         ggml_cgraph * vg = ggml_new_graph_custom(VC,  (size_t) 8192 * std::max<int64_t>(n_views, 1),  false);
-        for (int64_t v = 0; v < n_views; ++v) ggml_build_forward_expand(vg, t_ie[v]);
+        for (int64_t v = 0; v < n_views; ++v)
+            ggml_build_forward_expand(vg, t_ie[v]);
         if (!vision_scratch.alloc(backend, vg)) {
             std::fprintf(stderr, "vla(evo1): vision ggml_gallocr_alloc_graph failed\n");
             return {};
@@ -559,18 +586,24 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
 
     bool pre_built = false;
     for (int j = 0; j < in.n_lang; ++j)
-        if (in.lang_tokens[j] == (int32_t) img_ctx_id) { pre_built = true; break; }
+        if (in.lang_tokens[j] == (int32_t) img_ctx_id) {
+            pre_built = true;
+            break;
+        }
     std::vector<int32_t> input_ids;
     input_ids.reserve(max_text_length);
     if (pre_built) {
-        for (int j = 0; j < in.n_lang; ++j) input_ids.push_back(in.lang_tokens[j]);
+        for (int j = 0; j < in.n_lang; ++j)
+            input_ids.push_back(in.lang_tokens[j]);
     } else {
         for (int64_t v = 0; v < n_views; ++v) {
             input_ids.push_back((int32_t) img_start_id);
-            for (int64_t k = 0; k < num_image_token; ++k) input_ids.push_back((int32_t) img_ctx_id);
+            for (int64_t k = 0; k < num_image_token; ++k)
+                input_ids.push_back((int32_t) img_ctx_id);
             input_ids.push_back((int32_t) img_end_id);
         }
-        for (int j = 0; j < in.n_lang; ++j) input_ids.push_back(in.lang_tokens[j]);
+        for (int j = 0; j < in.n_lang; ++j)
+            input_ids.push_back(in.lang_tokens[j]);
     }
     const int64_t n_real = (int64_t) input_ids.size();
     if (n_real > max_text_length) {
@@ -606,9 +639,11 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
                          in.attention_mask_n, (long long) SEQ);
             return {};
         }
-        for (int64_t p = 0; p < SEQ; ++p) attn_ok[p] = in.attention_mask[p] ? 1 : 0;
+        for (int64_t p = 0; p < SEQ; ++p)
+            attn_ok[p] = in.attention_mask[p] ? 1 : 0;
     } else {
-        for (int64_t p = 0; p < n_real; ++p) attn_ok[p] = 1;
+        for (int64_t p = 0; p < n_real; ++p)
+            attn_ok[p] = 1;
     }
 
     std::vector<float> state_norm(per_a, 0.0f);
@@ -616,11 +651,16 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         const float lo = state_min[i], hi = state_max[i];
         // The converter zero-pads stats past real_state_dim, so lo == hi == 0 there
         // and the affine below would map anything to -1.
-        if (hi <= lo) { state_norm[i] = 0.0f; continue; }
+        if (hi <= lo) {
+            state_norm[i] = 0.0f;
+            continue;
+        }
         const float sv = in.state ? in.state[i] : 0.0f;
         float xn = 2.0f * (sv - lo) / (hi - lo + norm_eps_denom) - 1.0f;
-        if (xn < -1.0f) xn = -1.0f;
-        if (xn >  1.0f) xn =  1.0f;
+        if (xn < -1.0f)
+            xn = -1.0f;
+        if (xn >  1.0f)
+            xn =  1.0f;
         state_norm[i] = xn;
     }
 
@@ -656,7 +696,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     const ggml_type at = act_type;
 
     ggml_tensor * h = as_type(C, t_embeds, at);
-    for (int64_t i = 0; i < lm_layers; ++i) h = build_qwen2_layer(C, *this, lm[i], h, t_pos, t_lmmask, SEQ, t_qmask);
+    for (int64_t i = 0; i < lm_layers; ++i)
+        h = build_qwen2_layer(C, *this, lm[i], h, t_pos, t_lmmask, SEQ, t_qmask);
     ggml_tensor * context = ggml_mul(C, ggml_rms_norm(C, h, lm_rms_eps), lm_output_norm);
 
     ggml_tensor * se = ggml_relu(C, ggml_add(C, mm_act(C, state_W1, as_type(C, t_state, at), at), state_b1));
@@ -742,7 +783,12 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_tensor * t_amask = gio.t_amask, * x_action = gio.x_action;
 
     ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
-    { std::vector<int32_t> pp(SEQ); for (int64_t i = 0; i < SEQ; ++i) pp[i] = (int32_t) i; ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos)); }
+    {
+        std::vector<int32_t> pp(SEQ);
+        for (int64_t i = 0; i < SEQ; ++i)
+            pp[i] = (int32_t) i;
+        ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos));
+    }
     { std::vector<float> mk((size_t) SEQ * SEQ); const float NEG = -std::numeric_limits<float>::infinity();
       for (int64_t q = 0; q < SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) mk[q * SEQ + kv] = (kv <= q && attn_ok[kv]) ? 0.0f : NEG;
       ggml_backend_tensor_set(t_lmmask, mk.data(), 0, ggml_nbytes(t_lmmask)); }

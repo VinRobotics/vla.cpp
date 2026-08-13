@@ -25,7 +25,8 @@
 namespace vla {
 
 void DitHead::declare(WeightLoader & L, const char * prefix, bool fuse_qkv, bool interleave, const char * outer) {
-    if (!outer) outer = prefix;
+    if (!outer)
+        outer = prefix;
 
     te_l1W = L.gemm("%s.time_emb.l1.weight", outer);
     te_l1b = L.f32 ("%s.time_emb.l1.bias",   outer);
@@ -116,8 +117,13 @@ ggml_tensor * DitHead::block(ggml_context * C, const DitLayerW & w, ggml_tensor 
         V = ggml_cont(C, ggml_permute(C, head_view(C, qkv, hd, heads, Tk, dim, 3, 2), 1, 2, 0, 3));
     } else {
         Q = to_heads(C, linear(C, w.Wq, w.bq, n), hd, heads, Tk);
-        if (K_pre) { K = K_pre; V = V_pre; }
-        else       { kv(C, w, enc ? enc : n, &K, &V); }
+        if (K_pre) {
+            K = K_pre;
+            V = V_pre;
+        }
+        else       {
+            kv(C, w, enc ? enc : n, &K, &V);
+        }
     }
 
     ggml_tensor * att = attention(C, Q, K, V, nullptr, scale, dim, Tk);

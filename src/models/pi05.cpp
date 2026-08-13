@@ -90,7 +90,9 @@ struct Pi05ModelArch : public ModelArchBase {
 
     struct MainKey {
         int64_t n_img=-1, n_lang=-1, nsteps=-1;
-        bool operator==(const MainKey & o) const { return n_img==o.n_img && n_lang==o.n_lang && nsteps==o.nsteps; }
+        bool operator==(const MainKey & o) const {
+            return n_img==o.n_img && n_lang==o.n_lang && nsteps==o.nsteps;
+        }
     };
     struct MainIO {
         ggml_tensor *t_image_emb=nullptr,*t_lang_emb=nullptr,*t_prefix_pos=nullptr;
@@ -184,8 +186,10 @@ ggml_tensor * build_vlm_layer(
     ggml_tensor * q_rope = rope_call(q_h);
     ggml_tensor * k_rope = rope_call(k_h);
 
-    if (k_out) *k_out = k_rope;
-    if (v_out) *v_out = v_h;
+    if (k_out)
+        *k_out = k_rope;
+    if (v_out)
+        *v_out = v_h;
 
     ggml_tensor * Q = ggml_cont(ctx, ggml_permute(ctx, q_rope, 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(ctx, ggml_permute(ctx, k_rope, 0, 2, 1, 3));
@@ -222,7 +226,8 @@ ggml_tensor * build_adarms(
 
     ggml_tensor * out = ggml_add(ctx,
         ggml_add(ctx, normed, ggml_mul(ctx, normed, scale)), shift);
-    if (gate_out) *gate_out = gate;
+    if (gate_out)
+        *gate_out = gate;
     return out;
 }
 
@@ -287,7 +292,10 @@ ggml_tensor * build_expert_layer(
 
 bool load_config(const gguf_reader & g, Config & cfg) {
     auto need = [&](const char * k) {
-        if (!g.has(k)) { std::fprintf(stderr, "vla(pi05): gguf missing key %s\n", k); return false; }
+        if (!g.has(k)) {
+            std::fprintf(stderr, "vla(pi05): gguf missing key %s\n", k);
+            return false;
+        }
         return true;
     };
     for (const char * k : {"pi05.hidden", "pi05.intermediate", "pi05.n_q_heads", "pi05.n_kv_heads",
@@ -295,7 +303,8 @@ bool load_config(const gguf_reader & g, Config & cfg) {
                            "pi05.chunk_size", "pi05.num_steps", "pi05.max_state_dim", "pi05.max_action_dim",
                            "pi05.real_state_dim", "pi05.real_action_dim", "pi05.tokenizer_max_length",
                            "pi05.min_period", "pi05.max_period"}) {
-        if (!need(k)) return false;
+        if (!need(k))
+            return false;
     }
     cfg = Config{};
     cfg.hidden          = g.u32("pi05.hidden");
@@ -339,8 +348,14 @@ bool load_stats(gguf_reader & g, Pi05ModelArch & m) {
     m.action_std .assign(cfg.real_action_dim, 1.f);
     auto read1d = [&](const char * name, std::vector<float> & dst) {
         const ggml_tensor * t = g.meta(name);
-        if (!t) { std::printf("vla(pi05): %s missing - identity\n", name); return; }
-        if (t->ne[0] != (int64_t) dst.size()) { std::printf("vla(pi05): %s dim mismatch - identity\n", name); return; }
+        if (!t) {
+            std::printf("vla(pi05): %s missing - identity\n", name);
+            return;
+        }
+        if (t->ne[0] != (int64_t) dst.size()) {
+            std::printf("vla(pi05): %s dim mismatch - identity\n", name);
+            return;
+        }
         const std::vector<float> identity = dst;
         if (!g.read_raw(name, dst.data(), dst.size() * sizeof(float))) {
             // A short read leaves dst half-overwritten.
@@ -365,9 +380,12 @@ bool load_stats(gguf_reader & g, Pi05ModelArch & m) {
 }
 
 Pi05ModelArch::~Pi05ModelArch() {
-    if (weight_buf)  ggml_backend_buffer_free(weight_buf);
-    if (ctx_weights) ggml_free(ctx_weights);
-    if (backend)     ggml_backend_free(backend);
+    if (weight_buf)
+        ggml_backend_buffer_free(weight_buf);
+    if (ctx_weights)
+        ggml_free(ctx_weights);
+    if (backend)
+        ggml_backend_free(backend);
 }
 
 std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
@@ -387,14 +405,16 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     m->ckpt_path_  = ckpt_path;
     m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
 
-    if (!m->io.open(ckpt_path)) return nullptr;
+    if (!m->io.open(ckpt_path))
+        return nullptr;
     gguf_reader & g = m->io;
     if (!g.has("pi05.architecture") || g.str("pi05.architecture") != "pi05") {
         std::fprintf(stderr, "vla(pi05): '%s' is not a π0.5 GGUF (pi05.architecture missing/wrong)\n",
                      ckpt_path.c_str());
         return nullptr;
     }
-    if (!load_config(g, m->cfg)) return nullptr;
+    if (!load_config(g, m->cfg))
+        return nullptr;
     const Config & cfg = m->cfg;
     m->adarms_cond_dim = g.has("pi05.adarms_cond_dim") ? g.u32("pi05.adarms_cond_dim") : cfg.expert_h;
     m->quantile_norm   = g.has("pi05.norm_mode") && g.str("pi05.norm_mode") == "quantiles";
@@ -411,7 +431,9 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     m->n_threads = default_cpu_threads();
     {
         const Backend b = backend_init("vla(pi05)", m->n_threads);
-        if (!b.handle) { return nullptr; }
+        if (!b.handle) {
+            return nullptr;
+        }
         m->backend = b.handle;
     }
 
@@ -422,7 +444,8 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
         vu("pi05.vit_hidden", m->vit_hidden); vu("pi05.vit_layers", m->vit_layers);
         vu("pi05.vit_heads",  m->vit_heads);  vu("pi05.image_size", m->vit_image_size);
         vu("pi05.patch_size", m->vit_patch_size); vu("pi05.n_img_tokens", m->vit_n_tokens);
-        if (g.has("pi05.vit_ln_eps")) m->vit_ln_eps = g.f32("pi05.vit_ln_eps");
+        if (g.has("pi05.vit_ln_eps"))
+            m->vit_ln_eps = g.f32("pi05.vit_ln_eps");
         const int64_t grid = m->vit_image_size / m->vit_patch_size;
         if (grid * grid != m->vit_n_tokens || m->vit_n_tokens != cfg.n_img) {
             std::fprintf(stderr, "vla(pi05): vit geometry mismatch (grid^2=%lld n_img_tokens=%lld cfg.n_img=%lld)\n",
@@ -434,7 +457,10 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     {
         ggml_init_params wp = { (size_t) 16 * 1024 * 1024, nullptr,  true };
         m->ctx_weights = ggml_init(wp);
-        if (!m->ctx_weights) { std::fprintf(stderr, "vla(pi05): ggml_init(ctx_weights) failed\n"); return nullptr; }
+        if (!m->ctx_weights) {
+            std::fprintf(stderr, "vla(pi05): ggml_init(ctx_weights) failed\n");
+            return nullptr;
+        }
     }
     ggml_context * W = m->ctx_weights;
     std::vector<ggml_tensor *> weights;
@@ -443,7 +469,11 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
 
     auto mk = [&](const char * name, ggml_type type, int n_dims, const int64_t * ne) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name); missing = true; return nullptr; }
+        if (!gt) {
+            std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name);
+            missing = true;
+            return nullptr;
+        }
         ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), n_dims, ne);
         ggml_set_name(t, name);
         weights.push_back(t);
@@ -451,12 +481,20 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     };
     auto mk_mm = [&](const char * name) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name); missing = true; return nullptr; }
+        if (!gt) {
+            std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name);
+            missing = true;
+            return nullptr;
+        }
         return mk(name, m->matmul_type, GGML_MAX_DIMS, gt->ne);
     };
     auto mk_f32 = [&](const char * name) -> ggml_tensor * {
         const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name); missing = true; return nullptr; }
+        if (!gt) {
+            std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name);
+            missing = true;
+            return nullptr;
+        }
         return mk(name, GGML_TYPE_F32, GGML_MAX_DIMS, gt->ne);
     };
 
@@ -491,12 +529,14 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     m->W_tout = L.f32("time_mlp_out.weight");     m->b_tout = L.f32("time_mlp_out.bias");
     m->W_aout = L.f32("action_out_proj.weight");  m->b_aout = L.f32("action_out_proj.bias");
 
-    if (!L.upload(m->backend, &m->weight_buf)) return nullptr;
+    if (!L.upload(m->backend, &m->weight_buf))
+        return nullptr;
 
     std::printf("vla(pi05): resident weights = %.2f GiB\n",
                 ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0*1024.0));
 
-    if (!load_stats(g, *m)) return nullptr;
+    if (!load_stats(g, *m))
+        return nullptr;
     std::printf("vla(pi05): model loaded (n_threads=%d)\n", m->n_threads);
     return m;
 }
@@ -543,7 +583,8 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         h = ggml_add(VC, ggml_mul(VC, ggml_norm(VC, h, vit_ln_eps), vit.post_ln_w), vit.post_ln_b);
         // PaliGemma projector: linear (+ optional bias), then 1/sqrt(hidden) scale (matches clip.cpp siglip.cpp).
         ggml_tensor * proj = ggml_mul_mat(VC, mm_proj_w, h);
-        if (mm_proj_b) proj = ggml_add(VC, proj, mm_proj_b);
+        if (mm_proj_b)
+            proj = ggml_add(VC, proj, mm_proj_b);
         ggml_tensor * vit_emb = ggml_scale(VC, proj, 1.0f / std::sqrt((float) proj->ne[0]));
         ggml_set_output(vit_emb);
 
@@ -571,7 +612,8 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         // projector features. Inside this branch on purpose: precomputed_img_emb
         // replaces the tower and is already LM-ready.
         const float img_scale = (float) std::sqrt((double) hidden_pl);
-        for (float & x : img_emb_host) x *= img_scale;
+        for (float & x : img_emb_host)
+            x *= img_scale;
     }
 
     if (in.n_lang < 1 || !in.lang_tokens) {
@@ -661,8 +703,13 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     }
     {
         std::vector<float> x0h((size_t) max_ad * chunk);
-        if (in.noise) std::memcpy(x0h.data(), in.noise, x0h.size() * sizeof(float));
-        else { std::normal_distribution<float> nd(0.f, 1.f); for (auto & v : x0h) v = nd(rng); }
+        if (in.noise)
+            std::memcpy(x0h.data(), in.noise, x0h.size() * sizeof(float));
+        else {
+            std::normal_distribution<float> nd(0.f, 1.f);
+            for (auto & v : x0h)
+                v = nd(rng);
+        }
         ggml_backend_tensor_set(t_x0, x0h.data(), 0, ggml_nbytes(t_x0));
     }
     for (int s = 0; s < num_steps; ++s) {

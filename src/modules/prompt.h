@@ -30,8 +30,12 @@ struct Prompt {
     std::vector<int32_t> image_pos;
     std::vector<int32_t> text_pos;
 
-    int64_t len()     const { return (int64_t) ids.size(); }
-    int64_t n_text()  const { return (int64_t) text_pos.size(); }
+    int64_t len()     const {
+        return (int64_t) ids.size();
+    }
+    int64_t n_text()  const {
+        return (int64_t) text_pos.size();
+    }
 };
 
 // Accepts a stream carrying exactly n_img placeholders, or none, in which case

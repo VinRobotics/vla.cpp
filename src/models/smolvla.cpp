@@ -63,7 +63,8 @@ struct safetensors {
 
     bool open(const std::string & path) {
         file.open(path, std::ios::binary);
-        if (!file) return false;
+        if (!file)
+            return false;
         uint64_t header_size = 0;
         file.read(reinterpret_cast<char *>(&header_size), sizeof(header_size));
         std::string header_str(header_size, '\0');
@@ -71,7 +72,8 @@ struct safetensors {
         data_blob_start = sizeof(uint64_t) + header_size;
         json j = json::parse(header_str);
         for (auto it = j.begin(); it != j.end(); ++it) {
-            if (it.key() == "__metadata__") continue;
+            if (it.key() == "__metadata__")
+                continue;
             const auto & v = it.value();
             st_tensor_info info;
             info.dtype = v.at("dtype").get<std::string>();
@@ -105,7 +107,10 @@ struct safetensors {
         const size_t elsz = (info.dtype == "BF16") ? sizeof(ggml_bf16_t) : sizeof(float);
         size_t want = elsz;
         for (const int64_t d : info.shape) {
-            if (d < 0) { std::fprintf(stderr, "vla: negative dim for %s\n", name.c_str()); return false; }
+            if (d < 0) {
+                std::fprintf(stderr, "vla: negative dim for %s\n", name.c_str());
+                return false;
+            }
             want *= (size_t) d;
         }
         if (info.off_end < info.off_begin || info.off_end - info.off_begin != want) {
@@ -170,20 +175,26 @@ struct gguf_source {
     }
 
     ~gguf_source() {
-        if (fp)       std::fclose(fp);
-        if (gctx)     gguf_free(gctx);
-        if (meta_ctx) ggml_free(meta_ctx);
+        if (fp)
+            std::fclose(fp);
+        if (gctx)
+            gguf_free(gctx);
+        if (meta_ctx)
+            ggml_free(meta_ctx);
     }
 
     static bool shape_matches(const ggml_tensor * t, const std::vector<int64_t> & pt_shape) {
         const int nd_used = std::max(1, (int) pt_shape.size());
-        if (nd_used > GGML_MAX_DIMS) return false;
+        if (nd_used > GGML_MAX_DIMS)
+            return false;
         for (int d = 0; d < (int) pt_shape.size(); ++d) {
             const int64_t expected = pt_shape[pt_shape.size() - 1 - d];
-            if (t->ne[d] != expected) return false;
+            if (t->ne[d] != expected)
+                return false;
         }
         for (int d = (int) pt_shape.size(); d < GGML_MAX_DIMS; ++d) {
-            if (t->ne[d] != 1) return false;
+            if (t->ne[d] != 1)
+                return false;
         }
         return true;
     }
@@ -207,10 +218,12 @@ struct gguf_source {
             return false;
         }
         if (t->type == GGML_TYPE_F32) {
-            if (std::fread(dst, 1, bytes, fp) != bytes) return false;
+            if (std::fread(dst, 1, bytes, fp) != bytes)
+                return false;
         } else if (t->type == GGML_TYPE_BF16) {
             std::vector<ggml_bf16_t> tmp(bytes / sizeof(ggml_bf16_t));
-            if (std::fread(tmp.data(), 1, bytes, fp) != bytes) return false;
+            if (std::fread(tmp.data(), 1, bytes, fp) != bytes)
+                return false;
             ggml_bf16_to_fp32_row(tmp.data(), dst, tmp.size());
         } else {
             std::fprintf(stderr, "vla: gguf unsupported dtype %d for %s\n",
@@ -236,7 +249,8 @@ struct gguf_source {
             return false;
         }
         const size_t offset = data_off + gguf_get_tensor_offset(gctx, id);
-        if (fseeko(fp, (off_t) offset, SEEK_SET) != 0) return false;
+        if (fseeko(fp, (off_t) offset, SEEK_SET) != 0)
+            return false;
         return std::fread(dst, 1, bytes, fp) == bytes;
     }
 
@@ -246,11 +260,21 @@ struct gguf_source {
     bool has_key(const char * key) const {
         return find_key(key) >= 0;
     }
-    uint32_t get_u32(const char * key) const { return gguf_get_val_u32(gctx, find_key(key)); }
-    int32_t  get_i32(const char * key) const { return gguf_get_val_i32(gctx, find_key(key)); }
-    float    get_f32(const char * key) const { return gguf_get_val_f32(gctx, find_key(key)); }
-    double   get_f64(const char * key) const { return gguf_get_val_f64(gctx, find_key(key)); }
-    std::string get_str(const char * key) const { return gguf_get_val_str(gctx, find_key(key)); }
+    uint32_t get_u32(const char * key) const {
+        return gguf_get_val_u32(gctx, find_key(key));
+    }
+    int32_t  get_i32(const char * key) const {
+        return gguf_get_val_i32(gctx, find_key(key));
+    }
+    float    get_f32(const char * key) const {
+        return gguf_get_val_f32(gctx, find_key(key));
+    }
+    double   get_f64(const char * key) const {
+        return gguf_get_val_f64(gctx, find_key(key));
+    }
+    std::string get_str(const char * key) const {
+        return gguf_get_val_str(gctx, find_key(key));
+    }
 
     bool has_tensor(const char * name) const {
         return ggml_get_tensor(meta_ctx, name) != nullptr;
@@ -573,7 +597,8 @@ bool load_config_from_gguf(const gguf_source & st, Config & cfg) {
             "smolvla.real_state_dim", "smolvla.real_action_dim",
             "smolvla.self_attn_every_n_layers", "smolvla.tokenizer_max_length",
             "smolvla.min_period", "smolvla.max_period"}) {
-        if (!need(k)) return false;
+        if (!need(k))
+            return false;
     }
 
     cfg.hidden        = st.get_u32("smolvla.hidden");
@@ -626,15 +651,24 @@ std::string hf_to_gguf(const std::string & n) {
     static const char * MODEL_PFX     = "model.";
 
     auto map_suffix = [](const std::string & s) -> std::string {
-        if (s == "input_layernorm.weight")          return "attn_norm.weight";
-        if (s == "self_attn.q_proj.weight")         return "attn_q.weight";
-        if (s == "self_attn.k_proj.weight")         return "attn_k.weight";
-        if (s == "self_attn.v_proj.weight")         return "attn_v.weight";
-        if (s == "self_attn.o_proj.weight")         return "attn_o.weight";
-        if (s == "post_attention_layernorm.weight") return "ffn_norm.weight";
-        if (s == "mlp.gate_proj.weight")            return "ffn_gate.weight";
-        if (s == "mlp.up_proj.weight")              return "ffn_up.weight";
-        if (s == "mlp.down_proj.weight")            return "ffn_down.weight";
+        if (s == "input_layernorm.weight")
+            return "attn_norm.weight";
+        if (s == "self_attn.q_proj.weight")
+            return "attn_q.weight";
+        if (s == "self_attn.k_proj.weight")
+            return "attn_k.weight";
+        if (s == "self_attn.v_proj.weight")
+            return "attn_v.weight";
+        if (s == "self_attn.o_proj.weight")
+            return "attn_o.weight";
+        if (s == "post_attention_layernorm.weight")
+            return "ffn_norm.weight";
+        if (s == "mlp.gate_proj.weight")
+            return "ffn_gate.weight";
+        if (s == "mlp.up_proj.weight")
+            return "ffn_up.weight";
+        if (s == "mlp.down_proj.weight")
+            return "ffn_down.weight";
         return s;
     };
     auto starts_with = [](const std::string & s, const char * pfx) -> bool {
@@ -651,9 +685,11 @@ std::string hf_to_gguf(const std::string & n) {
 
     auto layer_translate = [&](const std::string & rest, const char * dst_blk) -> std::string {
 
-        if (!starts_with(rest, "layers.")) return n;
+        if (!starts_with(rest, "layers."))
+            return n;
         const size_t end_i = rest.find('.', 7);
-        if (end_i == std::string::npos) return n;
+        if (end_i == std::string::npos)
+            return n;
         const std::string idx = rest.substr(7, end_i - 7);
         const std::string suf = rest.substr(end_i + 1);
         return std::string(dst_blk) + ".blk." + idx + "." + map_suffix(suf);
@@ -671,18 +707,25 @@ std::string hf_to_gguf(const std::string & n) {
         return "mm.fc.weight";
     if (starts_with(n, VIS_PFX)) {
         const std::string rest = n.substr(std::strlen(VIS_PFX));
-        if (rest == "embeddings.patch_embedding.weight")   return "vit.patch_embd.weight";
-        if (rest == "embeddings.patch_embedding.bias")     return "vit.patch_embd.bias";
-        if (rest == "embeddings.position_embedding.weight") return "vit.pos_embd";
-        if (rest == "post_layernorm.weight")               return "vit.post_ln.weight";
-        if (rest == "post_layernorm.bias")                 return "vit.post_ln.bias";
+        if (rest == "embeddings.patch_embedding.weight")
+            return "vit.patch_embd.weight";
+        if (rest == "embeddings.patch_embedding.bias")
+            return "vit.patch_embd.bias";
+        if (rest == "embeddings.position_embedding.weight")
+            return "vit.pos_embd";
+        if (rest == "post_layernorm.weight")
+            return "vit.post_ln.weight";
+        if (rest == "post_layernorm.bias")
+            return "vit.post_ln.bias";
         if (starts_with(rest, "encoder.layers.")) {
             const size_t e = rest.find('.', 15);
-            if (e == std::string::npos) return n;
+            if (e == std::string::npos)
+                return n;
             const std::string idx = rest.substr(15, e - 15);
             const std::string suf = rest.substr(e + 1);
             std::string ds;
-            if      (suf == "layer_norm1.weight")     ds = "ln1.weight";
+            if      (suf == "layer_norm1.weight")
+                ds = "ln1.weight";
             else if (suf == "layer_norm1.bias")       ds = "ln1.bias";
             else if (suf == "layer_norm2.weight")     ds = "ln2.weight";
             else if (suf == "layer_norm2.bias")       ds = "ln2.bias";
@@ -698,7 +741,8 @@ std::string hf_to_gguf(const std::string & n) {
             else if (suf == "mlp.fc1.bias")              ds = "fc1.bias";
             else if (suf == "mlp.fc2.weight")            ds = "fc2.weight";
             else if (suf == "mlp.fc2.bias")              ds = "fc2.bias";
-            else return n;
+            else
+                return n;
             return "vit.blk." + idx + "." + ds;
         }
         return n;
@@ -721,10 +765,13 @@ ggml_tensor * rope_q_or_k(ggml_context * ctx, ggml_tensor * x,
                           32.f,  1.f);
 }
 
-static inline bool tower_mm_f32_prec() { return vla::mm_prec_f32_enabled(); }
+static inline bool tower_mm_f32_prec() {
+    return vla::mm_prec_f32_enabled();
+}
 static inline ggml_tensor * mm_w(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x) {
     ggml_tensor * r = ggml_mul_mat(ctx, w, x);
-    if (tower_mm_f32_prec()) ggml_mul_mat_set_prec(r, GGML_PREC_F32);
+    if (tower_mm_f32_prec())
+        ggml_mul_mat_set_prec(r, GGML_PREC_F32);
     return r;
 }
 
@@ -846,7 +893,8 @@ namespace {
 
 static void vram_probe(ggml_backend_t backend, const char * label) {
     ggml_backend_dev_t dev = ggml_backend_get_device(backend);
-    if (!dev) return;
+    if (!dev)
+        return;
     size_t free_b = 0, total_b = 0;
     ggml_backend_dev_memory(dev, &free_b, &total_b);
     static size_t prev_free = 0;
@@ -867,10 +915,14 @@ static void vram_probe(ggml_backend_t backend, const char * label) {
 
 static ggml_type resolve_weight_dtype() {
     const char * e = std::getenv("VLA_WEIGHT_DTYPE");
-    if (!e) return GGML_TYPE_BF16;
-    if (std::strcmp(e, "f32")  == 0) return GGML_TYPE_F32;
-    if (std::strcmp(e, "bf16") == 0) return GGML_TYPE_BF16;
-    if (std::strcmp(e, "f16")  == 0) return GGML_TYPE_F16;
+    if (!e)
+        return GGML_TYPE_BF16;
+    if (std::strcmp(e, "f32")  == 0)
+        return GGML_TYPE_F32;
+    if (std::strcmp(e, "bf16") == 0)
+        return GGML_TYPE_BF16;
+    if (std::strcmp(e, "f16")  == 0)
+        return GGML_TYPE_F16;
     std::fprintf(stderr, "vla: unknown VLA_WEIGHT_DTYPE='%s', using bf16\n", e);
     return GGML_TYPE_BF16;
 }
@@ -930,7 +982,10 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
 
     {
         const Backend b = backend_init("vla", default_cpu_threads());
-        if (!b.handle) { delete m; return nullptr; }
+        if (!b.handle) {
+            delete m;
+            return nullptr;
+        }
         m->backend = b.handle;
     }
     vram_probe(m->backend, "after backend init");
@@ -946,7 +1001,8 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
         vu("smolvla.vit_heads",  m->vit_heads);  vu("smolvla.patch_size", m->vit_patch);
         vu("smolvla.image_size", m->vit_image);  vu("smolvla.vit_pixel_shuffle", m->vit_scale);
         vu("smolvla.n_img_tokens", m->vit_n_tokens); vu("smolvla.vit_inter", m->vit_inter);
-        if (gst.has_key("smolvla.vit_ln_eps")) m->vit_ln_eps = gst.get_f32("smolvla.vit_ln_eps");
+        if (gst.has_key("smolvla.vit_ln_eps"))
+            m->vit_ln_eps = gst.get_f32("smolvla.vit_ln_eps");
     }
     {
         const int64_t grid = m->vit_image / m->vit_patch;
@@ -974,7 +1030,8 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
             for (const auto & kv : st.tensors) {
                 if (kv.first.compare(0, prefix.size(), prefix) == 0) {
                     const int idx = std::atoi(kv.first.c_str() + prefix.size());
-                    if (idx > max_layer) max_layer = idx;
+                    if (idx > max_layer)
+                        max_layer = idx;
                 }
             }
             if (max_layer < 0) {
@@ -1233,10 +1290,16 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
     };
 
     for (auto & p : pending_f32) {
-        if (!stream_f32(p.name, p.t, p.shape)) { delete m; return nullptr; }
+        if (!stream_f32(p.name, p.t, p.shape)) {
+            delete m;
+            return nullptr;
+        }
     }
     for (auto & p : pending_bf16) {
-        if (!stream_bf16(p.name, p.t))         { delete m; return nullptr; }
+        if (!stream_bf16(p.name, p.t))         {
+            delete m;
+            return nullptr;
+        }
     }
 
     {
@@ -1411,11 +1474,16 @@ bool build_compute_graph(SmolVLAModelArch* m, int n_views) {
 
 SmolVLAModelArch::~SmolVLAModelArch() {
 
-    if (galloc)      ggml_gallocr_free(galloc);
-    if (ctx_compute) ggml_free(ctx_compute);
-    if (weight_buf)  ggml_backend_buffer_free(weight_buf);
-    if (ctx_weights) ggml_free(ctx_weights);
-    if (backend)     ggml_backend_free(backend);
+    if (galloc)
+        ggml_gallocr_free(galloc);
+    if (ctx_compute)
+        ggml_free(ctx_compute);
+    if (weight_buf)
+        ggml_backend_buffer_free(weight_buf);
+    if (ctx_weights)
+        ggml_free(ctx_weights);
+    if (backend)
+        ggml_backend_free(backend);
 }
 
 namespace {
@@ -1490,7 +1558,10 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         std::vector<float> chw, post_host((size_t) H * n_patches), shuf_host((size_t) c4 * K);
         bool vok = true;
         for (int v = 0; v < n_views && vok; ++v) {
-            if (!preprocess_image_chw("smolvla", in.images[v], m->vit_image, chw)) { vok = false; break; }
+            if (!preprocess_image_chw("smolvla", in.images[v], m->vit_image, chw)) {
+                vok = false;
+                break;
+            }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
             if (ggml_backend_graph_compute(m->backend, gA) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(smolvla): vision compute A failed (view %d)\n", v); vok = false; break;
@@ -1532,8 +1603,10 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     if (in.timing_detail == TimingDetail::NONE) {
 
         if (m->gf_cached == nullptr || m->cached_n_views != n_views) {
-            if (m->galloc)      ggml_gallocr_free(m->galloc);
-            if (m->ctx_compute) ggml_free(m->ctx_compute);
+            if (m->galloc)
+                ggml_gallocr_free(m->galloc);
+            if (m->ctx_compute)
+                ggml_free(m->ctx_compute);
             m->galloc      = nullptr;
             m->ctx_compute = nullptr;
             m->gf_cached   = nullptr;
@@ -1551,7 +1624,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         const int64_t pad_end      = cfg.n_img + n_lang_max;
 
         std::vector<float> state_host(cfg.max_state_dim, 0.0f);
-        if (in.state) std::memcpy(state_host.data(), in.state, cfg.max_state_dim * sizeof(float));
+        if (in.state)
+            std::memcpy(state_host.data(), in.state, cfg.max_state_dim * sizeof(float));
         for (int64_t i = 0; i < cfg.real_state_dim && i < cfg.max_state_dim; ++i) {
             state_host[i] = (state_host[i] - m->state_mean[i]) / (m->state_std[i] + cfg.norm_eps);
         }
@@ -1561,7 +1635,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
             std::memcpy(noise_host.data(), in.noise, noise_host.size() * sizeof(float));
         } else {
             std::normal_distribution<float> dist(0.f, 1.f);
-            for (auto & v : noise_host) v = dist(m->rng);
+            for (auto & v : noise_host)
+                v = dist(m->rng);
         }
 
         std::vector<int32_t> lang_host(n_lang_max, 0);
@@ -1574,8 +1649,10 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         for (int64_t i = 0; i < n_prefix_max; ++i) {
             for (int64_t j = 0; j < n_prefix_max; ++j) {
                 bool blocked = false;
-                if ((i < n_prefix_max - 1) && (j == n_prefix_max - 1)) blocked = true;
-                if (j >= pad_start && j < pad_end)                     blocked = true;
+                if ((i < n_prefix_max - 1) && (j == n_prefix_max - 1))
+                    blocked = true;
+                if (j >= pad_start && j < pad_end)
+                    blocked = true;
                 mask_prefill_host[i * n_prefix_max + j] = blocked ? -INFINITY : 0.f;
             }
             pos_prefill_host[i] = (i == n_prefix_max - 1)
@@ -1678,7 +1755,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     ggml_tensor * pos_rebased      = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
 
     std::vector<float> state_host(cfg.max_state_dim, 0.0f);
-    if (in.state) std::memcpy(state_host.data(), in.state, cfg.max_state_dim * sizeof(float));
+    if (in.state)
+        std::memcpy(state_host.data(), in.state, cfg.max_state_dim * sizeof(float));
     for (int64_t i = 0; i < cfg.real_state_dim && i < cfg.max_state_dim; ++i) {
         state_host[i] = (state_host[i] - m->state_mean[i]) / (m->state_std[i] + cfg.norm_eps);
     }
@@ -1688,7 +1766,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         std::memcpy(noise_host.data(), in.noise, noise_host.size() * sizeof(float));
     } else {
         std::normal_distribution<float> dist(0.f, 1.f);
-        for (auto & v : noise_host) v = dist(m->rng);
+        for (auto & v : noise_host)
+            v = dist(m->rng);
     }
 
     std::vector<float>   mask_prefill_host(cfg.n_prefix * cfg.n_prefix);
@@ -1708,8 +1787,10 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     for (int64_t i = 0; i < cfg.n_suffix; ++i) {
         for (int64_t j = 0; j < cfg.n_full; ++j) {
             bool blocked;
-            if (j < cfg.n_prefix) blocked = false;
-            else                  blocked = ((j - cfg.n_prefix) > i);
+            if (j < cfg.n_prefix)
+                blocked = false;
+            else
+                blocked = ((j - cfg.n_prefix) > i);
             mask_full_host[i * cfg.n_full + j] = blocked ? -INFINITY : 0.f;
         }
         pos_full_host   [i] = static_cast<int32_t>(cfg.n_prefix + i);
@@ -1894,7 +1975,8 @@ std::unique_ptr<ModelArchBase> smolvla_create(const std::string& mmproj_path,
                                               const std::string& config_path,
                                               const Options& opts) {
     SmolVLAModelArch* raw = smolvla_load_impl(mmproj_path, ckpt_path, config_path);
-    if (!raw) return nullptr;
+    if (!raw)
+        return nullptr;
     return std::unique_ptr<ModelArchBase>(raw);
 }
 

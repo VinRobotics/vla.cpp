@@ -56,8 +56,12 @@ public:
     ggml_tensor * fuse_gemm(const char * out_name, const std::vector<std::string> & srcs);
     ggml_tensor * fuse_f32 (const char * out_name, const std::vector<std::string> & srcs);
 
-    ggml_type gemm_type() const { return gemm_; }
-    bool      ok()        const { return ok_; }
+    ggml_type gemm_type() const {
+        return gemm_;
+    }
+    bool      ok()        const {
+        return ok_;
+    }
 
     bool upload(ggml_backend_t backend, ggml_backend_buffer_t * out_buf);
 

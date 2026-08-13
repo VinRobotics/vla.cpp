@@ -53,7 +53,8 @@ ggml_tensor * WeightLoader::declare(ggml_type want, bool required, bool gemma_no
     }
     ggml_set_name(t, name);
 
-    if (gemma_norm) gemma_norms_.push_back(name);
+    if (gemma_norm)
+        gemma_norms_.push_back(name);
     return t;
 }
 
@@ -91,7 +92,10 @@ ggml_tensor * WeightLoader::fuse_f32(const char * out_name, const std::vector<st
 }
 
 ggml_tensor * WeightLoader::fuse(ggml_type want, const char * out_name, const std::vector<std::string> & srcs) {
-    if (srcs.empty()) { ok_ = false; return nullptr; }
+    if (srcs.empty()) {
+        ok_ = false;
+        return nullptr;
+    }
 
     const ggml_tensor * first = g_.meta(srcs[0].c_str());
     if (!first) {
@@ -141,7 +145,8 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
         const char * name = ggml_get_name(t);
         const bool fused = std::any_of(fused_.begin(), fused_.end(),
                                        [&](const Fused & f) { return f.dst == t; });
-        if (fused) continue;
+        if (fused)
+            continue;
 
         const bool gn = std::find(gemma_norms_.begin(), gemma_norms_.end(), name) != gemma_norms_.end();
 

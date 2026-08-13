@@ -42,7 +42,8 @@ namespace vla {
  */
 inline bool env_flag(const char * name, bool def = false) {
     const char * v = std::getenv(name);
-    if (!v)  return def;
+    if (!v)
+        return def;
     if (!*v) return false;          // FOO= reads as "unset it"
 
     char   buf[8] = {};

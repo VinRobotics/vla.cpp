@@ -191,7 +191,8 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m(
   wmma::fragment<wmma::matrix_b, 16, 16, 16, signed char, wmma::col_major> b_frag;
   wmma::fragment<wmma::accumulator, 16, 16, 16, int> acc[TILES_PER_WARP];
   #pragma unroll
-  for (int t = 0; t < TILES_PER_WARP; ++t) wmma::fill_fragment(acc[t], 0);
+  for (int t = 0; t < TILES_PER_WARP; ++t)
+      wmma::fill_fragment(acc[t], 0);
 
   for (int k_0 = 0; k_0 < K / K_CHUNK; ++k_0) {
     #pragma unroll
@@ -333,7 +334,8 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m_wide(
   wmma::fragment<wmma::matrix_b, 16, 16, 16, signed char, wmma::col_major> b_frag;
   wmma::fragment<wmma::accumulator, 16, 16, 16, int> acc[M_PER_WARP];
   #pragma unroll
-  for (int t = 0; t < M_PER_WARP; ++t) wmma::fill_fragment(acc[t], 0);
+  for (int t = 0; t < M_PER_WARP; ++t)
+      wmma::fill_fragment(acc[t], 0);
 
   for (int k_0 = 0; k_0 < K / K_CHUNK; ++k_0) {
     #pragma unroll
@@ -379,7 +381,8 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m_wide(
     __syncthreads();
   }
 
-  if (!my_tile_valid) return;
+  if (!my_tile_valid)
+      return;
 
   const int n_base = my_tile * 16;
   const float wsv  = ws[n_base / (N / ws_num)];
@@ -474,37 +477,45 @@ __global__ void act_quant_kernel(
     float local_max = 0.0f;
     for (int k = tid; k < K; k += BLOCK_THREADS) {
         float v = fabsf(__bfloat162float(row_in[k]));
-        if (v > local_max) local_max = v;
+        if (v > local_max)
+            local_max = v;
     }
 
     for (int off = 16; off > 0; off >>= 1) {
         float other = __shfl_down_sync(0xffffffff, local_max, off);
-        if (other > local_max) local_max = other;
+        if (other > local_max)
+            local_max = other;
     }
 
     __shared__ float smem[32];
     const int warp_id = tid >> 5;
     const int lane    = tid & 31;
-    if (lane == 0) smem[warp_id] = local_max;
+    if (lane == 0)
+        smem[warp_id] = local_max;
     __syncthreads();
     if (warp_id == 0) {
         float v = (tid < (BLOCK_THREADS + 31) / 32) ? smem[lane] : 0.0f;
         for (int off = 16; off > 0; off >>= 1) {
             float other = __shfl_down_sync(0xffffffff, v, off);
-            if (other > v) v = other;
+            if (other > v)
+                v = other;
         }
-        if (lane == 0) smem[0] = v;
+        if (lane == 0)
+            smem[0] = v;
     }
     __syncthreads();
     const float amax  = smem[0] < 1e-5f ? 1e-5f : smem[0];
     const float scale = 127.0f / amax;
-    if (tid == 0) scales[m] = scale;
+    if (tid == 0)
+        scales[m] = scale;
 
     for (int k = tid; k < K; k += BLOCK_THREADS) {
         float v = __bfloat162float(row_in[k]) * scale;
         float q = nearbyintf(v);
-        if (q >  127.0f) q =  127.0f;
-        if (q < -128.0f) q = -128.0f;
+        if (q >  127.0f)
+            q =  127.0f;
+        if (q < -128.0f)
+            q = -128.0f;
         row_out[k] = (int8_t)q;
     }
 }

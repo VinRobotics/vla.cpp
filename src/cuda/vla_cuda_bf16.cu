@@ -58,8 +58,12 @@ namespace {
 
 constexpr int BLOCK = 256;
 
-inline __device__ float bf2f(const __nv_bfloat16 v) { return __bfloat162float(v); }
-inline __device__ __nv_bfloat16 f2bf(const float v) { return __float2bfloat16(v); }
+inline __device__ float bf2f(const __nv_bfloat16 v) {
+    return __bfloat162float(v);
+}
+inline __device__ __nv_bfloat16 f2bf(const float v) {
+    return __float2bfloat16(v);
+}
 
 // ---------------------------------------------------------------------------
 // elementwise binary: dst = op(src0, src1), src1 broadcast per ggml_can_repeat
@@ -80,8 +84,10 @@ inline __device__ float apply_bin(BinOp op, float a, float b) {
 // arguments so the branch is uniform across the block and the 64-bit modulo is
 // left for the general case that never fires in practice.
 inline __device__ int64_t bcast_idx(int64_t i, int64_t ne_src, int64_t ne_dst) {
-    if (ne_src == ne_dst) return i;
-    if (ne_src == 1)      return 0;
+    if (ne_src == ne_dst)
+        return i;
+    if (ne_src == 1)
+        return 0;
     return i % ne_src;
 }
 
@@ -191,7 +197,9 @@ __global__ void k_bin_bcast_bf16_flat(
 }
 
 // element strides (ggml stores byte strides)
-inline int64_t es(const ggml_tensor * t, int i) { return t->nb[i] / ggml_type_size(t->type); }
+inline int64_t es(const ggml_tensor * t, int i) {
+    return t->nb[i] / ggml_type_size(t->type);
+}
 
 // Launch shape for the row-addressed kernels; ok=false means fall back to flat.
 struct RowGrid {
@@ -211,13 +219,19 @@ inline bool force_flat() {
 inline RowGrid row_grid(int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3) {
     RowGrid g{};
     const int64_t nz = ne2*ne3;
-    if (ne1 > 65535 || nz > 65535 || ne1 < 1 || nz < 1) { g.ok = false; return g; }
+    if (ne1 > 65535 || nz > 65535 || ne1 < 1 || nz < 1) {
+        g.ok = false;
+        return g;
+    }
 
     unsigned bx = 32;
-    while (bx < (unsigned) BLOCK && (int64_t) bx < ne0) bx *= 2;
+    while (bx < (unsigned) BLOCK && (int64_t) bx < ne0)
+        bx *= 2;
     int64_t gx = (ne0 + bx - 1) / bx;
-    if (gx > 65535) gx = 65535;
-    if (gx < 1)     gx = 1;
+    if (gx > 65535)
+        gx = 65535;
+    if (gx < 1)
+        gx = 1;
 
     g.block = dim3(bx, 1, 1);
     g.grid  = dim3((unsigned) gx, (unsigned) ne1, (unsigned) nz);
@@ -229,11 +243,16 @@ template <BinOp op>
 bool bin_bcast(ggml_tensor * dst, cudaStream_t stream) {
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
-    if (!src0 || !src1) return false;
-    if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16) return false;
-    if (src1->type != GGML_TYPE_BF16 && src1->type != GGML_TYPE_F32) return false;
-    if (!ggml_are_same_shape(src0, dst)) return false;
-    if (!ggml_can_repeat(src1, src0)) return false;
+    if (!src0 || !src1)
+        return false;
+    if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16)
+        return false;
+    if (src1->type != GGML_TYPE_BF16 && src1->type != GGML_TYPE_F32)
+        return false;
+    if (!ggml_are_same_shape(src0, dst))
+        return false;
+    if (!ggml_can_repeat(src1, src0))
+        return false;
 
     // Only the unfused path honours VLA_BF16_FLAT: the fused path has no flat
     // fallback, and declining there hands the run to ggml's aborting kernel.
@@ -252,10 +271,13 @@ bool bin_bcast(ggml_tensor * dst, cudaStream_t stream) {
     if (vec8_shape) {
         const int64_t nvec  = dst->ne[0] / 8;
         unsigned      bx    = 32;
-        while (bx < (unsigned) BLOCK && (int64_t) bx < nvec) bx *= 2;
+        while (bx < (unsigned) BLOCK && (int64_t) bx < nvec)
+            bx *= 2;
         int64_t gx = (nvec + bx - 1) / bx;
-        if (gx > 65535) gx = 65535;
-        if (gx < 1)     gx = 1;
+        if (gx > 65535)
+            gx = 65535;
+        if (gx < 1)
+            gx = 1;
         const dim3 vgrid((unsigned) gx, g.grid.y, g.grid.z);
         const dim3 vblock(bx, 1, 1);
 
@@ -269,8 +291,12 @@ bool bin_bcast(ggml_tensor * dst, cudaStream_t stream) {
             es(src1,1), es(src1,2), es(src1,3),                                    \
             es(dst,1), es(dst,2), es(dst,3))
 
-        if (src1->type == GGML_TYPE_BF16) { VLA_LAUNCH_VEC8(__nv_bfloat16); }
-        else                              { VLA_LAUNCH_VEC8(float); }
+        if (src1->type == GGML_TYPE_BF16) {
+            VLA_LAUNCH_VEC8(__nv_bfloat16);
+        }
+        else                              {
+            VLA_LAUNCH_VEC8(float);
+        }
 #undef VLA_LAUNCH_VEC8
         return true;
     }
@@ -364,27 +390,37 @@ __global__ void k_fused_bin_bcast_bf16(
 
 template <BinOp op>
 bool fused_bin_bcast(ggml_tensor * dst, int n_fuse, cudaStream_t stream) {
-    if (n_fuse < 2 || n_fuse > MAX_FUSE) return false;
+    if (n_fuse < 2 || n_fuse > MAX_FUSE)
+        return false;
 
     const ggml_tensor * src0 = dst->src[0];
-    if (!src0) return false;
-    if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16) return false;
-    if (!ggml_are_same_shape(src0, dst)) return false;
+    if (!src0)
+        return false;
+    if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16)
+        return false;
+    if (!ggml_are_same_shape(src0, dst))
+        return false;
 
     // src[1] fixes the layout and type every other addend must match; the
     // upstream fusion check guarantees it, and this re-checks rather than
     // trusting it, because getting it wrong reads out of bounds.
     const ggml_tensor * src1 = dst->src[1];
-    if (!src1) return false;
-    if (src1->type != GGML_TYPE_BF16 && src1->type != GGML_TYPE_F32) return false;
-    if (!ggml_can_repeat(src1, src0)) return false;
+    if (!src1)
+        return false;
+    if (src1->type != GGML_TYPE_BF16 && src1->type != GGML_TYPE_F32)
+        return false;
+    if (!ggml_can_repeat(src1, src0))
+        return false;
 
     for (int k = 1; k < n_fuse; ++k) {
         const ggml_tensor * s = dst->src[k + 1];
-        if (!s || s->type != src1->type) return false;
-        if (!ggml_are_same_shape(s, src1)) return false;
+        if (!s || s->type != src1->type)
+            return false;
+        if (!ggml_are_same_shape(s, src1))
+            return false;
         for (int d = 0; d < GGML_MAX_DIMS; ++d) {
-            if (s->nb[d] != src1->nb[d]) return false;
+            if (s->nb[d] != src1->nb[d])
+                return false;
         }
     }
 
@@ -392,7 +428,8 @@ bool fused_bin_bcast(ggml_tensor * dst, int n_fuse, cudaStream_t stream) {
     // kernel, which aborts on BF16, so an unaddressable shape must decline
     // before the hook claims it.
     const RowGrid g = row_grid(dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3]);
-    if (!g.ok) return false;
+    if (!g.ok)
+        return false;
 
 #define VLA_LAUNCH_FUSED(TYPE)                                                    \
     do {                                                                          \
@@ -425,9 +462,12 @@ enum class UnOp { Silu, Relu, Gelu, GeluErf };
 
 template <UnOp op>
 inline __device__ float apply_unary(const float x) {
-    if (op == UnOp::Silu)    return x / (1.0f + expf(-x));
-    if (op == UnOp::Relu)    return x > 0.0f ? x : 0.0f;
-    if (op == UnOp::GeluErf) return 0.5f*x*(1.0f + erff(x*0.70710678118654752440f));
+    if (op == UnOp::Silu)
+        return x / (1.0f + expf(-x));
+    if (op == UnOp::Relu)
+        return x > 0.0f ? x : 0.0f;
+    if (op == UnOp::GeluErf)
+        return 0.5f*x*(1.0f + erff(x*0.70710678118654752440f));
     // tanh approximation, matching ggml's GGML_UNARY_OP_GELU
     const float c = 0.79788456080286535588f;  // sqrt(2/pi)
     return 0.5f*x*(1.0f + tanhf(c*(x + 0.044715f*x*x*x)));
@@ -445,9 +485,11 @@ __global__ void k_unary_bf16(const __nv_bfloat16 * __restrict__ x,
 template <UnOp op>
 bool unary(ggml_tensor * dst, cudaStream_t stream) {
     const ggml_tensor * src0 = dst->src[0];
-    if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16) return false;
+    if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16)
+        return false;
     // The elementwise index math above assumes a dense buffer.
-    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(dst)) return false;
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(dst))
+        return false;
 
     const int64_t n = ggml_nelements(dst);
     const int64_t blocks = (n + BLOCK - 1) / BLOCK;
@@ -471,8 +513,10 @@ __global__ void k_scale_bf16(const __nv_bfloat16 * __restrict__ x, __nv_bfloat16
 
 bool scale(ggml_tensor * dst, cudaStream_t stream) {
     const ggml_tensor * src0 = dst->src[0];
-    if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16) return false;
-    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(dst)) return false;
+    if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16)
+        return false;
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(dst))
+        return false;
 
     float s = 1.0f, b = 0.0f;
     memcpy(&s, (const float *) dst->op_params + 0, sizeof(float));
@@ -495,7 +539,8 @@ __device__ inline float block_sum(float v, float * shared) {
     shared[tid] = v;
     __syncthreads();
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) shared[tid] += shared[tid + s];
+        if (tid < s)
+            shared[tid] += shared[tid + s];
         __syncthreads();
     }
     return shared[0];
@@ -514,37 +559,45 @@ __global__ void k_norm_bf16(const __nv_bfloat16 * __restrict__ x, __nv_bfloat16 
     for (int64_t c = threadIdx.x; c < ncols; c += blockDim.x) {
         const float v = bf2f(xr[c]);
         sumsq += v*v;
-        if (!rms) sum += v;
+        if (!rms)
+            sum += v;
     }
 
     if (rms) {
         const float ms = block_sum(sumsq, shared) / (float) ncols;
         const float inv = rsqrtf(ms + eps);
-        for (int64_t c = threadIdx.x; c < ncols; c += blockDim.x) dr[c] = f2bf(bf2f(xr[c])*inv);
+        for (int64_t c = threadIdx.x; c < ncols; c += blockDim.x)
+            dr[c] = f2bf(bf2f(xr[c])*inv);
     } else {
         const float mean = block_sum(sum, shared) / (float) ncols;
         __syncthreads();
         const float meansq = block_sum(sumsq, shared) / (float) ncols;
         const float inv = rsqrtf(meansq - mean*mean + eps);
-        for (int64_t c = threadIdx.x; c < ncols; c += blockDim.x) dr[c] = f2bf((bf2f(xr[c]) - mean)*inv);
+        for (int64_t c = threadIdx.x; c < ncols; c += blockDim.x)
+            dr[c] = f2bf((bf2f(xr[c]) - mean)*inv);
     }
 }
 
 template <bool rms>
 bool norm(ggml_tensor * dst, cudaStream_t stream) {
     const ggml_tensor * src0 = dst->src[0];
-    if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16) return false;
+    if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16)
+        return false;
     // Rows must be dense; higher dims are handled by flattening into the row index.
-    if (src0->nb[0] != ggml_type_size(src0->type)) return false;
-    if (dst->nb[0]  != ggml_type_size(dst->type))  return false;
-    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(dst)) return false;
+    if (src0->nb[0] != ggml_type_size(src0->type))
+        return false;
+    if (dst->nb[0]  != ggml_type_size(dst->type))
+        return false;
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(dst))
+        return false;
 
     float eps = 0.0f;
     memcpy(&eps, dst->op_params, sizeof(float));
 
     const int64_t ncols = src0->ne[0];
     const int64_t nrows = ggml_nelements(src0) / ncols;
-    if (nrows > 2147483647) return false;
+    if (nrows > 2147483647)
+        return false;
 
     k_norm_bf16<rms><<<(int) nrows, BLOCK, 0, stream>>>(
         (const __nv_bfloat16 *) src0->data, (__nv_bfloat16 *) dst->data,
@@ -571,7 +624,8 @@ cublasHandle_t g_handle = nullptr;
 bool mul_mat(ggml_tensor * dst, cudaStream_t stream) {
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
-    if (!src0 || !src1) return false;
+    if (!src0 || !src1)
+        return false;
     if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16 || src1->type != GGML_TYPE_BF16) {
         return false;
     }
@@ -581,10 +635,13 @@ bool mul_mat(ggml_tensor * dst, cudaStream_t stream) {
     // src0 is either shared across the whole batch or batched 1:1 with src1
     const bool batch_ok = (src0->ne[2] == 1           && src0->ne[3] == 1) ||
                           (src0->ne[2] == src1->ne[2] && src0->ne[3] == src1->ne[3]);
-    if (!batch_ok) return false;
+    if (!batch_ok)
+        return false;
 
-    if (!g_handle && cublasCreate(&g_handle) != CUBLAS_STATUS_SUCCESS) return false;
-    if (cublasSetStream(g_handle, stream) != CUBLAS_STATUS_SUCCESS) return false;
+    if (!g_handle && cublasCreate(&g_handle) != CUBLAS_STATUS_SUCCESS)
+        return false;
+    if (cublasSetStream(g_handle, stream) != CUBLAS_STATUS_SUCCESS)
+        return false;
 
     const int64_t ne00 = src0->ne[0], ne01 = src0->ne[1];
     const int64_t ne10 = src1->ne[0], ne11 = src1->ne[1];
@@ -627,7 +684,8 @@ bool mul_mat(ggml_tensor * dst, cudaStream_t stream) {
 // ---------------------------------------------------------------------------
 
 extern "C" bool vla_cuda_bf16_fused_binbcast(ggml_tensor * dst, int n_fuse, void * stream_v) {
-    if (!dst) return false;
+    if (!dst)
+        return false;
     cudaStream_t stream = (cudaStream_t) stream_v;
 
     switch (dst->op) {
@@ -638,7 +696,8 @@ extern "C" bool vla_cuda_bf16_fused_binbcast(ggml_tensor * dst, int n_fuse, void
 }
 
 extern "C" bool vla_cuda_bf16_forward(ggml_tensor * dst, void * stream_v) {
-    if (!dst) return false;
+    if (!dst)
+        return false;
     cudaStream_t stream = (cudaStream_t) stream_v;
 
     switch (dst->op) {

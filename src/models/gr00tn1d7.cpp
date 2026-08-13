@@ -155,11 +155,15 @@ bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
 
     if (const char * ns = std::getenv("VLA_NUM_STEPS")) {
         char * end = nullptr; long v = std::strtol(ns, &end, 10);
-        if (end && *end == '\0' && v >= 1) { m.num_steps = (int64_t) v; std::fprintf(stderr, "vla(gr00tn1d7): VLA_NUM_STEPS override → num_steps=%lld\n", (long long) v); }
+        if (end && *end == '\0' && v >= 1) {
+            m.num_steps = (int64_t) v;
+            std::fprintf(stderr, "vla(gr00tn1d7): VLA_NUM_STEPS override → num_steps=%lld\n", (long long) v);
+        }
     }
     F(fk("vit_ln_eps"), m.vit_ln_eps); F(fk("lm_rms_eps"), m.lm_rms_eps); F(fk("ln_eps"), m.ln_eps); F(fk("norm_out_eps"), m.norm_out_eps);
     F(fk("vlln_eps"), m.vlln_eps); F(fk("vlsa_ln_eps"), m.vlsa_ln_eps); F(fk("connector_ln_eps"), m.connector_ln_eps); F(fk("vit_rope_theta"), m.vit_rope_base);
-    if (g.has(fk("lm_rope_theta"))) m.lm_rope_base = (float) g.f64(fk("lm_rope_theta"));
+    if (g.has(fk("lm_rope_theta")))
+        m.lm_rope_base = (float) g.f64(fk("lm_rope_theta"));
 
     m.lm.cfg.hidden      = m.lm_hidden;
     m.lm.cfg.layers      = m.lm_layers;
@@ -202,11 +206,15 @@ bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
         long ls = lookup("libero_sim"); if (ls >= 0) m.aex.embodiment_id = ls;
         if (const char * e = std::getenv("VLA_GR00T_EMBODIMENT")) {
             char * end = nullptr; long v = std::strtol(e, &end, 10);
-            if (end && *end == '\0') m.aex.embodiment_id = v;
+            if (end && *end == '\0')
+                m.aex.embodiment_id = v;
             else { long id = lookup(e); if (id >= 0) m.aex.embodiment_id = id; else std::fprintf(stderr, "vla(gr00tn1d7): embodiment tag '%s' not in embodiment_id_mapping; using id %lld\n", e, (long long) m.aex.embodiment_id); }
         }
     }
-    if (m.aex.embodiment_id < 0 || m.aex.embodiment_id >= m.max_embodiments) { std::fprintf(stderr, "vla(gr00tn1d7): embodiment id %lld out of range [0,%lld)\n", (long long) m.aex.embodiment_id, (long long) m.max_embodiments); return false; }
+    if (m.aex.embodiment_id < 0 || m.aex.embodiment_id >= m.max_embodiments) {
+        std::fprintf(stderr, "vla(gr00tn1d7): embodiment id %lld out of range [0,%lld)\n", (long long) m.aex.embodiment_id, (long long) m.max_embodiments);
+        return false;
+    }
 
     cfg = Config{};
     cfg.n_img = 64; cfg.n_lang = m.max_seq_len; cfg.n_state = 1;
@@ -226,9 +234,12 @@ bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
 
 Gr00tN1d7ModelArch::~Gr00tN1d7ModelArch() {
     mg.release();
-    if (weight_buf)  ggml_backend_buffer_free(weight_buf);
-    if (ctx_weights) ggml_free(ctx_weights);
-    if (backend)     ggml_backend_free(backend);
+    if (weight_buf)
+        ggml_backend_buffer_free(weight_buf);
+    if (ctx_weights)
+        ggml_free(ctx_weights);
+    if (backend)
+        ggml_backend_free(backend);
 }
 
 std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
@@ -243,9 +254,14 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
     m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
 
     gguf_reader g("gr00tn1d7");
-    if (!g.open(ckpt_path)) return nullptr;
-    if (!g.has("gr00t_n1_7.architecture")) { std::fprintf(stderr, "vla(gr00tn1d7): %s is not a gr00t_n1_7 GGUF\n", ckpt_path.c_str()); return nullptr; }
-    if (!load_config(g, *m, m->cfg)) return nullptr;
+    if (!g.open(ckpt_path))
+        return nullptr;
+    if (!g.has("gr00t_n1_7.architecture")) {
+        std::fprintf(stderr, "vla(gr00tn1d7): %s is not a gr00t_n1_7 GGUF\n", ckpt_path.c_str());
+        return nullptr;
+    }
+    if (!load_config(g, *m, m->cfg))
+        return nullptr;
     std::printf("vla(gr00tn1d7): vit=Qwen3-VL %lldd×%lldL×%lldh (Conv3d patch %lld², temporal %lld; learned pos %lld + 2D rope; deepstack@{%lld,%lld,%lld}; merge÷%lld)  "
                 "lm=Qwen3-VL %lldd×%lldL (%lldq/%lldkv×%lld, θ=%g)  vlsa=%lldL×%lldh×%lld  dit=AlternateVLDiT %lldL×%lldh×%lld(inner %lld) attend_text_every_n=%lld  "
                 "in_emb=%lld  horizon=%lld action_dim=%lld max_state=%lld N_steps=%lld  embodiment=%lld  resident=%s\n",
@@ -259,13 +275,18 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
 
     {
         const Backend b = backend_init("vla(gr00tn1d7)", m->n_threads);
-        if (!b.handle) { return nullptr; }
+        if (!b.handle) {
+            return nullptr;
+        }
         m->backend = b.handle;
     }
 
     ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };
     m->ctx_weights = ggml_init(wp);
-    if (!m->ctx_weights) { std::fprintf(stderr, "vla(gr00tn1d7): ggml_init(ctx_weights) failed\n"); return nullptr; }
+    if (!m->ctx_weights) {
+        std::fprintf(stderr, "vla(gr00tn1d7): ggml_init(ctx_weights) failed\n");
+        return nullptr;
+    }
 
     WeightLoader L("gr00tn1d7", g, m->ctx_weights, m->matmul_type);
 
@@ -279,18 +300,23 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
     m->aex.declare(L, "aex");
     m->dit.declare(L, "aex.dit", true, m->dit_interleave != 0);
 
-    if (!L.upload(m->backend, &m->weight_buf)) return nullptr;
+    if (!L.upload(m->backend, &m->weight_buf))
+        return nullptr;
 
     std::printf("vla(gr00tn1d7): QKV-fused DiT (self Wqkv / cross Wkv)\n");
     std::printf("vla(gr00tn1d7): weights resident in %.2f GiB (%s) - incl. Qwen3-VL vision tower + deepstack + vl_self_attention; embodiment id %lld\n",
                 ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0*1024.0),
                 dtype_name(m->matmul_type), (long long) m->aex.embodiment_id);
-    if (!m->build_caches()) { std::fprintf(stderr, "vla(gr00tn1d7): build_caches failed\n"); return nullptr; }
+    if (!m->build_caches()) {
+        std::fprintf(stderr, "vla(gr00tn1d7): build_caches failed\n");
+        return nullptr;
+    }
     return m;
 }
 
 bool Gr00tN1d7ModelArch::build_caches() {
-    if (caches_ready) return true;
+    if (caches_ready)
+        return true;
     const int64_t side = image_target_size, ps = patch_size, m2 = spatial_merge;
     const int64_t grid = side / ps;
     const int64_t hd_vit = vit_hidden / vit_heads;
@@ -300,7 +326,10 @@ bool Gr00tN1d7ModelArch::build_caches() {
     merge_block_coords(grid, grid, m2, c_grow, c_gcol);
     vit_rope_tables(c_grow, c_gcol, hd_vit, (double) vit_rope_base, c_rope_cos, c_rope_sin);
 
-    if (!io.open(gguf_path)) { std::fprintf(stderr, "vla(gr00tn1d7): build_caches: io.open(%s) failed\n", gguf_path.c_str()); return false; }
+    if (!io.open(gguf_path)) {
+        std::fprintf(stderr, "vla(gr00tn1d7): build_caches: io.open(%s) failed\n", gguf_path.c_str());
+        return false;
+    }
     std::vector<float> pos_table = io.read_f32("vit.pos_embd");
     if (pos_table.empty() || (int64_t) pos_table.size() != vit_num_pos * vit_hidden) {
         std::fprintf(stderr, "vla(gr00tn1d7): build_caches: vit.pos_embd unreadable\n"); return false;
@@ -341,11 +370,13 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     if (in.precomputed_img_emb && in.n_img_views > 0) {
         n_views = in.n_img_views; img_emb_ptr = in.precomputed_img_emb;
 
-        for (int j = 0; j < 3; ++j) ds_host[j].assign((size_t) n_views * K * H, 0.0f);
+        for (int j = 0; j < 3; ++j)
+            ds_host[j].assign((size_t) n_views * K * H, 0.0f);
     } else if (in.images && in.n_images > 0) {
         n_views = in.n_images;
         img_emb_host.assign((size_t) n_views * K * H, 0.0f);
-        for (int j = 0; j < 3; ++j) ds_host[j].assign((size_t) n_views * K * H, 0.0f);
+        for (int j = 0; j < 3; ++j)
+            ds_host[j].assign((size_t) n_views * K * H, 0.0f);
 
         ggml_context * VC = vision_scratch.reset((size_t) 512 * 1024 * 1024);
         if (!VC) { std::fprintf(stderr, "vla(gr00tn1d7): ggml_init(vision ctx) failed\n"); return {}; }
@@ -360,29 +391,43 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         for (int64_t i = 0; i < vit_layers; ++i) {
             h = build_vit_layer(VC, vit.blk[i], h, t_cos, t_sin, n_patches, vit_heads, hd_vit, vit_hidden, vit_ln_eps);
             ggml_set_output(h);
-            for (int j = 0; j < 3; ++j) if (i == deepstack_idx[j]) stash[j] = h;
+            for (int j = 0; j < 3; ++j)
+                if (i == deepstack_idx[j])
+                    stash[j] = h;
         }
         ggml_tensor * ds_out[3];
-        for (int j = 0; j < 3; ++j) { ds_out[j] = build_merger(VC, vit.deepstack[j], stash[j] ? stash[j] : h, vit_hidden, m2, connector_ln_eps, false); ggml_set_output(ds_out[j]); }
+        for (int j = 0; j < 3; ++j) {
+            ds_out[j] = build_merger(VC, vit.deepstack[j], stash[j] ? stash[j] : h, vit_hidden, m2, connector_ln_eps, false);
+            ggml_set_output(ds_out[j]);
+        }
         ggml_tensor * vit_embeds = build_merger(VC, vit.merger, h, vit_hidden, m2, connector_ln_eps, true);
         ggml_set_output(vit_embeds);
         ggml_cgraph * vg = ggml_new_graph_custom(VC, 16384, false);
         ggml_build_forward_expand(vg, vit_embeds);
-        for (int j = 0; j < 3; ++j) ggml_build_forward_expand(vg, ds_out[j]);
+        for (int j = 0; j < 3; ++j)
+            ggml_build_forward_expand(vg, ds_out[j]);
         if (!vision_scratch.alloc(backend, vg)) { std::fprintf(stderr, "vla(gr00tn1d7): vision gallocr alloc failed\n"); return {}; }
         const auto tv0 = std::chrono::steady_clock::now();
         std::vector<float> patches;
         bool vok = true;
         for (int64_t v = 0; v < n_views && vok; ++v) {
-            if (!preprocess_image_patches("gr00tn1d7", in.images[v], side, ps, temporal_patch, grow, gcol, patches)) { vok = false; break; }
+            if (!preprocess_image_patches("gr00tn1d7", in.images[v], side, ps, temporal_patch, grow, gcol, patches)) {
+                vok = false;
+                break;
+            }
 
             ggml_backend_tensor_set(t_pos, pos_interp.data(), 0, ggml_nbytes(t_pos));
             ggml_backend_tensor_set(t_cos, rope_cos.data(), 0, ggml_nbytes(t_cos));
             ggml_backend_tensor_set(t_sin, rope_sin.data(), 0, ggml_nbytes(t_sin));
             ggml_backend_tensor_set(t_patches, patches.data(), 0, ggml_nbytes(t_patches));
-            if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(gr00tn1d7): vision compute failed\n"); vok = false; break; }
+            if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
+                std::fprintf(stderr, "vla(gr00tn1d7): vision compute failed\n");
+                vok = false;
+                break;
+            }
             ggml_backend_tensor_get(vit_embeds, img_emb_host.data() + v * K * H, 0, ggml_nbytes(vit_embeds));
-            for (int j = 0; j < 3; ++j) ggml_backend_tensor_get(ds_out[j], ds_host[j].data() + v * K * H, 0, ggml_nbytes(ds_out[j]));
+            for (int j = 0; j < 3; ++j)
+                ggml_backend_tensor_get(ds_out[j], ds_host[j].data() + v * K * H, 0, ggml_nbytes(ds_out[j]));
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - tv0).count();
         if (!vok) return {};
@@ -394,13 +439,17 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
 
     std::vector<int32_t> input_ids;
     int64_t n_img_slots = 0;
-    for (int j = 0; j < in.n_lang; ++j) if (in.lang_tokens[j] == (int32_t) image_token_index) ++n_img_slots;
+    for (int j = 0; j < in.n_lang; ++j)
+        if (in.lang_tokens[j] == (int32_t) image_token_index)
+            ++n_img_slots;
     if (n_img_slots == n_img) {
         input_ids.assign(in.lang_tokens, in.lang_tokens + in.n_lang);
     } else if (n_img_slots == 0) {
         input_ids.reserve(n_img + in.n_lang);
-        for (int64_t i = 0; i < n_img; ++i) input_ids.push_back((int32_t) image_token_index);
-        for (int j = 0; j < in.n_lang; ++j) input_ids.push_back(in.lang_tokens[j]);
+        for (int64_t i = 0; i < n_img; ++i)
+            input_ids.push_back((int32_t) image_token_index);
+        for (int j = 0; j < in.n_lang; ++j)
+            input_ids.push_back(in.lang_tokens[j]);
     } else {
         std::fprintf(stderr, "vla(gr00tn1d7): lang_tokens has %lld image-token slots but n_img=%lld; expected 0 (v1 fallback) or %lld (chat-template path)\n",
                      (long long) n_img_slots, (long long) n_img, (long long) n_img);
@@ -421,8 +470,10 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     std::vector<int32_t> image_pos_idx, text_pos_idx;
     image_pos_idx.reserve((size_t) n_img); text_pos_idx.reserve((size_t) (SEQ - n_img));
     for (int64_t p = 0; p < SEQ; ++p) {
-        if (input_ids[p] == (int32_t) image_token_index) image_pos_idx.push_back((int32_t) p);
-        else                                              text_pos_idx.push_back((int32_t) p);
+        if (input_ids[p] == (int32_t) image_token_index)
+            image_pos_idx.push_back((int32_t) p);
+        else
+            text_pos_idx.push_back((int32_t) p);
     }
     const int64_t SEQ_TXT = (int64_t) text_pos_idx.size();
     if ((int64_t) image_pos_idx.size() != n_img) {
@@ -440,14 +491,21 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     }
 
     std::vector<float> x_init((size_t) AH * AD);
-    if (in.noise) std::memcpy(x_init.data(), in.noise, x_init.size() * sizeof(float));
-    else { std::mt19937 rng((uint32_t) std::chrono::steady_clock::now().time_since_epoch().count()); std::normal_distribution<float> nd(0.f, 1.f); for (auto & v : x_init) v = nd(rng); }
+    if (in.noise)
+        std::memcpy(x_init.data(), in.noise, x_init.size() * sizeof(float));
+    else {
+        std::mt19937 rng((uint32_t) std::chrono::steady_clock::now().time_since_epoch().count());
+        std::normal_distribution<float> nd(0.f, 1.f);
+        for (auto & v : x_init)
+            v = nd(rng);
+    }
 
     // On by default: 16% faster, bit-identical. Set VLA_GR00T_GRAPH_CACHE=0 to opt out.
     // Dumping adds graph outputs, so it always rebuilds.
     const char * gc = std::getenv("VLA_GR00T_GRAPH_CACHE");
     const bool use_cache = (!gc || std::strcmp(gc, "0") != 0) && !do_dump;
-    if (!use_cache) mg.release();
+    if (!use_cache)
+        mg.release();
 
     ggml_tensor * eagle = nullptr, * vl_embs = nullptr;
     std::vector<ggml_tensor*> lm_h_dump, vlsa_dump;
@@ -460,12 +518,16 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     ggml_tensor * t_state  = ggml_new_tensor_2d(C, GGML_TYPE_F32, max_state_dim, 1);ggml_set_input(t_state);
     ggml_tensor * t_x0     = ggml_new_tensor_2d(C, GGML_TYPE_F32, AD, AH);          ggml_set_input(t_x0);
     ggml_tensor * t_ds[3] = {nullptr,nullptr,nullptr};
-    if (inject_deepstack) for (int j = 0; j < 3; ++j) { t_ds[j] = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ); ggml_set_input(t_ds[j]); }
+    if (inject_deepstack) for (int j = 0; j < 3; ++j) {
+        t_ds[j] = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);
+        ggml_set_input(t_ds[j]);
+    }
 
     ggml_tensor * t_img_idx = ggml_new_tensor_1d(C, GGML_TYPE_I32, n_img);    ggml_set_input(t_img_idx);
     ggml_tensor * t_txt_idx = (SEQ_TXT > 0)
         ? ggml_new_tensor_1d(C, GGML_TYPE_I32, SEQ_TXT) : nullptr;
-    if (t_txt_idx) ggml_set_input(t_txt_idx);
+    if (t_txt_idx)
+        ggml_set_input(t_txt_idx);
     std::vector<ggml_tensor *> t_tau(num_steps), t_tproj(num_steps);
     for (int64_t s = 0; s < num_steps; ++s) {
         t_tau[s]   = ggml_new_tensor_2d(C, GGML_TYPE_F32, E, AH); ggml_set_input(t_tau[s]);
@@ -475,18 +537,28 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     ggml_tensor * h = t_embeds;
     for (int64_t i = 0; i < lm_layers; ++i) {
         h = lm.block(C, lm.blk[i], h, t_pos, t_lmmask, SEQ);
-        if (inject_deepstack && i < 3) h = ggml_add(C, h, t_ds[i]);
-        if (do_dump) { ggml_set_output(h); lm_h_dump.push_back(h); }
+        if (inject_deepstack && i < 3)
+            h = ggml_add(C, h, t_ds[i]);
+        if (do_dump) {
+            ggml_set_output(h);
+            lm_h_dump.push_back(h);
+        }
     }
 
     eagle = h;
     ggml_set_name(eagle, "eagle"); ggml_set_output(eagle);
 
     vl_embs = ggml_add(C, ggml_mul(C, ggml_norm(C, eagle, vlln_eps), vlln_w), vlln_b);
-    if (do_dump) { ggml_set_output(vl_embs); vlsa_dump.push_back(vl_embs); }
+    if (do_dump) {
+        ggml_set_output(vl_embs);
+        vlsa_dump.push_back(vl_embs);
+    }
     for (int64_t i = 0; i < vlsa_layers; ++i) {
         vl_embs = vlsa.block(C, vlsa.blk[i], vl_embs, SEQ);
-        if (do_dump) { ggml_set_output(vl_embs); vlsa_dump.push_back(vl_embs); }
+        if (do_dump) {
+            ggml_set_output(vl_embs);
+            vlsa_dump.push_back(vl_embs);
+        }
     }
     ggml_set_name(vl_embs, "vl_embs"); ggml_set_output(vl_embs);
 
@@ -500,7 +572,8 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
 
     std::vector<ggml_tensor *> Kc(dit_layers, nullptr), Vc(dit_layers, nullptr);
     for (int64_t i = 0; i < dit_layers; ++i) {
-        if (dit_interleave && (i % 2 == 1)) continue;
+        if (dit_interleave && (i % 2 == 1))
+            continue;
         ggml_tensor * enc = (i % every2 == 0) ? vl_txt : vl_img;
         dit.kv(C, dit.blk[i], enc, &Kc[i], &Vc[i]);
     }
@@ -515,9 +588,11 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         ggml_tensor * hh = sa;
         for (int64_t i = 0; i < dit_layers; ++i) {
             ggml_tensor * enc;
-            if (dit_interleave && (i % 2 == 1)) enc = nullptr;
+            if (dit_interleave && (i % 2 == 1))
+                enc = nullptr;
             else if (i % every2 == 0)           enc = vl_txt;
-            else                                enc = vl_img;
+            else
+                enc = vl_img;
             hh = dit.block(C, dit.blk[i], hh, temb, enc, Kc[i], Vc[i]);
         }
         ggml_tensor * po = ggml_add(C, ggml_mul_mat(C, dit.po1W, ggml_silu(C, temb)), dit.po1b);
@@ -558,7 +633,10 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         int64_t st = 0, st_idx = 0;
         while (st < SEQ) {
             int64_t img_start = -1;
-            for (int64_t i = st; i < SEQ; ++i) if (input_ids[i] == (int32_t) image_token_index) { img_start = i; break; }
+            for (int64_t i = st; i < SEQ; ++i) if (input_ids[i] == (int32_t) image_token_index) {
+                img_start = i;
+                break;
+            }
             const int64_t text_end = (img_start < 0) ? SEQ : img_start;
             const int64_t text_len = text_end - st;
             for (int64_t i = 0; i < text_len; ++i) {
@@ -567,9 +645,14 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
                 pp[1 * SEQ + (st + i)] = p;
                 pp[2 * SEQ + (st + i)] = p;
             }
-            if (img_start < 0) { st_idx += text_len; st = SEQ; break; }
+            if (img_start < 0) {
+                st_idx += text_len;
+                st = SEQ;
+                break;
+            }
             int64_t img_end = img_start;
-            while (img_end < SEQ && input_ids[img_end] == (int32_t) image_token_index) ++img_end;
+            while (img_end < SEQ && input_ids[img_end] == (int32_t) image_token_index)
+                ++img_end;
             const int64_t n_img_tokens = img_end - img_start;
             if (n_img_tokens % (llm_grid_h * llm_grid_w) != 0) {
                 std::fprintf(stderr, "vla(gr00tn1d7): image run length %lld not a multiple of %lld (post-merge grid)\n",
@@ -590,8 +673,10 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
                 }
             }
             int64_t max_image_pos = this_t - 1;
-            if (llm_grid_h - 1 > max_image_pos) max_image_pos = llm_grid_h - 1;
-            if (llm_grid_w - 1 > max_image_pos) max_image_pos = llm_grid_w - 1;
+            if (llm_grid_h - 1 > max_image_pos)
+                max_image_pos = llm_grid_h - 1;
+            if (llm_grid_w - 1 > max_image_pos)
+                max_image_pos = llm_grid_w - 1;
             st_idx = image_offset + max_image_pos + 1;
             st = img_end;
         }
@@ -599,13 +684,22 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         std::memcpy(pp.data() + (size_t) 3 * SEQ, pp.data() + (size_t) 0 * SEQ, (size_t) SEQ * sizeof(int32_t));
         ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos));
     }
-    if (c_mask_seq != SEQ) { build_causal_mask(SEQ, c_mask); c_mask_seq = SEQ; }
+    if (c_mask_seq != SEQ) {
+        build_causal_mask(SEQ, c_mask);
+        c_mask_seq = SEQ;
+    }
     ggml_backend_tensor_set(t_lmmask, c_mask.data(), 0, ggml_nbytes(t_lmmask));
-    { std::vector<float> st(max_state_dim, 0.0f); for (int64_t i = 0; i < max_state_dim; ++i) st[i] = in.state ? in.state[i] : 0.0f; ggml_backend_tensor_set(t_state, st.data(), 0, ggml_nbytes(t_state)); }
+    {
+        std::vector<float> st(max_state_dim, 0.0f);
+        for (int64_t i = 0; i < max_state_dim; ++i)
+            st[i] = in.state ? in.state[i] : 0.0f;
+        ggml_backend_tensor_set(t_state, st.data(), 0, ggml_nbytes(t_state));
+    }
     ggml_backend_tensor_set(t_x0, x_init.data(), 0, ggml_nbytes(t_x0));
     if (inject_deepstack) for (int j = 0; j < 3; ++j) ggml_backend_tensor_set(t_ds[j], ds_pad[j].data(), 0, ggml_nbytes(t_ds[j]));
     ggml_backend_tensor_set(t_img_idx, image_pos_idx.data(), 0, ggml_nbytes(t_img_idx));
-    if (t_txt_idx) ggml_backend_tensor_set(t_txt_idx, text_pos_idx.data(), 0, ggml_nbytes(t_txt_idx));
+    if (t_txt_idx)
+        ggml_backend_tensor_set(t_txt_idx, text_pos_idx.data(), 0, ggml_nbytes(t_txt_idx));
     for (int64_t s = 0; s < num_steps; ++s) {
         ggml_backend_tensor_set(t_tau[s],   c_tau[(size_t) s].data(),   0, ggml_nbytes(t_tau[s]));
         ggml_backend_tensor_set(t_tproj[s], c_tproj[(size_t) s].data(), 0, ggml_nbytes(t_tproj[s]));
@@ -627,20 +721,36 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
             ggml_backend_tensor_get(t, buf.data(), 0, buf.size() * sizeof(float));
             char path[1024]; std::snprintf(path, sizeof(path), "%s_%s_%lldx%lld.f32", dump, name, (long long) n0, (long long) n1);
             FILE * fp = std::fopen(path, "wb");
-            if (fp) { std::fwrite(buf.data(), sizeof(float), buf.size(), fp); std::fclose(fp); std::fprintf(stderr, "vla(gr00tn1d7): dumped %s shape=(%lld,%lld) to %s\n", name, (long long) n1, (long long) n0, path); }
+            if (fp) {
+                std::fwrite(buf.data(), sizeof(float), buf.size(), fp);
+                std::fclose(fp);
+                std::fprintf(stderr, "vla(gr00tn1d7): dumped %s shape=(%lld,%lld) to %s\n", name, (long long) n1, (long long) n0, path);
+            }
         };
         dump_t("eagle",  eagle);
         dump_t("vl_embs", vl_embs);
 
-        for (size_t li = 0; li < lm_h_dump.size(); ++li) { char nm[32]; std::snprintf(nm, sizeof(nm), "lm_h_%02zu", li); dump_t(nm, lm_h_dump[li]); }
+        for (size_t li = 0; li < lm_h_dump.size(); ++li) {
+            char nm[32];
+            std::snprintf(nm, sizeof(nm), "lm_h_%02zu", li);
+            dump_t(nm, lm_h_dump[li]);
+        }
 
-        for (size_t vi = 0; vi < vlsa_dump.size(); ++vi) { char nm[32]; std::snprintf(nm, sizeof(nm), "vlsa_%02zu", vi); dump_t(nm, vlsa_dump[vi]); }
+        for (size_t vi = 0; vi < vlsa_dump.size(); ++vi) {
+            char nm[32];
+            std::snprintf(nm, sizeof(nm), "vlsa_%02zu", vi);
+            dump_t(nm, vlsa_dump[vi]);
+        }
 
         if (inject_deepstack) {
             auto dump_host = [&](const char * name, const float * data, int64_t n0, int64_t n1) {
                 char path[1024]; std::snprintf(path, sizeof(path), "%s_%s_%lldx%lld.f32", dump, name, (long long) n0, (long long) n1);
                 FILE * fp = std::fopen(path, "wb");
-                if (fp) { std::fwrite(data, sizeof(float), (size_t) n0 * n1, fp); std::fclose(fp); std::fprintf(stderr, "vla(gr00tn1d7): dumped %s shape=(%lld,%lld) to %s\n", name, (long long) n1, (long long) n0, path); }
+                if (fp) {
+                    std::fwrite(data, sizeof(float), (size_t) n0 * n1, fp);
+                    std::fclose(fp);
+                    std::fprintf(stderr, "vla(gr00tn1d7): dumped %s shape=(%lld,%lld) to %s\n", name, (long long) n1, (long long) n0, path);
+                }
             };
 
             for (int64_t v = 0; v < n_views; ++v) {
@@ -655,7 +765,8 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
             }
         }
     }
-    if (!use_cache) mg.release();
+    if (!use_cache)
+        mg.release();
     stats.ms_total = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return out;
 }
