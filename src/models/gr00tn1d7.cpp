@@ -52,9 +52,6 @@ namespace {
 
 
 struct VlsaLayerW  { ggml_tensor *n1w,*n1b,*n3w,*n3b,*Wq,*bq,*Wk,*bk,*Wv,*bv,*Wo,*bo,*Wff0,*bff0,*Wff2,*bff2; };
-struct Qwen3LayerW { ggml_tensor *attn_norm,*Wq,*Wk,*Wv,*Wo,*q_norm,*k_norm,*ffn_norm,*Wgate,*Wup,*Wdown; };
-struct DitLayerW   { ggml_tensor *adaln_w,*adaln_b,*Wq,*bq,*Wk,*bk,*Wv,*bv,*Wo,*bo,*Wff0,*bff0,*Wff2,*bff2;
-                     ggml_tensor *Wqkv=nullptr,*bqkv=nullptr,*Wkv=nullptr,*bkv=nullptr; };
 
 }
 
