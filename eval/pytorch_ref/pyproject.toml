@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vla-cpp-eval"
+version = "0.1.0"
+description = "Evaluation framework for vla.cpp"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Khanh Nguyen", email = "v.khanhnd61@vinrobotics.net" },
+    { name = "Chinh Nguyen", email = "v.chinhnt18@vinrobotics.net" },
+    { name = "An Le", email = "v.anlt21@vinrobotics.net" },
+]
+maintainers = [
+    { name = "VinRobotics", email = "v.khanhnd61@vinrobotics.net" },
+]
+dependencies = [
+    "timm",
+    "accelerate",
+    "einop",
+    "diffusers",
+    "ninja",
+    "pandas",
+    "matplotlib",
+    "pyarrow",
+    "accelerator",
+    "deepspeed",
+    "websockets",
+    "opencv-python",
+    "swanlab",
+    "wandb",
+    "av",
+    "fvcore",
+    "dm-tree",
+    "albumentations",
+    "peft",
+    "lmdb",
+    "num2words",
+    "zmq",
+    "msgpack",
+    "lerobot[pi]",
+    "torch==2.8.0",
+    "torchvision==0.23.0",
+    "torchaudio==2.8.0",
+    "flash-attn",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["policies*", "sim*", "client*", "server*", "utils*"]
+
+# ---------------------------------------------------------------------------
+# uv-specific: sources for packages that need non-PyPI origins
+# ---------------------------------------------------------------------------
+[tool.uv.sources]
+lerobot   = { git = "https://github.com/huggingface/lerobot.git", tag = "v0.4.4" }
+torch     = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio  = { index = "pytorch-cu128" }
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl" }
+
+[[tool.uv.index]]
+name     = "pytorch-cu128"
+url      = "https://download.pytorch.org/whl/cu128"
+explicit = true   # only used for packages that explicitly reference this index

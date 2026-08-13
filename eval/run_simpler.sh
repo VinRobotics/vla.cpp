@@ -293,10 +293,8 @@ run_model() {
         echo "[skip] ${arch}: statistics.json not found at ${stats_json} (set GR00T_N1_6_BRIDGE_STATS)" >&2
         return 1
     fi
-
-    export VLA_GR00T_BF16_WEIGHTS="${VLA_GR00T_BF16_WEIGHTS:-1}"
+    # bf16 weights are the shipping default; the env switch was retired.
     export VLA_GR00T_EMBODIMENT="${VLA_GR00T_EMBODIMENT:-${EMBODIMENT}}"
-    echo "[${arch}] VLA_GR00T_BF16_WEIGHTS=${VLA_GR00T_BF16_WEIGHTS}  VLA_GR00T_EMBODIMENT=${VLA_GR00T_EMBODIMENT}"
 
     local log="${LOG_DIR}/${arch}.log"
     echo "===================="

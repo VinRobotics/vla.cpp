@@ -217,6 +217,6 @@ weights) does not fit and dies in the allocator:
 level_zero backend failed with error: 38 (UR_RESULT_ERROR_OUT_OF_HOST_MEMORY)
 ```
 
-`VLA_GR00T_BF16_WEIGHTS=1` halves the weights but its activations still overflow
+`--weight-dtype bf16` (now the default) halves the weights but its activations still overflow
 the card. There is no host-memory spill path - the core is single-backend - so
 the larger checkpoints need an A770/B580-class card or better.
