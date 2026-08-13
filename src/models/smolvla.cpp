@@ -28,6 +28,7 @@
 #include "backend.h"
 
 #include "nlohmann/json.hpp"
+#include "env_flag.h"
 
 #include <chrono>
 #include <cmath>
@@ -363,7 +364,7 @@ namespace {
 // 96/100 for explicit attention. evo1 showed the same ~4-5 pp drop, so the
 // default stays on the accuracy-preserving path.
 static inline bool siglip_fa_enabled() {
-    static const bool enabled = (std::getenv("VLA_SMOLVLA_FA") != nullptr);
+    static const bool enabled = vla::env_flag("VLA_SMOLVLA_FA");
     return enabled;
 }
 

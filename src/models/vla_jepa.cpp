@@ -24,6 +24,7 @@
 #include "models/scratch_ctx.h"
 #include "models/dit_common.h"
 #include "models/qwen3vl_vit.h"
+#include "env_flag.h"
 
 #include <chrono>
 #include <cmath>
@@ -238,7 +239,7 @@ std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
 
     auto m = std::make_unique<VlaJepaModelArch>();
     m->gguf_path   = ckpt_path;
-    m->matmul_type = std::getenv("VLA_JEPA_BF16_WEIGHTS") ? GGML_TYPE_BF16 : GGML_TYPE_F32;
+    m->matmul_type = vla::env_flag("VLA_JEPA_BF16_WEIGHTS") ? GGML_TYPE_BF16 : GGML_TYPE_F32;
 
     gguf_reader g("vla_jepa");
     if (!g.open(ckpt_path)) return nullptr;

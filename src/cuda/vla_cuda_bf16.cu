@@ -36,6 +36,7 @@
 // never a reduction.
 
 #include "ggml.h"
+#include "env_flag.h"
 
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
@@ -159,10 +160,7 @@ struct RowGrid {
 // same per-element arithmetic in the same order, so they are bit-identical --
 // which is what makes the A/B a correctness check rather than a smoke test.
 inline bool force_flat() {
-    static const bool v = [] {
-        const char * s = std::getenv("VLA_BF16_FLAT");
-        return s && *s && !(s[0] == '0' && s[1] == '\0');
-    }();
+    static const bool v = vla::env_flag("VLA_BF16_FLAT");
     return v;
 }
 

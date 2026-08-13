@@ -25,6 +25,7 @@
 #include "models/gguf_reader.h"
 #include "models/scratch_ctx.h"
 #include "models/dit_common.h"
+#include "env_flag.h"
 
 #include <chrono>
 #include <cmath>
@@ -158,7 +159,7 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
     if (!mmproj_path.empty())
         std::printf("vla(vla_adapter): note - mmproj '%s' ignored (vision baked into combined GGUF)\n", mmproj_path.c_str());
     auto m = std::make_unique<VlaAdapterModelArch>();
-    m->mt = std::getenv("VLA_ADAPTER_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
+    m->mt = vla::env_flag("VLA_ADAPTER_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
     gguf_reader g("vla_adapter");
     if (!g.open(ckpt_path)) return nullptr;

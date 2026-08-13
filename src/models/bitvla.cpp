@@ -29,6 +29,7 @@
 #include "kernels/bitvla/bitvla_lm_cuda.h"
 #include "kernels/bitvla/bitvla_vit_cuda.h"
 #include "kernels/bitvla/bitvla_fp32head_cuda.h"
+#include "env_flag.h"
 #ifdef __GLIBC__
 #  include <malloc.h>
 #endif
@@ -536,7 +537,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
 
     auto m = std::make_unique<BitvlaModelArch>();
     m->gguf_path   = ckpt_path;
-    m->matmul_type = std::getenv("VLA_BITVLA_BF16_WEIGHTS") ? GGML_TYPE_BF16 : GGML_TYPE_F32;
+    m->matmul_type = vla::env_flag("VLA_BITVLA_BF16_WEIGHTS") ? GGML_TYPE_BF16 : GGML_TYPE_F32;
 
     gguf_reader g("bitvla");
     if (!g.open(ckpt_path)) return nullptr;
@@ -676,7 +677,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
 
 #ifdef VLA_BITVLA_CUDA_KERNELS
 
-    if ((m->packed_int2 || m->matmul_type == GGML_TYPE_F32) && !std::getenv("VLA_BITVLA_NO_CUDA_LM")) {
+    if ((m->packed_int2 || m->matmul_type == GGML_TYPE_F32) && !vla::env_flag("VLA_BITVLA_NO_CUDA_LM")) {
         int dev_count = 0;
         if (cudaGetDeviceCount(&dev_count) == cudaSuccess && dev_count > 0) {
             cudaSetDevice(0);
@@ -881,7 +882,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
     }
 
     if (m->cuda_lm_ready && m->cuda_vit_ready &&
-        std::getenv("VLA_BITVLA_CPU_HEAD") == nullptr) {
+        !vla::env_flag("VLA_BITVLA_CPU_HEAD")) {
         m->fp32head_cuda_ctx = bitvla_fp32head_cuda_init(
             (int) m->proprio_dim, (int) m->lm_hidden,
             (int) m->num_actions_chunk, (int) m->action_dim,
@@ -914,7 +915,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
     }
 
     if (m->cuda_lm_ready && m->cuda_vit_ready && m->weight_buf &&
-        std::getenv("VLA_BITVLA_KEEP_CPU_WEIGHTS") == nullptr) {
+        !vla::env_flag("VLA_BITVLA_KEEP_CPU_WEIGHTS")) {
         size_t bytes_kept = 0;
         if (!m->cuda_fp32head_ready) {
 

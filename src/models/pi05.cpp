@@ -25,6 +25,7 @@
 #include "models/scratch_ctx.h"
 #include "models/dit_common.h"
 #include "models/vision_common.h"
+#include "env_flag.h"
 
 #include <algorithm>
 #include <chrono>
@@ -397,7 +398,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
 
     auto m = std::make_unique<Pi05ModelArch>();
     m->ckpt_path_  = ckpt_path;
-    m->matmul_type = std::getenv("VLA_PI05_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
+    m->matmul_type = vla::env_flag("VLA_PI05_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
     if (!m->io.open(ckpt_path)) return nullptr;
     gguf_reader & g = m->io;
@@ -742,7 +743,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     std::vector<float> out((size_t) chunk * max_ad);
     ggml_backend_tensor_get(x_final, out.data(), 0, out.size() * sizeof(float));
 
-    if (!std::getenv("VLA_PI05_SKIP_UNNORM")) {
+    if (!vla::env_flag("VLA_PI05_SKIP_UNNORM")) {
         for (int64_t t = 0; t < chunk; ++t) {
             float * row = out.data() + (size_t) t * max_ad;
             for (int64_t j = 0; j < max_ad; ++j) {

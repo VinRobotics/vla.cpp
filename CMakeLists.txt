@@ -119,6 +119,9 @@ if(GGML_CUDA)
         CUDA_SEPARABLE_COMPILATION ON
         POSITION_INDEPENDENT_CODE ON
     )
+    target_include_directories(bitvla_cuda_kernels PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
     target_compile_features(bitvla_cuda_kernels PRIVATE cxx_std_17)
     target_compile_options(bitvla_cuda_kernels PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math -Xptxas=-O3>

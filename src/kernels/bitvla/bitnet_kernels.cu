@@ -14,6 +14,8 @@
 
 #include "bitnet_kernels.h"
 
+#include "env_flag.h"
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -67,7 +69,7 @@ extern "C" void bitlinear_int8xint2(int8_t* input0, int8_t* input1, __nv_bfloat1
 // VLA_BITVLA_NARROW_GEMM=1 to fall back to the one-tile-per-CTA kernel, which
 // is what the A/B correctness harness and any regression bisect want.
 static bool bitlinear_use_wide() {
-    static const bool wide = (std::getenv("VLA_BITVLA_NARROW_GEMM") == nullptr);
+    static const bool wide = !vla::env_flag("VLA_BITVLA_NARROW_GEMM");
     return wide;
 }
 

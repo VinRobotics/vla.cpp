@@ -24,6 +24,7 @@
 #include "models/scratch_ctx.h"
 #include "models/vision_common.h"
 #include "models/dit_common.h"
+#include "env_flag.h"
 
 #include <chrono>
 #include <cmath>
@@ -259,7 +260,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
 
     auto m = std::make_unique<Gr00tN1d5ModelArch>();
     m->gguf_path   = ckpt_path;
-    m->matmul_type = std::getenv("VLA_GR00T_BF16_WEIGHTS") ? GGML_TYPE_BF16 : GGML_TYPE_F32;
+    m->matmul_type = vla::env_flag("VLA_GR00T_BF16_WEIGHTS") ? GGML_TYPE_BF16 : GGML_TYPE_F32;
 
     if (!m->io.open(ckpt_path)) return nullptr;
     gguf_reader & g = m->io;

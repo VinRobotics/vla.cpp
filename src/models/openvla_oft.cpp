@@ -24,6 +24,7 @@
 #include "gguf.h"
 #include "models/gguf_reader.h"
 #include "models/scratch_ctx.h"
+#include "env_flag.h"
 
 #include <chrono>
 #include <cmath>
@@ -134,7 +135,7 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
     if (!mmproj_path.empty())
         std::printf("vla(openvla_oft): note - mmproj '%s' ignored (vision baked into combined GGUF)\n", mmproj_path.c_str());
     auto m = std::make_unique<OpenVlaOftModelArch>();
-    m->mt = std::getenv("VLA_OPENVLA_OFT_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
+    m->mt = vla::env_flag("VLA_OPENVLA_OFT_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
     gguf_reader g("openvla_oft");
     if (!g.open(ckpt_path)) return nullptr;

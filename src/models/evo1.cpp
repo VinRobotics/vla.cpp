@@ -24,6 +24,7 @@
 #include "models/scratch_ctx.h"
 #include "models/act_dtype.h"
 #include "cuda/vla_cuda_ops.h"
+#include "env_flag.h"
 
 #include <chrono>
 #include <algorithm>
@@ -199,7 +200,7 @@ bool preprocess_image_chw(const ImageView & v, int64_t side, std::vector<float> 
 // concentrated in the two tasks the control aced, so the default stays on the
 // accuracy-preserving path and the speedup is opt-in.
 inline bool evo1_vit_fa_enabled() {
-    static const bool enabled = (std::getenv("VLA_EVO1_FA") != nullptr);
+    static const bool enabled = vla::env_flag("VLA_EVO1_FA");
     return enabled;
 }
 
@@ -354,7 +355,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
 
     auto m = std::make_unique<Evo1ModelArch>();
     m->gguf_path = ckpt_path;
-    m->matmul_type = std::getenv("VLA_EVO1_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
+    m->matmul_type = vla::env_flag("VLA_EVO1_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
     if (!m->io.open(ckpt_path)) return nullptr;
     gguf_reader & g = m->io;
@@ -375,7 +376,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
         m->backend = b.handle;
 
         // BF16 activations need BF16-resident weights and the CUDA BF16 GEMM path.
-        if (std::getenv("VLA_EVO1_BF16_ACT")) {
+        if (vla::env_flag("VLA_EVO1_BF16_ACT")) {
             if (b.is_cuda && m->matmul_type == GGML_TYPE_BF16) {
                 m->act_type = GGML_TYPE_BF16;
                 cuda_register_bf16_ops();   // installs the in-tree BF16 CUDA kernels

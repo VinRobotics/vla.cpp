@@ -27,6 +27,7 @@
 #include "models/vision_common.h"
 #include "models/act_dtype.h"
 #include "cuda/vla_cuda_ops.h"
+#include "env_flag.h"
 
 #include <algorithm>
 #include <chrono>
@@ -144,7 +145,7 @@ namespace {
 // cost. (The evo1 SR drop this used to cite did not reproduce.)
 // VLA_PI0_BF16_ACT is the better lever here: 9.1%, and its SR was measured.
 static inline bool pi0_fa_enabled() {
-    static const bool enabled = (std::getenv("VLA_PI0_FA") != nullptr);
+    static const bool enabled = vla::env_flag("VLA_PI0_FA");
     return enabled;
 }
 
@@ -362,7 +363,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
 
     auto m = std::make_unique<Pi0ModelArch>();
     m->ckpt_path_ = ckpt_path;
-    m->matmul_type = std::getenv("VLA_PI0_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
+    m->matmul_type = vla::env_flag("VLA_PI0_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
 
     if (!m->io.open(ckpt_path)) return nullptr;
     gguf_reader & g = m->io;
@@ -389,7 +390,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
         m->backend = b.handle;
 
         // BF16 activations need BF16-resident weights and the CUDA BF16 GEMM path.
-        if (std::getenv("VLA_PI0_BF16_ACT")) {
+        if (vla::env_flag("VLA_PI0_BF16_ACT")) {
             if (b.is_cuda && m->matmul_type == GGML_TYPE_BF16) {
                 m->act_type = GGML_TYPE_BF16;
                 cuda_register_bf16_ops();   // installs the in-tree BF16 CUDA kernels

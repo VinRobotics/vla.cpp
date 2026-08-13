@@ -19,6 +19,7 @@
 #include "model.h"
 
 #include "ggml.h"
+#include "env_flag.h"
 
 #include <algorithm>
 #include <cmath>
@@ -43,7 +44,7 @@ inline ggml_tensor * rope2d(ggml_context * C, ggml_tensor * x, ggml_tensor * cos
     return ggml_add(C, ggml_mul(C, x, cos_t), ggml_mul(C, rot, sin_t));
 }
 
-inline bool fa_enabled() { static const bool e = (std::getenv("VLA_FLASH_ATTN") != nullptr); return e; }
+inline bool fa_enabled() { static const bool e = vla::env_flag("VLA_FLASH_ATTN"); return e; }
 
 inline ggml_tensor * flash_attn(ggml_context * C, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
                                 ggml_tensor * mask, float scale) {
