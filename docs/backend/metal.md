@@ -85,6 +85,16 @@ table in [the README](../../README.md#benchmarks): that one is measured with
 `vla-bench`, in-process on synthetic inputs, and is directly comparable to the
 CUDA table above it.
 
+Outputs were checked against the CPU backend on all ten models in that table, on
+an M5 Max, using `vla_predict_check` on fixed images, tokens, state and noise -
+the same build twice, once as configured and once with `-DGGML_METAL=OFF`. The
+loosest model is π0: 1.9e-2 absolute on actions peaking near 1.0, RMS 5.2e-4 for
+that model, with a worst per-model RMS of 1.7e-3 across the set. Eight of the ten
+stay under 7e-3 absolute. The two outliers are π0 and GR00T N1.7 (1.4e-2), which
+run multi-step denoise loops where per-step rounding compounds.
+Metal output is deterministic run to run - repeated runs are bit-identical - so
+these are BF16/F32 kernel rounding, not instability.
+
 The measurements below predate it and are not the same experiment - they were
 taken end-to-end through `vla-server` on an M4, so they include transport and
 preprocessing that `vla-bench` excludes, and they come from an older revision.

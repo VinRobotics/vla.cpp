@@ -337,15 +337,31 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 |---|:--:|:--:|:--:|:--:|:--:|
 | [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | - | 
 | [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | - | 
-| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | ~ | - | 
-| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | ~ | - | 
-| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | ~ | - | 
+| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | Y | - | 
+| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | Y | - | 
+| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | - | 
 | [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | - | 
 | [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | ~ | - | 
-| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | ~ | - | 
-| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | ~ | - | 
-| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | ~ | - | 
-| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | ~ | - | 
+| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | - | 
+| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | - | 
+| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | - | 
+| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | - | 
+
+The Metal column was filled from a sweep on an Apple M5 Max: every model marked
+`Y` there loads on Metal at stock defaults, times as shown in
+[Benchmarks](#apple-silicon-metal), and was diffed against the CPU backend with
+`vla_predict_check` on fixed images, tokens, state and noise. Worst case per
+model is 6.9e-3 absolute on actions peaking near 1.0 (RMS 1.7e-3) - BF16/F32
+kernel rounding, the same conclusion
+[docs/backend/sycl.md](docs/backend/sycl.md) reaches for SYCL. π0 and GR00T
+N1.7, both already `Y`, deviate most at 1.9e-2 and 1.4e-2, which is what
+iterating a denoise loop in a different rounding regime costs; the seven cells
+this sweep moved are all tighter than that.
+
+BitVLA stays short of `Y` on Metal for a structural reason rather than an
+untested one: its graph is CPU-only by design and its published GGUFs are
+int2-packed for CUDA, so there is nothing to run. See
+[Benchmarks](#apple-silicon-metal).
 
 ---
 
