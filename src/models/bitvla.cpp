@@ -74,17 +74,17 @@ void bitvla_act_quant_op(ggml_tensor * dst, const ggml_tensor * a, int ith, int 
     const int64_t r1   = std::min(rows, r0+per);
     const float * src = (const float *) a->data;
     float * out = (float *) dst->data;
-    for (int64_t r = r0; r < r1; ++r) {
+    for (int64_t r=r0; r<r1; ++r) {
         const float * row_in = src+r * cols;
         float * row_out = out+r * cols;
         float amax = 0.0f;
-        for (int64_t c = 0; c < cols; ++c)
+        for (int64_t c=0; c<cols; ++c)
             amax = std::max(amax, std::fabs(row_in[c]));
         if (amax < 1e-5f)
             amax = 1e-5f;
         const float s     = 127.0f/amax;
         const float inv_s = 1.0f/s;
-        for (int64_t c = 0; c < cols; ++c) {
+        for (int64_t c=0; c<cols; ++c) {
             float q = std::nearbyintf(row_in[c]*s);
             if (q >  127.0f)
                 q =  127.0f;
@@ -432,7 +432,7 @@ static void recover_ternary_and_scale(const float* W, int64_t n,
     // Per-tensor absmean scale (1/mean|W|), matching scripts/bitvla_int2_pack.py;
     // the int2-packed path bakes the same scale.
     double s = 0.0;
-    for (int64_t i = 0; i < n; ++i)
+    for (int64_t i=0; i<n; ++i)
         s += std::fabs((double) W[i]);
     float mean = n > 0 ? (float) (s/(double) n) : 0.0f;
     if (mean < 1e-5f)
@@ -440,7 +440,7 @@ static void recover_ternary_and_scale(const float* W, int64_t n,
     absmean = mean;
     const float inv = 1.0f/mean;
     ternary.resize(n);
-    for (int64_t i = 0; i < n; ++i) {
+    for (int64_t i=0; i<n; ++i) {
         float q = std::nearbyintf(W[i]*inv);
         if (q >  1.0f)
             q =  1.0f;
@@ -455,7 +455,7 @@ static std::vector<uint8_t> pack_ladder_int2(const int8_t* W, int64_t N, int64_t
     constexpr int WMMA_K = 32, K_PER_ITER = K_PER_LOOP * K_BLOCK;
     const int64_t n_slots = N * K/16;
     std::vector<uint8_t> out(N * K/4, 0);
-    for (int64_t s = 0; s < n_slots; ++s) {
+    for (int64_t s=0; s<n_slots; ++s) {
         const int64_t slots_per_block = (N_BLOCK * K)/16;
         const int64_t n_block  = s/slots_per_block;
         const int64_t in_block = s%slots_per_block;
@@ -469,9 +469,9 @@ static std::vector<uint8_t> pack_ladder_int2(const int8_t* W, int64_t N, int64_t
         const int64_t y_in_h   = in_yhalf%8;
         const int64_t n_global = n_block * N_BLOCK+y_half*8+y_in_h;
         const int64_t k_sub    = k_0*K_PER_ITER+major_k * WMMA_K+sub_k * K_PER_LOOP;
-        for (int byte_i = 0; byte_i < 4; ++byte_i) {
+        for (int byte_i=0; byte_i<4; ++byte_i) {
             uint8_t b = 0;
-            for (int j = 0; j < 4; ++j) {
+            for (int j=0; j<4; ++j) {
                 const int t = (int) W[n_global * K+(k_sub+byte_i+4*j)];
                 const uint8_t enc = (uint8_t)(t+2) & 0x3;
                 b |= (enc << (2*j));
@@ -489,7 +489,7 @@ static inline uint16_t f32_to_bf16_u16(float f) {
 
 static __nv_bfloat16* upload_bf16_from_f32(const float* h, size_t n, std::vector<void*>& out_ptrs) {
     std::vector<uint16_t> tmp(n);
-    for (size_t i = 0; i < n; ++i)
+    for (size_t i=0; i<n; ++i)
         tmp[i] = f32_to_bf16_u16(h[i]);
     __nv_bfloat16* d = nullptr;
     cudaMalloc(&d, n * sizeof(__nv_bfloat16));
@@ -530,7 +530,7 @@ static int8_t* pack_and_upload_fused(const std::vector<const float*>& wptrs,
     std::vector<int8_t> stacked(N_total * K);
     out_scales.clear();
     int64_t row_off = 0;
-    for (size_t i = 0; i < wptrs.size(); ++i) {
+    for (size_t i=0; i<wptrs.size(); ++i) {
         std::vector<int8_t> tern;
         float sc;
         recover_ternary_and_scale(wptrs[i], Ns[i]*K, tern, sc);
@@ -646,7 +646,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
     m->vit_patch_b = mk_f32("vit.patch_embd.bias");
     m->vit_pos     = mk_f32("vit.pos_embd.weight");
     m->vit.resize(m->vit_layers);
-    for (int64_t i = 0; i < m->vit_layers && ok; ++i) {
+    for (int64_t i=0; i<m->vit_layers && ok; ++i) {
         char p[64]; auto N = [&](const char * s) { std::snprintf(p, sizeof(p), "vit.blk.%lld.%s", (long long) i, s); return p; };
         auto & w = m->vit[i];
         w.ln1w=mk_f32(N("ln1.weight")); w.ln1b=mk_f32(N("ln1.bias"));
@@ -669,7 +669,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
     m->embed_tokens   = m->packed_int2 ? nullptr : mk_mm("token_embd.weight");
     m->lm_output_norm = mk_f32("lm.output_norm.weight");
     m->lm.resize(m->lm_layers);
-    for (int64_t i = 0; i < m->lm_layers && ok; ++i) {
+    for (int64_t i=0; i<m->lm_layers && ok; ++i) {
         char p[64]; auto N = [&](const char * s) { std::snprintf(p, sizeof(p), "lm.blk.%lld.%s", (long long) i, s); return p; };
         auto & w = m->lm[i];
         w.attn_norm     = mk_f32(N("attn_norm.weight"));
@@ -762,7 +762,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                 (int) m->lm_inter, (int) m->lm_layers, m->lm_rope_base, m->lm_rms_eps, max_seq);
             if (m->lm_cuda_ctx) {
                 bool pack_ok = true;
-                for (int64_t L = 0; L < m->lm_layers && pack_ok && scales_ok; ++L) {
+                for (int64_t L=0; L<m->lm_layers && pack_ok && scales_ok; ++L) {
                     bitvla_lm_layer_cuda lyr{};
 
                     lyr.attn_norm_w     = upload_bf16_from_f32((const float*) m->lm[L].attn_norm->data,     m->lm_hidden, m->cuda_devptrs);
@@ -862,7 +862,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                         m->vit_ln_eps, mm_out);
                     if (m->vit_cuda_ctx) {
                         bool vit_ok = true;
-                        for (int64_t L = 0; L < m->vit_layers && vit_ok; ++L) {
+                        for (int64_t L=0; L<m->vit_layers && vit_ok; ++L) {
                             bitvla_vit_layer_cuda vl{};
 
                             vl.ln1_w = upload_bf16_from_f32((const float*) m->vit[L].ln1w->data, m->vit_hidden, m->cuda_devptrs);
@@ -916,7 +916,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                                 recover_ternary_and_scale(W, m->vit_hidden*m->vit_inter, tern, scale);
 
                                 std::vector<int8_t> padded((size_t) m->vit_hidden*ffn_pad, 0);
-                                for (int64_t n = 0; n < m->vit_hidden; ++n) {
+                                for (int64_t n=0; n<m->vit_hidden; ++n) {
                                     std::memcpy(padded.data()+n * ffn_pad,
                                                 tern.data()+n * m->vit_inter,
                                                 (size_t) m->vit_inter);
@@ -1111,7 +1111,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         img_embeds_host.assign((size_t) n_views * N * hidden_l, 0.0f);
         std::vector<float> patches((size_t) N * patch_flat);
         const auto t_v0 = clk::now();
-        for (int64_t v = 0; v < n_views; ++v) {
+        for (int64_t v=0; v<n_views; ++v) {
             const ImageView & iv = in.images[v];
             if (iv.w != (int) H || iv.h != (int) H) {
                 std::fprintf(stderr, "vla(bitvla): image view %lld size %dx%d ≠ expected %lldx%lld\n",
@@ -1119,14 +1119,14 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
                 return {};
             }
 
-            for (int64_t pi = 0; pi < H/P; ++pi)
-            for (int64_t pj = 0; pj < H/P; ++pj) {
+            for (int64_t pi=0; pi<H/P; ++pi)
+            for (int64_t pj=0; pj<H/P; ++pj) {
                 const int64_t p_idx = pi * (H/P)+pj;
                 float * p_dst = patches.data()+p_idx * patch_flat;
                 int64_t k = 0;
-                for (int64_t c = 0; c < 3; ++c)
-                for (int64_t kh = 0; kh < P; ++kh)
-                for (int64_t kw = 0; kw < P; ++kw) {
+                for (int64_t c=0; c<3; ++c)
+                for (int64_t kh=0; kh<P; ++kh)
+                for (int64_t kw=0; kw<P; ++kw) {
                     const int64_t h = pi * P+kh;
                     const int64_t w = pj * P+kw;
 
@@ -1146,7 +1146,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
             if (cuda_vit_ready) {
 
                 std::vector<uint16_t> patches_bf16((size_t) N * patch_flat);
-                for (size_t i = 0; i < patches_bf16.size(); ++i)
+                for (size_t i=0; i<patches_bf16.size(); ++i)
                     patches_bf16[i] = f32_to_bf16_u16(patches[i]);
                 cudaMemcpy(d_vit_patches, patches_bf16.data(), patches_bf16.size()*sizeof(uint16_t), cudaMemcpyHostToDevice);
                 int rc = bitvla_vit_cuda_forward(vit_cuda_ctx, d_vit_patches, d_vit_img_embeds,  0);
@@ -1154,7 +1154,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
                 std::vector<uint16_t> img_bf16((size_t) N * hidden_l);
                 cudaMemcpy(img_bf16.data(), d_vit_img_embeds, img_bf16.size()*sizeof(uint16_t), cudaMemcpyDeviceToHost);
                 float* dst = img_embeds_host.data()+(size_t) v * N * hidden_l;
-                for (size_t i = 0; i < img_bf16.size(); ++i) {
+                for (size_t i=0; i<img_bf16.size(); ++i) {
                     uint32_t u = ((uint32_t) img_bf16[i]) << 16;
                     float f; std::memcpy(&f, &u, 4);
                     dst[i] = f;
@@ -1170,7 +1170,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
 
             ggml_tensor * pe = ggml_add(ctx, ggml_mul_mat(ctx, vit_patch_w, x_in), vit_patch_b);
             ggml_tensor * h  = ggml_add(ctx, pe, vit_pos);
-            for (int64_t L = 0; L < vit_layers; ++L) {
+            for (int64_t L=0; L<vit_layers; ++L) {
                 h = build_vit_layer(ctx, vit[L], h, N, vit_heads, vit_head_dim, hidden_v, vit_ln_eps);
             }
 
@@ -1236,7 +1236,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
     const int64_t n_action  = num_actions_chunk * action_dim;
 
     int64_t n_image_markers = 0, n_proprio_markers = 0;
-    for (int64_t i = 0; i < n_lang_in; ++i) {
+    for (int64_t i=0; i<n_lang_in; ++i) {
         if (in.lang_tokens[i] == image_token_id)
             n_image_markers++;
         else if (in.lang_tokens[i] == proprio_pad_id) n_proprio_markers++;
@@ -1279,7 +1279,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         if (!emb_reader.fetch_rows_f32("token_embd.weight", ids, inputs_embeds.data(), hidden_l)) return {};
 
         int64_t k_img = 0;
-        for (int64_t i = 0; i < n_lang_in; ++i) {
+        for (int64_t i=0; i<n_lang_in; ++i) {
             const int32_t tok = in.lang_tokens[i];
             if (tok == image_token_id) {
                 std::memcpy(inputs_embeds.data()+(size_t) i * hidden_l,
@@ -1326,7 +1326,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
     if (cuda_lm_ready && seq <= cuda_max_seq) {
 
         std::vector<uint16_t> in_bf16((size_t) seq * hidden_l);
-        for (size_t i = 0; i < in_bf16.size(); ++i)
+        for (size_t i=0; i<in_bf16.size(); ++i)
             in_bf16[i] = f32_to_bf16_u16(inputs_embeds[i]);
         cudaMemcpy(d_inputs_embeds, in_bf16.data(), in_bf16.size()*sizeof(uint16_t), cudaMemcpyHostToDevice);
 
@@ -1334,14 +1334,14 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         if (rc != 0) { std::fprintf(stderr, "vla(bitvla): CUDA LM forward failed\n"); return {}; }
 
         std::vector<int32_t> aids(n_action);
-        for (int64_t i = 0; i < n_action; ++i)
+        for (int64_t i=0; i<n_action; ++i)
             aids[i] = (int32_t) (seq-2-n_action+i);
         cudaMemcpy(d_action_ids, aids.data(), n_action * sizeof(int32_t), cudaMemcpyHostToDevice);
         bitvla_gather_rows_bf16(d_last_hidden, d_action_hidden, d_action_ids, (int) n_action, (int) hidden_l,  0);
 
         std::vector<uint16_t> out_bf16((size_t) n_action * hidden_l);
         cudaMemcpy(out_bf16.data(), d_action_hidden, out_bf16.size()*sizeof(uint16_t), cudaMemcpyDeviceToHost);
-        for (size_t i = 0; i < out_bf16.size(); ++i) {
+        for (size_t i=0; i<out_bf16.size(); ++i) {
             uint32_t u = ((uint32_t) out_bf16[i]) << 16;
             float f; std::memcpy(&f, &u, 4);
             last_hidden_at_actions[i] = f;
@@ -1356,7 +1356,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         ggml_set_name(positions, "positions");
 
         ggml_tensor * h = x_in;
-        for (int64_t L = 0; L < lm_layers; ++L) {
+        for (int64_t L=0; L<lm_layers; ++L) {
             h = build_lm_layer(ctx, *this, lm[L], h, positions, seq);
         }
         ggml_tensor * h_norm = rmsnorm(ctx, h, lm_output_norm, lm_rms_eps);
@@ -1373,11 +1373,11 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
 
         ggml_backend_tensor_set(x_in, inputs_embeds.data(), 0, ggml_nbytes(x_in));
         std::vector<int32_t> pos_v(seq);
-        for (int64_t i = 0; i < seq; ++i)
+        for (int64_t i=0; i<seq; ++i)
             pos_v[i] = (int32_t) i;
         ggml_backend_tensor_set(positions, pos_v.data(), 0, ggml_nbytes(positions));
         std::vector<int32_t> aids(n_action);
-        for (int64_t i = 0; i < n_action; ++i)
+        for (int64_t i=0; i<n_action; ++i)
             aids[i] = (int32_t) (seq-2-n_action+i);
         ggml_backend_tensor_set(action_ids, aids.data(), 0, ggml_nbytes(action_ids));
 
@@ -1441,8 +1441,8 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
                    " " + std::to_string(action_dim));
 
     std::vector<float> actions = std::move(normalized_actions);
-    for (int64_t t = 0; t < chunk; ++t) {
-        for (int64_t d = 0; d < action_dim; ++d) {
+    for (int64_t t=0; t<chunk; ++t) {
+        for (int64_t d=0; d<action_dim; ++d) {
             const float a = actions[t * action_dim+d];
             if (unnorm_mask[d]) {
                 actions[t * action_dim+d] = 0.5f * (a+1.0f)*(q99[d]-q01[d]+1e-8f)+q01[d];

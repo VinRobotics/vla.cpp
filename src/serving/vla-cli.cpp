@@ -212,7 +212,7 @@ int main(int argc, char ** argv) {
     std::vector<std::string> image_paths;
     bool pretty = false;
 
-    for (int i = 1; i < argc; ++i) {
+    for (int i=1; i<argc; ++i) {
         const std::string a = argv[i];
         auto need = [&](const char * name) -> const char * {
             if (i+1 >= argc) {
@@ -288,7 +288,7 @@ int main(int argc, char ** argv) {
 
     std::vector<std::vector<uint8_t>> imgbuf(image_paths.size());
     std::vector<ImageView>            views(image_paths.size());
-    for (size_t v = 0; v < image_paths.size(); ++v) {
+    for (size_t v=0; v<image_paths.size(); ++v) {
         int w = 0, h = 0;
         if (!load_image(image_paths[v].c_str(), imgbuf[v], w, h)) {
             model_free(m);
@@ -314,7 +314,7 @@ int main(int argc, char ** argv) {
 
     const int64_t cols = cfg.max_action_dim > 0 ? cfg.max_action_dim : 1;
     if (pretty) {
-        for (size_t i = 0; i < act.size(); ++i)
+        for (size_t i=0; i<act.size(); ++i)
             std::printf("%.6g%c", act[i], ((int64_t) (i+1)%cols == 0) ? '\n' : ' ');
     } else {
         std::printf("action_len=%zu\n", act.size());

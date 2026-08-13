@@ -26,7 +26,7 @@ bool build_prompt(const char * arch, const Inputs & in, int64_t n_img,
     out = Prompt{};
 
     int64_t slots = 0;
-    for (int j = 0; j < in.n_lang; ++j)
+    for (int j=0; j<in.n_lang; ++j)
         if (in.lang_tokens[j] == image_token)
             ++slots;
 
@@ -34,9 +34,9 @@ bool build_prompt(const char * arch, const Inputs & in, int64_t n_img,
         out.ids.assign(in.lang_tokens, in.lang_tokens+in.n_lang);
     } else if (slots == 0) {
         out.ids.reserve((size_t)(n_img+in.n_lang));
-        for (int64_t i = 0; i < n_img; ++i)
+        for (int64_t i=0; i<n_img; ++i)
             out.ids.push_back(image_token);
-        for (int j = 0; j < in.n_lang; ++j)
+        for (int j=0; j<in.n_lang; ++j)
             out.ids.push_back(in.lang_tokens[j]);
     } else {
         std::fprintf(stderr, "vla(%s): lang_tokens has %lld image-token slots but n_img=%lld; expected 0 or %lld\n",
@@ -52,7 +52,7 @@ bool build_prompt(const char * arch, const Inputs & in, int64_t n_img,
 
     out.image_pos.reserve((size_t) n_img);
     out.text_pos.reserve((size_t)(seq-n_img));
-    for (int64_t p = 0; p < seq; ++p) {
+    for (int64_t p=0; p<seq; ++p) {
         if (out.ids[p] == image_token)
             out.image_pos.push_back((int32_t) p);
         else
@@ -68,7 +68,7 @@ bool fetch_embeds(const char * arch, gguf_reader & io, const Prompt & p,
     if (!io.fetch_rows_f32("token_embd.weight", p.ids, out.data(), hidden))
         return false;
 
-    for (size_t k = 0; k < p.image_pos.size(); ++k)
+    for (size_t k=0; k<p.image_pos.size(); ++k)
         std::memcpy(out.data()+(size_t) p.image_pos[k]*hidden, img_emb+k*hidden, hidden*sizeof(float));
 
     (void) arch;

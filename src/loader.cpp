@@ -141,7 +141,7 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
     }
     *out_buf = buf;
 
-    for (ggml_tensor * t = ggml_get_first_tensor(ctx_); t; t = ggml_get_next_tensor(ctx_, t)) {
+    for (ggml_tensor * t=ggml_get_first_tensor(ctx_); t; t=ggml_get_next_tensor(ctx_, t)) {
         const char * name = ggml_get_name(t);
         const bool fused = std::any_of(fused_.begin(), fused_.end(),
                                        [&](const Fused & f) { return f.dst == t; });

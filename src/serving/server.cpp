@@ -130,7 +130,7 @@ bool decode_image(const vla::Image & img,
         std::memcpy(f32.data(), img.data().data(), expected);
         // State and noise are swept for NaN/Inf; pixels were not, so a bad pixel
         // came back out as a robot action.
-        for (size_t i = 0; i < pixels; ++i) {
+        for (size_t i=0; i<pixels; ++i) {
             if (!std::isfinite(f32[i])) {
                 std::fprintf(stderr, "vla-server: F32_RGB_01 pixel %zu is not finite\n", i);
                 return false;
@@ -170,7 +170,7 @@ Drain drain_extra_frames(zmq::socket_t & sock) {
 }
 
 int find_non_finite(const float * data, int n) {
-    for (int i = 0; i < n; ++i) {
+    for (int i=0; i<n; ++i) {
         if (!std::isfinite(data[i]))
             return i;
     }
@@ -219,7 +219,7 @@ int main(int argc, char ** argv) {
     std::string  opt_err;
 
     std::vector<std::string> positionals;
-    for (int i = 1; i < argc; ++i) {
+    for (int i=1; i<argc; ++i) {
         std::string a = argv[i];
         if (a == "--bind" && i+1 < argc) {
             bind_addr = argv[++i];
@@ -405,7 +405,7 @@ int main(int argc, char ** argv) {
         }
         {
             bool tokens_ok = true;
-            for (int t = 0; t < req.lang_tokens_size(); ++t) {
+            for (int t=0; t<req.lang_tokens_size(); ++t) {
                 if (req.lang_tokens(t) < 0) {
                     char buf[128]; std::snprintf(buf, sizeof(buf),
                         "lang_tokens[%d] = %d is negative", t, req.lang_tokens(t));
@@ -469,7 +469,7 @@ int main(int argc, char ** argv) {
         } else {
 
             bool decode_ok = true;
-            for (int v = 0; v < n_views; ++v) {
+            for (int v=0; v<n_views; ++v) {
                 if (!decode_image(req.images(v), u8_bufs[v], f32_bufs[v], img_views[v])) {
                     char buf[64]; std::snprintf(buf, sizeof(buf), "image[%d] decode failed", v);
                     send_reply(make_error_response(rid, buf));

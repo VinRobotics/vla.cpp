@@ -130,7 +130,7 @@ int32_t vla_predict(vla_model * h, const vla_inputs * in,
 
     try {
         std::vector<vla::ImageView> views((size_t) (in->n_images > 0 ? in->n_images : 0));
-        for (size_t i = 0; i < views.size(); ++i) {
+        for (size_t i=0; i<views.size(); ++i) {
             views[i] = vla::ImageView{ in->images[i].data,
                                        in->images[i].w,
                                        in->images[i].h,

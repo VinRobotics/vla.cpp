@@ -308,7 +308,7 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
 
         const auto tv0 = std::chrono::steady_clock::now();
         std::vector<float> chw;
-        for (int64_t v = 0; v < n_views; ++v) {
+        for (int64_t v=0; v<n_views; ++v) {
             if (!preprocess_image_chw("gr00tn1d5", in.images[v], image_size, chw)) return {};
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
@@ -345,7 +345,7 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
         ggml_tensor * t_x0     = ggml_new_tensor_2d(C, GGML_TYPE_F32, AD, AH);           ggml_set_input(t_x0);
 
         std::vector<ggml_tensor *> t_tau(num_steps), t_tproj(num_steps);
-        for (int64_t s = 0; s < num_steps; ++s) {
+        for (int64_t s=0; s<num_steps; ++s) {
             t_tau[s]   = ggml_new_tensor_2d(C, GGML_TYPE_F32, E, AH); ggml_set_input(t_tau[s]);
             t_tproj[s] = ggml_new_tensor_1d(C, GGML_TYPE_F32, 256);   ggml_set_input(t_tproj[s]);
         }
@@ -357,7 +357,7 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
         ggml_tensor * state_features = aex.encode_state(C, t_state);
 
         std::vector<ggml_tensor *> Kc(dit.cfg.layers, nullptr), Vc(dit.cfg.layers, nullptr);
-        for (int64_t i = 0; i < dit.cfg.layers; ++i) {
+        for (int64_t i=0; i<dit.cfg.layers; ++i) {
             if (dit_interleave && (i%2 == 1))
                 continue;
             dit.kv(C, dit.blk[i], vl_embs, &Kc[i], &Vc[i]);
@@ -365,12 +365,12 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
 
         const float dt = 1.0f/(float) num_steps;
         ggml_tensor * actions = t_x0;
-        for (int64_t s = 0; s < num_steps; ++s) {
+        for (int64_t s=0; s<num_steps; ++s) {
             ggml_tensor * temb = dit.time_emb(C, t_tproj[s]);
             ggml_tensor * af   = aex.encode_action(C, actions, t_tau[s], E, AH);
             ggml_tensor * hh   = ggml_concat(C, ggml_concat(C, state_features, future_tokens, 1), af, 1);
 
-            for (int64_t i = 0; i < dit.cfg.layers; ++i) {
+            for (int64_t i=0; i<dit.cfg.layers; ++i) {
                 ggml_tensor * enc = (dit_interleave && (i%2 == 1)) ? nullptr : vl_embs;
                 hh = dit.block(C, dit.blk[i], hh, temb, enc, Kc[i], Vc[i]);
             }
@@ -396,7 +396,7 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_set(gio.t_embeds, inputs_embeds.data(), 0, ggml_nbytes(gio.t_embeds));
 
     std::vector<int32_t> pp(SEQ);
-    for (int64_t i = 0; i < SEQ; ++i)
+    for (int64_t i=0; i<SEQ; ++i)
         pp[i] = (int32_t) i;
     ggml_backend_tensor_set(gio.t_pos, pp.data(), 0, ggml_nbytes(gio.t_pos));
 
@@ -405,13 +405,13 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_set(gio.t_lmmask, mask.data(), 0, ggml_nbytes(gio.t_lmmask));
 
     std::vector<float> st(max_state_dim, 0.0f);
-    for (int64_t i = 0; i < max_state_dim; ++i)
+    for (int64_t i=0; i<max_state_dim; ++i)
         st[i] = in.state ? in.state[i] : 0.0f;
     ggml_backend_tensor_set(gio.t_state, st.data(), 0, ggml_nbytes(gio.t_state));
 
     ggml_backend_tensor_set(gio.t_x0, x_init.data(), 0, ggml_nbytes(gio.t_x0));
 
-    for (int64_t s = 0; s < num_steps; ++s) {
+    for (int64_t s=0; s<num_steps; ++s) {
         const int64_t bucket = (int64_t) ((double) s/(double) num_steps*(double) num_buckets);
         std::vector<float> tau, tpr;
         action_sinusoid(bucket, E, AH, tau);

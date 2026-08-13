@@ -162,7 +162,7 @@ __global__ void k_bin_bcast_bf16_vec8(
         __nv_bfloat16*av = reinterpret_cast<__nv_bfloat16 *>(&a);
 
         #pragma unroll
-        for (int k = 0; k < 8; ++k) {
+        for (int k=0; k<8; ++k) {
             const float b = (float) r1[i0+k];
             av[k] = f2bf(apply_bin(op, bf2f(av[k]), b));
         }
@@ -381,7 +381,7 @@ __global__ void k_fused_bin_bcast_bf16(
         const int64_t j = row1+bcast_idx(i0, ne10, ne0)*s10;
 
         float acc = bf2f(r0[i0*s00]);
-        for (int k = 0; k < n_fuse; ++k) {
+        for (int k=0; k<n_fuse; ++k) {
             acc = apply_bin(op, acc, (float) srcs.p[k][j]);
         }
         rd[i0*d0] = f2bf(acc);
@@ -412,13 +412,13 @@ bool fused_bin_bcast(ggml_tensor * dst, int n_fuse, cudaStream_t stream) {
     if (!ggml_can_repeat(src1, src0))
         return false;
 
-    for (int k = 1; k < n_fuse; ++k) {
+    for (int k=1; k<n_fuse; ++k) {
         const ggml_tensor * s = dst->src[k+1];
         if (!s || s->type != src1->type)
             return false;
         if (!ggml_are_same_shape(s, src1))
             return false;
-        for (int d = 0; d < GGML_MAX_DIMS; ++d) {
+        for (int d=0; d<GGML_MAX_DIMS; ++d) {
             if (s->nb[d] != src1->nb[d])
                 return false;
         }
@@ -434,7 +434,7 @@ bool fused_bin_bcast(ggml_tensor * dst, int n_fuse, cudaStream_t stream) {
 #define VLA_LAUNCH_FUSED(TYPE)                                                    \
     do {                                                                          \
         SrcPtrs<TYPE> srcs{};                                                     \
-        for (int k = 0; k < n_fuse; ++k) srcs.p[k] = (const TYPE *) dst->src[k+1]->data; \
+        for (int k=0; k<n_fuse; ++k) srcs.p[k] = (const TYPE *) dst->src[k+1]->data; \
         k_fused_bin_bcast_bf16<op, TYPE><<<g.grid, g.block, 0, stream>>>(         \
             (const __nv_bfloat16 *) src0->data, srcs, n_fuse,                     \
             (__nv_bfloat16 *) dst->data,                                          \
@@ -538,7 +538,7 @@ __device__ inline float block_sum(float v, float * shared) {
     const int tid = threadIdx.x;
     shared[tid] = v;
     __syncthreads();
-    for (int s = blockDim.x/2; s > 0; s >>= 1) {
+    for (int s=blockDim.x/2; s>0; s >>= 1) {
         if (tid < s)
             shared[tid] += shared[tid+s];
         __syncthreads();
@@ -556,7 +556,7 @@ __global__ void k_norm_bf16(const __nv_bfloat16*__restrict__ x, __nv_bfloat16*__
     __nv_bfloat16 *       dr = dst+row*sd1;
 
     float sum = 0.0f, sumsq = 0.0f;
-    for (int64_t c = threadIdx.x; c < ncols; c += blockDim.x) {
+    for (int64_t c=threadIdx.x; c<ncols; c += blockDim.x) {
         const float v = bf2f(xr[c]);
         sumsq += v*v;
         if (!rms)
@@ -566,14 +566,14 @@ __global__ void k_norm_bf16(const __nv_bfloat16*__restrict__ x, __nv_bfloat16*__
     if (rms) {
         const float ms = block_sum(sumsq, shared)/(float) ncols;
         const float inv = rsqrtf(ms+eps);
-        for (int64_t c = threadIdx.x; c < ncols; c += blockDim.x)
+        for (int64_t c=threadIdx.x; c<ncols; c += blockDim.x)
             dr[c] = f2bf(bf2f(xr[c])*inv);
     } else {
         const float mean = block_sum(sum, shared)/(float) ncols;
         __syncthreads();
         const float meansq = block_sum(sumsq, shared)/(float) ncols;
         const float inv = rsqrtf(meansq-mean*mean+eps);
-        for (int64_t c = threadIdx.x; c < ncols; c += blockDim.x)
+        for (int64_t c=threadIdx.x; c<ncols; c += blockDim.x)
             dr[c] = f2bf((bf2f(xr[c])-mean)*inv);
     }
 }

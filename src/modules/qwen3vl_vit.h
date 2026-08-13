@@ -79,7 +79,7 @@ struct Qwen3VLTower {
         };
 
         char name[160];
-        for (int j = 0; j < 3; ++j) {
+        for (int j=0; j<3; ++j) {
             std::snprintf(name, sizeof(name), "%s.deepstack.%d", prefix, j);
             merger_w(deepstack[j], name);
         }
@@ -129,7 +129,7 @@ inline ggml_tensor * build_merger(ggml_context * C, const MergerW & w, ggml_tens
 // Patch row/col after the spatial merge.
 inline void merge_block_coords(int64_t gh, int64_t gw, int64_t m, std::vector<int64_t> & row, std::vector<int64_t> & col) {
     const int64_t S = gh * gw; row.assign(S, 0); col.assign(S, 0);
-    for (int64_t s = 0; s < S; ++s) {
+    for (int64_t s=0; s<S; ++s) {
         int64_t t = s; const int64_t wj = t%m; t /= m; const int64_t wi = t%m; t /= m;
         const int64_t bc = t%(gw/m); t /= (gw/m); const int64_t br = t;
         row[s] = br * m+wi; col[s] = bc * m+wj;
@@ -140,18 +140,18 @@ inline void vit_rope_tables(const std::vector<int64_t> & row, const std::vector<
                             std::vector<float> & cos_t, std::vector<float> & sin_t) {
     const int64_t S = (int64_t) row.size(), nf = hd/4;
     std::vector<double> invf(nf);
-    for (int64_t i = 0; i < nf; ++i)
+    for (int64_t i=0; i<nf; ++i)
         invf[i] = 1.0/std::pow(theta, (double)(2*i)/(double)(hd/2));
     cos_t.assign((size_t) S * hd, 0.0f); sin_t.assign((size_t) S * hd, 0.0f);
-    for (int64_t s = 0; s < S; ++s) {
+    for (int64_t s=0; s<S; ++s) {
         std::vector<double> emb(hd);
-        for (int64_t i = 0; i < nf; ++i) {
+        for (int64_t i=0; i<nf; ++i) {
             emb[i] = (double) row[s]*invf[i];
             emb[nf+i] = (double) col[s]*invf[i];
         }
-        for (int64_t i = 0; i < hd/2; ++i)
+        for (int64_t i=0; i<hd/2; ++i)
             emb[hd/2+i] = emb[i];
-        for (int64_t i = 0; i < hd; ++i) {
+        for (int64_t i=0; i<hd; ++i) {
             cos_t[s * hd+i] = (float) std::cos(emb[i]);
             sin_t[s * hd+i] = (float) std::sin(emb[i]);
         }
@@ -165,7 +165,7 @@ inline void interp_pos_embed(const std::vector<float> & table, int64_t num_side,
     const int64_t S = (int64_t) row.size();
     out.assign((size_t) S * hidden, 0.0f);
     auto src_coord = [&](int64_t k, int64_t g) -> double { return (g <= 1) ? 0.0 : (double) k * (double)(num_side-1)/(double)(g-1); };
-    for (int64_t s = 0; s < S; ++s) {
+    for (int64_t s=0; s<S; ++s) {
         // Clamped, not just h1/w1: a grid that the spatial merge does not divide
         // pushes row/col past gh-1 and would index off the end of the table.
         const double lim = (double) (num_side-1);
@@ -176,7 +176,7 @@ inline void interp_pos_embed(const std::vector<float> & table, int64_t num_side,
         const double c00 = (1-dh)*(1-dw), c01 = (1-dh)*dw, c10 = dh * (1-dw), c11 = dh * dw;
         const float * T00 = &table[(h0*num_side+w0)*hidden]; const float * T01 = &table[(h0*num_side+w1)*hidden];
         const float * T10 = &table[(h1*num_side+w0)*hidden]; const float * T11 = &table[(h1*num_side+w1)*hidden];
-        for (int64_t c = 0; c < hidden; ++c)
+        for (int64_t c=0; c<hidden; ++c)
             out[s * hidden+c] = (float)(c00*T00[c]+c01*T01[c]+c10*T10[c]+c11*T11[c]);
     }
 }
@@ -197,12 +197,12 @@ inline bool preprocess_image_patches(const char * arch, const ImageView & v, int
             return ((const uint8_t *) v.data)[(r * side+c)*3+ch]/255.0f;
         return ((const float *) v.data)[(r * side+c)*3+ch];
     };
-    for (int64_t s = 0; s < S; ++s)
-        for (int64_t ch = 0; ch < 3; ++ch)
-            for (int64_t ph = 0; ph < ps; ++ph)
-                for (int64_t pw = 0; pw < ps; ++pw) {
+    for (int64_t s=0; s<S; ++s)
+        for (int64_t ch=0; ch<3; ++ch)
+            for (int64_t ph=0; ph<ps; ++ph)
+                for (int64_t pw=0; pw<ps; ++pw) {
                     const float val = (px(row[s]*ps+ph, col[s]*ps+pw, ch)-QWEN3VL_MEAN[ch])/QWEN3VL_STD[ch];
-                    for (int64_t t = 0; t < tps; ++t)
+                    for (int64_t t=0; t<tps; ++t)
                         out[s * pf+ch * tps * ps * ps+t * ps * ps+ph * ps+pw] = val;
                 }
     return true;

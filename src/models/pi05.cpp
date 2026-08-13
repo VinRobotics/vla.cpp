@@ -507,7 +507,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     m->pl.declare(L, "vlm", cfg.n_layers, false);
 
     m->ex_layers.resize(cfg.n_layers);
-    for (int64_t i = 0; i < cfg.n_layers; ++i) {
+    for (int64_t i=0; i<cfg.n_layers; ++i) {
         ExpertLayerW & w = m->ex_layers[i];
         w.ada_in_w   = L.f32 ("aex.blk.%lld.attn_norm.weight", (long long)i);
         w.ada_in_b   = L.f32 ("aex.blk.%lld.attn_norm.bias",   (long long)i);
@@ -578,7 +578,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         ggml_tensor * conv = ggml_conv_2d(VC, vit.patch_w, t_px, (int) vit_patch_size, (int) vit_patch_size, 0, 0, 1, 1);
         ggml_tensor * patches = ggml_cont(VC, ggml_transpose(VC, ggml_reshape_2d(VC, conv, grid * grid, vit_hidden)));
         ggml_tensor * h = ggml_add(VC, ggml_add(VC, patches, vit.patch_b), vit.pos);
-        for (int64_t i = 0; i < vit_layers; ++i)
+        for (int64_t i=0; i<vit_layers; ++i)
             h = build_siglip_layer(VC, vit.enc.blk[i], h, K, vit_heads, vit_hidden/vit_heads, vit_hidden, vit_ln_eps);
         h = ggml_add(VC, ggml_mul(VC, ggml_norm(VC, h, vit_ln_eps), vit.post_ln_w), vit.post_ln_b);
         // PaliGemma projector: linear (+ optional bias), then 1/sqrt(hidden) scale (matches clip.cpp siglip.cpp).
@@ -597,7 +597,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         }
         const auto tv0 = clk::now();
         std::vector<float> chw;
-        for (int v = 0; v < in.n_images; ++v) {
+        for (int v=0; v<in.n_images; ++v) {
             if (!preprocess_image_chw("pi05", in.images[v], vit_image_size, chw)) { return {}; }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
@@ -640,7 +640,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     ggml_tensor * t_suffix_pos= ggml_new_tensor_1d(C, GGML_TYPE_I32, n_suf);                   ggml_set_input(t_suffix_pos);
 
     std::vector<ggml_tensor *> t_time(num_steps);
-    for (int s = 0; s < num_steps; ++s) {
+    for (int s=0; s<num_steps; ++s) {
         t_time[s] = ggml_new_tensor_1d(C, GGML_TYPE_F32, hidden_ex);
         ggml_set_input(t_time[s]);
     }
@@ -651,7 +651,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     std::vector<ggml_tensor *> cK(n_layers), cV(n_layers);
     {
         ggml_tensor * h = prefix_embs;
-        for (int64_t i = 0; i < n_layers; ++i) {
+        for (int64_t i=0; i<n_layers; ++i) {
             h = build_vlm_layer(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix, rope_base,
                                 &cK[i], &cV[i]);
         }
@@ -659,13 +659,13 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     }
 
     ggml_tensor * x_t = t_x0;
-    for (int step = 0; step < num_steps; ++step) {
+    for (int step=0; step<num_steps; ++step) {
 
         ggml_tensor * c1   = ggml_silu(C, ggml_add(C, ggml_mul_mat(C, W_tin,  t_time[step]), b_tin));
         ggml_tensor * cond = ggml_silu(C, ggml_add(C, ggml_mul_mat(C, W_tout, c1),           b_tout));
 
         ggml_tensor * h = ggml_add(C, ggml_mul_mat(C, W_ain, x_t), b_ain);
-        for (int64_t i = 0; i < n_layers; ++i) {
+        for (int64_t i=0; i<n_layers; ++i) {
             h = build_expert_layer(C, ex_layers[i], h, t_suffix_pos, cond, cfg, n_suf, rope_base,
                                    cK[i], cV[i]);
         }
@@ -696,9 +696,9 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_set(t_image_emb, img_emb_host.data(), 0, ggml_nbytes(t_image_emb));
     ggml_backend_tensor_set(t_lang_emb,  lang_rows.data(),    0, ggml_nbytes(t_lang_emb));
     {
-        std::vector<int32_t> pp(n_prefix); for (int64_t i = 0; i < n_prefix; ++i) pp[i] = (int32_t) i;
+        std::vector<int32_t> pp(n_prefix); for (int64_t i=0; i<n_prefix; ++i) pp[i] = (int32_t) i;
         ggml_backend_tensor_set(t_prefix_pos, pp.data(), 0, ggml_nbytes(t_prefix_pos));
-        std::vector<int32_t> sp(n_suf);    for (int64_t i = 0; i < n_suf; ++i)    sp[i] = (int32_t) (n_prefix+i);
+        std::vector<int32_t> sp(n_suf);    for (int64_t i=0; i<n_suf; ++i)    sp[i] = (int32_t) (n_prefix+i);
         ggml_backend_tensor_set(t_suffix_pos, sp.data(), 0, ggml_nbytes(t_suffix_pos));
     }
     {
@@ -712,7 +712,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         }
         ggml_backend_tensor_set(t_x0, x0h.data(), 0, ggml_nbytes(t_x0));
     }
-    for (int s = 0; s < num_steps; ++s) {
+    for (int s=0; s<num_steps; ++s) {
         const float timestep = 1.0f+(float) s * dt;
         const std::vector<float> tv = sinusoidal_time_emb(timestep, hidden_ex, cfg.min_period, cfg.max_period);
         ggml_backend_tensor_set(t_time[s], tv.data(), 0, ggml_nbytes(t_time[s]));
@@ -730,9 +730,9 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_get(x_final, out.data(), 0, out.size()*sizeof(float));
 
     if (!vla::env_flag("VLA_PI05_SKIP_UNNORM")) {
-        for (int64_t t = 0; t < chunk; ++t) {
+        for (int64_t t=0; t<chunk; ++t) {
             float * row = out.data()+(size_t) t * max_ad;
-            for (int64_t j = 0; j < max_ad; ++j) {
+            for (int64_t j=0; j<max_ad; ++j) {
                 if (j >= cfg.real_action_dim)
                     row[j] = 0.0f;
                 else if (quantile_norm)

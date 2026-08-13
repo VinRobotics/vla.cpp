@@ -168,9 +168,9 @@ bool preprocess_image_chw(const ImageView & v, int64_t side, std::vector<float> 
         return false;
     }
     out.assign((size_t) 3*side * side, 0.0f);
-    for (int64_t h = 0; h < side; ++h)
-        for (int64_t w = 0; w < side; ++w)
-            for (int64_t c = 0; c < 3; ++c) {
+    for (int64_t h=0; h<side; ++h)
+        for (int64_t w=0; w<side; ++w)
+            for (int64_t c=0; c<3; ++c) {
                 float px;
                 if (v.format == PixelFormat::U8) {
                     px = ((const uint8_t *) v.data)[(h * side+w)*3+c]/255.0f;
@@ -263,7 +263,7 @@ ggml_tensor * build_internvit_view(ggml_context * C, const Evo1ModelArch & m, gg
     // the activation dtype from here
     ggml_tensor * x = as_type(C, ggml_add(C, ggml_concat(C, cls2d, patches, 1), m.vit_pos), m.act_type);
 
-    for (int64_t i = 0; i < m.vit_layers; ++i)
+    for (int64_t i=0; i<m.vit_layers; ++i)
         x = build_internvit_layer(C, m, m.vit[i], x, n_tok);
 
     ggml_tensor * pnc = ggml_cont(C, ggml_view_2d(C, x, H, n_patches, x->nb[1], x->nb[1]));
@@ -418,7 +418,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
     bool ok = true;
     m->lm_output_norm = mk_f32("vlm.output_norm.weight"); ok &= (m->lm_output_norm != nullptr);
     m->lm.resize(m->lm_layers);
-    for (int64_t i = 0; i < m->lm_layers && ok; ++i) {
+    for (int64_t i=0; i<m->lm_layers && ok; ++i) {
         char p[64]; auto N = [&](const char * suf) { std::snprintf(p, sizeof(p), "vlm.blk.%lld.%s", (long long) i, suf); return p; };
         auto & w = m->lm[i];
         w.attn_norm = mk_f32(N("attn_norm.weight"));
@@ -436,7 +436,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
     m->ae_W3 = mk_mm("aex.ae.W3.weight"); m->ae_b3 = mk_f32("aex.ae.W3.bias");
     m->ae_pos = mk_f32("aex.ae.pos_enc");
     m->dit.resize(m->dit_layers);
-    for (int64_t i = 0; i < m->dit_layers && ok; ++i) {
+    for (int64_t i=0; i<m->dit_layers && ok; ++i) {
         char p[64]; auto N = [&](const char * suf) { std::snprintf(p, sizeof(p), "aex.blk.%lld.%s", (long long) i, suf); return p; };
         auto & w = m->dit[i];
         w.n1w = mk_f32(N("norm1.weight")); w.n1b = mk_f32(N("norm1.bias"));
@@ -464,7 +464,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
         m->vit_cls     = mk_f32("vit.class_embd");
         m->vit_pos     = mk_f32("vit.pos_embd");
         m->vit.resize(m->vit_layers);
-        for (int64_t i = 0; i < m->vit_layers && ok; ++i) {
+        for (int64_t i=0; i<m->vit_layers && ok; ++i) {
             char p[64]; auto N = [&](const char * suf) { std::snprintf(p, sizeof(p), "vit.blk.%lld.%s", (long long) i, suf); return p; };
             auto & w = m->vit[i];
             w.n1w = mk_f32(N("norm1.weight")); w.n1b = mk_f32(N("norm1.bias"));
@@ -546,14 +546,14 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         ggml_context * VC = vision_scratch.reset(vision_arena);
         if (!VC) { std::fprintf(stderr, "vla(evo1): ggml_init(vision ctx) failed\n"); return {}; }
         std::vector<ggml_tensor *> t_px((size_t) n_views), t_ie((size_t) n_views);
-        for (int64_t v = 0; v < n_views; ++v) {
+        for (int64_t v=0; v<n_views; ++v) {
             t_px[v] = ggml_new_tensor_3d(VC, GGML_TYPE_F32, image_size, image_size, 3);
             ggml_set_input(t_px[v]);
             t_ie[v] = build_internvit_view(VC, *this, t_px[v]);
             ggml_set_output(t_ie[v]);
         }
         ggml_cgraph * vg = ggml_new_graph_custom(VC,  (size_t) 8192*std::max<int64_t>(n_views, 1),  false);
-        for (int64_t v = 0; v < n_views; ++v)
+        for (int64_t v=0; v<n_views; ++v)
             ggml_build_forward_expand(vg, t_ie[v]);
         if (!vision_scratch.alloc(backend, vg)) {
             std::fprintf(stderr, "vla(evo1): vision ggml_gallocr_alloc_graph failed\n");
@@ -562,7 +562,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         img_emb_host.assign((size_t) n_views * num_image_token * lm_hidden, 0.0f);
         std::vector<float> chw;
         const auto tv0 = std::chrono::steady_clock::now();
-        for (int64_t v = 0; v < n_views; ++v) {
+        for (int64_t v=0; v<n_views; ++v) {
             if (!preprocess_image_chw(in.images[v], image_size, chw)) { return {}; }
             ggml_backend_tensor_set(t_px[v], chw.data(), 0, ggml_nbytes(t_px[v]));
         }
@@ -570,7 +570,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             std::fprintf(stderr, "vla(evo1): vision graph compute failed (%lld views)\n", (long long) n_views);
             return {};
         }
-        for (int64_t v = 0; v < n_views; ++v) {
+        for (int64_t v=0; v<n_views; ++v) {
             ggml_backend_tensor_get(t_ie[v], img_emb_host.data()+v * num_image_token * lm_hidden,
                                     0, ggml_nbytes(t_ie[v]));
         }
@@ -585,7 +585,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         std::fprintf(stderr, "vla(evo1): note - %lld image views (model n_images=%lld); prompt adapts\n", (long long) n_views, (long long) n_images);
 
     bool pre_built = false;
-    for (int j = 0; j < in.n_lang; ++j)
+    for (int j=0; j<in.n_lang; ++j)
         if (in.lang_tokens[j] == (int32_t) img_ctx_id) {
             pre_built = true;
             break;
@@ -593,16 +593,16 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     std::vector<int32_t> input_ids;
     input_ids.reserve(max_text_length);
     if (pre_built) {
-        for (int j = 0; j < in.n_lang; ++j)
+        for (int j=0; j<in.n_lang; ++j)
             input_ids.push_back(in.lang_tokens[j]);
     } else {
-        for (int64_t v = 0; v < n_views; ++v) {
+        for (int64_t v=0; v<n_views; ++v) {
             input_ids.push_back((int32_t) img_start_id);
-            for (int64_t k = 0; k < num_image_token; ++k)
+            for (int64_t k=0; k<num_image_token; ++k)
                 input_ids.push_back((int32_t) img_ctx_id);
             input_ids.push_back((int32_t) img_end_id);
         }
-        for (int j = 0; j < in.n_lang; ++j)
+        for (int j=0; j<in.n_lang; ++j)
             input_ids.push_back(in.lang_tokens[j]);
     }
     const int64_t n_real = (int64_t) input_ids.size();
@@ -618,7 +618,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     if (!io.fetch_rows_f32("token_embd.weight", input_ids, inputs_embeds.data(), lm_hidden)) return {};
     {
         int64_t img_idx = 0;
-        for (int64_t p = 0; p < SEQ; ++p) {
+        for (int64_t p=0; p<SEQ; ++p) {
             if (input_ids[p] == (int32_t) img_ctx_id) {
                 if (img_idx >= n_img_tokens) { std::fprintf(stderr, "vla(evo1): more IMG_CTX tokens than ViT embeds\n"); return {}; }
                 std::memcpy(inputs_embeds.data()+p * lm_hidden,
@@ -639,15 +639,15 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
                          in.attention_mask_n, (long long) SEQ);
             return {};
         }
-        for (int64_t p = 0; p < SEQ; ++p)
+        for (int64_t p=0; p<SEQ; ++p)
             attn_ok[p] = in.attention_mask[p] ? 1 : 0;
     } else {
-        for (int64_t p = 0; p < n_real; ++p)
+        for (int64_t p=0; p<n_real; ++p)
             attn_ok[p] = 1;
     }
 
     std::vector<float> state_norm(per_a, 0.0f);
-    for (int64_t i = 0; i < per_a; ++i) {
+    for (int64_t i=0; i<per_a; ++i) {
         const float lo = state_min[i], hi = state_max[i];
         // The converter zero-pads stats past real_state_dim, so lo == hi == 0 there
         // and the affine below would map anything to -1.
@@ -696,7 +696,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     const ggml_type at = act_type;
 
     ggml_tensor * h = as_type(C, t_embeds, at);
-    for (int64_t i = 0; i < lm_layers; ++i)
+    for (int64_t i=0; i<lm_layers; ++i)
         h = build_qwen2_layer(C, *this, lm[i], h, t_pos, t_lmmask, SEQ, t_qmask);
     ggml_tensor * context = ggml_mul(C, ggml_rms_norm(C, h, lm_rms_eps), lm_output_norm);
 
@@ -706,7 +706,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
 
     struct DC { ggml_tensor *Wq, *bq, *K, *V; };
     std::vector<DC> dc(dit_layers);
-    for (int64_t i = 0; i < dit_layers; ++i) {
+    for (int64_t i=0; i<dit_layers; ++i) {
         const auto & w = dit[i];
         dc[i].Wq = inproj_split_w(C, w.Win, E, 0);
         ggml_tensor * Wk = inproj_split_w(C, w.Win, E, 1);
@@ -727,7 +727,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         ae = ggml_add(C, ae, ae_pos);
         ae = ggml_relu(C, ggml_add(C, mm_act(C, ae_W2, ae, at), ae_b2));
         ggml_tensor * x = ggml_add(C, mm_act(C, ae_W3, ae, at), ae_b3);
-        for (int64_t i = 0; i < dit_layers; ++i) {
+        for (int64_t i=0; i<dit_layers; ++i) {
             const auto & w = dit[i]; const auto & c = dc[i];
             ggml_tensor * x_q = ggml_add(C, ggml_mul(C, ggml_norm(C, x, proj_ln_eps), w.n1w), w.n1b);
             ggml_tensor * qp = as_type(C, ggml_add(C, mm_act(C, c.Wq, x_q, at), c.bq), GGML_TYPE_F32);
@@ -757,7 +757,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
 
     const float dt = 1.0f/(float) num_steps;
     ggml_tensor * x_action = t_x;
-    for (int64_t step = 0; step < num_steps; ++step) {
+    for (int64_t step=0; step<num_steps; ++step) {
         const int64_t time_index = (int64_t) ((double) step/(double) num_steps*1000.0);
         ggml_tensor * x_seq = ggml_reshape_2d(C, x_action, per_a, horizon);
         ggml_tensor * x_seq_masked = as_type(C, ggml_mul(C, x_seq, t_amask), at);
@@ -785,18 +785,18 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
     {
         std::vector<int32_t> pp(SEQ);
-        for (int64_t i = 0; i < SEQ; ++i)
+        for (int64_t i=0; i<SEQ; ++i)
             pp[i] = (int32_t) i;
         ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos));
     }
     { std::vector<float> mk((size_t) SEQ * SEQ); const float NEG = -std::numeric_limits<float>::infinity();
-      for (int64_t q = 0; q < SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) mk[q * SEQ+kv] = (kv <= q && attn_ok[kv]) ? 0.0f : NEG;
+      for (int64_t q=0; q<SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) mk[q * SEQ+kv] = (kv <= q && attn_ok[kv]) ? 0.0f : NEG;
       ggml_backend_tensor_set(t_lmmask, mk.data(), 0, ggml_nbytes(t_lmmask)); }
     ggml_backend_tensor_set(t_state, state_norm.data(), 0, ggml_nbytes(t_state));
     ggml_backend_tensor_set(t_x, x_init.data(), 0, ggml_nbytes(t_x));
-    { std::vector<float> am(per_a, 0.0f); for (int64_t i = 0; i < real_action_dim && i < per_a; ++i) am[i] = 1.0f;
+    { std::vector<float> am(per_a, 0.0f); for (int64_t i=0; i<real_action_dim && i<per_a; ++i) am[i] = 1.0f;
       ggml_backend_tensor_set(t_amask, am.data(), 0, ggml_nbytes(t_amask)); }
-    { std::vector<float> qm(SEQ, 0.0f); for (int64_t p = 0; p < SEQ; ++p) qm[p] = attn_ok[p] ? 1.0f : 0.0f;
+    { std::vector<float> qm(SEQ, 0.0f); for (int64_t p=0; p<SEQ; ++p) qm[p] = attn_ok[p] ? 1.0f : 0.0f;
       ggml_backend_tensor_set(t_qmask, qm.data(), 0, ggml_nbytes(t_qmask)); }
 
     const auto tc0 = std::chrono::steady_clock::now();
@@ -812,8 +812,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_get(x_action, x_final.data(), 0, x_final.size()*sizeof(float));
 
     std::vector<float> out((size_t) horizon * per_a);
-    for (int64_t hstep = 0; hstep < horizon; ++hstep)
-        for (int64_t c = 0; c < per_a; ++c) {
+    for (int64_t hstep=0; hstep<horizon; ++hstep)
+        for (int64_t c=0; c<per_a; ++c) {
             const double a = (double) x_final[hstep * per_a+c];
             out[hstep * per_a+c] = (float) ((a+1.0)/2.0*((double) action_max[c]-(double) action_min[c]+(double) norm_eps_denom)+(double) action_min[c]);
         }

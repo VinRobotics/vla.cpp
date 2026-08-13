@@ -94,7 +94,7 @@ bool parse_stats(const std::string & js, int64_t want, std::vector<float> & q01,
         return false;
     if (!read_arr("mask", mk))
         mk.assign(want, 1.0f);
-    mask.assign(mk.size(), 1); for (size_t i = 0; i < mk.size(); ++i) mask[i] = mk[i] != 0.0f ? 1 : 0;
+    mask.assign(mk.size(), 1); for (size_t i=0; i<mk.size(); ++i) mask[i] = mk[i] != 0.0f ? 1 : 0;
     return (int64_t) q01.size() == want && (int64_t) q99.size() == want;
 }
 
@@ -266,7 +266,7 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     if (n_views < 1) { std::fprintf(stderr, "vla(openvla_oft): need >=1 image view\n"); return {}; }
     if (!in.images) { std::fprintf(stderr, "vla(openvla_oft): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
     // towers read S*S*3 per view; reject any view that is not exactly SxS.
-    for (int64_t v = 0; v < n_views; ++v) {
+    for (int64_t v=0; v<n_views; ++v) {
         const ImageView& iv = in.images[v];
         if (!view_is_side(iv.data, iv.w, iv.h, S)) {
             std::fprintf(stderr, "vla(openvla_oft): image view %lld is %dx%d, expected %lldx%lld\n",
@@ -308,7 +308,7 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
 
     const int64_t L = in.n_lang;
     // ggml_get_rows does not bound-check, so reject out-of-range tokens here.
-    for (int64_t i = 0; i < L; ++i)
+    for (int64_t i=0; i<L; ++i)
         if (in.lang_tokens[i] < 0 || in.lang_tokens[i] >= vocab) {
             std::fprintf(stderr, "vla(openvla_oft): token %d out of vocab\n", in.lang_tokens[i]);
             return {};

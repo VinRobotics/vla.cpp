@@ -46,11 +46,11 @@ __global__ void rmsnorm_bf16_kernel(const __nv_bfloat16* __restrict__ x,
     __nv_bfloat16*       o   = out+m * K;
 
     float ss = 0.0f;
-    for (int k = tid; k < K; k += BLOCK) {
+    for (int k=tid; k<K; k += BLOCK) {
         float v = __bfloat162float(row[k]);
         ss += v * v;
     }
-    for (int off = 16; off > 0; off >>= 1)
+    for (int off=16; off>0; off >>= 1)
         ss += __shfl_down_sync(0xffffffff, ss, off);
     __shared__ float smem[32];
     if ((tid & 31) == 0)
@@ -58,7 +58,7 @@ __global__ void rmsnorm_bf16_kernel(const __nv_bfloat16* __restrict__ x,
     __syncthreads();
     if ((tid >> 5) == 0) {
         float v = (tid < (BLOCK+31)/32) ? smem[tid] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1)
+        for (int off=16; off>0; off >>= 1)
             v += __shfl_down_sync(0xffffffff, v, off);
         if (tid == 0)
             smem[0] = v;
@@ -67,7 +67,7 @@ __global__ void rmsnorm_bf16_kernel(const __nv_bfloat16* __restrict__ x,
     const float mean  = smem[0]/(float)K;
     const float scale = rsqrtf(mean+eps);
 
-    for (int k = tid; k < K; k += BLOCK) {
+    for (int k=tid; k<K; k += BLOCK) {
         float v  = __bfloat162float(row[k])*scale;
         float wv = __bfloat162float(w[k]);
         o[k] = __float2bfloat16(v * wv);
@@ -87,7 +87,7 @@ __global__ void rope_neox_bf16_kernel(__nv_bfloat16* __restrict__ inout,
     __nv_bfloat16* row = inout+((size_t)h * S+s)*D;
     const float* c_row = cos_tab+(size_t)s * half;
     const float* s_row = sin_tab+(size_t)s * half;
-    for (int k = tid; k < half; k += BLOCK) {
+    for (int k=tid; k<half; k += BLOCK) {
         float c = c_row[k];
         float si= s_row[k];
         float a = __bfloat162float(row[k]);
@@ -106,12 +106,12 @@ __global__ void softmax_scaled_bf16_kernel(__nv_bfloat16* __restrict__ inout,
     __nv_bfloat16* r = inout+(size_t)row * S;
 
     float mx = -INFINITY;
-    for (int i = tid; i < S; i += BLOCK) {
+    for (int i=tid; i<S; i += BLOCK) {
         float v = __bfloat162float(r[i])*scale;
         if (v > mx)
             mx = v;
     }
-    for (int off = 16; off > 0; off >>= 1) {
+    for (int off=16; off>0; off >>= 1) {
         float other = __shfl_down_sync(0xffffffff, mx, off);
         if (other > mx)
             mx = other;
@@ -122,7 +122,7 @@ __global__ void softmax_scaled_bf16_kernel(__nv_bfloat16* __restrict__ inout,
     __syncthreads();
     if ((tid >> 5) == 0) {
         float v = (tid < (BLOCK+31)/32) ? smem[tid] : -INFINITY;
-        for (int off = 16; off > 0; off >>= 1) {
+        for (int off=16; off>0; off >>= 1) {
             float other = __shfl_down_sync(0xffffffff, v, off);
             if (other > v)
                 v = other;
@@ -134,17 +134,17 @@ __global__ void softmax_scaled_bf16_kernel(__nv_bfloat16* __restrict__ inout,
     const float max_v = smem[0];
 
     float s_sum = 0.0f;
-    for (int i = tid; i < S; i += BLOCK) {
+    for (int i=tid; i<S; i += BLOCK) {
         s_sum += expf(__bfloat162float(r[i])*scale-max_v);
     }
-    for (int off = 16; off > 0; off >>= 1)
+    for (int off=16; off>0; off >>= 1)
         s_sum += __shfl_down_sync(0xffffffff, s_sum, off);
     if ((tid & 31) == 0)
         smem[tid >> 5] = s_sum;
     __syncthreads();
     if ((tid >> 5) == 0) {
         float v = (tid < (BLOCK+31)/32) ? smem[tid] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1)
+        for (int off=16; off>0; off >>= 1)
             v += __shfl_down_sync(0xffffffff, v, off);
         if (tid == 0)
             smem[0] = v;
@@ -152,7 +152,7 @@ __global__ void softmax_scaled_bf16_kernel(__nv_bfloat16* __restrict__ inout,
     __syncthreads();
     const float inv_sum = 1.0f/smem[0];
 
-    for (int i = tid; i < S; i += BLOCK) {
+    for (int i=tid; i<S; i += BLOCK) {
         float v = expf(__bfloat162float(r[i])*scale-max_v)*inv_sum;
         r[i] = __float2bfloat16(v);
     }
@@ -184,7 +184,7 @@ __global__ void repeat_kv_bf16_kernel(const __nv_bfloat16* in, __nv_bfloat16* ou
     const int s   = (int)blockIdx.y;
     const int tid = (int)threadIdx.x;
     const int kv_h = q_h * n_kv/n_q;
-    for (int k = tid; k < hd; k += blockDim.x) {
+    for (int k=tid; k<hd; k += blockDim.x) {
         out[((size_t)q_h * seq+s)*hd+k] = in[((size_t)kv_h * seq+s)*hd+k];
     }
 }
@@ -195,7 +195,7 @@ __global__ void transpose_sHhd_to_HShd_bf16_kernel(const __nv_bfloat16* in,
     const int s   = (int)blockIdx.y;
     const int h   = (int)blockIdx.x;
     const int tid = (int)threadIdx.x;
-    for (int k = tid; k < hd; k += blockDim.x) {
+    for (int k=tid; k<hd; k += blockDim.x) {
         out[((size_t)h * S+s)*hd+k] = in[((size_t)s * H+h)*hd+k];
     }
 }
@@ -206,7 +206,7 @@ __global__ void transpose_HShd_to_sHhd_bf16_kernel(const __nv_bfloat16* in,
     const int h   = (int)blockIdx.x;
     const int s   = (int)blockIdx.y;
     const int tid = (int)threadIdx.x;
-    for (int k = tid; k < hd; k += blockDim.x) {
+    for (int k=tid; k<hd; k += blockDim.x) {
         out[((size_t)s * H+h)*hd+k] = in[((size_t)h * S+s)*hd+k];
     }
 }
@@ -218,7 +218,7 @@ __global__ void gather_rows_bf16_kernel(const __nv_bfloat16* in,
     const int m = (int)blockIdx.x;
     const int r = row_ids[m];
     const int tid = (int)threadIdx.x;
-    for (int k = tid; k < K; k += blockDim.x) {
+    for (int k=tid; k<K; k += blockDim.x) {
         out[(size_t)m * K+k] = in[(size_t)r * K+k];
     }
 }
@@ -332,8 +332,8 @@ extern "C" bitvla_lm_cuda_ctx* bitvla_lm_cuda_init(int hidden, int n_q, int n_kv
 
     const int half = head_dim/2;
     std::vector<float> h_cos((size_t)max_seq * half), h_sin((size_t)max_seq * half);
-    for (int s = 0; s < max_seq; ++s) {
-        for (int k = 0; k < half; ++k) {
+    for (int s=0; s<max_seq; ++s) {
+        for (int k=0; k<half; ++k) {
             float freq = 1.0f/std::pow(rope_base, (float)(2*k)/(float)head_dim);
             float ang  = (float)s * freq;
             h_cos[(size_t)s * half+k] = std::cos(ang);
@@ -405,7 +405,7 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
         std::vector<__nv_bfloat16> tmp(n);
         std::vector<float> f32(n);
         cudaMemcpy(tmp.data(), d_ptr, n * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-        for (size_t i = 0; i < n; ++i) {
+        for (size_t i=0; i<n; ++i) {
             uint16_t u = *reinterpret_cast<uint16_t*>(&tmp[i]);
             uint32_t b = ((uint32_t) u) << 16;
             float f; std::memcpy(&f, &b, 4);
@@ -561,9 +561,9 @@ __global__ void layernorm_bias_bf16_kernel(const __nv_bfloat16* __restrict__ x,
     __nv_bfloat16*       o   = out+(size_t)m * K;
 
     float sum = 0.0f;
-    for (int k = tid; k < K; k += BLOCK)
+    for (int k=tid; k<K; k += BLOCK)
         sum += __bfloat162float(row[k]);
-    for (int off = 16; off > 0; off >>= 1)
+    for (int off=16; off>0; off >>= 1)
         sum += __shfl_down_sync(0xffffffff, sum, off);
     __shared__ float smem[32];
     if ((tid & 31) == 0)
@@ -571,7 +571,7 @@ __global__ void layernorm_bias_bf16_kernel(const __nv_bfloat16* __restrict__ x,
     __syncthreads();
     if ((tid >> 5) == 0) {
         float v = (tid < (BLOCK+31)/32) ? smem[tid] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1)
+        for (int off=16; off>0; off >>= 1)
             v += __shfl_down_sync(0xffffffff, v, off);
         if (tid == 0)
             smem[0] = v;
@@ -580,18 +580,18 @@ __global__ void layernorm_bias_bf16_kernel(const __nv_bfloat16* __restrict__ x,
     const float mean = smem[0]/(float)K;
 
     float vsum = 0.0f;
-    for (int k = tid; k < K; k += BLOCK) {
+    for (int k=tid; k<K; k += BLOCK) {
         float v = __bfloat162float(row[k])-mean;
         vsum += v * v;
     }
-    for (int off = 16; off > 0; off >>= 1)
+    for (int off=16; off>0; off >>= 1)
         vsum += __shfl_down_sync(0xffffffff, vsum, off);
     if ((tid & 31) == 0)
         smem[tid >> 5] = vsum;
     __syncthreads();
     if ((tid >> 5) == 0) {
         float v = (tid < (BLOCK+31)/32) ? smem[tid] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1)
+        for (int off=16; off>0; off >>= 1)
             v += __shfl_down_sync(0xffffffff, v, off);
         if (tid == 0)
             smem[0] = v;
@@ -599,7 +599,7 @@ __global__ void layernorm_bias_bf16_kernel(const __nv_bfloat16* __restrict__ x,
     __syncthreads();
     const float inv_std = rsqrtf(smem[0]/(float)K+eps);
 
-    for (int k = tid; k < K; k += BLOCK) {
+    for (int k=tid; k<K; k += BLOCK) {
         float v = (__bfloat162float(row[k])-mean)*inv_std;
         float wv = __bfloat162float(w[k]);
         float bv = __bfloat162float(b[k]);
@@ -684,7 +684,7 @@ extern "C" int bitvla_lm_cuda_forward(bitvla_lm_cuda_ctx* ctx,
         const size_t n = (size_t) seq * ctx->hidden;
         h_dump.resize(n); h_dump_f32.resize(n);
         cudaMemcpy(h_dump.data(), d_ptr, n * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-        for (size_t i = 0; i < n; ++i) {
+        for (size_t i=0; i<n; ++i) {
             uint16_t u = *reinterpret_cast<uint16_t*>(&h_dump[i]);
             uint32_t b = ((uint32_t) u) << 16;
             float f; std::memcpy(&f, &b, 4);
@@ -704,7 +704,7 @@ extern "C" int bitvla_lm_cuda_forward(bitvla_lm_cuda_ctx* ctx,
         cudaStreamSynchronize(stream);
         dump_to_file("lm_layer_input", ctx->d_h);
     }
-    for (int L = 0; L < ctx->n_layers; ++L) {
+    for (int L=0; L<ctx->n_layers; ++L) {
         int rc = run_layer(ctx, L, seq, stream);
         if (rc != 0)
             return rc;

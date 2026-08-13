@@ -62,7 +62,7 @@ int main(int argc, char ** argv) {
     int extra_token = -1, extra_count = 0;
     bool markdown = false;
 
-    for (int i = 1; i < argc; ++i) {
+    for (int i=1; i<argc; ++i) {
         const std::string a = argv[i];
         auto need = [&](const char * name) -> const char * {
             if (i+1 >= argc) {
@@ -126,26 +126,26 @@ int main(int argc, char ** argv) {
 
     std::vector<std::vector<uint8_t>> pixels(n_images, std::vector<uint8_t>((size_t) 3*side * side));
     std::vector<vla::ImageView> views(n_images);
-    for (int v = 0; v < n_images; ++v) {
-        for (int y = 0; y < side; ++y)
-        for (int x = 0; x < side; ++x)
-        for (int c = 0; c < 3; ++c)
+    for (int v=0; v<n_images; ++v) {
+        for (int y=0; y<side; ++y)
+        for (int x=0; x<side; ++x)
+        for (int c=0; c<3; ++c)
             pixels[v][((size_t) y * side+x)*3+c] = (uint8_t) ((x+2*y+40*c+17*v) & 0xFF);
         views[v] = vla::ImageView{ pixels[v].data(), side, side, vla::PixelFormat::U8 };
     }
 
     std::vector<int32_t> lang((size_t) n_tokens);
-    for (int i = 0; i < n_tokens; ++i)
+    for (int i=0; i<n_tokens; ++i)
         lang[i] = 1+(i%100);
     if (extra_token >= 0 && extra_count > 0)
         lang.insert(lang.end(), (size_t) extra_count, extra_token);
 
     std::vector<float> state((size_t) cfg.max_state_dim, 0.0f);
-    for (int64_t i = 0; i < cfg.real_state_dim && i < cfg.max_state_dim; ++i)
+    for (int64_t i=0; i<cfg.real_state_dim && i<cfg.max_state_dim; ++i)
         state[i] = 0.01f * (float) (i+1);
 
     std::vector<float> noise((size_t) cfg.max_action_dim*(size_t) cfg.n_suffix);
-    for (size_t i = 0; i < noise.size(); ++i)
+    for (size_t i=0; i<noise.size(); ++i)
         noise[i] = 0.001f * (float) ((i*2654435761u)%1000)-0.5f;
 
     vla::Inputs in{};
@@ -156,7 +156,7 @@ int main(int argc, char ** argv) {
     in.state       = state.data();
     in.noise       = noise.data();
 
-    for (int i = 0; i < warmup; ++i) {
+    for (int i=0; i<warmup; ++i) {
         if (vla::predict(m, in).empty()) {
             std::fprintf(stderr, "vla-bench: predict failed\n");
             vla::model_free(m);
@@ -167,7 +167,7 @@ int main(int argc, char ** argv) {
     std::vector<double> ms;
     ms.reserve((size_t) reps);
     double vision_sum = 0.0;
-    for (int i = 0; i < reps; ++i) {
+    for (int i=0; i<reps; ++i) {
         const auto t0 = std::chrono::steady_clock::now();
         const std::vector<float> out = vla::predict(m, in);
         const auto t1 = std::chrono::steady_clock::now();

@@ -80,7 +80,7 @@ __device__ void decode_i2s_to_i8s(T1 *_i2s, T2 *_i8s, const int N = 16)
   static constexpr uint I4s_TO_I8s_MAGIC_NUM = 0x00000000;
 
 #pragma unroll
-  for (int i = 0; i < (N/4); i++)
+  for (int i=0; i<(N/4); i++)
   {
     asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
                  : "=r"(i8s[i])
@@ -117,7 +117,7 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel(int8_t* __restric
   int red_buf0[1];
   in_thread_C_local[0] = 0;
   #pragma unroll
-  for (int k_0 = 0; k_0 < K/(K_per_loop * K_block_size); ++k_0) {
+  for (int k_0=0; k_0<K/(K_per_loop * K_block_size); ++k_0) {
     *(int4*)(A_local+0) = *(int4*)(A+((k_0*K_per_loop * K_block_size)+(((int)threadIdx.x)*K_per_loop)));
     B_reshape_local[0] = *(int*)(B +
       (((int)blockIdx.x)*N_block_size * K/4) +
@@ -129,13 +129,13 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel(int8_t* __restric
       );
     decode_i2s_to_i8s(B_reshape_local, B_decode_local, 16);
     #pragma unroll
-    for (int k_2_0 = 0; k_2_0 < 4; ++k_2_0) {
+    for (int k_2_0=0; k_2_0<4; ++k_2_0) {
       in_thread_C_local[0] = __dp4a(*(int *)&A_local[((k_2_0*4))],*(int *)&B_decode_local[((k_2_0*4))], in_thread_C_local[0]);
     }
   }
   red_buf0[0] = in_thread_C_local[0];
   #pragma unroll
-  for (int offset = K_block_size/2; offset > 0; offset /= 2) {
+  for (int offset=K_block_size/2; offset>0; offset /= 2) {
     red_buf0[0] += __shfl_down_sync(__activemask(), red_buf0[0], offset, K_block_size);
   }
   int out_idx = ((((int)blockIdx.x)*N_block_size)+((int)threadIdx.y));
@@ -191,12 +191,12 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m(
   wmma::fragment<wmma::matrix_b, 16, 16, 16, signed char, wmma::col_major> b_frag;
   wmma::fragment<wmma::accumulator, 16, 16, 16, int> acc[TILES_PER_WARP];
   #pragma unroll
-  for (int t = 0; t < TILES_PER_WARP; ++t)
+  for (int t=0; t<TILES_PER_WARP; ++t)
       wmma::fill_fragment(acc[t], 0);
 
-  for (int k_0 = 0; k_0 < K/K_CHUNK; ++k_0) {
+  for (int k_0=0; k_0<K/K_CHUNK; ++k_0) {
     #pragma unroll
-    for (int r = 0; r < (M_ROWS * K_CHUNK/16)/128; ++r) {
+    for (int r=0; r<(M_ROWS * K_CHUNK/16)/128; ++r) {
       const int idx = tid+r*128;
       const int m   = idx >> 3;
       const int kk  = (idx & 7)*16;
@@ -216,10 +216,10 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m(
     __syncthreads();
 
     #pragma unroll
-    for (int k16 = 0; k16 < K_CHUNK/16; ++k16) {
+    for (int k16=0; k16<K_CHUNK/16; ++k16) {
       wmma::load_matrix_sync(b_frag, &W_smem[0][k16*16], K_CHUNK);
       #pragma unroll
-      for (int t = 0; t < TILES_PER_WARP; ++t) {
+      for (int t=0; t<TILES_PER_WARP; ++t) {
         wmma::load_matrix_sync(a_frag[t], &A_smem[warp*16+t*64][k16*16], K_CHUNK);
         wmma::mma_sync(acc[t], a_frag[t], b_frag, acc[t]);
       }
@@ -228,7 +228,7 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m(
   }
 
   #pragma unroll
-  for (int t = 0; t < TILES_PER_WARP; ++t)
+  for (int t=0; t<TILES_PER_WARP; ++t)
     wmma::store_matrix_sync(&C_smem[warp*16+t*64][0], acc[t], 16, wmma::mem_row_major);
   __syncthreads();
 
@@ -236,7 +236,7 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m(
   const int ws_idx = n_base/(N/ws_num);
   const float wsv = ws[ws_idx];
   #pragma unroll
-  for (int e = 0; e < (M_ROWS*16)/128; ++e) {
+  for (int e=0; e<(M_ROWS*16)/128; ++e) {
     const int lin = tid+e*128;
     const int ml  = lin >> 4;
     const int col = lin & 15;
@@ -334,12 +334,12 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m_wide(
   wmma::fragment<wmma::matrix_b, 16, 16, 16, signed char, wmma::col_major> b_frag;
   wmma::fragment<wmma::accumulator, 16, 16, 16, int> acc[M_PER_WARP];
   #pragma unroll
-  for (int t = 0; t < M_PER_WARP; ++t)
+  for (int t=0; t<M_PER_WARP; ++t)
       wmma::fill_fragment(acc[t], 0);
 
-  for (int k_0 = 0; k_0 < K/K_CHUNK; ++k_0) {
+  for (int k_0=0; k_0<K/K_CHUNK; ++k_0) {
     #pragma unroll
-    for (int r = 0; r < (M_ROWS * K_CHUNK/16)/128; ++r) {
+    for (int r=0; r<(M_ROWS * K_CHUNK/16)/128; ++r) {
       const int idx = tid+r*128;
       const int m   = idx >> 3;
       const int kk  = (idx & 7)*16;
@@ -351,7 +351,7 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m_wide(
     // All 128 threads cooperate on one weight tile at a time, reproducing the
     // pack's swizzle exactly; only the tile base changes per j.
     #pragma unroll
-    for (int j = 0; j < N_TILES; ++j) {
+    for (int j=0; j<N_TILES; ++j) {
       const int tile = (int)blockIdx.x*N_TILES+j;
       if (tile < N_BLOCKS) {
         B_reshape_local[0] = *(int*)(B +
@@ -369,10 +369,10 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m_wide(
 
     if (my_tile_valid) {
       #pragma unroll
-      for (int k16 = 0; k16 < K_CHUNK/16; ++k16) {
+      for (int k16=0; k16<K_CHUNK/16; ++k16) {
         wmma::load_matrix_sync(b_frag, &W_smem[warp%N_TILES][0][k16*16], SM_STRIDE);
         #pragma unroll
-        for (int t = 0; t < M_PER_WARP; ++t) {
+        for (int t=0; t<M_PER_WARP; ++t) {
           wmma::load_matrix_sync(a_frag, &A_smem[(m_tile_base+t)*16][k16*16], SM_STRIDE);
           wmma::mma_sync(acc[t], a_frag, b_frag, acc[t]);
         }
@@ -391,11 +391,11 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m_wide(
   // M_ROWS x 16 int32 buffer per warp would cost more shared memory than the
   // A block it is meant to amortise.
   #pragma unroll
-  for (int t = 0; t < M_PER_WARP; ++t) {
+  for (int t=0; t<M_PER_WARP; ++t) {
     wmma::store_matrix_sync(&C_smem[warp][0][0], acc[t], 16, wmma::mem_row_major);
     __syncwarp();
     #pragma unroll
-    for (int e = 0; e < (16*16)/32; ++e) {
+    for (int e=0; e<(16*16)/32; ++e) {
       const int lin = lane+e*32;
       const int ml  = lin >> 4;
       const int col = lin & 15;
@@ -475,13 +475,13 @@ __global__ void act_quant_kernel(
     int8_t*              row_out = out+m * K;
 
     float local_max = 0.0f;
-    for (int k = tid; k < K; k += BLOCK_THREADS) {
+    for (int k=tid; k<K; k += BLOCK_THREADS) {
         float v = fabsf(__bfloat162float(row_in[k]));
         if (v > local_max)
             local_max = v;
     }
 
-    for (int off = 16; off > 0; off >>= 1) {
+    for (int off=16; off>0; off >>= 1) {
         float other = __shfl_down_sync(0xffffffff, local_max, off);
         if (other > local_max)
             local_max = other;
@@ -495,7 +495,7 @@ __global__ void act_quant_kernel(
     __syncthreads();
     if (warp_id == 0) {
         float v = (tid < (BLOCK_THREADS+31)/32) ? smem[lane] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1) {
+        for (int off=16; off>0; off >>= 1) {
             float other = __shfl_down_sync(0xffffffff, v, off);
             if (other > v)
                 v = other;
@@ -509,7 +509,7 @@ __global__ void act_quant_kernel(
     if (tid == 0)
         scales[m] = scale;
 
-    for (int k = tid; k < K; k += BLOCK_THREADS) {
+    for (int k=tid; k<K; k += BLOCK_THREADS) {
         float v = __bfloat162float(row_in[k])*scale;
         float q = nearbyintf(v);
         if (q >  127.0f)

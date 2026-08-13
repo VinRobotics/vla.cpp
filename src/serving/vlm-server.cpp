@@ -75,7 +75,7 @@ int main(int argc, char ** argv) {
     vlm::LoadParams lp;
     std::vector<std::string> positionals;
 
-    for (int i = 1; i < argc; ++i) {
+    for (int i=1; i<argc; ++i) {
         std::string a = argv[i];
         if (a == "--bind" && i+1 < argc) {
             bind_addr = argv[++i];
@@ -241,7 +241,7 @@ int main(int argc, char ** argv) {
         std::vector<vlm::Image> images;
         images.reserve(req.images_size());
         bool decode_ok = true;
-        for (int v = 0; v < req.images_size(); ++v) {
+        for (int v=0; v<req.images_size(); ++v) {
             const vlm_chat::Image & im = req.images(v);
             vlm::Image out;
             if (im.encoding() == vlm_chat::Image::JPEG) {

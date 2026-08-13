@@ -48,7 +48,7 @@ inline bool env_flag(const char * name, bool def = false) {
 
     char   buf[8] = {};
     size_t n      = 0;
-    for (; n < sizeof(buf)-1 && v[n]; ++n) {
+    for (; n<sizeof(buf)-1 && v[n]; ++n) {
         buf[n] = (char) std::tolower((unsigned char) v[n]);
     }
     if (v[n]) return true;          // longer than any false word, so it is one

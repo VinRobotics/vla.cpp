@@ -100,9 +100,9 @@ __global__ void layernorm_fp32_kernel(const float* __restrict__ x,
     float*       o   = out+(size_t)m * K;
 
     float sum = 0.0f;
-    for (int k = tid; k < K; k += BLOCK)
+    for (int k=tid; k<K; k += BLOCK)
         sum += row[k];
-    for (int off = 16; off > 0; off >>= 1)
+    for (int off=16; off>0; off >>= 1)
         sum += __shfl_down_sync(0xffffffff, sum, off);
     __shared__ float smem[32];
     if ((tid & 31) == 0)
@@ -110,7 +110,7 @@ __global__ void layernorm_fp32_kernel(const float* __restrict__ x,
     __syncthreads();
     if ((tid >> 5) == 0) {
         float v = (tid < (BLOCK+31)/32) ? smem[tid] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1)
+        for (int off=16; off>0; off >>= 1)
             v += __shfl_down_sync(0xffffffff, v, off);
         if (tid == 0)
             smem[0] = v;
@@ -119,18 +119,18 @@ __global__ void layernorm_fp32_kernel(const float* __restrict__ x,
     const float mean = smem[0]/(float)K;
 
     float vsum = 0.0f;
-    for (int k = tid; k < K; k += BLOCK) {
+    for (int k=tid; k<K; k += BLOCK) {
         float v = row[k]-mean;
         vsum += v * v;
     }
-    for (int off = 16; off > 0; off >>= 1)
+    for (int off=16; off>0; off >>= 1)
         vsum += __shfl_down_sync(0xffffffff, vsum, off);
     if ((tid & 31) == 0)
         smem[tid >> 5] = vsum;
     __syncthreads();
     if ((tid >> 5) == 0) {
         float v = (tid < (BLOCK+31)/32) ? smem[tid] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1)
+        for (int off=16; off>0; off >>= 1)
             v += __shfl_down_sync(0xffffffff, v, off);
         if (tid == 0)
             smem[0] = v;
@@ -138,7 +138,7 @@ __global__ void layernorm_fp32_kernel(const float* __restrict__ x,
     __syncthreads();
     const float inv_std = rsqrtf(smem[0]/(float)K+eps);
 
-    for (int k = tid; k < K; k += BLOCK) {
+    for (int k=tid; k<K; k += BLOCK) {
         o[k] = (row[k]-mean)*inv_std * w[k]+b[k];
     }
 }

@@ -166,7 +166,7 @@ struct gguf_reader {
         std::vector<float> f = read_f32(name);
         if (f.empty()) return {};
         const int64_t n = (int64_t) f.size();
-        if (gemma_norm) for (int64_t i = 0; i < n; ++i) f[i] += 1.0f;
+        if (gemma_norm) for (int64_t i=0; i<n; ++i) f[i] += 1.0f;
         if (target == GGML_TYPE_F32)  {
             std::vector<uint8_t> o(n * sizeof(float));
             std::memcpy(o.data(), f.data(), o.size());
@@ -196,7 +196,7 @@ struct gguf_reader {
         const size_t  elsz = (t->type == GGML_TYPE_F32) ? 4u : 2u;
         const size_t  rb   = (size_t) cols * elsz;
         std::vector<uint8_t> row(rb);
-        for (size_t k = 0; k < row_ids.size(); ++k) {
+        for (size_t k=0; k<row_ids.size(); ++k) {
             const int32_t r = row_ids[k];
             if (r < 0 || r >= rows) {
                 std::fprintf(stderr, "vla(%s): row %d out of range for %s\n", arch, r, name);

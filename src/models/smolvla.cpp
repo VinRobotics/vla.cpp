@@ -71,7 +71,7 @@ struct safetensors {
         file.read(header_str.data(), header_size);
         data_blob_start = sizeof(uint64_t)+header_size;
         json j = json::parse(header_str);
-        for (auto it = j.begin(); it != j.end(); ++it) {
+        for (auto it=j.begin(); it!=j.end(); ++it) {
             if (it.key() == "__metadata__")
                 continue;
             const auto & v = it.value();
@@ -187,12 +187,12 @@ struct gguf_source {
         const int nd_used = std::max(1, (int) pt_shape.size());
         if (nd_used > GGML_MAX_DIMS)
             return false;
-        for (int d = 0; d < (int) pt_shape.size(); ++d) {
+        for (int d=0; d<(int) pt_shape.size(); ++d) {
             const int64_t expected = pt_shape[pt_shape.size()-1-d];
             if (t->ne[d] != expected)
                 return false;
         }
-        for (int d = (int) pt_shape.size(); d < GGML_MAX_DIMS; ++d) {
+        for (int d=(int) pt_shape.size(); d<GGML_MAX_DIMS; ++d) {
             if (t->ne[d] != 1)
                 return false;
         }
@@ -1132,7 +1132,7 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
         pending_f32.push_back({std::string(VP) + "post_layernorm.weight", m->vit_post_ln_w, {H}});
         pending_f32.push_back({std::string(VP) + "post_layernorm.bias",   m->vit_post_ln_b, {H}});
         m->vit.resize(m->vit_layers);
-        for (int64_t i = 0; i < m->vit_layers; ++i) {
+        for (int64_t i=0; i<m->vit_layers; ++i) {
             EncBlockW & w = m->vit[i];
             char pb[256]; std::snprintf(pb, sizeof(pb), "%sencoder.layers.%lld.", VP, (long long) i);
             const std::string pf = pb;
@@ -1159,7 +1159,7 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
     }
 
     m->vlm_layers.resize(cfg.n_layers);
-    for (int i = 0; i < cfg.n_layers; ++i) {
+    for (int i=0; i<cfg.n_layers; ++i) {
         VlmLayerW & w = m->vlm_layers[i];
         w.Wln_in   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.hidden);
         w.Wq       = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.q_full_dim);
@@ -1189,7 +1189,7 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
                            m->Wnorm_vlm, {cfg.hidden}});
 
     m->expert_layers.resize(cfg.n_layers);
-    for (int i = 0; i < cfg.n_layers; ++i) {
+    for (int i=0; i<cfg.n_layers; ++i) {
         ExpertLayerW & w = m->expert_layers[i];
         w.is_self_attn = (i%cfg.self_attn_every_n == 0);
         w.Wln_in   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.expert_h);
@@ -1248,7 +1248,7 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
     pending_f32.push_back({"model.action_out_proj.bias",   m->b_aout, {cfg.max_action_dim}});
 
     m->time_bcasts.assign(cfg.num_steps, nullptr);
-    for (int step = 0; step < cfg.num_steps; ++step) {
+    for (int step=0; step<cfg.num_steps; ++step) {
         m->time_bcasts[step] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,
                                                    cfg.expert_h, cfg.n_suffix);
     }
@@ -1304,12 +1304,12 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
 
     {
         const float dt = -1.f/static_cast<float>(cfg.num_steps);
-        for (int step = 0; step < cfg.num_steps; ++step) {
+        for (int step=0; step<cfg.num_steps; ++step) {
             const double time = 1.0+double(step)*double(dt);
             const auto te = sinusoidal_time_emb(time, cfg.expert_h,
                                                 cfg.min_period, cfg.max_period);
             std::vector<float> tile(cfg.expert_h*cfg.n_suffix);
-            for (int64_t t = 0; t < cfg.n_suffix; ++t) {
+            for (int64_t t=0; t<cfg.n_suffix; ++t) {
                 std::memcpy(tile.data()+t * cfg.expert_h,
                             te.data(), cfg.expert_h*sizeof(float));
             }
@@ -1387,7 +1387,7 @@ bool build_compute_graph(SmolVLAModelArch* m, int n_views) {
     std::vector<ggml_tensor *> v_cache(cfg.n_layers);
     {
         ggml_tensor * h = prefix_embs;
-        for (int i = 0; i < cfg.n_layers; ++i) {
+        for (int i=0; i<cfg.n_layers; ++i) {
             h = build_vlm_layer(ctx, m->vlm_layers[i], h, mask_prefill_f16, pos_prefill,
                                 cfg_built, &k_cache[i], &v_cache[i]);
         }
@@ -1396,7 +1396,7 @@ bool build_compute_graph(SmolVLAModelArch* m, int n_views) {
     // Reproject each cross-attn layer's prefix K/V once; reused every denoise step.
     std::vector<ggml_tensor *> xk_cache(cfg.n_layers, nullptr);
     std::vector<ggml_tensor *> xv_cache(cfg.n_layers, nullptr);
-    for (int li = 0; li < cfg.n_layers; ++li) {
+    for (int li=0; li<cfg.n_layers; ++li) {
         if (!m->expert_layers[li].is_self_attn)
             expert_cross_kv(ctx, m->expert_layers[li], k_cache[li], v_cache[li],
                             cfg_built, &xk_cache[li], &xv_cache[li]);
@@ -1405,7 +1405,7 @@ bool build_compute_graph(SmolVLAModelArch* m, int n_views) {
     const float dt = -1.f/static_cast<float>(cfg.num_steps);
     ggml_tensor * x_t = x0;
 
-    for (int step = 0; step < cfg.num_steps; ++step) {
+    for (int step=0; step<cfg.num_steps; ++step) {
         ggml_tensor * time_bcast     = m->time_bcasts[step];
         ggml_tensor * action_emb     = ggml_add(ctx, ggml_mul_mat(ctx, m->W_ain, x_t), m->b_ain);
         ggml_tensor * action_time_in = ggml_concat(ctx, action_emb, time_bcast, 0);
@@ -1414,7 +1414,7 @@ bool build_compute_graph(SmolVLAModelArch* m, int n_views) {
                                                 ggml_mul_mat(ctx, m->W_at2, ggml_silu(ctx, mlp1)),
                                                 m->b_at2);
         ggml_tensor * h = suffix_embs;
-        for (int li = 0; li < cfg.n_layers; ++li) {
+        for (int li=0; li<cfg.n_layers; ++li) {
             if (m->expert_layers[li].is_self_attn) {
                 h = build_expert_self_attn_layer(ctx, m->expert_layers[li], h,
                                                  k_cache[li], v_cache[li],
@@ -1531,7 +1531,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         ggml_tensor * conv = ggml_conv_2d(VC, m->vit_patch_w, t_px, (int) m->vit_patch, (int) m->vit_patch, 0, 0, 1, 1);
         ggml_tensor * patches = ggml_cont(VC, ggml_transpose(VC, ggml_reshape_2d(VC, conv, n_patches, H)));
         ggml_tensor * hv = ggml_add(VC, ggml_add(VC, patches, m->vit_patch_b), m->vit_pos);
-        for (int64_t i = 0; i < m->vit_layers; ++i)
+        for (int64_t i=0; i<m->vit_layers; ++i)
             hv = build_siglip_layer(VC, m->vit[i], hv, n_patches, m->vit_heads, H/m->vit_heads, H, m->vit_ln_eps);
         ggml_tensor * post_ln = ggml_add(VC, ggml_mul(VC, ggml_norm(VC, hv, m->vit_ln_eps), m->vit_post_ln_w), m->vit_post_ln_b);
         ggml_set_output(post_ln);
@@ -1557,7 +1557,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
 
         std::vector<float> chw, post_host((size_t) H * n_patches), shuf_host((size_t) c4*K);
         bool vok = true;
-        for (int v = 0; v < n_views && vok; ++v) {
+        for (int v=0; v<n_views && vok; ++v) {
             if (!preprocess_image_chw("smolvla", in.images[v], m->vit_image, chw)) {
                 vok = false;
                 break;
@@ -1592,7 +1592,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     // its indices. Reject any token id outside the embedding table before the
     // gather so an out-of-range id cannot read past the weights.
     const int64_t vocab_rows = m->E_lang ? m->E_lang->ne[1] : 0;
-    for (int i = 0; i < in.n_lang; ++i) {
+    for (int i=0; i<in.n_lang; ++i) {
         if (in.lang_tokens[i] < 0 || in.lang_tokens[i] >= vocab_rows) {
             std::fprintf(stderr, "vla: lang_tokens[%d]=%d out of vocab range [0, %lld)\n",
                          i, in.lang_tokens[i], (long long) vocab_rows);
@@ -1626,7 +1626,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         std::vector<float> state_host(cfg.max_state_dim, 0.0f);
         if (in.state)
             std::memcpy(state_host.data(), in.state, cfg.max_state_dim*sizeof(float));
-        for (int64_t i = 0; i < cfg.real_state_dim && i < cfg.max_state_dim; ++i) {
+        for (int64_t i=0; i<cfg.real_state_dim && i<cfg.max_state_dim; ++i) {
             state_host[i] = (state_host[i]-m->state_mean[i])/(m->state_std[i]+cfg.norm_eps);
         }
 
@@ -1646,8 +1646,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         const int64_t suffix_pos_base = state_pos+1;
         std::vector<float>   mask_prefill_host(n_prefix_max * n_prefix_max);
         std::vector<int32_t> pos_prefill_host (n_prefix_max);
-        for (int64_t i = 0; i < n_prefix_max; ++i) {
-            for (int64_t j = 0; j < n_prefix_max; ++j) {
+        for (int64_t i=0; i<n_prefix_max; ++i) {
+            for (int64_t j=0; j<n_prefix_max; ++j) {
                 bool blocked = false;
                 if ((i < n_prefix_max-1) && (j == n_prefix_max-1))
                     blocked = true;
@@ -1664,8 +1664,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         std::vector<float>   mask_prefix_only_host(n_prefix_max * cfg.n_suffix, 0.f);
         std::vector<int32_t> pos_full_host        (cfg.n_suffix);
         std::vector<int32_t> pos_rebased_host     (cfg.n_suffix);
-        for (int64_t i = 0; i < cfg.n_suffix; ++i) {
-            for (int64_t j = 0; j < n_full_max; ++j) {
+        for (int64_t i=0; i<cfg.n_suffix; ++i) {
+            for (int64_t j=0; j<n_full_max; ++j) {
                 bool blocked;
                 if (j < n_prefix_max) {
                     blocked = (j >= pad_start && j < pad_end);
@@ -1674,7 +1674,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
                 }
                 mask_full_host[i * n_full_max+j] = blocked ? -INFINITY : 0.f;
             }
-            for (int64_t j = 0; j < n_prefix_max; ++j) {
+            for (int64_t j=0; j<n_prefix_max; ++j) {
                 if (j >= pad_start && j < pad_end) {
                     mask_prefix_only_host[i * n_prefix_max+j] = -INFINITY;
                 }
@@ -1709,9 +1709,9 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
 
         std::vector<float> out(cfg.n_suffix*cfg.max_action_dim);
         ggml_backend_tensor_get(m->out_x_t, out.data(), 0, out.size()*sizeof(float));
-        for (int64_t r = 0; r < cfg.n_suffix; ++r) {
+        for (int64_t r=0; r<cfg.n_suffix; ++r) {
             float * row = out.data()+r * cfg.max_action_dim;
-            for (int64_t j = 0; j < cfg.max_action_dim; ++j) {
+            for (int64_t j=0; j<cfg.max_action_dim; ++j) {
                 row[j] = j < cfg.real_action_dim ? row[j]*(m->action_std[j]+cfg.norm_eps)+m->action_mean[j] : 0.0f;
             }
         }
@@ -1757,7 +1757,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     std::vector<float> state_host(cfg.max_state_dim, 0.0f);
     if (in.state)
         std::memcpy(state_host.data(), in.state, cfg.max_state_dim*sizeof(float));
-    for (int64_t i = 0; i < cfg.real_state_dim && i < cfg.max_state_dim; ++i) {
+    for (int64_t i=0; i<cfg.real_state_dim && i<cfg.max_state_dim; ++i) {
         state_host[i] = (state_host[i]-m->state_mean[i])/(m->state_std[i]+cfg.norm_eps);
     }
 
@@ -1772,8 +1772,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
 
     std::vector<float>   mask_prefill_host(cfg.n_prefix*cfg.n_prefix);
     std::vector<int32_t> pos_prefill_host (cfg.n_prefix);
-    for (int64_t i = 0; i < cfg.n_prefix; ++i) {
-        for (int64_t j = 0; j < cfg.n_prefix; ++j) {
+    for (int64_t i=0; i<cfg.n_prefix; ++i) {
+        for (int64_t j=0; j<cfg.n_prefix; ++j) {
             const bool blocked = (i < cfg.n_prefix-1) && (j == cfg.n_prefix-1);
             mask_prefill_host[i * cfg.n_prefix+j] = blocked ? -INFINITY : 0.f;
         }
@@ -1784,8 +1784,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     std::vector<float>   mask_prefix_only_host(cfg.n_prefix*cfg.n_suffix, 0.f);
     std::vector<int32_t> pos_full_host        (cfg.n_suffix);
     std::vector<int32_t> pos_rebased_host     (cfg.n_suffix);
-    for (int64_t i = 0; i < cfg.n_suffix; ++i) {
-        for (int64_t j = 0; j < cfg.n_full; ++j) {
+    for (int64_t i=0; i<cfg.n_suffix; ++i) {
+        for (int64_t j=0; j<cfg.n_full; ++j) {
             bool blocked;
             if (j < cfg.n_prefix)
                 blocked = false;
@@ -1813,7 +1813,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     std::vector<ggml_tensor *> v_cache(cfg.n_layers);
     {
         ggml_tensor * h = prefix_embs;
-        for (int i = 0; i < cfg.n_layers; ++i) {
+        for (int i=0; i<cfg.n_layers; ++i) {
             h = build_vlm_layer(ctx, m->vlm_layers[i], h, mask_prefill_f16, pos_prefill,
                                 cfg, &k_cache[i], &v_cache[i]);
         }
@@ -1822,7 +1822,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     std::vector<ggml_tensor *> K_storage(cfg.n_layers);
     std::vector<ggml_tensor *> V_storage(cfg.n_layers);
     if (in.timing_detail == TimingDetail::PHASE) {
-        for (int i = 0; i < cfg.n_layers; ++i) {
+        for (int i=0; i<cfg.n_layers; ++i) {
             K_storage[i] = ggml_new_tensor_3d(ctx, GGML_TYPE_F32,
                                               cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix);
             V_storage[i] = ggml_new_tensor_3d(ctx, GGML_TYPE_F32,
@@ -1844,12 +1844,12 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
 
     std::vector<ggml_tensor *> xk_cache(cfg.n_layers, nullptr);
     std::vector<ggml_tensor *> xv_cache(cfg.n_layers, nullptr);
-    for (int li = 0; li < cfg.n_layers; ++li) {
+    for (int li=0; li<cfg.n_layers; ++li) {
         if (!m->expert_layers[li].is_self_attn)
             expert_cross_kv(ctx, m->expert_layers[li], K_ref[li], V_ref[li], cfg, &xk_cache[li], &xv_cache[li]);
     }
 
-    for (int step = 0; step < cfg.num_steps; ++step) {
+    for (int step=0; step<cfg.num_steps; ++step) {
         const double time = 1.0+static_cast<double>(step)*static_cast<double>(dt);
         time_host[step] = sinusoidal_time_emb(time, cfg.expert_h, cfg.min_period, cfg.max_period);
 
@@ -1864,7 +1864,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
                                                 m->b_at2);
 
         ggml_tensor * h = suffix_embs;
-        for (int li = 0; li < cfg.n_layers; ++li) {
+        for (int li=0; li<cfg.n_layers; ++li) {
             if (m->expert_layers[li].is_self_attn) {
                 h = build_expert_self_attn_layer(ctx, m->expert_layers[li], h,
                                                  K_ref[li], V_ref[li],
@@ -1897,10 +1897,10 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     ggml_backend_tensor_set(mask_prefix_only, mask_prefix_only_host.data(), 0, mask_prefix_only_host.size()*sizeof(float));
     ggml_backend_tensor_set(pos_full,         pos_full_host.data(),         0, pos_full_host.size()         * sizeof(int32_t));
     ggml_backend_tensor_set(pos_rebased,      pos_rebased_host.data(),      0, pos_rebased_host.size()      * sizeof(int32_t));
-    for (int step = 0; step < cfg.num_steps; ++step) {
+    for (int step=0; step<cfg.num_steps; ++step) {
 
         std::vector<float> tile(cfg.expert_h*cfg.n_suffix);
-        for (int64_t t = 0; t < cfg.n_suffix; ++t) {
+        for (int64_t t=0; t<cfg.n_suffix; ++t) {
             std::memcpy(tile.data()+t * cfg.expert_h,
                         time_host[step].data(), cfg.expert_h*sizeof(float));
         }
@@ -1910,7 +1910,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     if (in.timing_detail == TimingDetail::PHASE) {
 
         ggml_cgraph * gf_pre = ggml_new_graph_custom(ctx,  4096,  false);
-        for (int i = 0; i < cfg.n_layers; ++i) {
+        for (int i=0; i<cfg.n_layers; ++i) {
             ggml_build_forward_expand(gf_pre, k_cache[i]);
             ggml_build_forward_expand(gf_pre, v_cache[i]);
         }
@@ -1923,7 +1923,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         }
         m->stats.ms_prefill = ms_since(t0);
 
-        for (int i = 0; i < cfg.n_layers; ++i) {
+        for (int i=0; i<cfg.n_layers; ++i) {
             ggml_backend_tensor_copy(k_cache[i], K_storage[i]);
             ggml_backend_tensor_copy(v_cache[i], V_storage[i]);
         }
@@ -1950,9 +1950,9 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     std::vector<float> out(cfg.n_suffix*cfg.max_action_dim);
     ggml_backend_tensor_get(x_t, out.data(), 0, out.size()*sizeof(float));
 
-    for (int64_t r = 0; r < cfg.n_suffix; ++r) {
+    for (int64_t r=0; r<cfg.n_suffix; ++r) {
         float * row = out.data()+r * cfg.max_action_dim;
-        for (int64_t j = 0; j < cfg.max_action_dim; ++j) {
+        for (int64_t j=0; j<cfg.max_action_dim; ++j) {
             row[j] = j < cfg.real_action_dim ? row[j]*(m->action_std[j]+cfg.norm_eps)+m->action_mean[j] : 0.0f;
         }
     }

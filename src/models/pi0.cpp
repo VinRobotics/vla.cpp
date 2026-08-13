@@ -494,7 +494,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
         ggml_tensor * patches = ggml_cont(VC, ggml_transpose(VC, ggml_reshape_2d(VC, conv, grid * grid, vit_hidden)));
         // patch embed (conv_2d) stays F32; the tower runs in the activation dtype
         ggml_tensor * h = as_type(VC, ggml_add(VC, ggml_add(VC, patches, vit.patch_b), vit.pos), act_type);
-        for (int64_t i = 0; i < vit_layers; ++i)
+        for (int64_t i=0; i<vit_layers; ++i)
             h = build_siglip_layer(VC, vit.enc.blk[i], h, K, vit_heads, vit_hidden/vit_heads, vit_hidden, vit_ln_eps, act_type);
         h = ggml_add(VC, ggml_mul(VC, ggml_norm(VC, h, vit_ln_eps), vit.post_ln_w), vit.post_ln_b);
         // PaliGemma projector: linear (+ optional bias), then 1/sqrt(hidden) scale (matches clip.cpp siglip.cpp).
@@ -514,7 +514,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
         }
         const auto tv0 = clk::now();
         std::vector<float> chw;
-        for (int v = 0; v < in.n_images; ++v) {
+        for (int v=0; v<in.n_images; ++v) {
             if (!preprocess_image_chw("pi0", in.images[v], vit_image_size, chw)) { return {}; }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
@@ -552,7 +552,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     ggml_tensor * t_suffix_pos= ggml_new_tensor_1d(C, GGML_TYPE_I32, n_suf);                   ggml_set_input(t_suffix_pos);
     ggml_tensor * t_full_mask = ggml_new_tensor_2d(C, GGML_TYPE_F32, n_total, n_suf);          ggml_set_input(t_full_mask);
     std::vector<ggml_tensor *> t_time(num_steps);
-    for (int s = 0; s < num_steps; ++s) {
+    for (int s=0; s<num_steps; ++s) {
         t_time[s] = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_ex, chunk);
         ggml_set_input(t_time[s]);
     }
@@ -564,7 +564,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     std::vector<ggml_tensor *> cK(n_layers), cV(n_layers);
     {
         ggml_tensor * h = prefix_embs;
-        for (int64_t i = 0; i < n_layers; ++i) {
+        for (int64_t i=0; i<n_layers; ++i) {
             h = build_gemma_layer(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix, rope_base,
                                    nullptr,  nullptr,  nullptr,
                                   &cK[i], &cV[i], act_type);
@@ -576,9 +576,9 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     // do not accumulate in 8 mantissa bits.
     ggml_tensor * x_t = t_x0;
     std::vector<ggml_tensor *> v_steps(num_steps);
-    for (int step = 0; step < num_steps; ++step) {
+    for (int step=0; step<num_steps; ++step) {
         ggml_tensor * h = build_embed_suffix(C, *this, t_state, x_t, t_time[step]);
-        for (int64_t i = 0; i < n_layers; ++i) {
+        for (int64_t i=0; i<n_layers; ++i) {
             h = build_gemma_layer(C, ex.blk[i], h, t_suffix_pos, cfg, n_suf, rope_base,
                                    cK[i],  cV[i],  t_full_mask,
                                    nullptr,  nullptr, act_type);
@@ -617,17 +617,17 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_set(t_image_emb, img_emb_host.data(), 0, ggml_nbytes(t_image_emb));
     ggml_backend_tensor_set(t_lang_emb,  lang_rows.data(),    0, ggml_nbytes(t_lang_emb));
     {
-        std::vector<int32_t> pp(n_prefix); for (int64_t i = 0; i < n_prefix; ++i) pp[i] = (int32_t) i;
+        std::vector<int32_t> pp(n_prefix); for (int64_t i=0; i<n_prefix; ++i) pp[i] = (int32_t) i;
         ggml_backend_tensor_set(t_prefix_pos, pp.data(), 0, ggml_nbytes(t_prefix_pos));
-        std::vector<int32_t> sp(n_suf);     for (int64_t i = 0; i < n_suf; ++i)    sp[i] = (int32_t) (n_prefix+i);
+        std::vector<int32_t> sp(n_suf);     for (int64_t i=0; i<n_suf; ++i)    sp[i] = (int32_t) (n_prefix+i);
         ggml_backend_tensor_set(t_suffix_pos, sp.data(), 0, ggml_nbytes(t_suffix_pos));
     }
     {
 
         std::vector<float> sh(max_sd, 0.f);
-        for (int64_t i = 0; i < max_sd; ++i)
+        for (int64_t i=0; i<max_sd; ++i)
             sh[i] = in.state ? in.state[i] : 0.f;
-        for (int64_t i = 0; i < cfg.real_state_dim && i < max_sd; ++i)
+        for (int64_t i=0; i<cfg.real_state_dim && i<max_sd; ++i)
             sh[i] = (sh[i]-state_mean[i])/(state_std[i]+cfg.norm_eps);
         ggml_backend_tensor_set(t_state, sh.data(), 0, ggml_nbytes(t_state));
     }
@@ -645,8 +645,8 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     {
 
         std::vector<float> mk((size_t) n_total * n_suf);
-        for (int64_t i = 0; i < n_suf; ++i)
-            for (int64_t j = 0; j < n_total; ++j) {
+        for (int64_t i=0; i<n_suf; ++i)
+            for (int64_t j=0; j<n_total; ++j) {
                 bool allowed;
                 if (j < n_prefix)
                     allowed = true;
@@ -658,11 +658,11 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
             }
         ggml_backend_tensor_set(t_full_mask, mk.data(), 0, ggml_nbytes(t_full_mask));
     }
-    for (int s = 0; s < num_steps; ++s) {
+    for (int s=0; s<num_steps; ++s) {
         const float timestep = 1.0f+(float) s * dt;
         const std::vector<float> tv = sinusoidal_time_emb(timestep, hidden_ex, cfg.min_period, cfg.max_period);
         std::vector<float> tile((size_t) hidden_ex * chunk);
-        for (int64_t c = 0; c < chunk; ++c)
+        for (int64_t c=0; c<chunk; ++c)
             std::memcpy(tile.data()+c * hidden_ex, tv.data(), hidden_ex * sizeof(float));
         ggml_backend_tensor_set(t_time[s], tile.data(), 0, ggml_nbytes(t_time[s]));
     }
@@ -677,9 +677,9 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
 
     std::vector<float> out((size_t) chunk * max_ad);
     ggml_backend_tensor_get(x_final, out.data(), 0, out.size()*sizeof(float));
-    for (int64_t t = 0; t < chunk; ++t) {
+    for (int64_t t=0; t<chunk; ++t) {
         float * row = out.data()+(size_t) t * max_ad;
-        for (int64_t j = 0; j < max_ad; ++j)
+        for (int64_t j=0; j<max_ad; ++j)
             row[j] = j < cfg.real_action_dim ? row[j]*(action_std[j]+cfg.norm_eps)+action_mean[j] : 0.0f;
     }
 

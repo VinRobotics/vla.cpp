@@ -282,7 +282,7 @@ int bitvla_vit_cuda_forward(bitvla_vit_cuda_ctx* ctx,
 
     bitvla_add_bf16(ctx->d_h, ctx->pos_emb, ctx->d_h, seq * H, stream);
 
-    for (int L = 0; L < ctx->n_layers; ++L) {
+    for (int L=0; L<ctx->n_layers; ++L) {
         int rc = run_vit_layer(ctx, L, stream);
         if (rc != 0)
             return rc;
