@@ -22,8 +22,8 @@
 #include "ggml-cuda.h"
 #endif
 #include "gguf.h"
-#include "models/gguf_reader.h"
-#include "models/scratch_ctx.h"
+#include "gguf_reader.h"
+#include "scratch_ctx.h"
 
 #ifdef VLA_BITVLA_CUDA_KERNELS
 #include "kernels/bitvla/bitvla_lm_cuda.h"

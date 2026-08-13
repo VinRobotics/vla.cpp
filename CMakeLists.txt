@@ -69,6 +69,13 @@ vla_exclude_fetched_targets(${llama_SOURCE_DIR})
 
 add_library(vla_core
     src/model.cpp
+    src/loader.cpp
+    src/modules/action_expert.cpp
+    src/modules/dit_head.cpp
+    src/modules/encoder.cpp
+    src/modules/prompt.cpp
+    src/modules/qwen3_lm.cpp
+    src/modules/siglip_vit.cpp
     src/models/smolvla.cpp
     src/models/pi0.cpp
     src/models/pi05.cpp

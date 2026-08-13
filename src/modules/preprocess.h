@@ -72,4 +72,49 @@ inline bool preprocess_image_chw(const char * arch, const ImageView & v, int64_t
     return true;
 }
 
+// HWC to a [3*ps*ps, grid*grid] patch table in [-1, 1], the GEMM patch-embed
+// input GR00T N1.6 uses in place of a conv2d.
+inline bool preprocess_image_patches(const char * arch, const ImageView & v, int64_t side, int64_t ps,
+                                     std::vector<float> & out) {
+    if (v.w != (int) side || v.h != (int) side || !v.data) {
+        std::fprintf(stderr, "vla(%s): image view is %dx%d, expected %lldx%lld\n",
+                     arch, v.w, v.h, (long long) side, (long long) side);
+        return false;
+    }
+    const int64_t grid = side/ps, pd = 3*ps*ps, np = grid*grid;
+    out.assign((size_t) pd*np, 0.0f);
+
+    auto px = [&](int64_t r, int64_t c, int64_t ch) -> float {
+        if (v.format == PixelFormat::U8) return ((const uint8_t *) v.data)[(r*side+c)*3+ch]/255.0f;
+        return ((const float *) v.data)[(r*side+c)*3+ch];
+    };
+
+    for (int64_t row = 0; row < grid; ++row)
+        for (int64_t col = 0; col < grid; ++col) {
+            const int64_t t = row*grid+col;
+            for (int64_t ph = 0; ph < ps; ++ph)
+                for (int64_t pw = 0; pw < ps; ++pw)
+                    for (int64_t ch = 0; ch < 3; ++ch)
+                        out[t*pd+ph*ps*3+pw*3+ch] = px(row*ps+ph, col*ps+pw, ch)*2.0f-1.0f;
+        }
+    return true;
+}
+
+// Pixel shuffle with c-outermost channel order, the inverse layout to
+// pixel_shuffle_hf above. GR00T N1.6's connector expects this one.
+inline void pixel_shuffle_back(const float * src, int64_t grid, int64_t hidden, int64_t r, float * dst) {
+    const int64_t g2 = grid/r, c4 = hidden*r*r;
+    for (int64_t y = 0; y < g2; ++y)
+        for (int64_t x = 0; x < g2; ++x) {
+            const int64_t t = y*g2+x;
+            for (int64_t c = 0; c < hidden; ++c)
+                for (int64_t i = 0; i < r; ++i)
+                    for (int64_t j = 0; j < r; ++j) {
+                        const int64_t pp = (r*y+i)*grid+(r*x+j);
+                        const int64_t cp = c*r*r+i*r+j;
+                        dst[t*c4+cp] = src[pp*hidden+c];
+                    }
+        }
+}
+
 }  // namespace vla

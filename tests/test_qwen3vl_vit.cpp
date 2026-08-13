@@ -14,7 +14,7 @@
 
 // Pins the Qwen3-VL patch geometry. predict_check covers the graph builders.
 
-#include "models/qwen3vl_vit.h"
+#include "modules/qwen3vl_vit.h"
 
 #include <cmath>
 #include <cstdio>

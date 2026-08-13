@@ -20,10 +20,10 @@
 #include "ggml-backend.h"
 #include "backend.h"
 #include "gguf.h"
-#include "models/gguf_reader.h"
-#include "models/scratch_ctx.h"
+#include "gguf_reader.h"
+#include "scratch_ctx.h"
 #include "models/dit_common.h"
-#include "models/qwen3vl_vit.h"
+#include "modules/qwen3vl_vit.h"
 #include "env_flag.h"
 
 #include <chrono>

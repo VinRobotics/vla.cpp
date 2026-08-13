@@ -14,16 +14,16 @@
 
 #include "arch.h"
 #include "model.h"
-#include "vision_common.h"
-#include "models/dual_tower.h"
+#include "modules/preprocess.h"
+#include "modules/dual_tower.h"
 
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include "ggml-backend.h"
 #include "backend.h"
 #include "gguf.h"
-#include "models/gguf_reader.h"
-#include "models/scratch_ctx.h"
+#include "gguf_reader.h"
+#include "scratch_ctx.h"
 #include "env_flag.h"
 
 #include <chrono>

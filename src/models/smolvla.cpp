@@ -17,9 +17,9 @@
 
 #include "arch.h"
 #include "model.h"
-#include "vision_common.h"
+#include "modules/preprocess.h"
 #include "scratch_ctx.h"
-#include "dit_common.h"
+#include "models/dit_common.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"

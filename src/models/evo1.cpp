@@ -20,9 +20,9 @@
 #include "ggml-backend.h"
 #include "backend.h"
 #include "gguf.h"
-#include "models/gguf_reader.h"
-#include "models/scratch_ctx.h"
-#include "models/act_dtype.h"
+#include "gguf_reader.h"
+#include "scratch_ctx.h"
+#include "act_dtype.h"
 #include "cuda/vla_cuda_ops.h"
 #include "env_flag.h"
 
