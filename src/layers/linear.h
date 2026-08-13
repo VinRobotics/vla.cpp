@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Projections. A null bias emits no add node.
 
 #pragma once
 
@@ -27,8 +26,7 @@ inline ggml_tensor * linear(ggml_context * C, ggml_tensor * W, ggml_tensor * b, 
     return b ? ggml_add(C, y, b) : y;
 }
 
-// One row of a stacked [out, in, n_embodiment] weight: the GR00T action expert
-// keeps a per-embodiment copy of every projection in one tensor.
+// One row of a stacked [out, in, n_embodiment] weight.
 inline ggml_tensor * cat_linear(ggml_context * C, ggml_tensor * W3d, ggml_tensor * b2d, int64_t id, ggml_tensor * x) {
     const int64_t out = W3d->ne[0];
     const int64_t in  = W3d->ne[1];
@@ -38,7 +36,7 @@ inline ggml_tensor * cat_linear(ggml_context * C, ggml_tensor * W3d, ggml_tensor
     return ggml_add(C, y, ggml_view_1d(C, b2d, out, (size_t)id*b2d->nb[1]));
 }
 
-// Slice block `blk` out of a fused [nblk*E, T] projection, laid out as heads.
+// Block `blk` of a fused [nblk*E, T] projection, laid out as heads.
 inline ggml_tensor * head_view(ggml_context * C, ggml_tensor * proj, int64_t hd, int64_t heads,
                                int64_t T, int64_t E, int nblk, int blk) {
     const size_t es = ggml_element_size(proj);

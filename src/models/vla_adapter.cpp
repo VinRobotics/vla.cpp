@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "arch.h"
+#include "options.h"
 #include "model.h"
 #include "modules/preprocess.h"
 #include "modules/dual_tower.h"
@@ -155,11 +156,12 @@ static ggml_tensor* hrope(ggml_context*C, ggml_tensor*x, ggml_tensor*cs, ggml_te
 
 std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path,
                                                   const std::string& ckpt_path,
-                                                  const std::string& ) {
+                                                  const std::string&,
+                                                  const Options& opts) {
     if (!mmproj_path.empty())
         std::printf("vla(vla_adapter): note - mmproj '%s' ignored (vision baked into combined GGUF)\n", mmproj_path.c_str());
     auto m = std::make_unique<VlaAdapterModelArch>();
-    m->mt = vla::env_flag("VLA_ADAPTER_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
+    m->mt = opts.weight_dtype.value_or(GGML_TYPE_BF16);
 
     gguf_reader g("vla_adapter");
     if (!g.open(ckpt_path)) return nullptr;

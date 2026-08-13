@@ -12,16 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Rotary embeddings. Three conventions live in the tree and they are not
-// interchangeable; the pairing is pinned by tests/test_rope_conventions.cpp.
-//
-//   RopeSpec       ggml rope, NEOX or IMROPE. The Qwen3 backbones.
-//   rope_2d        precomputed tables, half-split rotation. The Qwen3-VL tower,
-//                  whose 2d grid positions ggml_rope has no spelling for.
-//   rope_pairwise  precomputed tables, adjacent-pair rotation. VLA-Adapter's
-//                  action head pairs a half-split frequency table with an
-//                  interleaved rotation; the reference does the same, so the
-//                  mismatch is deliberate.
+// Three conventions, not interchangeable; pinned by
+// tests/test_rope_conventions.cpp. rope_pairwise deliberately pairs a
+// half-split frequency table with an interleaved rotation, as the VLA-Adapter
+// reference does.
 
 #pragma once
 
@@ -31,8 +25,6 @@
 
 namespace vla {
 
-// Which ggml rope call a backbone wants, and with what parameters. `sections`
-// is read only when type is GGML_ROPE_TYPE_IMROPE.
 struct RopeSpec {
     int   type       = GGML_ROPE_TYPE_NEOX;
     int   n_dims     = 0;
@@ -55,7 +47,6 @@ inline ggml_tensor * rope(ggml_context * C, const RopeSpec & r, ggml_tensor * x,
                          r.freq_base, r.freq_scale, r.ext_factor, r.attn_factor, r.beta_fast, r.beta_slow);
 }
 
-// Half-split rotation against precomputed tables: (x1, x2) -> (-x2, x1).
 inline ggml_tensor * rope_2d(ggml_context * C, ggml_tensor * x, ggml_tensor * cos_t, ggml_tensor * sin_t) {
     const int64_t hd = x->ne[0];
     const int64_t S  = x->ne[1];
@@ -68,7 +59,6 @@ inline ggml_tensor * rope_2d(ggml_context * C, ggml_tensor * x, ggml_tensor * co
     return ggml_add(C, ggml_mul(C, x, cos_t), ggml_mul(C, rot, sin_t));
 }
 
-// Adjacent-pair rotation: (even, odd) -> (-odd, even).
 inline ggml_tensor * rope_pairwise_rot(ggml_context * C, ggml_tensor * x, int64_t HD) {
     const int64_t L = x->ne[1];
     const int64_t H = x->ne[2];

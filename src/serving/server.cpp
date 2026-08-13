@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "model.h"
+#include "options.h"
 #include "serving/hf_fetch.h"
 #include "serving/vla.pb.h"
 
@@ -190,10 +191,11 @@ void usage(const char * prog) {
         "                          'none'  : single ms_inference\n"
         "                          'phase' : ms_prefill + ms_denoise broken out\n"
         "                          (π0 currently reports only the combined ms_inference)\n"
+        "%s"
         "  --config PATH           LeRobot policy config.json (SmolVLA safetensors only;\n"
         "                          ignored for GGUF checkpoints). If omitted, uses\n"
         "                          <dirname(ckpt)>/config.json.\n",
-        prog);
+        prog, vla::Options::usage());
 }
 
 }
@@ -209,6 +211,8 @@ int main(int argc, char ** argv) {
     std::string hf_spec;
     std::string config_path;
     vla::TimingDetail timing_detail = vla::TimingDetail::NONE;
+    vla::Options opts;
+    std::string  opt_err;
 
     std::vector<std::string> positionals;
     for (int i = 1; i < argc; ++i) {
@@ -228,6 +232,12 @@ int main(int argc, char ** argv) {
                 usage(argv[0]);
                 return 1;
             }
+        } else if (opts.parse_arg(argc, argv, i, opt_err)) {
+            continue;
+        } else if (!opt_err.empty()) {
+            std::fprintf(stderr, "vla-server: %s\n", opt_err.c_str());
+            usage(argv[0]);
+            return 1;
         } else if (a == "-h" || a == "--help") {
             usage(argv[0]);
             return 0;
@@ -261,7 +271,12 @@ int main(int argc, char ** argv) {
     if (!config_path.empty()) {
         std::printf("  config: %s\n", config_path.c_str());
     }
-    vla::Model * model = vla::model_load(mmproj_path, ckpt_path, config_path);
+    if (!opts.load_json(config_path, opt_err)) {
+        std::fprintf(stderr, "vla-server: %s\n", opt_err.c_str());
+        return 1;
+    }
+
+    vla::Model * model = vla::model_load(mmproj_path, ckpt_path, config_path, opts);
     if (!model) {
         std::fprintf(stderr, "vla-server: model_load failed\n");
         return 1;

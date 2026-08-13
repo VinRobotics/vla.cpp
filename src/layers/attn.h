@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Scaled dot-product attention. `nv` is the batch (view) count; ggml pads every
-// shape to four dimensions, so nv == 1 emits the same nodes as the 2d/3d
-// spelling it replaces.
+
+// nv == 1 emits the same nodes as the 2d/3d spelling, since ggml pads every
+// shape to four dimensions.
 
 #pragma once
 
@@ -24,7 +24,6 @@
 
 namespace vla {
 
-// [heads*hd, T, nv] -> [hd, T, heads, nv].
 inline ggml_tensor * to_heads(ggml_context * C, ggml_tensor * p, int64_t hd, int64_t heads,
                               int64_t T, int64_t nv = 1) {
     return ggml_cont(C, ggml_permute(C, ggml_reshape_4d(C, p, hd, heads, T, nv), 0, 2, 1, 3));
@@ -36,8 +35,6 @@ inline ggml_tensor * to_heads_v(ggml_context * C, ggml_tensor * p, int64_t hd, i
     return ggml_cont(C, ggml_permute(C, ggml_reshape_4d(C, p, hd, heads, T, nv), 1, 2, 0, 3));
 }
 
-// Scores stay F32 whatever the activation dtype: softmax over a BF16 reduction
-// loses too much.
 inline ggml_tensor * attention(ggml_context * C, ggml_tensor * Q, ggml_tensor * K, ggml_tensor * V,
                                ggml_tensor * mask, float scale, int64_t dim, int64_t T, int64_t nv = 1) {
     ggml_tensor * kq = ggml_mul_mat(C, K, Q);

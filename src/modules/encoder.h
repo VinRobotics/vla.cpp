@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Post-LN transformer encoder: full self-attention with biases, a GELU MLP, and
-// a LayerNorm before each residual. The SigLIP vision blocks and the GR00T
-// vision-language self-attention blocks are the same computation under
-// different tensor names, so both declare through EncNames.
+// Post-LN encoder. The SigLIP vision blocks and the GR00T vision-language
+// self-attention blocks are the same computation under different tensor names,
+// which is what EncNames selects.
 
 #pragma once
 
@@ -53,8 +52,6 @@ struct EncStack {
     EncCfg                 cfg;
     std::vector<EncBlockW> blk;
 
-    // Reads "<prefix>.<i>.*". SigLIP checkpoints prefix their blocks with
-    // "blk", so callers pass e.g. "vit.blk".
     void declare(WeightLoader & L, const char * prefix, int64_t layers, const EncNames & n = EncNames{});
 
     ggml_tensor * block(ggml_context * C, const EncBlockW & w, ggml_tensor * x,

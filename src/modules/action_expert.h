@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// GR00T action expert: the per-embodiment MLPs that lift state and noisy
-// actions into the DiT token stream and project the DiT output back to action
-// space. Every projection is a cat_linear row selected by embodiment_id.
+// Every projection is a cat_linear row selected by embodiment_id.
 
 #pragma once
 
@@ -35,8 +33,6 @@ struct ActionExpert {
 
     int64_t embodiment_id = 0;
 
-    // Reads "<prefix>.state_enc.*", "<prefix>.act_enc.*", "<prefix>.act_dec.*"
-    // and "<prefix>.pos_embd".
     void declare(WeightLoader & L, const char * prefix);
 
     ggml_tensor * encode_state(ggml_context * C, ggml_tensor * state) const;

@@ -26,6 +26,8 @@
 
 #pragma once
 
+#include "options.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -164,7 +166,7 @@ struct Inputs {
  * @return Owning handle. Free with @ref model_free.
  */
 Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
-                  const std::string& config_path = "");
+                  const std::string& config_path = "", const Options& opts = Options{});
 
 /**
  * @brief Release a model handle returned by @ref model_load.

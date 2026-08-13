@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "arch.h"
+#include "options.h"
 #include "model.h"
 
 #include "ggml.h"
@@ -199,10 +200,6 @@ bool preprocess_image_chw(const ImageView & v, int64_t side, std::vector<float> 
 // (n=100, same binary). That is inside sampling noise at ~1.6 SE, but the drop
 // concentrated in the two tasks the control aced, so the default stays on the
 // accuracy-preserving path and the speedup is opt-in.
-inline bool evo1_vit_fa_enabled() {
-    static const bool enabled = vla::env_flag("VLA_EVO1_FA");
-    return enabled;
-}
 
 ggml_tensor * evo1_flash_attn(ggml_context * C, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
                               float scale, int64_t hidden, int64_t N) {
@@ -232,7 +229,7 @@ ggml_tensor * build_internvit_layer(ggml_context * C, const Evo1ModelArch & m, c
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, hd, n_heads, N), 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, hd, n_heads, N), 0, 2, 1, 3));
     ggml_tensor * att;
-    if (evo1_vit_fa_enabled()) {
+    if (vla::flash_attn_enabled()) {
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, n_heads, N), 0, 2, 1, 3));
         att = evo1_flash_attn(C, Q, K, V, scale, H, N);
     } else {
@@ -348,14 +345,15 @@ Evo1ModelArch::~Evo1ModelArch() {
 
 std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
                                            const std::string& ckpt_path,
-                                           const std::string& ) {
+                                           const std::string&,
+                                           const Options& opts) {
     if (!mmproj_path.empty())
         std::printf("vla(evo1): note - mmproj '%s' is ignored (the vision tower is bundled in the combined GGUF)\n",
                     mmproj_path.c_str());
 
     auto m = std::make_unique<Evo1ModelArch>();
     m->gguf_path = ckpt_path;
-    m->matmul_type = vla::env_flag("VLA_EVO1_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
+    m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
 
     if (!m->io.open(ckpt_path)) return nullptr;
     gguf_reader & g = m->io;
@@ -376,7 +374,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
         m->backend = b.handle;
 
         // BF16 activations need BF16-resident weights and the CUDA BF16 GEMM path.
-        if (vla::env_flag("VLA_EVO1_BF16_ACT")) {
+        if (opts.act_dtype.value_or(GGML_TYPE_F32) == GGML_TYPE_BF16) {
             if (b.is_cuda && m->matmul_type == GGML_TYPE_BF16) {
                 m->act_type = GGML_TYPE_BF16;
                 cuda_register_bf16_ops();   // installs the in-tree BF16 CUDA kernels

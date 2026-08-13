@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// NVIDIA Isaac GR00T N1.6: SigLIP2 tower with a GEMM patch embed and a
-// pixel-shuffled MLP connector, a Qwen3 backbone, and an AlternateVL DiT head
-// that cross-attends text and image tokens on alternating blocks.
-
 #include "arch.h"
+#include "options.h"
 #include "backend.h"
 #include "env_flag.h"
 #include "gguf_reader.h"
@@ -233,12 +230,13 @@ Gr00tN1d6ModelArch::~Gr00tN1d6ModelArch() {
 
 std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
                                                  const std::string& ckpt_path,
-                                                 const std::string& ) {
+                                                 const std::string&,
+                                                 const Options& opts) {
     if (!mmproj_path.empty())
         std::printf("vla(gr00tn1d6): note - mmproj '%s' is ignored (the vision tower is bundled in the combined GGUF)\n", mmproj_path.c_str());
 
     auto m = std::make_unique<Gr00tN1d6ModelArch>();
-    m->matmul_type           = vla::env_flag("VLA_GR00T_BF16_WEIGHTS") ? GGML_TYPE_BF16 : GGML_TYPE_F32;
+    m->matmul_type           = opts.weight_dtype.value_or(GGML_TYPE_BF16);
     m->lm.cfg.rope.freq_base = 1000000.0f;
 
     if (!m->io.open(ckpt_path)) return nullptr;
@@ -396,7 +394,6 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
     std::vector<float> x_init;
     init_noise(in, (size_t) AH*AD, x_init);
 
-    // LM + DiT graph depends only on the sequence split and step count.
     const MainKey mkey{ SEQ, n_img, SEQ_TXT, num_steps };
     const bool built = main_graph.ensure(backend, mkey, (size_t) 256*1024*1024,
                                          [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {

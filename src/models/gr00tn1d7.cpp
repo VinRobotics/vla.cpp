@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "arch.h"
+#include "options.h"
 #include "model.h"
 
 #include "ggml.h"
@@ -136,7 +137,7 @@ ggml_tensor * build_vlsa_layer(ggml_context * C, const VlsaLayerW & w, ggml_tens
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, hd, heads, seq), 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, hd, heads, seq), 0, 2, 1, 3));
     ggml_tensor * att;
-    if (fa_enabled()) {
+    if (vla::flash_attn_enabled()) {
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, heads, seq), 0, 2, 1, 3));
         att = flash_attn(C, Q, K, V, nullptr, scale);
     } else {
@@ -170,7 +171,7 @@ ggml_tensor * build_qwen3_layer(ggml_context * C, const Gr00tN1d7ModelArch & m, 
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, qr, 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, kr, 0, 2, 1, 3));
     ggml_tensor * att;
-    if (fa_enabled()) {
+    if (vla::flash_attn_enabled()) {
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, vh, 0, 2, 1, 3));
         att = flash_attn(C, Q, K, V, ggml_cast(C, mask, GGML_TYPE_F16), scale);
     } else {
@@ -306,13 +307,14 @@ Gr00tN1d7ModelArch::~Gr00tN1d7ModelArch() {
 
 std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
                                                  const std::string& ckpt_path,
-                                                 const std::string& ) {
+                                                 const std::string&,
+                                                 const Options& opts) {
     if (!mmproj_path.empty())
         std::printf("vla(gr00tn1d7): note - mmproj '%s' is ignored (the vision tower is bundled in the combined GGUF)\n", mmproj_path.c_str());
 
     auto m = std::make_unique<Gr00tN1d7ModelArch>();
     m->gguf_path   = ckpt_path;
-    m->matmul_type = vla::env_flag("VLA_GR00T_BF16_WEIGHTS") ? GGML_TYPE_BF16 : GGML_TYPE_F32;
+    m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
 
     gguf_reader g("gr00tn1d7");
     if (!g.open(ckpt_path)) return nullptr;

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "arch.h"
+#include "options.h"
 #include "model.h"
 
 #include "ggml.h"
@@ -233,13 +234,14 @@ VlaJepaModelArch::~VlaJepaModelArch() {
 
 std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
                                                const std::string& ckpt_path,
-                                               const std::string& ) {
+                                               const std::string&,
+                                               const Options& opts) {
     if (!mmproj_path.empty())
         std::printf("vla(vla_jepa): note - mmproj '%s' is ignored (the vision tower is bundled in the combined GGUF)\n", mmproj_path.c_str());
 
     auto m = std::make_unique<VlaJepaModelArch>();
     m->gguf_path   = ckpt_path;
-    m->matmul_type = vla::env_flag("VLA_JEPA_BF16_WEIGHTS") ? GGML_TYPE_BF16 : GGML_TYPE_F32;
+    m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
 
     gguf_reader g("vla_jepa");
     if (!g.open(ckpt_path)) return nullptr;

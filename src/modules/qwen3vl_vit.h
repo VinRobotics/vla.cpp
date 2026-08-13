@@ -19,7 +19,7 @@
 #include "model.h"
 
 #include "ggml.h"
-#include "env_flag.h"
+#include "options.h"
 
 #include <algorithm>
 #include <cmath>
@@ -44,8 +44,6 @@ inline ggml_tensor * rope2d(ggml_context * C, ggml_tensor * x, ggml_tensor * cos
     return ggml_add(C, ggml_mul(C, x, cos_t), ggml_mul(C, rot, sin_t));
 }
 
-inline bool fa_enabled() { static const bool e = vla::env_flag("VLA_FLASH_ATTN"); return e; }
-
 inline ggml_tensor * flash_attn(ggml_context * C, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
                                 ggml_tensor * mask, float scale) {
     ggml_tensor * kf = (k->type == GGML_TYPE_F16) ? k : ggml_cast(C, k, GGML_TYPE_F16);
@@ -68,7 +66,7 @@ inline ggml_tensor * build_vit_layer(ggml_context * C, const VitLayerW & w, ggml
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, hd, heads, seq), 0, 2, 1, 3));
     Q = rope2d(C, Q, cos_t, sin_t); K = rope2d(C, K, cos_t, sin_t);
     ggml_tensor * att;
-    if (fa_enabled()) {
+    if (vla::flash_attn_enabled()) {
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, heads, seq), 0, 2, 1, 3));
         att = flash_attn(C, Q, K, V, nullptr, scale);
     } else {

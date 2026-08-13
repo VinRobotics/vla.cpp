@@ -72,8 +72,6 @@ inline bool preprocess_image_chw(const char * arch, const ImageView & v, int64_t
     return true;
 }
 
-// HWC to a [3*ps*ps, grid*grid] patch table in [-1, 1], the GEMM patch-embed
-// input GR00T N1.6 uses in place of a conv2d.
 inline bool preprocess_image_patches(const char * arch, const ImageView & v, int64_t side, int64_t ps,
                                      std::vector<float> & out) {
     if (v.w != (int) side || v.h != (int) side || !v.data) {
@@ -100,8 +98,7 @@ inline bool preprocess_image_patches(const char * arch, const ImageView & v, int
     return true;
 }
 
-// Pixel shuffle with c-outermost channel order, the inverse layout to
-// pixel_shuffle_hf above. GR00T N1.6's connector expects this one.
+// c-outermost channel order, the inverse layout to pixel_shuffle_hf above.
 inline void pixel_shuffle_back(const float * src, int64_t grid, int64_t hidden, int64_t r, float * dst) {
     const int64_t g2 = grid/r, c4 = hidden*r*r;
     for (int64_t y = 0; y < g2; ++y)

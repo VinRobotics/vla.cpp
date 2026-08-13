@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "arch.h"
+#include "options.h"
 #include "model.h"
 
 #include "ggml.h"
@@ -144,10 +145,6 @@ namespace {
 // measured, so it stays opt-in on an unquantified risk rather than a measured
 // cost. (The evo1 SR drop this used to cite did not reproduce.)
 // VLA_PI0_BF16_ACT is the better lever here: 9.1%, and its SR was measured.
-static inline bool pi0_fa_enabled() {
-    static const bool enabled = vla::env_flag("VLA_PI0_FA");
-    return enabled;
-}
 
 ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_tensor * x,
                                  int64_t seq, int64_t heads, int64_t head_dim, int64_t hidden, float ln_eps,
@@ -160,7 +157,7 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, head_dim, heads, seq), 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, head_dim, heads, seq), 0, 2, 1, 3));
     ggml_tensor * att;
-    if (pi0_fa_enabled()) {
+    if (vla::flash_attn_enabled()) {
         // Avoids materialising the per-head score matrix; K/V stay F32 so the
         // numerics track the explicit path below.
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 0, 2, 1, 3));
@@ -227,7 +224,7 @@ ggml_tensor * build_gemma_layer(
     ggml_tensor * Q = ggml_cont(ctx, ggml_permute(ctx, q_rope, 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(ctx, ggml_permute(ctx, K_full, 0, 2, 1, 3));
     ggml_tensor * att_pre;
-    if (pi0_fa_enabled()) {
+    if (vla::flash_attn_enabled()) {
         ggml_tensor * V = ggml_cont(ctx, ggml_permute(ctx, V_full, 0, 2, 1, 3));
         // ggml_flash_attn_ext asserts an F16 mask. The mask holds only 0 and
         // -inf, both exactly representable in F16, so the cast is lossless.
@@ -350,7 +347,8 @@ Pi0ModelArch::~Pi0ModelArch() {
 
 std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
                                           const std::string& ckpt_path,
-                                          const std::string& config_path) {
+                                          const std::string& config_path,
+                                          const Options& opts) {
     (void) config_path;
 
     if (!ends_with(ckpt_path, ".gguf")) {
@@ -363,7 +361,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
 
     auto m = std::make_unique<Pi0ModelArch>();
     m->ckpt_path_ = ckpt_path;
-    m->matmul_type = vla::env_flag("VLA_PI0_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
+    m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
 
     if (!m->io.open(ckpt_path)) return nullptr;
     gguf_reader & g = m->io;
@@ -390,7 +388,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
         m->backend = b.handle;
 
         // BF16 activations need BF16-resident weights and the CUDA BF16 GEMM path.
-        if (vla::env_flag("VLA_PI0_BF16_ACT")) {
+        if (opts.act_dtype.value_or(GGML_TYPE_F32) == GGML_TYPE_BF16) {
             if (b.is_cuda && m->matmul_type == GGML_TYPE_BF16) {
                 m->act_type = GGML_TYPE_BF16;
                 cuda_register_bf16_ops();   // installs the in-tree BF16 CUDA kernels

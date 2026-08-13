@@ -26,6 +26,7 @@
 #pragma once
 
 #include "model.h"
+#include "options.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -109,7 +110,8 @@ public:
  */
 std::unique_ptr<ModelArchBase> smolvla_create(const std::string& mmproj_path,
                                               const std::string& ckpt_path,
-                                              const std::string& config_path);
+                                              const std::string& config_path,
+                                              const Options& opts);
 
 /**
  * @brief Build a pi0 model from its mmproj and checkpoint GGUFs.
@@ -117,7 +119,8 @@ std::unique_ptr<ModelArchBase> smolvla_create(const std::string& mmproj_path,
  */
 std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
                                           const std::string& ckpt_path,
-                                          const std::string& config_path);
+                                          const std::string& config_path,
+                                              const Options& opts);
 
 /**
  * @brief Build a pi0.5 model from its mmproj and checkpoint GGUFs.
@@ -125,7 +128,8 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
  */
 std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
                                            const std::string& ckpt_path,
-                                           const std::string& config_path);
+                                           const std::string& config_path,
+                                              const Options& opts);
 
 /**
  * @brief Build an Evo-1 model. Vision is baked into @p ckpt_path; pass
@@ -134,7 +138,8 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
  */
 std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
                                            const std::string& ckpt_path,
-                                           const std::string& config_path);
+                                           const std::string& config_path,
+                                              const Options& opts);
 
 /**
  * @brief Build a GR00T N1.5 model. Vision is baked into @p ckpt_path.
@@ -142,7 +147,8 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
  */
 std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
                                                  const std::string& ckpt_path,
-                                                 const std::string& config_path);
+                                                 const std::string& config_path,
+                                              const Options& opts);
 
 /**
  * @brief Build a GR00T N1.6 model. Vision is baked into @p ckpt_path.
@@ -150,7 +156,8 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
  */
 std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
                                                  const std::string& ckpt_path,
-                                                 const std::string& config_path);
+                                                 const std::string& config_path,
+                                              const Options& opts);
 
 /**
  * @brief Build a GR00T N1.7 model. Vision is baked into @p ckpt_path.
@@ -158,7 +165,8 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
  */
 std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
                                                  const std::string& ckpt_path,
-                                                 const std::string& config_path);
+                                                 const std::string& config_path,
+                                              const Options& opts);
 
 /**
  * @brief Build a BitVLA model. Vision is baked into @p ckpt_path.
@@ -166,7 +174,8 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
  */
 std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                                              const std::string& ckpt_path,
-                                             const std::string& config_path);
+                                             const std::string& config_path,
+                                              const Options& opts);
 
 /**
  * @brief Build a VLA-Adapter model. Vision is baked into @p ckpt_path.
@@ -174,7 +183,8 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
  */
 std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path,
                                                   const std::string& ckpt_path,
-                                                  const std::string& config_path);
+                                                  const std::string& config_path,
+                                              const Options& opts);
 
 /**
  * @brief Build a OpenVLA-OFT model. Vision is baked into @p ckpt_path.
@@ -182,7 +192,8 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
  */
 std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path,
                                                   const std::string& ckpt_path,
-                                                  const std::string& config_path);
+                                                  const std::string& config_path,
+                                              const Options& opts);
 
 /**
  * @brief Build a VLA-JEPA model. Vision is baked into @p ckpt_path.
@@ -190,7 +201,8 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
  */
 std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
                                                   const std::string& ckpt_path,
-                                                  const std::string& config_path);
+                                                  const std::string& config_path,
+                                              const Options& opts);
 
 /**
  * @brief Inspect a GGUF and identify the architecture tag.

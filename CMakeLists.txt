@@ -70,6 +70,7 @@ vla_exclude_fetched_targets(${llama_SOURCE_DIR})
 add_library(vla_core
     src/model.cpp
     src/loader.cpp
+    src/options.cpp
     src/modules/action_expert.cpp
     src/modules/dit_head.cpp
     src/modules/encoder.cpp

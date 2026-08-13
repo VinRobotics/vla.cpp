@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "arch.h"
+#include "options.h"
 #include "model.h"
 
 #include "ggml.h"
@@ -386,7 +387,8 @@ Pi05ModelArch::~Pi05ModelArch() {
 
 std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
                                            const std::string& ckpt_path,
-                                           const std::string& config_path) {
+                                           const std::string& config_path,
+                                           const Options& opts) {
     (void) config_path;
 
     if (!ends_with(ckpt_path, ".gguf")) {
@@ -398,7 +400,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
 
     auto m = std::make_unique<Pi05ModelArch>();
     m->ckpt_path_  = ckpt_path;
-    m->matmul_type = vla::env_flag("VLA_PI05_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
+    m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
 
     if (!m->io.open(ckpt_path)) return nullptr;
     gguf_reader & g = m->io;

@@ -149,7 +149,7 @@ bool detect_arch_from_ckpt(const std::string& ckpt_path, Arch* out) {
 }
 
 Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
-                  const std::string& config_path) {
+                  const std::string& config_path, const Options& opts) {
     Arch arch;
     if (!detect_arch_from_ckpt(ckpt_path, &arch)) {
         std::fprintf(stderr,
@@ -160,50 +160,61 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
     }
 
     std::unique_ptr<ModelArchBase> impl;
+    {
+        std::string err;
+        if (!Options::reject_retired_env(err)) {
+            std::fprintf(stderr, "vla: %s\n", err.c_str());
+            return nullptr;
+        }
+    }
+
+    set_flash_attn(opts.flash_attn.value_or(false));
+    set_mm_prec_f32(opts.mm_prec_f32.value_or(true));
+
     switch (arch) {
         case Arch::SMOLVLA:
             std::printf("vla: arch = smolvla\n");
-            impl = smolvla_create(mmproj_path, ckpt_path, config_path);
+            impl = smolvla_create(mmproj_path, ckpt_path, config_path, opts);
             break;
         case Arch::PI0:
             std::printf("vla: arch = pi0\n");
-            impl = pi0_create(mmproj_path, ckpt_path, config_path);
+            impl = pi0_create(mmproj_path, ckpt_path, config_path, opts);
             break;
         case Arch::PI05:
             std::printf("vla: arch = pi05\n");
-            impl = pi05_create(mmproj_path, ckpt_path, config_path);
+            impl = pi05_create(mmproj_path, ckpt_path, config_path, opts);
             break;
         case Arch::EVO1:
             std::printf("vla: arch = evo1\n");
-            impl = evo1_create(mmproj_path, ckpt_path, config_path);
+            impl = evo1_create(mmproj_path, ckpt_path, config_path, opts);
             break;
         case Arch::GR00T_N1_5:
             std::printf("vla: arch = gr00t_n1_5\n");
-            impl = gr00t_n1_5_create(mmproj_path, ckpt_path, config_path);
+            impl = gr00t_n1_5_create(mmproj_path, ckpt_path, config_path, opts);
             break;
         case Arch::GR00T_N1_6:
             std::printf("vla: arch = gr00t_n1_6\n");
-            impl = gr00t_n1_6_create(mmproj_path, ckpt_path, config_path);
+            impl = gr00t_n1_6_create(mmproj_path, ckpt_path, config_path, opts);
             break;
         case Arch::GR00T_N1_7:
             std::printf("vla: arch = gr00t_n1_7\n");
-            impl = gr00t_n1_7_create(mmproj_path, ckpt_path, config_path);
+            impl = gr00t_n1_7_create(mmproj_path, ckpt_path, config_path, opts);
             break;
         case Arch::BITVLA:
             std::printf("vla: arch = bitvla\n");
-            impl = bitvla_create(mmproj_path, ckpt_path, config_path);
+            impl = bitvla_create(mmproj_path, ckpt_path, config_path, opts);
             break;
         case Arch::VLA_ADAPTER:
             std::printf("vla: arch = vla_adapter\n");
-            impl = vla_adapter_create(mmproj_path, ckpt_path, config_path);
+            impl = vla_adapter_create(mmproj_path, ckpt_path, config_path, opts);
             break;
         case Arch::OPENVLA_OFT:
             std::printf("vla: arch = openvla_oft\n");
-            impl = openvla_oft_create(mmproj_path, ckpt_path, config_path);
+            impl = openvla_oft_create(mmproj_path, ckpt_path, config_path, opts);
             break;
         case Arch::VLA_JEPA:
             std::printf("vla: arch = vla_jepa\n");
-            impl = vla_jepa_create(mmproj_path, ckpt_path, config_path);
+            impl = vla_jepa_create(mmproj_path, ckpt_path, config_path, opts);
             break;
     }
     if (!impl) return nullptr;

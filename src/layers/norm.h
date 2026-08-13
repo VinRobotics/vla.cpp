@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Normalisation layers.
 
 #pragma once
 
@@ -29,14 +28,12 @@ inline ggml_tensor * layer_norm(ggml_context * C, ggml_tensor * x, ggml_tensor *
     return ggml_add(C, ggml_mul(C, ggml_norm(C, x, eps), w), b);
 }
 
-// w == nullptr leaves the norm unscaled.
 inline ggml_tensor * rms_norm(ggml_context * C, ggml_tensor * x, ggml_tensor * w, float eps) {
     ggml_tensor * n = ggml_rms_norm(C, x, eps);
     return w ? ggml_mul(C, n, w) : n;
 }
 
-// The conditioning vector is (scale, shift) in that order; the final projection
-// layer of each DiT head uses (shift, scale) instead.
+// cond is (scale, shift) here; the DiT final projection uses (shift, scale).
 inline ggml_tensor * adaln(ggml_context * C, ggml_tensor * x, ggml_tensor * temb,
                            ggml_tensor * lw, ggml_tensor * lb, int64_t dim, float eps) {
     ggml_tensor * cond = linear(C, lw, lb, ggml_silu(C, temb));

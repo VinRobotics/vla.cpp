@@ -22,8 +22,6 @@ namespace vla {
 
 namespace {
 
-// GGUF tensor names in this tree top out well under this; the truncation guard
-// below turns an overflow into a load failure rather than a silent wrong name.
 constexpr size_t NAME_CAP = 256;
 
 }
@@ -59,8 +57,6 @@ ggml_tensor * WeightLoader::declare(ggml_type want, bool required, bool gemma_no
     return t;
 }
 
-// The five entry points differ only in the resident type and whether a miss is
-// fatal, so each is a one-line forward into declare().
 #define VLA_DECLARE_FN(fn, type, required, gemma)                       \
     ggml_tensor * WeightLoader::fn(const char * fmt, ...) {             \
         va_list ap;                                                     \

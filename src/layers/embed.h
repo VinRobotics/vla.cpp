@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Host-side input tables, uploaded as graph inputs rather than built as nodes.
 // The sin/cos order differs per family and each matches its reference;
 // tests/test_dit_common.cpp pins all three.
 
@@ -43,7 +42,7 @@ inline void timesteps_proj(int64_t bucket, std::vector<float> & out) {
     }
 }
 
-// Broadcast across the horizon. sin first, then cos.
+// sin first, then cos.
 inline void action_sinusoid(int64_t bucket, int64_t dim, int64_t T, std::vector<float> & out) {
     const int64_t half = dim/2;
     const float   step = std::log(10000.0f)/(float)half;
@@ -58,8 +57,7 @@ inline void action_sinusoid(int64_t bucket, int64_t dim, int64_t T, std::vector<
         }
 }
 
-// Log-spaced periods rather than frequencies, the openpi convention shared by
-// pi0, pi0.5 and SmolVLA.
+// Log-spaced periods rather than frequencies, the openpi convention.
 inline std::vector<float> sinusoidal_time_emb(double t, int64_t dim, double min_p, double max_p) {
     const int64_t half = dim/2;
 
@@ -74,7 +72,6 @@ inline std::vector<float> sinusoidal_time_emb(double t, int64_t dim, double min_
     return out;
 }
 
-// Additive causal mask, -inf above the diagonal.
 inline void build_causal_mask(int64_t seq, std::vector<float> & out) {
     const float NEG = -std::numeric_limits<float>::infinity();
 

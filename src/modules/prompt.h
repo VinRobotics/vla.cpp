@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Token-sequence assembly for the archs whose backbone takes one interleaved
-// image/text stream: build the id list, note where the image slots landed, then
-// swap the tower's embeddings into those rows.
+// Token-sequence assembly for backbones taking one interleaved image/text
+// stream.
 
 #pragma once
 
@@ -35,18 +34,14 @@ struct Prompt {
     int64_t n_text()  const { return (int64_t) text_pos.size(); }
 };
 
-// Accepts a caller-supplied stream that already carries exactly n_img image
-// placeholders, or one with none, in which case the placeholders are prepended.
-// Any other count is a mismatch between the tokenizer and the tower.
+// Accepts a stream carrying exactly n_img placeholders, or none, in which case
+// they are prepended.
 bool build_prompt(const char * arch, const Inputs & in, int64_t n_img,
                   int32_t image_token, int64_t max_seq, Prompt & out);
 
-// Embedding-table rows for the prompt, with the image rows overwritten by the
-// tower output.
 bool fetch_embeds(const char * arch, gguf_reader & io, const Prompt & p,
                   const float * img_emb, int64_t hidden, std::vector<float> & out);
 
-// The request's noise if it carried any, else a fresh N(0,1) draw.
 void init_noise(const Inputs & in, size_t n, std::vector<float> & out);
 
 }

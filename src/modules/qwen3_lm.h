@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Qwen3 decoder stack, shared by GR00T N1.5/N1.6/N1.7 and VLA-JEPA. Prefill
-// only: a VLA runs one pass per action chunk, so there is no KV cache.
+// Prefill only: a VLA runs one pass per action chunk, so there is no KV cache.
 
 #pragma once
 
@@ -48,13 +47,11 @@ struct Qwen3LM {
     std::vector<Qwen3LayerW> blk;
     ggml_tensor *            output_norm = nullptr;
 
-    // Reads "<prefix>.blk.<i>.*" and "<prefix>.output_norm.weight".
     void declare(WeightLoader & L, const char * prefix);
 
     ggml_tensor * block(ggml_context * C, const Qwen3LayerW & w, ggml_tensor * h,
                         ggml_tensor * pos, ggml_tensor * mask, int64_t seq) const;
 
-    // Every block, then the output RMSNorm.
     ggml_tensor * build(ggml_context * C, ggml_tensor * h,
                         ggml_tensor * pos, ggml_tensor * mask, int64_t seq) const;
 };

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Feed-forward blocks.
 
 #pragma once
 
@@ -22,19 +21,17 @@
 
 namespace vla {
 
-// tanh-approximate GELU.
 inline ggml_tensor * ffn_gelu(ggml_context * C, ggml_tensor * W1, ggml_tensor * b1,
                               ggml_tensor * W2, ggml_tensor * b2, ggml_tensor * x) {
     return linear(C, W2, b2, ggml_gelu(C, linear(C, W1, b1, x)));
 }
 
-// Exact erf GELU, what DINOv2 and SigLIP-so400m were trained with.
+// DINOv2 and SigLIP-so400m were trained with the exact erf form.
 inline ggml_tensor * ffn_gelu_erf(ggml_context * C, ggml_tensor * W1, ggml_tensor * b1,
                                   ggml_tensor * W2, ggml_tensor * b2, ggml_tensor * x) {
     return linear(C, W2, b2, ggml_gelu_erf(C, linear(C, W1, b1, x)));
 }
 
-// down(silu(gate(x)) * up(x)).
 inline ggml_tensor * ffn_swiglu(ggml_context * C, ggml_tensor * Wg, ggml_tensor * bg,
                                 ggml_tensor * Wu, ggml_tensor * bu,
                                 ggml_tensor * Wd, ggml_tensor * bd, ggml_tensor * x) {

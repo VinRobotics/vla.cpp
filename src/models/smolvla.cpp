@@ -16,6 +16,7 @@
 // distilled action-expert weights and force num_steps = 1 at the denoise loops.
 
 #include "arch.h"
+#include "options.h"
 #include "model.h"
 #include "modules/preprocess.h"
 #include "scratch_ctx.h"
@@ -363,10 +364,6 @@ namespace {
 // reinterpreting it as F16), and that measured 92/100 on libero_object against
 // 96/100 for explicit attention. evo1 showed the same ~4-5 pp drop, so the
 // default stays on the accuracy-preserving path.
-static inline bool siglip_fa_enabled() {
-    static const bool enabled = vla::env_flag("VLA_SMOLVLA_FA");
-    return enabled;
-}
 
 // One pre-norm SigLIP encoder block (SmolVLM2 tower), same graph as the other
 // in-tree models. Bidirectional attention, F32 score accumulation, tanh GELU.
@@ -380,7 +377,7 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const SigLipLayerW & w, ggml_
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, head_dim, heads, seq), 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, head_dim, heads, seq), 0, 2, 1, 3));
     ggml_tensor * att;
-    if (siglip_fa_enabled()) {
+    if (vla::flash_attn_enabled()) {
         // The tower runs 1024 tokens (512/16 grid) over 12 layers, so the
         // explicit path below materialises a 1024x1024 score matrix per head —
         // written by the matmul, read and rewritten by the softmax, then read
@@ -724,10 +721,7 @@ ggml_tensor * rope_q_or_k(ggml_context * ctx, ggml_tensor * x,
                           32.f,  1.f);
 }
 
-static inline bool tower_mm_f32_prec() {
-    const char * e = std::getenv("VLA_MM_PREC");
-    return !(e && std::strcmp(e, "default") == 0);
-}
+static inline bool tower_mm_f32_prec() { return vla::mm_prec_f32_enabled(); }
 static inline ggml_tensor * mm_w(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x) {
     ggml_tensor * r = ggml_mul_mat(ctx, w, x);
     if (tower_mm_f32_prec()) ggml_mul_mat_set_prec(r, GGML_PREC_F32);
@@ -1897,7 +1891,8 @@ std::vector<float> SmolVLAModelArch::predict(const Inputs& in) {
 
 std::unique_ptr<ModelArchBase> smolvla_create(const std::string& mmproj_path,
                                               const std::string& ckpt_path,
-                                              const std::string& config_path) {
+                                              const std::string& config_path,
+                                              const Options& opts) {
     SmolVLAModelArch* raw = smolvla_load_impl(mmproj_path, ckpt_path, config_path);
     if (!raw) return nullptr;
     return std::unique_ptr<ModelArchBase>(raw);

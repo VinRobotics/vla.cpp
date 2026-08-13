@@ -12,14 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// DiT action head: adaLN-conditioned blocks that alternate self-attention with
-// cross-attention into the vision-language embeddings. Shared by GR00T
-// N1.5/N1.6/N1.7 and VLA-JEPA.
-//
-// A block cross-attends when `enc` is non-null and self-attends otherwise. The
-// per-layer choice is the model's, since each arch interleaves differently.
-// Cross-attention K/V depend only on `enc`, so a model hoists them out of the
-// solver loop and passes them back through K_pre/V_pre.
+// A block cross-attends when `enc` is non-null and self-attends otherwise; the
+// per-layer choice is the model's. Cross-attention K/V depend only on `enc`, so
+// a model hoists them out of the solver loop and passes them via K_pre/V_pre.
 
 #pragma once
 
@@ -37,7 +32,6 @@ struct DitLayerW {
     ggml_tensor *Wq, *bq, *Wk, *bk, *Wv, *bv, *Wo, *bo;
     ggml_tensor *Wff0, *bff0, *Wff2, *bff2;
 
-    // N1.7 ships self-attention QKV and cross-attention KV pre-fused.
     ggml_tensor *Wqkv = nullptr, *bqkv = nullptr, *Wkv = nullptr, *bkv = nullptr;
 };
 
@@ -56,9 +50,6 @@ struct DitHead {
     ggml_tensor *te_l1W = nullptr, *te_l1b = nullptr, *te_l2W = nullptr, *te_l2b = nullptr;
     ggml_tensor *po1W   = nullptr, *po1b   = nullptr, *po2W   = nullptr, *po2b   = nullptr;
 
-    // Reads "<prefix>.<i>.*", "<prefix>.time_emb.*" and "<prefix>.proj_out*".
-    // fuse_qkv builds N1.7's synthetic Wqkv (self blocks) and Wkv (cross blocks)
-    // by concatenating the split projections at load.
     void declare(WeightLoader & L, const char * prefix, bool fuse_qkv = false, bool interleave = false);
 
     void kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
@@ -69,7 +60,7 @@ struct DitHead {
 
     ggml_tensor * time_emb(ggml_context * C, ggml_tensor * tproj) const;
 
-    // Final (shift, scale) adaLN and output projection.
+    // (shift, scale) adaLN, opposite to layers/norm.h adaln.
     ggml_tensor * proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * temb) const;
 };
 
