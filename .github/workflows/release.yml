@@ -30,7 +30,7 @@ jobs:
             cuda: false
             runner: ubuntu-24.04
           - name: linux-x86_64-cuda
-            cmake: -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;86;89;120
+            cmake: -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="75;86;89;120"
             cuda: true
             runner: ubuntu-24.04
           # Jetson and other aarch64 boards. Native arm64 runner, CPU only: the
@@ -121,13 +121,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: ${{ startsWith(github.ref, 'refs/tags/') }}
           tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:latest
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
