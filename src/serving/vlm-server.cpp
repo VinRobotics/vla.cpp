@@ -77,11 +77,11 @@ int main(int argc, char ** argv) {
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--bind" && i + 1 < argc) {
+        if (a == "--bind" && i+1 < argc) {
             bind_addr = argv[++i];
-        } else if ((a == "-c" || a == "--n-ctx") && i + 1 < argc) {
+        } else if ((a == "-c" || a == "--n-ctx") && i+1 < argc) {
             lp.n_ctx = std::atoi(argv[++i]);
-        } else if (a == "--ngl" && i + 1 < argc) {
+        } else if (a == "--ngl" && i+1 < argc) {
             lp.n_gpu_layers = std::atoi(argv[++i]);
         } else if (a == "--no-mmproj-gpu") {
             lp.mmproj_use_gpu = false;
@@ -113,7 +113,7 @@ int main(int argc, char ** argv) {
     zmq::socket_t  sock(zctx, zmq::socket_type::router);
     sock.set(zmq::sockopt::linger, 0);
     // Per frame only; the recv loop caps the multipart total.
-    sock.set(zmq::sockopt::maxmsgsize, int64_t(64) * 1024 * 1024);
+    sock.set(zmq::sockopt::maxmsgsize, int64_t(64)*1024*1024);
     // A peer that sends a frame with SNDMORE and then stalls would otherwise park
     // this single-threaded loop in recv for good, starving every other client.
     sock.set(zmq::sockopt::rcvtimeo, 5000);
@@ -152,7 +152,7 @@ int main(int argc, char ** argv) {
         // maxmsgsize bounds each frame but not how many, so a peer could stream
         // sub-limit frames until memory runs out.
         constexpr size_t kMaxEnvFrames = 8;
-        constexpr size_t kMaxEnvBytes  = 64 * 1024;
+        constexpr size_t kMaxEnvBytes  = 64*1024;
 
         std::vector<std::string> env;
         std::string payload;
@@ -221,7 +221,7 @@ int main(int argc, char ** argv) {
         // One 60 MiB payload of tiny messages would cost template formatting and
         // tokenization far beyond anything n_ctx could consume.
         constexpr int    kMaxMessages  = 512;
-        constexpr size_t kMaxTextBytes = 4u * 1024 * 1024;
+        constexpr size_t kMaxTextBytes = 4u*1024*1024;
         if (req.messages_size() > kMaxMessages) {
             send_reply(make_error_stream(rid, "too many messages (max 512)"));
             continue;
@@ -273,7 +273,7 @@ int main(int argc, char ** argv) {
                     send_reply(make_error_stream(rid, buf));
                     decode_ok = false; break;
                 }
-                const size_t expected = size_t(3) * im.width() * im.height();
+                const size_t expected = size_t(3)*im.width()*im.height();
                 if (im.data().size() != expected) {
                     char buf[96]; std::snprintf(buf, sizeof(buf),
                         "image[%d] RGB_U8 size %zu != 3*%u*%u", v,
@@ -329,7 +329,7 @@ int main(int argc, char ** argv) {
         const auto t0 = std::chrono::steady_clock::now();
         const vlm::ChatResult r = engine.chat(messages, images, sp, on_token);
         const float ms_total = std::chrono::duration<float, std::milli>(
-            std::chrono::steady_clock::now() - t0).count();
+            std::chrono::steady_clock::now()-t0).count();
 
         vlm_chat::StreamMessage sm;
         vlm_chat::ChatResponse * resp = sm.mutable_final();

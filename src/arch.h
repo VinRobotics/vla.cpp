@@ -95,9 +95,9 @@ public:
 
     /**
      * @brief Run a full forward pass and return one chunk of normalised actions.
-     * @param in Vision + language + state inputs (see @ref Inputs).
+     * @param in Vision+language+state inputs (see @ref Inputs).
      * @return Flattened action chunk of length
-     *         @c cfg.num_steps * cfg.real_action_dim.
+     *         @c cfg.num_steps*cfg.real_action_dim.
      */
     virtual std::vector<float> predict(const Inputs& in) = 0;
 };
@@ -105,7 +105,7 @@ public:
 /**
  * @brief Build a SmolVLA model from its mmproj and checkpoint GGUFs.
  * @param mmproj_path Path to the vision-tower GGUF.
- * @param ckpt_path   Path to the LM + action-expert GGUF.
+ * @param ckpt_path   Path to the LM+action-expert GGUF.
  * @param config_path Optional JSON override; pass empty to use bundled config.
  * @return Owning pointer to the constructed model.
  */

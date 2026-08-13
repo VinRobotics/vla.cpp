@@ -49,9 +49,9 @@ void usage(const char * prog) {
 double percentile(const std::vector<double> & v, double p) {
     if (v.empty())
         return 0.0;
-    const double idx = p * (double) (v.size() - 1);
+    const double idx = p * (double) (v.size()-1);
     const size_t lo = (size_t) std::floor(idx), hi = (size_t) std::ceil(idx);
-    return v[lo] + (v[hi] - v[lo]) * (idx - (double) lo);
+    return v[lo]+(v[hi]-v[lo])*(idx-(double) lo);
 }
 
 }  // namespace
@@ -65,7 +65,7 @@ int main(int argc, char ** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto need = [&](const char * name) -> const char * {
-            if (i + 1 >= argc) {
+            if (i+1 >= argc) {
                 std::fprintf(stderr, "vla-bench: %s needs a value\n", name);
                 std::exit(1);
             }
@@ -114,7 +114,7 @@ int main(int argc, char ** argv) {
     }
     if (label.empty()) {
         const size_t slash = ckpt.find_last_of('/');
-        label = (slash == std::string::npos) ? ckpt : ckpt.substr(slash + 1);
+        label = (slash == std::string::npos) ? ckpt : ckpt.substr(slash+1);
     }
 
     vla::Model * m = vla::model_load(mmproj, ckpt, "");
@@ -124,29 +124,29 @@ int main(int argc, char ** argv) {
     }
     const vla::Config & cfg = vla::model_config(m);
 
-    std::vector<std::vector<uint8_t>> pixels(n_images, std::vector<uint8_t>((size_t) 3 * side * side));
+    std::vector<std::vector<uint8_t>> pixels(n_images, std::vector<uint8_t>((size_t) 3*side * side));
     std::vector<vla::ImageView> views(n_images);
     for (int v = 0; v < n_images; ++v) {
         for (int y = 0; y < side; ++y)
         for (int x = 0; x < side; ++x)
         for (int c = 0; c < 3; ++c)
-            pixels[v][((size_t) y * side + x) * 3 + c] = (uint8_t) ((x + 2 * y + 40 * c + 17 * v) & 0xFF);
+            pixels[v][((size_t) y * side+x)*3+c] = (uint8_t) ((x+2*y+40*c+17*v) & 0xFF);
         views[v] = vla::ImageView{ pixels[v].data(), side, side, vla::PixelFormat::U8 };
     }
 
     std::vector<int32_t> lang((size_t) n_tokens);
     for (int i = 0; i < n_tokens; ++i)
-        lang[i] = 1 + (i % 100);
+        lang[i] = 1+(i%100);
     if (extra_token >= 0 && extra_count > 0)
         lang.insert(lang.end(), (size_t) extra_count, extra_token);
 
     std::vector<float> state((size_t) cfg.max_state_dim, 0.0f);
     for (int64_t i = 0; i < cfg.real_state_dim && i < cfg.max_state_dim; ++i)
-        state[i] = 0.01f * (float) (i + 1);
+        state[i] = 0.01f * (float) (i+1);
 
-    std::vector<float> noise((size_t) cfg.max_action_dim * (size_t) cfg.n_suffix);
+    std::vector<float> noise((size_t) cfg.max_action_dim*(size_t) cfg.n_suffix);
     for (size_t i = 0; i < noise.size(); ++i)
-        noise[i] = 0.001f * (float) ((i * 2654435761u) % 1000) - 0.5f;
+        noise[i] = 0.001f * (float) ((i*2654435761u)%1000)-0.5f;
 
     vla::Inputs in{};
     in.images      = views.data();
@@ -176,7 +176,7 @@ int main(int argc, char ** argv) {
             vla::model_free(m);
             return 1;
         }
-        ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        ms.push_back(std::chrono::duration<double, std::milli>(t1-t0).count());
         vision_sum += vla::last_stats(m).ms_vision;
     }
 
@@ -184,7 +184,7 @@ int main(int argc, char ** argv) {
     const double lo     = ms.front();
     const double p50    = percentile(ms, 0.50);
     const double p90    = percentile(ms, 0.90);
-    const double vision = vision_sum / (double) reps;
+    const double vision = vision_sum/(double) reps;
 
     if (markdown) {
         std::printf("| %s | %d | %d | %d | %.1f | %.1f | %.1f | %.1f |\n",

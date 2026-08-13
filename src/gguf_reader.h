@@ -122,7 +122,7 @@ struct gguf_reader {
             std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name);
             return false;
         }
-        const size_t off = data_off + gguf_get_tensor_offset(gctx, id);
+        const size_t off = data_off+gguf_get_tensor_offset(gctx, id);
         const size_t nb  = gguf_get_tensor_size(gctx, id);
         if (nb != cap) {
             std::fprintf(stderr, "vla(%s): tensor %s is %zu bytes, caller expects %zu\n",
@@ -139,8 +139,8 @@ struct gguf_reader {
         if (!t) { std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name); return {}; }
         const int64_t n = ggml_nelements(t);
         std::vector<float> out(n);
-        if (t->type == GGML_TYPE_F32) { if (!read_raw(name, out.data(), out.size() * sizeof(float))) return {}; }
-        else if (t->type == GGML_TYPE_BF16) { std::vector<ggml_bf16_t> tmp(n); if (!read_raw(name, tmp.data(), tmp.size() * sizeof(ggml_bf16_t))) return {}; ggml_bf16_to_fp32_row(tmp.data(), out.data(), n); }
+        if (t->type == GGML_TYPE_F32) { if (!read_raw(name, out.data(), out.size()*sizeof(float))) return {}; }
+        else if (t->type == GGML_TYPE_BF16) { std::vector<ggml_bf16_t> tmp(n); if (!read_raw(name, tmp.data(), tmp.size()*sizeof(ggml_bf16_t))) return {}; ggml_bf16_to_fp32_row(tmp.data(), out.data(), n); }
         else { std::fprintf(stderr, "vla(%s): tensor %s unsupported type %d\n", arch, name, (int) t->type); return {}; }
         return out;
     }
@@ -192,7 +192,7 @@ struct gguf_reader {
         }
         const int64_t rows = t->ne[1];
         const int64_t id   = gguf_find_tensor(gctx, name);
-        const size_t  base = data_off + gguf_get_tensor_offset(gctx, id);
+        const size_t  base = data_off+gguf_get_tensor_offset(gctx, id);
         const size_t  elsz = (t->type == GGML_TYPE_F32) ? 4u : 2u;
         const size_t  rb   = (size_t) cols * elsz;
         std::vector<uint8_t> row(rb);
@@ -202,14 +202,14 @@ struct gguf_reader {
                 std::fprintf(stderr, "vla(%s): row %d out of range for %s\n", arch, r, name);
                 return false;
             }
-            if (fseeko(fp, (off_t) (base + (size_t) r * rb), SEEK_SET) != 0)
+            if (fseeko(fp, (off_t) (base+(size_t) r * rb), SEEK_SET) != 0)
                 return false;
             if (std::fread(row.data(), 1, rb, fp) != rb)
                 return false;
             if (elsz == 4)
-                std::memcpy(dst + k * cols, row.data(), rb);
+                std::memcpy(dst+k * cols, row.data(), rb);
             else
-                ggml_bf16_to_fp32_row(reinterpret_cast<ggml_bf16_t *>(row.data()), dst + k * cols, cols);
+                ggml_bf16_to_fp32_row(reinterpret_cast<ggml_bf16_t *>(row.data()), dst+k * cols, cols);
         }
         return true;
     }

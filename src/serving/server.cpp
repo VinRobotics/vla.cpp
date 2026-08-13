@@ -90,7 +90,7 @@ bool decode_image(const vla::Image & img,
             stbi_image_free(px);
             return false;
         }
-        u8.assign(px, px + size_t(3) * w * h);
+        u8.assign(px, px+size_t(3)*w * h);
         stbi_image_free(px);
         view = { u8.data(), w, h, vla::PixelFormat::U8 };
         return true;
@@ -101,14 +101,14 @@ bool decode_image(const vla::Image & img,
                          img.width(), img.height(), kMaxImageDim);
             return false;
         }
-        const size_t expected = size_t(3) * img.width() * img.height();
+        const size_t expected = size_t(3)*img.width()*img.height();
         if (img.data().size() != expected) {
             std::fprintf(stderr, "vla-server: RGB_U8 size %zu != 3*%u*%u = %zu\n",
                          img.data().size(), img.width(), img.height(), expected);
             return false;
         }
         u8.assign(reinterpret_cast<const uint8_t*>(img.data().data()),
-                  reinterpret_cast<const uint8_t*>(img.data().data()) + expected);
+                  reinterpret_cast<const uint8_t*>(img.data().data())+expected);
         view = { u8.data(), int(img.width()), int(img.height()), vla::PixelFormat::U8 };
         return true;
     } else if (img.encoding() == vla::Image::F32_RGB_01) {
@@ -118,7 +118,7 @@ bool decode_image(const vla::Image & img,
                          img.width(), img.height(), kMaxImageDim);
             return false;
         }
-        const size_t pixels   = size_t(3) * img.width() * img.height();
+        const size_t pixels   = size_t(3)*img.width()*img.height();
         const size_t expected = pixels * sizeof(float);
         if (img.data().size() != expected) {
             std::fprintf(stderr, "vla-server: F32_RGB_01 size %zu != 4*3*%u*%u = %zu\n",
@@ -221,13 +221,13 @@ int main(int argc, char ** argv) {
     std::vector<std::string> positionals;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--bind" && i + 1 < argc) {
+        if (a == "--bind" && i+1 < argc) {
             bind_addr = argv[++i];
-        } else if (a == "-hf" && i + 1 < argc) {
+        } else if (a == "-hf" && i+1 < argc) {
             hf_spec = argv[++i];
-        } else if (a == "--config" && i + 1 < argc) {
+        } else if (a == "--config" && i+1 < argc) {
             config_path = argv[++i];
-        } else if (a == "--timing-detail" && i + 1 < argc) {
+        } else if (a == "--timing-detail" && i+1 < argc) {
             const std::string v = argv[++i];
             if      (v == "none")
                 timing_detail = vla::TimingDetail::NONE;
@@ -299,7 +299,7 @@ int main(int argc, char ** argv) {
     sock.set(zmq::sockopt::linger, 0);
     // 64 MiB is above any real request (16 views of 512x512 F32 RGB is ~50 MiB) and
     // low enough to bound protobuf's expansion during ParseFromArray.
-    sock.set(zmq::sockopt::maxmsgsize, int64_t(64) * 1024 * 1024);
+    sock.set(zmq::sockopt::maxmsgsize, int64_t(64)*1024*1024);
     // A peer that sends a frame with SNDMORE and then stalls would otherwise park
     // this single-threaded loop in recv for good, starving every other client.
     sock.set(zmq::sockopt::rcvtimeo, 5000);
@@ -424,7 +424,7 @@ int main(int argc, char ** argv) {
             send_reply(make_error_response(rid, buf));
             continue;
         }
-        const int expected_noise_n = int(cfg.n_suffix * cfg.max_action_dim);
+        const int expected_noise_n = int(cfg.n_suffix*cfg.max_action_dim);
         if (req.noise_size() != 0 && req.noise_size() != expected_noise_n) {
             char buf[128]; std::snprintf(buf, sizeof(buf),
                 "noise length %d != 0 or %d (chunk_size * action_dim)",
@@ -444,7 +444,7 @@ int main(int argc, char ** argv) {
 
         if (use_precomputed) {
             precomputed_n_views = static_cast<int>(req.precomputed_img_emb_n_views());
-            const int64_t per_view = cfg.n_img * cfg.hidden;
+            const int64_t per_view = cfg.n_img*cfg.hidden;
             const int64_t expected = per_view * static_cast<int64_t>(precomputed_n_views);
             if (precomputed_n_views < 1 ||
                 static_cast<int64_t>(req.precomputed_img_emb_size()) != expected) {
@@ -554,9 +554,9 @@ int main(int argc, char ** argv) {
         send_reply(body);
 
         ++served;
-        if (served % 10 == 1) {
+        if (served%10 == 1) {
             const float ms_other = std::max(0.f,
-                st.ms_total - st.ms_vision - st.ms_inference);
+                st.ms_total-st.ms_vision-st.ms_inference);
             if (timing_detail == vla::TimingDetail::PHASE) {
                 std::printf("vla-server: rid=%llu  served=%llu  total=%.1f ms  "
                             "vision=%.1f  inf=%.1f (prefill=%.1f + denoise=%.1f)  other=%.1f\n",

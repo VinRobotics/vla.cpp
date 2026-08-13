@@ -126,7 +126,7 @@ bool bitmap_to_image(mtmd::bitmap & bmp, Image & out) {
     }
     out.width  = bmp.nx();
     out.height = bmp.ny();
-    out.rgb.assign(bmp.data(), bmp.data() + bmp.n_bytes());
+    out.rgb.assign(bmp.data(), bmp.data()+bmp.n_bytes());
     return true;
 }
 }
@@ -180,14 +180,14 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
     }
 
     int img_msg_idx = -1;
-    for (int i = (int) messages.size() - 1; i >= 0; --i) {
+    for (int i = (int) messages.size()-1; i >= 0; --i) {
         if (messages[i].role == "user") {
             img_msg_idx = i;
             break;
         }
     }
     if (img_msg_idx < 0) {
-        img_msg_idx = (int) messages.size() - 1;
+        img_msg_idx = (int) messages.size()-1;
     }
 
     const char * marker = mtmd_default_marker();
@@ -205,10 +205,10 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
                 std::string prefix;
                 for (size_t k = 0; k < images.size(); ++k)
                     prefix += marker;
-                msg.content = prefix + msg.content;
+                msg.content = prefix+msg.content;
             }
             for (const auto & im : images) {
-                if (im.rgb.size() != (size_t) im.width * im.height * 3) {
+                if (im.rgb.size() != (size_t) im.width*im.height*3) {
                     res.finish_reason = "error";
                     res.error         = "image rgb size != w*h*3";
                     common_sampler_free(smpl);
@@ -254,7 +254,7 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
         n_past = new_n_past;
     }
     res.prompt_tokens = (int32_t) n_past;
-    res.ms_prefill    = (ggml_time_us() - t_prefill_start) / 1000.0f;
+    res.ms_prefill    = (ggml_time_us()-t_prefill_start)/1000.0f;
 
     const int n_predict = sampling.max_tokens <= 0 ? INT_MAX : sampling.max_tokens;
     std::vector<llama_token> generated;
@@ -286,7 +286,7 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
         }
     }
     res.completion_tokens = (int32_t) generated.size();
-    res.ms_decode         = (ggml_time_us() - t_decode_start) / 1000.0f;
+    res.ms_decode         = (ggml_time_us()-t_decode_start)/1000.0f;
 
     if (res.finish_reason != "error") {
         res.text = common_detokenize(impl_->lctx, generated, false);

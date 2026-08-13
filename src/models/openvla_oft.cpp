@@ -55,8 +55,8 @@ bool parse_stats(const std::string & js, int64_t want, std::vector<float> & q01,
     }
     else {
         size_t b = js.find('{'); size_t q = js.find('"', b);
-        size_t qe = js.find('"', q + 1);
-        suite = js.substr(q + 1, qe - q - 1); suite_pos = q;
+        size_t qe = js.find('"', q+1);
+        suite = js.substr(q+1, qe-q-1); suite_pos = q;
     }
     if (suite_pos == std::string::npos) {
         std::fprintf(stderr, "vla(openvla_oft): suite '%s' not in stats\n", suite.c_str());
@@ -70,7 +70,7 @@ bool parse_stats(const std::string & js, int64_t want, std::vector<float> & q01,
         size_t lb = js.find('[', k); size_t rb = js.find(']', lb);
         if (lb == std::string::npos || rb == std::string::npos)
             return false;
-        out.clear(); size_t p = lb + 1;
+        out.clear(); size_t p = lb+1;
         while (p < rb) {
             while (p < rb && (js[p] == ',' || js[p] == ' ' || js[p] == '\n' || js[p] == '\t' || js[p] == '\r'))
                 ++p;
@@ -82,7 +82,7 @@ bool parse_stats(const std::string & js, int64_t want, std::vector<float> & q01,
                 p += t ? 4 : 5;
             }
             else {
-                out.push_back(std::strtof(js.c_str() + p, nullptr));
+                out.push_back(std::strtof(js.c_str()+p, nullptr));
                 while (p < rb && js[p] != ',')
                     ++p;
             }
@@ -189,7 +189,7 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
     // (modeling_prismatic.py:891), which is what act0 below does.
     U("openvla_oft.tokens.stop_id",m->stop_id);
     if (m->lm_head_dim==0)
-        m->lm_head_dim = m->lm_hidden / m->n_q;
+        m->lm_head_dim = m->lm_hidden/m->n_q;
 
     if (g.has("openvla_oft.statistics_json")) {
         if (!parse_stats(g.str("openvla_oft.statistics_json"), m->action_dim, m->q01, m->q99, m->unnorm_mask, m->suite))
@@ -318,10 +318,10 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
         return {};
     }
     const int64_t n_act = chunk * action_dim;
-    const int64_t NUM_PATCHES = NPATCH + 1;
-    const int64_t NUM_PROMPT_TOKENS = L - 1;
-    const int64_t ACT_START = NUM_PATCHES + NUM_PROMPT_TOKENS;
-    const int64_t SEQ = 1 + NUM_PATCHES + (L-1) + n_act + 1;
+    const int64_t NUM_PATCHES = NPATCH+1;
+    const int64_t NUM_PROMPT_TOKENS = L-1;
+    const int64_t ACT_START = NUM_PATCHES+NUM_PROMPT_TOKENS;
+    const int64_t SEQ = 1+NUM_PATCHES+(L-1)+n_act+1;
     const auto ti=clock::now();
     // LM + action head graph depends only on the sequence layout.
     const MainKey mkey{ SEQ, n_views, L };

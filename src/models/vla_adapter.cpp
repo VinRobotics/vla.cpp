@@ -57,8 +57,8 @@ bool parse_stats(const std::string & js, int64_t want, std::vector<float> & q01,
     }
     else {
         size_t b = js.find('{'); size_t q = js.find('"', b);
-        size_t qe = js.find('"', q + 1);
-        suite = js.substr(q + 1, qe - q - 1); suite_pos = q;
+        size_t qe = js.find('"', q+1);
+        suite = js.substr(q+1, qe-q-1); suite_pos = q;
     }
     if (suite_pos == std::string::npos) {
         std::fprintf(stderr, "vla(vla_adapter): suite '%s' not in stats\n", suite.c_str());
@@ -72,7 +72,7 @@ bool parse_stats(const std::string & js, int64_t want, std::vector<float> & q01,
         size_t lb = js.find('[', k); size_t rb = js.find(']', lb);
         if (lb == std::string::npos || rb == std::string::npos)
             return false;
-        out.clear(); size_t p = lb + 1;
+        out.clear(); size_t p = lb+1;
         while (p < rb) {
             while (p < rb && (js[p] == ',' || js[p] == ' ' || js[p] == '\n' || js[p] == '\t' || js[p] == '\r'))
                 ++p;
@@ -84,7 +84,7 @@ bool parse_stats(const std::string & js, int64_t want, std::vector<float> & q01,
                 p += t ? 4 : 5;
             }
             else {
-                out.push_back(std::strtof(js.c_str() + p, nullptr));
+                out.push_back(std::strtof(js.c_str()+p, nullptr));
                 while (p < rb && js[p] != ',')
                     ++p;
             }
@@ -360,9 +360,9 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         std::fprintf(stderr, "vla(vla_adapter): stop_id %lld out of vocab\n", (long long) stop_id);
         return {};
     }
-    const int64_t NUM_PROMPT_TOKENS = NPROMPT - 1;
+    const int64_t NUM_PROMPT_TOKENS = NPROMPT-1;
     const int64_t NPATCH = NP * n_views;
-    const int64_t SEQ = 1 + NPATCH + (NPROMPT-1) + num_tokens + 1;
+    const int64_t SEQ = 1+NPATCH+(NPROMPT-1)+num_tokens+1;
     const auto ti=clock::now();
     // LM + action head graph depends only on the sequence layout.
     const MainKey mkey{ SEQ, n_views, NPROMPT };

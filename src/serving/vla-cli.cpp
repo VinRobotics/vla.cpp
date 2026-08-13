@@ -57,9 +57,9 @@ bool parse_ints(const std::string & s, std::vector<int32_t> & out) {
             break;
         errno = 0;
         char * e = nullptr;
-        long long x = std::strtoll(s.c_str() + i, &e, 10);
-        if (e == s.c_str() + i) {
-            std::fprintf(stderr, "vla-cli: bad token near '%s'\n", s.c_str() + i);
+        long long x = std::strtoll(s.c_str()+i, &e, 10);
+        if (e == s.c_str()+i) {
+            std::fprintf(stderr, "vla-cli: bad token near '%s'\n", s.c_str()+i);
             return false;
         }
         if (errno == ERANGE || x < INT32_MIN || x > INT32_MAX) {
@@ -67,7 +67,7 @@ bool parse_ints(const std::string & s, std::vector<int32_t> & out) {
             return false;
         }
         out.push_back((int32_t) x);
-        i = (size_t) (e - s.c_str());
+        i = (size_t) (e-s.c_str());
     }
     return true;
 }
@@ -82,9 +82,9 @@ bool parse_floats(const std::string & s, std::vector<float> & out) {
         if (i >= s.size())
             break;
         char * e = nullptr;
-        float x = std::strtof(s.c_str() + i, &e);
-        if (e == s.c_str() + i) {
-            std::fprintf(stderr, "vla-cli: bad number near '%s'\n", s.c_str() + i);
+        float x = std::strtof(s.c_str()+i, &e);
+        if (e == s.c_str()+i) {
+            std::fprintf(stderr, "vla-cli: bad number near '%s'\n", s.c_str()+i);
             return false;
         }
         if (!std::isfinite(x)) {
@@ -92,7 +92,7 @@ bool parse_floats(const std::string & s, std::vector<float> & out) {
             return false;
         }
         out.push_back(x);
-        i = (size_t) (e - s.c_str());
+        i = (size_t) (e-s.c_str());
     }
     return true;
 }
@@ -105,7 +105,7 @@ bool load_image(const char * path, std::vector<uint8_t> & buf, int & w, int & h)
         std::fprintf(stderr, "vla-cli: cannot load image %s: %s\n", path, stbi_failure_reason());
         return false;
     }
-    buf.assign(px, px + size_t(3) * w * h);
+    buf.assign(px, px+size_t(3)*w * h);
     stbi_image_free(px);
     return true;
 }
@@ -215,7 +215,7 @@ int main(int argc, char ** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto need = [&](const char * name) -> const char * {
-            if (i + 1 >= argc) {
+            if (i+1 >= argc) {
                 std::fprintf(stderr, "vla-cli: %s needs a value\n", name);
                 std::exit(1);
             }
@@ -315,7 +315,7 @@ int main(int argc, char ** argv) {
     const int64_t cols = cfg.max_action_dim > 0 ? cfg.max_action_dim : 1;
     if (pretty) {
         for (size_t i = 0; i < act.size(); ++i)
-            std::printf("%.6g%c", act[i], ((int64_t) (i + 1) % cols == 0) ? '\n' : ' ');
+            std::printf("%.6g%c", act[i], ((int64_t) (i+1)%cols == 0) ? '\n' : ' ');
     } else {
         std::printf("action_len=%zu\n", act.size());
         for (float x : act)

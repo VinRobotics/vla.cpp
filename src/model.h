@@ -152,7 +152,7 @@ struct Inputs {
 };
 
 /**
- * @brief Load a model from one (vision-baked) or two (mmproj + ckpt) GGUFs.
+ * @brief Load a model from one (vision-baked) or two (mmproj+ckpt) GGUFs.
  *
  * The architecture is detected from the checkpoint via
  * @ref detect_arch_from_ckpt. Fails loud: a missing file, unknown

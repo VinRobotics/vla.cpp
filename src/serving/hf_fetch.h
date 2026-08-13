@@ -84,7 +84,7 @@ inline std::string hf_resolve(const std::string & spec) {
 
     const size_t colon = spec.find(':');
     const std::string repo = spec.substr(0, colon);
-    const std::string file = (colon == std::string::npos) ? "" : spec.substr(colon + 1);
+    const std::string file = (colon == std::string::npos) ? "" : spec.substr(colon+1);
 
     if (repo.find('/') == std::string::npos || !hf_token_ok(repo, true) ||
         (!file.empty() && !hf_token_ok(file, false))) {
@@ -92,7 +92,7 @@ inline std::string hf_resolve(const std::string & spec) {
         return "";
     }
 
-    const fs::path dir = fs::path(hf_cache_root()) / repo;
+    const fs::path dir = fs::path(hf_cache_root())/repo;
 
     std::error_code ec;
     if (fs::is_directory(dir, ec)) {

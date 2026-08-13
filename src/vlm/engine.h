@@ -14,7 +14,7 @@
 
 /**
  * @file engine.h
- * @brief Chat / image-grounded text generation built on llama.cpp.
+ * @brief Chat/image-grounded text generation built on llama.cpp.
  *
  * The @ref vlm namespace is independent of the @c vla action-prediction
  * pipeline: it exposes a small "load model, send messages + images, get

@@ -20,10 +20,10 @@
  * packed format ("ladder int8xint2") alongside FP32 weight scales. This
  * header exposes:
  *
- *   * Standalone bf16 ops (norm / RoPE / softmax / activations) used by
+ *   * Standalone bf16 ops (norm/RoPE/softmax/activations) used by
  *     both the LM and the ViT.
  *   * @ref bitvla_lm_cuda_ctx, an opaque context that owns the device-side
- *     LM state, plus its init / set-layer / forward / free entry points.
+ *     LM state, plus its init/set-layer/forward/free entry points.
  *
  * All functions are @c extern @c "C" so they can be called from C++ or C
  * driver code. Streams are passed in explicitly; the kernels never call
@@ -81,7 +81,7 @@ void bitvla_softmax_scaled_bf16(__nv_bfloat16* inout, float scale,
                                 int n_rows, int S, cudaStream_t stream);
 
 /**
- * @brief Elementwise @c relu(g)^2 * u (BitVLA squared-ReLU FFN gate).
+ * @brief Elementwise @c relu(g)^2*u (BitVLA squared-ReLU FFN gate).
  * @param g   Gate input (N), bf16 device pointer.
  * @param u   Up input    (N), bf16 device pointer.
  * @param out Output      (N), bf16 device pointer.
@@ -155,7 +155,7 @@ void bitvla_gather_rows_bf16(const __nv_bfloat16* in, __nv_bfloat16* out,
                              cudaStream_t stream);
 
 /**
- * @brief Affine LayerNorm in bf16 (mean/variance + scale + bias).
+ * @brief Affine LayerNorm in bf16 (mean/variance+scale+bias).
  * @param x  Input matrix (M x K), bf16 device pointer.
  * @param w  Per-channel scale (length K).
  * @param b  Per-channel bias  (length K).

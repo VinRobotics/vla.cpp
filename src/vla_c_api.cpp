@@ -157,10 +157,10 @@ int32_t vla_predict(vla_model * h, const vla_inputs * in,
             return VLA_ERR_PREDICT;
 
         // malloc pairs with vla_free_actions, which callers may replace.
-        float * buf = (float *) std::malloc(act.size() * sizeof(float));
+        float * buf = (float *) std::malloc(act.size()*sizeof(float));
         if (!buf)
             return VLA_ERR_EXCEPTION;
-        std::memcpy(buf, act.data(), act.size() * sizeof(float));
+        std::memcpy(buf, act.data(), act.size()*sizeof(float));
         *out_actions = buf;
         *out_n = (int64_t) act.size();
         return VLA_OK;

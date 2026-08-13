@@ -146,8 +146,8 @@ bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
 
     // merge_block_coords only enumerates the patch grid exactly when the spatial
     // merge divides it; otherwise it emits rows past the position table.
-    if (m.patch_size <= 0 || m.spatial_merge <= 0 || m.image_target_size % m.patch_size != 0 ||
-        (m.image_target_size / m.patch_size) % m.spatial_merge != 0) {
+    if (m.patch_size <= 0 || m.spatial_merge <= 0 || m.image_target_size%m.patch_size != 0 ||
+        (m.image_target_size/m.patch_size)%m.spatial_merge != 0) {
         std::fprintf(stderr, "vla(gr00tn1d7): image %lld / patch %lld / merge %lld do not divide evenly\n",
                      (long long) m.image_target_size, (long long) m.patch_size, (long long) m.spatial_merge);
         return false;
@@ -198,10 +198,10 @@ bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
     {
         const std::string js = g.str(fk("embodiment_id_mapping"));
         auto lookup = [&](const char * key) -> long {
-            const std::string k = std::string("\"") + key + "\"";
+            const std::string k = std::string("\"")+key + "\"";
             size_t p = js.find(k); if (p == std::string::npos) return -1;
-            p = js.find(':', p + k.size()); if (p == std::string::npos) return -1;
-            return std::strtol(js.c_str() + p + 1, nullptr, 10);
+            p = js.find(':', p+k.size()); if (p == std::string::npos) return -1;
+            return std::strtol(js.c_str()+p+1, nullptr, 10);
         };
         long ls = lookup("libero_sim"); if (ls >= 0) m.aex.embodiment_id = ls;
         if (const char * e = std::getenv("VLA_GR00T_EMBODIMENT")) {
@@ -318,8 +318,8 @@ bool Gr00tN1d7ModelArch::build_caches() {
     if (caches_ready)
         return true;
     const int64_t side = image_target_size, ps = patch_size, m2 = spatial_merge;
-    const int64_t grid = side / ps;
-    const int64_t hd_vit = vit_hidden / vit_heads;
+    const int64_t grid = side/ps;
+    const int64_t hd_vit = vit_hidden/vit_heads;
     const int64_t num_side = (int64_t) std::lround(std::sqrt((double) vit_num_pos));
     const int64_t E = in_embed_dim, AH = action_horizon;
 
@@ -338,7 +338,7 @@ bool Gr00tN1d7ModelArch::build_caches() {
 
     c_tau.assign((size_t) num_steps, {}); c_tproj.assign((size_t) num_steps, {});
     for (int64_t s = 0; s < num_steps; ++s) {
-        const int64_t bucket = (int64_t) ((double) s / (double) num_steps * (double) num_buckets);
+        const int64_t bucket = (int64_t) ((double) s/(double) num_steps * (double) num_buckets);
         action_sinusoid(bucket, E, AH, c_tau[(size_t) s]);
         timesteps_proj(bucket, c_tproj[(size_t) s]);
     }
@@ -353,11 +353,11 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     const int64_t H = lm_hidden, E = in_embed_dim;
     const int64_t side = image_target_size;
     const int64_t ps = patch_size, m2 = spatial_merge;
-    const int64_t grid = side / ps;
+    const int64_t grid = side/ps;
     const int64_t n_patches = grid * grid;
-    const int64_t K = (grid / m2) * (grid / m2);
-    const int64_t hd_vit = vit_hidden / vit_heads;
-    const int64_t AD = action_dim, AH = action_horizon, Nsa = 1 + AH;
+    const int64_t K = (grid/m2)*(grid/m2);
+    const int64_t hd_vit = vit_hidden/vit_heads;
+    const int64_t AD = action_dim, AH = action_horizon, Nsa = 1+AH;
     const bool    do_dump = (std::getenv("VLA_GR00T_N17_DUMP") != nullptr);
 
     if (!caches_ready) { std::fprintf(stderr, "vla(gr00tn1d7): caches not ready\n"); return {}; }
@@ -378,7 +378,7 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         for (int j = 0; j < 3; ++j)
             ds_host[j].assign((size_t) n_views * K * H, 0.0f);
 
-        ggml_context * VC = vision_scratch.reset((size_t) 512 * 1024 * 1024);
+        ggml_context * VC = vision_scratch.reset((size_t) 512*1024*1024);
         if (!VC) { std::fprintf(stderr, "vla(gr00tn1d7): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_patches = ggml_new_tensor_2d(VC, GGML_TYPE_F32, vit_patch_flat, n_patches); ggml_set_input(t_patches);
         ggml_tensor * t_pos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, vit_hidden, n_patches);     ggml_set_input(t_pos);
@@ -425,11 +425,11 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
                 vok = false;
                 break;
             }
-            ggml_backend_tensor_get(vit_embeds, img_emb_host.data() + v * K * H, 0, ggml_nbytes(vit_embeds));
+            ggml_backend_tensor_get(vit_embeds, img_emb_host.data()+v * K * H, 0, ggml_nbytes(vit_embeds));
             for (int j = 0; j < 3; ++j)
-                ggml_backend_tensor_get(ds_out[j], ds_host[j].data() + v * K * H, 0, ggml_nbytes(ds_out[j]));
+                ggml_backend_tensor_get(ds_out[j], ds_host[j].data()+v * K * H, 0, ggml_nbytes(ds_out[j]));
         }
-        stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - tv0).count();
+        stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now()-tv0).count();
         if (!vok) return {};
         img_emb_ptr = img_emb_host.data();
     } else {
@@ -443,9 +443,9 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         if (in.lang_tokens[j] == (int32_t) image_token_index)
             ++n_img_slots;
     if (n_img_slots == n_img) {
-        input_ids.assign(in.lang_tokens, in.lang_tokens + in.n_lang);
+        input_ids.assign(in.lang_tokens, in.lang_tokens+in.n_lang);
     } else if (n_img_slots == 0) {
-        input_ids.reserve(n_img + in.n_lang);
+        input_ids.reserve(n_img+in.n_lang);
         for (int64_t i = 0; i < n_img; ++i)
             input_ids.push_back((int32_t) image_token_index);
         for (int j = 0; j < in.n_lang; ++j)
@@ -463,12 +463,12 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     {   int64_t k = 0;
         for (int64_t p = 0; p < SEQ; ++p) if (input_ids[p] == (int32_t) image_token_index) {
             if (k >= n_img) { std::fprintf(stderr, "vla(gr00tn1d7): more <image> tokens than ViT embeds\n"); return {}; }
-            std::memcpy(inputs_embeds.data() + p * H, img_emb_ptr + k * H, H * sizeof(float)); ++k;
+            std::memcpy(inputs_embeds.data()+p * H, img_emb_ptr+k * H, H * sizeof(float)); ++k;
         }
     }
 
     std::vector<int32_t> image_pos_idx, text_pos_idx;
-    image_pos_idx.reserve((size_t) n_img); text_pos_idx.reserve((size_t) (SEQ - n_img));
+    image_pos_idx.reserve((size_t) n_img); text_pos_idx.reserve((size_t) (SEQ-n_img));
     for (int64_t p = 0; p < SEQ; ++p) {
         if (input_ids[p] == (int32_t) image_token_index)
             image_pos_idx.push_back((int32_t) p);
@@ -485,14 +485,14 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     if (inject_deepstack) for (int j = 0; j < 3; ++j) {
         ds_pad[j].assign((size_t) SEQ * H, 0.0f);
         for (int64_t k = 0; k < n_img; ++k) {
-            std::memcpy(ds_pad[j].data() + (size_t) image_pos_idx[k] * H,
-                        ds_host[j].data() + (size_t) k * H, H * sizeof(float));
+            std::memcpy(ds_pad[j].data()+(size_t) image_pos_idx[k]*H,
+                        ds_host[j].data()+(size_t) k * H, H * sizeof(float));
         }
     }
 
     std::vector<float> x_init((size_t) AH * AD);
     if (in.noise)
-        std::memcpy(x_init.data(), in.noise, x_init.size() * sizeof(float));
+        std::memcpy(x_init.data(), in.noise, x_init.size()*sizeof(float));
     else {
         std::mt19937 rng((uint32_t) std::chrono::steady_clock::now().time_since_epoch().count());
         std::normal_distribution<float> nd(0.f, 1.f);
@@ -510,10 +510,10 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     ggml_tensor * eagle = nullptr, * vl_embs = nullptr;
     std::vector<ggml_tensor*> lm_h_dump, vlsa_dump;
     const MainKey mkey{ SEQ, n_img, SEQ_TXT, num_steps, inject_deepstack };
-    const bool built = mg.ensure(backend, mkey, (size_t) 256 * 1024 * 1024,
+    const bool built = mg.ensure(backend, mkey, (size_t) 256*1024*1024,
                                  [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
     ggml_tensor * t_embeds = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);          ggml_set_input(t_embeds);
-    ggml_tensor * t_pos    = ggml_new_tensor_1d(C, GGML_TYPE_I32, 4 * SEQ);         ggml_set_input(t_pos);
+    ggml_tensor * t_pos    = ggml_new_tensor_1d(C, GGML_TYPE_I32, 4*SEQ);         ggml_set_input(t_pos);
     ggml_tensor * t_lmmask = ggml_new_tensor_2d(C, GGML_TYPE_F32, SEQ, SEQ);        ggml_set_input(t_lmmask);
     ggml_tensor * t_state  = ggml_new_tensor_2d(C, GGML_TYPE_F32, max_state_dim, 1);ggml_set_input(t_state);
     ggml_tensor * t_x0     = ggml_new_tensor_2d(C, GGML_TYPE_F32, AD, AH);          ggml_set_input(t_x0);
@@ -567,14 +567,14 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
 
     ggml_tensor * state_features = cat_linear(C, aex.se_l2W, aex.se_l2b, aex.embodiment_id, ggml_relu(C, cat_linear(C, aex.se_l1W, aex.se_l1b, aex.embodiment_id, t_state)));
 
-    const float dt = 1.0f / (float) num_steps;
-    const int64_t every2 = 2 * attend_text_every_n;
+    const float dt = 1.0f/(float) num_steps;
+    const int64_t every2 = 2*attend_text_every_n;
 
     std::vector<ggml_tensor *> Kc(dit_layers, nullptr), Vc(dit_layers, nullptr);
     for (int64_t i = 0; i < dit_layers; ++i) {
-        if (dit_interleave && (i % 2 == 1))
+        if (dit_interleave && (i%2 == 1))
             continue;
-        ggml_tensor * enc = (i % every2 == 0) ? vl_txt : vl_img;
+        ggml_tensor * enc = (i%every2 == 0) ? vl_txt : vl_img;
         dit.kv(C, dit.blk[i], enc, &Kc[i], &Vc[i]);
     }
 
@@ -588,9 +588,9 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         ggml_tensor * hh = sa;
         for (int64_t i = 0; i < dit_layers; ++i) {
             ggml_tensor * enc;
-            if (dit_interleave && (i % 2 == 1))
+            if (dit_interleave && (i%2 == 1))
                 enc = nullptr;
-            else if (i % every2 == 0)           enc = vl_txt;
+            else if (i%every2 == 0)           enc = vl_txt;
             else
                 enc = vl_img;
             hh = dit.block(C, dit.blk[i], hh, temb, enc, Kc[i], Vc[i]);
@@ -601,7 +601,7 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         ggml_tensor * h_mod = ggml_add(C, ggml_add(C, hn, ggml_mul(C, hn, sc)), sh);
         ggml_tensor * model_output = ggml_add(C, ggml_mul_mat(C, dit.po2W, h_mod), dit.po2b);
         ggml_tensor * pred = cat_linear(C, aex.ad_l2W, aex.ad_l2b, aex.embodiment_id, ggml_relu(C, cat_linear(C, aex.ad_l1W, aex.ad_l1b, aex.embodiment_id, model_output)));
-        ggml_tensor * vel  = ggml_cont(C, ggml_view_2d(C, pred, AD, AH, pred->nb[1], (size_t) (Nsa - AH) * pred->nb[1]));
+        ggml_tensor * vel  = ggml_cont(C, ggml_view_2d(C, pred, AD, AH, pred->nb[1], (size_t) (Nsa-AH)*pred->nb[1]));
         actions = ggml_add(C, actions, ggml_scale(C, vel, dt));
     }
     ggml_set_name(actions, "action_pred"); ggml_set_output(actions);
@@ -626,10 +626,10 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
     {
 
-        const int64_t llm_grid_h = image_target_size / patch_size / spatial_merge;
+        const int64_t llm_grid_h = image_target_size/patch_size/spatial_merge;
         const int64_t llm_grid_w = llm_grid_h;
 
-        std::vector<int32_t> pp((size_t) 4 * SEQ, 0);
+        std::vector<int32_t> pp((size_t) 4*SEQ, 0);
         int64_t st = 0, st_idx = 0;
         while (st < SEQ) {
             int64_t img_start = -1;
@@ -638,12 +638,12 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
                 break;
             }
             const int64_t text_end = (img_start < 0) ? SEQ : img_start;
-            const int64_t text_len = text_end - st;
+            const int64_t text_len = text_end-st;
             for (int64_t i = 0; i < text_len; ++i) {
-                const int32_t p = (int32_t) (i + st_idx);
-                pp[0 * SEQ + (st + i)] = p;
-                pp[1 * SEQ + (st + i)] = p;
-                pp[2 * SEQ + (st + i)] = p;
+                const int32_t p = (int32_t) (i+st_idx);
+                pp[0*SEQ+(st+i)] = p;
+                pp[1*SEQ+(st+i)] = p;
+                pp[2*SEQ+(st+i)] = p;
             }
             if (img_start < 0) {
                 st_idx += text_len;
@@ -653,35 +653,35 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
             int64_t img_end = img_start;
             while (img_end < SEQ && input_ids[img_end] == (int32_t) image_token_index)
                 ++img_end;
-            const int64_t n_img_tokens = img_end - img_start;
-            if (n_img_tokens % (llm_grid_h * llm_grid_w) != 0) {
+            const int64_t n_img_tokens = img_end-img_start;
+            if (n_img_tokens%(llm_grid_h * llm_grid_w) != 0) {
                 std::fprintf(stderr, "vla(gr00tn1d7): image run length %lld not a multiple of %lld (post-merge grid)\n",
                              (long long) n_img_tokens, (long long) (llm_grid_h * llm_grid_w));
                 mg.release(); return {};
             }
-            const int64_t this_t = n_img_tokens / (llm_grid_h * llm_grid_w);
-            const int64_t image_offset = text_len + st_idx;
+            const int64_t this_t = n_img_tokens/(llm_grid_h * llm_grid_w);
+            const int64_t image_offset = text_len+st_idx;
             for (int64_t tt = 0; tt < this_t; ++tt) {
                 for (int64_t hh = 0; hh < llm_grid_h; ++hh) {
                     for (int64_t ww = 0; ww < llm_grid_w; ++ww) {
-                        const int64_t k = (tt * llm_grid_h + hh) * llm_grid_w + ww;
-                        const int64_t tok = img_start + k;
-                        pp[0 * SEQ + tok] = (int32_t) (image_offset + tt);
-                        pp[1 * SEQ + tok] = (int32_t) (image_offset + hh);
-                        pp[2 * SEQ + tok] = (int32_t) (image_offset + ww);
+                        const int64_t k = (tt * llm_grid_h+hh)*llm_grid_w+ww;
+                        const int64_t tok = img_start+k;
+                        pp[0*SEQ+tok] = (int32_t) (image_offset+tt);
+                        pp[1*SEQ+tok] = (int32_t) (image_offset+hh);
+                        pp[2*SEQ+tok] = (int32_t) (image_offset+ww);
                     }
                 }
             }
-            int64_t max_image_pos = this_t - 1;
-            if (llm_grid_h - 1 > max_image_pos)
-                max_image_pos = llm_grid_h - 1;
-            if (llm_grid_w - 1 > max_image_pos)
-                max_image_pos = llm_grid_w - 1;
-            st_idx = image_offset + max_image_pos + 1;
+            int64_t max_image_pos = this_t-1;
+            if (llm_grid_h-1 > max_image_pos)
+                max_image_pos = llm_grid_h-1;
+            if (llm_grid_w-1 > max_image_pos)
+                max_image_pos = llm_grid_w-1;
+            st_idx = image_offset+max_image_pos+1;
             st = img_end;
         }
 
-        std::memcpy(pp.data() + (size_t) 3 * SEQ, pp.data() + (size_t) 0 * SEQ, (size_t) SEQ * sizeof(int32_t));
+        std::memcpy(pp.data()+(size_t) 3*SEQ, pp.data()+(size_t) 0*SEQ, (size_t) SEQ * sizeof(int32_t));
         ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos));
     }
     if (c_mask_seq != SEQ) {
@@ -709,16 +709,16 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
     const auto tc1 = std::chrono::steady_clock::now();
     if (st != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(gr00tn1d7): graph compute failed (%d)\n", (int) st); mg.release(); return {}; }
-    stats.ms_inference = std::chrono::duration<float, std::milli>(tc1 - tc0).count();
+    stats.ms_inference = std::chrono::duration<float, std::milli>(tc1-tc0).count();
 
     std::vector<float> out((size_t) AH * AD);
-    ggml_backend_tensor_get(actions, out.data(), 0, out.size() * sizeof(float));
+    ggml_backend_tensor_get(actions, out.data(), 0, out.size()*sizeof(float));
 
     if (const char * dump = std::getenv("VLA_GR00T_N17_DUMP")) {
         auto dump_t = [&](const char * name, ggml_tensor * t) {
             const int64_t n0 = t->ne[0], n1 = t->ne[1];
-            std::vector<float> buf((size_t) n0 * n1);
-            ggml_backend_tensor_get(t, buf.data(), 0, buf.size() * sizeof(float));
+            std::vector<float> buf((size_t) n0*n1);
+            ggml_backend_tensor_get(t, buf.data(), 0, buf.size()*sizeof(float));
             char path[1024]; std::snprintf(path, sizeof(path), "%s_%s_%lldx%lld.f32", dump, name, (long long) n0, (long long) n1);
             FILE * fp = std::fopen(path, "wb");
             if (fp) {
@@ -747,7 +747,7 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
                 char path[1024]; std::snprintf(path, sizeof(path), "%s_%s_%lldx%lld.f32", dump, name, (long long) n0, (long long) n1);
                 FILE * fp = std::fopen(path, "wb");
                 if (fp) {
-                    std::fwrite(data, sizeof(float), (size_t) n0 * n1, fp);
+                    std::fwrite(data, sizeof(float), (size_t) n0*n1, fp);
                     std::fclose(fp);
                     std::fprintf(stderr, "vla(gr00tn1d7): dumped %s shape=(%lld,%lld) to %s\n", name, (long long) n1, (long long) n0, path);
                 }
@@ -755,19 +755,19 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
 
             for (int64_t v = 0; v < n_views; ++v) {
                 char nm[32]; std::snprintf(nm, sizeof(nm), "ds0_view%lld", (long long) v);
-                dump_host(nm, ds_host[0].data() + v * K * H, H, K);
+                dump_host(nm, ds_host[0].data()+v * K * H, H, K);
                 std::snprintf(nm, sizeof(nm), "ds1_view%lld", (long long) v);
-                dump_host(nm, ds_host[1].data() + v * K * H, H, K);
+                dump_host(nm, ds_host[1].data()+v * K * H, H, K);
                 std::snprintf(nm, sizeof(nm), "ds2_view%lld", (long long) v);
-                dump_host(nm, ds_host[2].data() + v * K * H, H, K);
+                dump_host(nm, ds_host[2].data()+v * K * H, H, K);
                 std::snprintf(nm, sizeof(nm), "vit_view%lld", (long long) v);
-                dump_host(nm, img_emb_host.data() + v * K * H, H, K);
+                dump_host(nm, img_emb_host.data()+v * K * H, H, K);
             }
         }
     }
     if (!use_cache)
         mg.release();
-    stats.ms_total = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    stats.ms_total = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now()-t0).count();
     return out;
 }
 

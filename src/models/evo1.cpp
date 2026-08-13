@@ -131,7 +131,7 @@ ggml_tensor * build_qwen2_layer(ggml_context * C, const Evo1ModelArch & m, const
                                 ggml_tensor * qmask = nullptr) {
     const int64_t hd = m.lm_head_dim, n_q = m.n_q, n_kv = m.n_kv, hq = n_q * hd;
     const ggml_type at = m.act_type;
-    const float scale = 1.0f / std::sqrt((float) hd);
+    const float scale = 1.0f/std::sqrt((float) hd);
     ggml_tensor * h_n1 = ggml_mul(C, ggml_rms_norm(C, h, m.lm_rms_eps), w.attn_norm);
     ggml_tensor * qp = ggml_add(C, mm_act(C, w.Wq, h_n1, at), w.bq);
     ggml_tensor * kp = ggml_add(C, mm_act(C, w.Wk, h_n1, at), w.bk);
@@ -167,17 +167,17 @@ bool preprocess_image_chw(const ImageView & v, int64_t side, std::vector<float> 
         std::fprintf(stderr, "vla(evo1): image view is %dx%d, expected %lldx%lld\n", v.w, v.h, (long long) side, (long long) side);
         return false;
     }
-    out.assign((size_t) 3 * side * side, 0.0f);
+    out.assign((size_t) 3*side * side, 0.0f);
     for (int64_t h = 0; h < side; ++h)
         for (int64_t w = 0; w < side; ++w)
             for (int64_t c = 0; c < 3; ++c) {
                 float px;
                 if (v.format == PixelFormat::U8) {
-                    px = ((const uint8_t *) v.data)[(h * side + w) * 3 + c] / 255.0f;
+                    px = ((const uint8_t *) v.data)[(h * side+w)*3+c]/255.0f;
                 } else {
-                    px = ((const float *) v.data)[(h * side + w) * 3 + c];
+                    px = ((const float *) v.data)[(h * side+w)*3+c];
                 }
-                out[c * side * side + h * side + w] = (px - MEAN[c]) / STD[c];
+                out[c * side * side+h * side+w] = (px-MEAN[c])/STD[c];
             }
     return true;
 }
@@ -220,16 +220,16 @@ ggml_tensor * evo1_flash_attn(ggml_context * C, ggml_tensor * q, ggml_tensor * k
 
 ggml_tensor * build_internvit_layer(ggml_context * C, const Evo1ModelArch & m, const ViTLayerW & w,
                                     ggml_tensor * x, int64_t N) {
-    const int64_t H = m.vit_hidden, n_heads = m.vit_heads, hd = H / n_heads;
+    const int64_t H = m.vit_hidden, n_heads = m.vit_heads, hd = H/n_heads;
     const ggml_type at = m.act_type;
-    const float scale = 1.0f / std::sqrt((float) hd);
+    const float scale = 1.0f/std::sqrt((float) hd);
     ggml_tensor * x_n1 = ggml_add(C, ggml_mul(C, ggml_norm(C, x, m.vit_ln_eps), w.n1w), w.n1b);
     ggml_tensor * qkv = ggml_add(C, mm_act(C, w.Wqkv, x_n1, at), w.bqkv);
     // one cast of the packed QKV rather than three of its slices
     qkv = as_type(C, qkv, GGML_TYPE_F32);
-    ggml_tensor * q = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 0 * H * ggml_element_size(qkv)));
-    ggml_tensor * k = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 1 * H * ggml_element_size(qkv)));
-    ggml_tensor * v = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 2 * H * ggml_element_size(qkv)));
+    ggml_tensor * q = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 0*H * ggml_element_size(qkv)));
+    ggml_tensor * k = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 1*H * ggml_element_size(qkv)));
+    ggml_tensor * v = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 2*H * ggml_element_size(qkv)));
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, hd, n_heads, N), 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, hd, n_heads, N), 0, 2, 1, 3));
     ggml_tensor * att;
@@ -253,8 +253,8 @@ ggml_tensor * build_internvit_layer(ggml_context * C, const Evo1ModelArch & m, c
 }
 
 ggml_tensor * build_internvit_view(ggml_context * C, const Evo1ModelArch & m, ggml_tensor * pixels) {
-    const int64_t H = m.vit_hidden, grid = m.image_size / m.patch_size, n_patches = grid * grid, n_tok = n_patches + 1;
-    const int64_t shuf_c = H * 4, sgrid = grid / 2;
+    const int64_t H = m.vit_hidden, grid = m.image_size/m.patch_size, n_patches = grid * grid, n_tok = n_patches+1;
+    const int64_t shuf_c = H*4, sgrid = grid/2;
 
     ggml_tensor * conv = ggml_conv_2d(C, m.vit_patch_w, pixels, (int) m.patch_size, (int) m.patch_size, 0, 0, 1, 1);
     ggml_tensor * patches = ggml_add(C, ggml_cont(C, ggml_transpose(C, ggml_reshape_2d(C, conv, n_patches, H))), m.vit_patch_b);
@@ -267,7 +267,7 @@ ggml_tensor * build_internvit_view(ggml_context * C, const Evo1ModelArch & m, gg
         x = build_internvit_layer(C, m, m.vit[i], x, n_tok);
 
     ggml_tensor * pnc = ggml_cont(C, ggml_view_2d(C, x, H, n_patches, x->nb[1], x->nb[1]));
-    ggml_tensor * s1 = ggml_reshape_3d(C, pnc, 2 * H, sgrid, grid);
+    ggml_tensor * s1 = ggml_reshape_3d(C, pnc, 2*H, sgrid, grid);
     ggml_tensor * s2 = ggml_cont(C, ggml_permute(C, s1, 0, 2, 1, 3));
     ggml_tensor * s3 = ggml_reshape_3d(C, s2, shuf_c, sgrid, sgrid);
     ggml_tensor * s4 = ggml_cont(C, ggml_permute(C, s3, 0, 2, 1, 3));
@@ -287,7 +287,7 @@ ggml_tensor * inproj_split_b(ggml_context * C, ggml_tensor * bin, int64_t E, int
 }
 
 bool load_config(const gguf_reader & g, Evo1ModelArch & m, Config & cfg) {
-    auto u = [&](const char * k, int64_t & dst) { if (g.has((std::string("evo1.") + k).c_str())) dst = g.u32((std::string("evo1.") + k).c_str()); };
+    auto u = [&](const char * k, int64_t & dst) { if (g.has((std::string("evo1.")+k).c_str())) dst = g.u32((std::string("evo1.")+k).c_str()); };
     u("lm_hidden", m.lm_hidden); u("lm_layers_used", m.lm_layers); u("lm_q_heads", m.n_q); u("lm_kv_heads", m.n_kv);
     u("lm_head_dim", m.lm_head_dim); u("lm_inter", m.lm_inter); u("embed_dim", m.embed_dim); u("dit_layers", m.dit_layers);
     u("dit_heads", m.dit_heads); u("mlp_head_hidden", m.mlp_head_hidden); u("horizon", m.horizon); u("per_action_dim", m.per_a);
@@ -314,7 +314,7 @@ bool load_config(const gguf_reader & g, Evo1ModelArch & m, Config & cfg) {
     }
     // predict() reads action_dim noise floats; the server sizes noise as
     // horizon*per_action_dim, so they must agree or a client noise buffer underruns.
-    if (m.action_dim != m.horizon * m.per_a) {
+    if (m.action_dim != m.horizon*m.per_a) {
         std::fprintf(stderr, "vla(evo1): action_dim (%lld) != horizon (%lld) * per_action_dim (%lld)\n",
                      (long long) m.action_dim, (long long) m.horizon, (long long) m.per_a); return false;
     }
@@ -402,7 +402,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
         }
     }
 
-    ggml_init_params wp = {  (size_t) 32 * 1024 * 1024,
+    ggml_init_params wp = {  (size_t) 32*1024*1024,
                              nullptr,  true };
     m->ctx_weights = ggml_init(wp);
     if (!m->ctx_weights) {
@@ -493,7 +493,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
         return nullptr;
 
     std::printf("vla(evo1): weights resident in %.2f GiB (%s)%s\n",
-                ggml_backend_buffer_get_size(m->weight_buf) / (1024.0 * 1024.0 * 1024.0),
+                ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0*1024.0),
                 dtype_name(m->matmul_type),
                 m->have_vision ? " - incl. InternViT vision tower" : " - vision tower NOT loaded (precomputed_img_emb required)");
 
@@ -538,7 +538,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         //
         // The branches are independent, so the arithmetic per view is unchanged
         // - only the submission pattern differs.
-        const size_t want_arena = (size_t) 32 * 1024 * 1024 * (size_t) std::max<int64_t>(n_views, 1);
+        const size_t want_arena = (size_t) 32*1024*1024*(size_t) std::max<int64_t>(n_views, 1);
         if (want_arena > vision_arena) {
             vision_scratch.release();
             vision_arena = want_arena;
@@ -552,7 +552,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             t_ie[v] = build_internvit_view(VC, *this, t_px[v]);
             ggml_set_output(t_ie[v]);
         }
-        ggml_cgraph * vg = ggml_new_graph_custom(VC,  (size_t) 8192 * std::max<int64_t>(n_views, 1),  false);
+        ggml_cgraph * vg = ggml_new_graph_custom(VC,  (size_t) 8192*std::max<int64_t>(n_views, 1),  false);
         for (int64_t v = 0; v < n_views; ++v)
             ggml_build_forward_expand(vg, t_ie[v]);
         if (!vision_scratch.alloc(backend, vg)) {
@@ -571,10 +571,10 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             return {};
         }
         for (int64_t v = 0; v < n_views; ++v) {
-            ggml_backend_tensor_get(t_ie[v], img_emb_host.data() + v * num_image_token * lm_hidden,
+            ggml_backend_tensor_get(t_ie[v], img_emb_host.data()+v * num_image_token * lm_hidden,
                                     0, ggml_nbytes(t_ie[v]));
         }
-        stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - tv0).count();
+        stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now()-tv0).count();
         img_emb_ptr = img_emb_host.data();
     } else {
         std::fprintf(stderr, "vla(evo1): no images and no precomputed_img_emb in the request\n");
@@ -621,8 +621,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         for (int64_t p = 0; p < SEQ; ++p) {
             if (input_ids[p] == (int32_t) img_ctx_id) {
                 if (img_idx >= n_img_tokens) { std::fprintf(stderr, "vla(evo1): more IMG_CTX tokens than ViT embeds\n"); return {}; }
-                std::memcpy(inputs_embeds.data() + p * lm_hidden,
-                            img_emb_ptr + img_idx * lm_hidden, lm_hidden * sizeof(float));
+                std::memcpy(inputs_embeds.data()+p * lm_hidden,
+                            img_emb_ptr+img_idx * lm_hidden, lm_hidden * sizeof(float));
                 ++img_idx;
             }
         }
@@ -656,7 +656,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             continue;
         }
         const float sv = in.state ? in.state[i] : 0.0f;
-        float xn = 2.0f * (sv - lo) / (hi - lo + norm_eps_denom) - 1.0f;
+        float xn = 2.0f * (sv-lo)/(hi-lo+norm_eps_denom)-1.0f;
         if (xn < -1.0f)
             xn = -1.0f;
         if (xn >  1.0f)
@@ -666,23 +666,23 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
 
     std::vector<float> x_init((size_t) action_dim);
     if (in.noise) {
-        std::memcpy(x_init.data(), in.noise, x_init.size() * sizeof(float));
+        std::memcpy(x_init.data(), in.noise, x_init.size()*sizeof(float));
     } else {
         // Evo1 is trained with uniform[-1,1] noise
         uint64_t s = 0xE701ACE5ULL ^ (uint64_t) std::chrono::steady_clock::now().time_since_epoch().count();
         for (auto & v : x_init) {
-            s = s * 6364136223846793005ULL + 1442695040888963407ULL;
-            v = ((float) (uint32_t) (s >> 32) / 2147483648.0f) - 1.0f; // uniform[-1,1)
+            s = s*6364136223846793005ULL+1442695040888963407ULL;
+            v = ((float) (uint32_t) (s >> 32)/2147483648.0f)-1.0f; // uniform[-1,1)
         }
     }
 
     // LM + DiT graph depends only on the padded length and step count.
     const MainKey mkey{ SEQ, num_steps };
-    const bool built = main_graph.ensure(backend, mkey, (size_t) 96 * 1024 * 1024,
+    const bool built = main_graph.ensure(backend, mkey, (size_t) 96*1024*1024,
                                          [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
-    const int64_t E = embed_dim, hd_dit = E / dit_heads;
-    const float   scale_dit = 1.0f / std::sqrt((float) hd_dit);
-    const int64_t Nctx = SEQ + 1;
+    const int64_t E = embed_dim, hd_dit = E/dit_heads;
+    const float   scale_dit = 1.0f/std::sqrt((float) hd_dit);
+    const int64_t Nctx = SEQ+1;
 
     ggml_tensor * t_embeds   = ggml_new_tensor_2d(C, GGML_TYPE_F32, lm_hidden, SEQ);     ggml_set_input(t_embeds);
     ggml_tensor * t_pos      = ggml_new_tensor_1d(C, GGML_TYPE_I32, SEQ);                ggml_set_input(t_pos);
@@ -755,10 +755,10 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         return as_type(C, ggml_add(C, mm_act(C, head_W2, mh, at), head_b2), GGML_TYPE_F32);
     };
 
-    const float dt = 1.0f / (float) num_steps;
+    const float dt = 1.0f/(float) num_steps;
     ggml_tensor * x_action = t_x;
     for (int64_t step = 0; step < num_steps; ++step) {
-        const int64_t time_index = (int64_t) ((double) step / (double) num_steps * 1000.0);
+        const int64_t time_index = (int64_t) ((double) step/(double) num_steps*1000.0);
         ggml_tensor * x_seq = ggml_reshape_2d(C, x_action, per_a, horizon);
         ggml_tensor * x_seq_masked = as_type(C, ggml_mul(C, x_seq, t_amask), at);
         ggml_tensor * v_t = denoise(x_seq_masked, time_index);
@@ -790,7 +790,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos));
     }
     { std::vector<float> mk((size_t) SEQ * SEQ); const float NEG = -std::numeric_limits<float>::infinity();
-      for (int64_t q = 0; q < SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) mk[q * SEQ + kv] = (kv <= q && attn_ok[kv]) ? 0.0f : NEG;
+      for (int64_t q = 0; q < SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) mk[q * SEQ+kv] = (kv <= q && attn_ok[kv]) ? 0.0f : NEG;
       ggml_backend_tensor_set(t_lmmask, mk.data(), 0, ggml_nbytes(t_lmmask)); }
     ggml_backend_tensor_set(t_state, state_norm.data(), 0, ggml_nbytes(t_state));
     ggml_backend_tensor_set(t_x, x_init.data(), 0, ggml_nbytes(t_x));
@@ -806,18 +806,18 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         std::fprintf(stderr, "vla(evo1): ggml_backend_graph_compute failed (%d)\n", (int) st);
         return {};
     }
-    stats.ms_inference = std::chrono::duration<float, std::milli>(tc1 - tc0).count();
+    stats.ms_inference = std::chrono::duration<float, std::milli>(tc1-tc0).count();
 
     std::vector<float> x_final((size_t) action_dim);
-    ggml_backend_tensor_get(x_action, x_final.data(), 0, x_final.size() * sizeof(float));
+    ggml_backend_tensor_get(x_action, x_final.data(), 0, x_final.size()*sizeof(float));
 
     std::vector<float> out((size_t) horizon * per_a);
     for (int64_t hstep = 0; hstep < horizon; ++hstep)
         for (int64_t c = 0; c < per_a; ++c) {
-            const double a = (double) x_final[hstep * per_a + c];
-            out[hstep * per_a + c] = (float) ((a + 1.0) / 2.0 * ((double) action_max[c] - (double) action_min[c] + (double) norm_eps_denom) + (double) action_min[c]);
+            const double a = (double) x_final[hstep * per_a+c];
+            out[hstep * per_a+c] = (float) ((a+1.0)/2.0*((double) action_max[c]-(double) action_min[c]+(double) norm_eps_denom)+(double) action_min[c]);
         }
-    stats.ms_total = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    stats.ms_total = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now()-t0).count();
     return out;
 }
 

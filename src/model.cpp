@@ -35,7 +35,7 @@ namespace {
 bool ends_with_gguf(const std::string& p) {
     if (p.size() < 5)
         return false;
-    return std::strcmp(p.c_str() + p.size() - 5, ".gguf") == 0;
+    return std::strcmp(p.c_str()+p.size()-5, ".gguf") == 0;
 }
 
 bool detect_arch_gguf(const std::string& path, Arch* out) {
