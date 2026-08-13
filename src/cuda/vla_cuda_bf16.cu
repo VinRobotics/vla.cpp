@@ -120,6 +120,50 @@ __global__ void k_bin_bcast_bf16_rows(
     }
 }
 
+// Vectorized row kernel: 8 BF16 per thread (one uint4 load/store), for the
+// shape that dominates -- dst/src0 contiguous along dim 0 and src1 a full-width
+// row repeated over the other dims, i.e. every bias add and norm-weight mul.
+// The arithmetic is per element in float exactly as the scalar path does it, so
+// results are bit-identical; only the memory access widens. Worth doing because
+// a graph-node-level profile puts these kernels at ~27 ms of evo1's 147, and
+// their mean/median split (6.3 vs 2.2 us) says the big tensors carry the total.
+template <BinOp op, typename S1>
+__global__ void k_bin_bcast_bf16_vec8(
+        const __nv_bfloat16 * __restrict__ src0, const S1 * __restrict__ src1,
+        __nv_bfloat16 * __restrict__ dst,
+        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int64_t ne3,
+        const int64_t s01, const int64_t s02, const int64_t s03,
+        const int64_t ne11, const int64_t ne12, const int64_t ne13,
+        const int64_t s11, const int64_t s12, const int64_t s13,
+        const int64_t d1, const int64_t d2, const int64_t d3) {
+    const int64_t i1  = blockIdx.y;
+    const int64_t i23 = blockIdx.z;
+    const int64_t i2  = i23 % ne2;
+    const int64_t i3  = i23 / ne2;
+
+    const __nv_bfloat16 * __restrict__ r0 = src0 + i1*s01 + i2*s02 + i3*s03;
+    const S1 *            __restrict__ r1 = src1 + bcast_idx(i1, ne11, ne1)*s11 +
+                                                   bcast_idx(i2, ne12, ne2)*s12 +
+                                                   bcast_idx(i3, ne13, ne3)*s13;
+    __nv_bfloat16 *       __restrict__ rd = dst  + i1*d1  + i2*d2  + i3*d3;
+
+    const int64_t nvec = ne0 / 8;
+    for (int64_t v = (int64_t) blockIdx.x*blockDim.x + threadIdx.x; v < nvec;
+         v += (int64_t) gridDim.x*blockDim.x) {
+        const int64_t i0 = v * 8;
+
+        uint4 a = *reinterpret_cast<const uint4 *>(r0 + i0);
+        __nv_bfloat16 * av = reinterpret_cast<__nv_bfloat16 *>(&a);
+
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) {
+            const float b = (float) r1[i0 + k];
+            av[k] = f2bf(apply_bin(op, bf2f(av[k]), b));
+        }
+        *reinterpret_cast<uint4 *>(rd + i0) = a;
+    }
+}
+
 // Fallback for shapes the row grid cannot address (gridDim.y/z cap at 65535).
 template <BinOp op, typename S1>
 __global__ void k_bin_bcast_bf16_flat(
@@ -195,6 +239,41 @@ bool bin_bcast(ggml_tensor * dst, cudaStream_t stream) {
     // fallback, and declining there hands the run to ggml's aborting kernel.
     const RowGrid g = force_flat() ? RowGrid{}
                                    : row_grid(dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3]);
+
+    // 8-wide path: dim 0 contiguous on both sides and src1 a full-width row.
+    // Requires 16 B alignment for the uint4 accesses, which the ggml allocator
+    // gives at tensor start but not necessarily at a strided row offset.
+    const bool vec8_shape =
+        g.ok && dst->ne[0] % 8 == 0 &&
+        es(src0, 0) == 1 && es(dst, 0) == 1 && es(src1, 0) == 1 &&
+        src1->ne[0] == dst->ne[0] &&
+        es(src0, 1) % 8 == 0 && es(dst, 1) % 8 == 0 && es(src1, 1) % 8 == 0 &&
+        ((uintptr_t) src0->data % 16) == 0 && ((uintptr_t) dst->data % 16) == 0;
+    if (vec8_shape) {
+        const int64_t nvec  = dst->ne[0] / 8;
+        unsigned      bx    = 32;
+        while (bx < (unsigned) BLOCK && (int64_t) bx < nvec) bx *= 2;
+        int64_t gx = (nvec + bx - 1) / bx;
+        if (gx > 65535) gx = 65535;
+        if (gx < 1)     gx = 1;
+        const dim3 vgrid((unsigned) gx, g.grid.y, g.grid.z);
+        const dim3 vblock(bx, 1, 1);
+
+#define VLA_LAUNCH_VEC8(TYPE)                                                     \
+        k_bin_bcast_bf16_vec8<op, TYPE><<<vgrid, vblock, 0, stream>>>(             \
+            (const __nv_bfloat16 *) src0->data, (const TYPE *) src1->data,         \
+            (__nv_bfloat16 *) dst->data,                                           \
+            dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],                        \
+            es(src0,1), es(src0,2), es(src0,3),                                    \
+            src1->ne[1], src1->ne[2], src1->ne[3],                                 \
+            es(src1,1), es(src1,2), es(src1,3),                                    \
+            es(dst,1), es(dst,2), es(dst,3))
+
+        if (src1->type == GGML_TYPE_BF16) { VLA_LAUNCH_VEC8(__nv_bfloat16); }
+        else                              { VLA_LAUNCH_VEC8(float); }
+#undef VLA_LAUNCH_VEC8
+        return true;
+    }
 
 #define VLA_LAUNCH_BIN(TYPE)                                                      \
     do {                                                                          \
