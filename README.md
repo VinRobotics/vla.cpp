@@ -269,8 +269,40 @@ view count.
 | Evo-1       | 1 | 448 | 52.2 | 55.2 | 57.3 | 17.8 |
 | pi0.5       | 2 | 224 | 53.4 | 56.1 | 59.3 | 11.4 |
 
-Jetson and Apple targets are absent: they have not been re-measured with
-`vla-bench`.
+Jetson targets are absent: they have not been re-measured with `vla-bench`.
+
+### Apple Silicon (Metal)
+
+The same harness on the Metal backend. Apple M5 Max (18-core CPU,
+40-core GPU, 64 GB unified memory), macOS 26.6.1, High Power Mode, llama.cpp
+`b10331`, weights as shipped, 20 reps after 3 warmups, best of three sweeps
+(the sweep with the lowest p50), each model at its native input size and view
+count.
+
+| Model | Views | Input | min ms | p50 ms | p90 ms | vision ms |
+|---|--:|--:|--:|--:|--:|--:|
+| VLA-Adapter | 1 | 224 |  64.5 |  64.8 |  65.1 | 33.0 |
+| VLA-JEPA    | 1 | 256 |  74.9 |  75.1 |  75.4 | 17.2 |
+| GR00T N1.5  | 1 | 224 | 104.0 | 104.3 | 104.6 | 20.7 |
+| SmolVLA     | 2 | 512 | 114.8 | 115.2 | 115.9 | 29.0 |
+| GR00T N1.7  | 1 | 256 | 128.0 | 128.4 | 128.9 | 17.3 |
+| GR00T N1.6  | 1 | 224 | 133.0 | 133.3 | 134.4 | 21.3 |
+| OpenVLA-OFT | 1 | 224 | 183.4 | 184.2 | 184.6 | 33.7 |
+| Evo-1       | 1 | 448 | 214.5 | 215.0 | 216.2 | 50.3 |
+| pi0         | 2 | 224 | 220.2 | 220.8 | 221.3 | 39.3 |
+| pi0.5       | 2 | 224 | 237.1 | 237.5 | 237.7 | 39.1 |
+
+Every run came up on Metal (`backend = Metal` in the load banner); none fell
+back to CPU. The three sweeps agree to within 0.6% per model, and `min` to `p90`
+spans no more than 2 ms, so these settle rather than scatter.
+
+BitVLA has no row. Its shipped GGUFs are int2-packed and the loader rejects them
+outside a CUDA build (`VLA_BITVLA_CUDA_KERNELS`), and its ggml graph is CPU-only
+by design with the LM offloading to CUDA, so there is nothing to measure on
+Metal.
+
+These are latency numbers on the Metal backend, not a support claim: see
+[Roadmap](#roadmap) for which pairings are released and benchmarked.
 
 ### Task success
 
