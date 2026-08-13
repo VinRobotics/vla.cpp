@@ -10,7 +10,7 @@ ARG BASE_IMAGE=nvidia/cuda:12.9.1-devel-ubuntu24.04
 FROM ${BASE_IMAGE}
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential cmake git ca-certificates pkg-config \
+        build-essential cmake git ca-certificates pkg-config python3 \
         libzmq3-dev cppzmq-dev libprotobuf-dev protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
