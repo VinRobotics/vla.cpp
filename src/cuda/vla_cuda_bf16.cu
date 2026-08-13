@@ -70,8 +70,58 @@ inline __device__ __nv_bfloat16 f2bf(const float v) { return __float2bfloat16(v)
 
 enum class BinOp { Add, Mul };
 
+inline __device__ float apply_bin(BinOp op, float a, float b) {
+    return op == BinOp::Add ? a + b : a * b;
+}
+
+// Broadcast index along one dimension. ggml's rule is a modulo, but the only
+// shapes that occur are "same extent" and "extent 1"; both operands are kernel
+// arguments so the branch is uniform across the block and the 64-bit modulo is
+// left for the general case that never fires in practice.
+inline __device__ int64_t bcast_idx(int64_t i, int64_t ne_src, int64_t ne_dst) {
+    if (ne_src == ne_dst) return i;
+    if (ne_src == 1)      return 0;
+    return i % ne_src;
+}
+
+// Rows are addressed through blockIdx.y/z rather than recovered from a flat
+// index. A flat grid-stride loop costs a 64-bit division and three modulos per
+// element to rebuild (i0,i1,i2,i3), which is what made this kernel 12.8 us/launch
+// against ggml's 5.7 for the same work -- and at ~3,700 elementwise nodes per
+// evo1 call that difference was larger than everything BF16 activations saved.
 template <BinOp op, typename S1>
-__global__ void k_bin_bcast_bf16(
+__global__ void k_bin_bcast_bf16_rows(
+        const __nv_bfloat16 * __restrict__ src0, const S1 * __restrict__ src1,
+        __nv_bfloat16 * __restrict__ dst,
+        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int64_t ne3,
+        const int64_t s00, const int64_t s01, const int64_t s02, const int64_t s03,
+        const int64_t ne10, const int64_t ne11, const int64_t ne12, const int64_t ne13,
+        const int64_t s10, const int64_t s11, const int64_t s12, const int64_t s13,
+        const int64_t d0, const int64_t d1, const int64_t d2, const int64_t d3) {
+    const int64_t i1  = blockIdx.y;
+    const int64_t i23 = blockIdx.z;
+    const int64_t i2  = i23 % ne2;          // once per block, not per element
+    const int64_t i3  = i23 / ne2;
+
+    const int64_t j1 = bcast_idx(i1, ne11, ne1);
+    const int64_t j2 = bcast_idx(i2, ne12, ne2);
+    const int64_t j3 = bcast_idx(i3, ne13, ne3);
+
+    const __nv_bfloat16 * __restrict__ r0 = src0 + i1*s01 + i2*s02 + i3*s03;
+    const S1 *            __restrict__ r1 = src1 + j1*s11 + j2*s12 + j3*s13;
+    __nv_bfloat16 *       __restrict__ rd = dst  + i1*d1  + i2*d2  + i3*d3;
+
+    for (int64_t i0 = (int64_t) blockIdx.x*blockDim.x + threadIdx.x; i0 < ne0;
+         i0 += (int64_t) gridDim.x*blockDim.x) {
+        const float a = bf2f(r0[i0*s00]);
+        const float b = (float) r1[bcast_idx(i0, ne10, ne0)*s10];
+        rd[i0*d0] = f2bf(apply_bin(op, a, b));
+    }
+}
+
+// Fallback for shapes the row grid cannot address (gridDim.y/z cap at 65535).
+template <BinOp op, typename S1>
+__global__ void k_bin_bcast_bf16_flat(
         const __nv_bfloat16 * __restrict__ src0, const S1 * __restrict__ src1,
         __nv_bfloat16 * __restrict__ dst,
         const int64_t ne0, const int64_t ne1, const int64_t ne2, const int64_t ne3,
@@ -91,12 +141,47 @@ __global__ void k_bin_bcast_bf16(
         const float b = (float) src1[(i0 % ne10)*s10 + (i1 % ne11)*s11 +
                                      (i2 % ne12)*s12 + (i3 % ne13)*s13];
 
-        dst[i0*d0 + i1*d1 + i2*d2 + i3*d3] = f2bf(op == BinOp::Add ? a + b : a * b);
+        dst[i0*d0 + i1*d1 + i2*d2 + i3*d3] = f2bf(apply_bin(op, a, b));
     }
 }
 
 // element strides (ggml stores byte strides)
 inline int64_t es(const ggml_tensor * t, int i) { return t->nb[i] / ggml_type_size(t->type); }
+
+// Launch shape for the row-addressed kernels; ok=false means fall back to flat.
+struct RowGrid {
+    dim3 grid;
+    dim3 block;
+    bool ok;
+};
+
+// VLA_BF16_FLAT=1 forces the flat kernel, for bisecting. The two paths do the
+// same per-element arithmetic in the same order, so they are bit-identical --
+// which is what makes the A/B a correctness check rather than a smoke test.
+inline bool force_flat() {
+    static const bool v = [] {
+        const char * s = std::getenv("VLA_BF16_FLAT");
+        return s && *s && !(s[0] == '0' && s[1] == '\0');
+    }();
+    return v;
+}
+
+inline RowGrid row_grid(int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3) {
+    RowGrid g{};
+    const int64_t nz = ne2*ne3;
+    if (ne1 > 65535 || nz > 65535 || ne1 < 1 || nz < 1) { g.ok = false; return g; }
+
+    unsigned bx = 32;
+    while (bx < (unsigned) BLOCK && (int64_t) bx < ne0) bx *= 2;
+    int64_t gx = (ne0 + bx - 1) / bx;
+    if (gx > 65535) gx = 65535;
+    if (gx < 1)     gx = 1;
+
+    g.block = dim3(bx, 1, 1);
+    g.grid  = dim3((unsigned) gx, (unsigned) ne1, (unsigned) nz);
+    g.ok    = true;
+    return g;
+}
 
 template <BinOp op>
 bool bin_bcast(ggml_tensor * dst, cudaStream_t stream) {
@@ -108,29 +193,42 @@ bool bin_bcast(ggml_tensor * dst, cudaStream_t stream) {
     if (!ggml_are_same_shape(src0, dst)) return false;
     if (!ggml_can_repeat(src1, src0)) return false;
 
-    const int64_t total = ggml_nelements(dst);
-    const int64_t blocks = (total + BLOCK - 1) / BLOCK;
-    const int grid = (int) (blocks < 65535 ? blocks : 65535);
+    // Only the unfused path honours VLA_BF16_FLAT: the fused path has no flat
+    // fallback, and declining there hands the run to ggml's aborting kernel.
+    const RowGrid g = force_flat() ? RowGrid{}
+                                   : row_grid(dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3]);
+
+#define VLA_LAUNCH_BIN(TYPE)                                                      \
+    do {                                                                          \
+        if (g.ok) {                                                               \
+            k_bin_bcast_bf16_rows<op, TYPE><<<g.grid, g.block, 0, stream>>>(      \
+                (const __nv_bfloat16 *) src0->data, (const TYPE *) src1->data,    \
+                (__nv_bfloat16 *) dst->data,                                      \
+                dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],                   \
+                es(src0,0), es(src0,1), es(src0,2), es(src0,3),                   \
+                src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],               \
+                es(src1,0), es(src1,1), es(src1,2), es(src1,3),                   \
+                es(dst,0), es(dst,1), es(dst,2), es(dst,3));                      \
+        } else {                                                                  \
+            const int64_t blocks = (ggml_nelements(dst) + BLOCK - 1) / BLOCK;     \
+            const int flat = (int) (blocks < 65535 ? blocks : 65535);             \
+            k_bin_bcast_bf16_flat<op, TYPE><<<flat, BLOCK, 0, stream>>>(          \
+                (const __nv_bfloat16 *) src0->data, (const TYPE *) src1->data,    \
+                (__nv_bfloat16 *) dst->data,                                      \
+                dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],                   \
+                es(src0,0), es(src0,1), es(src0,2), es(src0,3),                   \
+                src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],               \
+                es(src1,0), es(src1,1), es(src1,2), es(src1,3),                   \
+                es(dst,0), es(dst,1), es(dst,2), es(dst,3));                      \
+        }                                                                         \
+    } while (0)
 
     if (src1->type == GGML_TYPE_BF16) {
-        k_bin_bcast_bf16<op, __nv_bfloat16><<<grid, BLOCK, 0, stream>>>(
-            (const __nv_bfloat16 *) src0->data, (const __nv_bfloat16 *) src1->data,
-            (__nv_bfloat16 *) dst->data,
-            dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
-            es(src0,0), es(src0,1), es(src0,2), es(src0,3),
-            src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
-            es(src1,0), es(src1,1), es(src1,2), es(src1,3),
-            es(dst,0), es(dst,1), es(dst,2), es(dst,3));
+        VLA_LAUNCH_BIN(__nv_bfloat16);
     } else {
-        k_bin_bcast_bf16<op, float><<<grid, BLOCK, 0, stream>>>(
-            (const __nv_bfloat16 *) src0->data, (const float *) src1->data,
-            (__nv_bfloat16 *) dst->data,
-            dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
-            es(src0,0), es(src0,1), es(src0,2), es(src0,3),
-            src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
-            es(src1,0), es(src1,1), es(src1,2), es(src1,3),
-            es(dst,0), es(dst,1), es(dst,2), es(dst,3));
+        VLA_LAUNCH_BIN(float);
     }
+#undef VLA_LAUNCH_BIN
     return true;
 }
 
@@ -163,23 +261,27 @@ __global__ void k_fused_bin_bcast_bf16(
         const int64_t ne10, const int64_t ne11, const int64_t ne12, const int64_t ne13,
         const int64_t s10, const int64_t s11, const int64_t s12, const int64_t s13,
         const int64_t d0, const int64_t d1, const int64_t d2, const int64_t d3) {
-    const int64_t total = ne0*ne1*ne2*ne3;
-    for (int64_t idx = (int64_t) blockIdx.x*blockDim.x + threadIdx.x; idx < total;
-         idx += (int64_t) gridDim.x*blockDim.x) {
-        const int64_t i0 =  idx                  % ne0;
-        const int64_t i1 = (idx / ne0)           % ne1;
-        const int64_t i2 = (idx / (ne0*ne1))     % ne2;
-        const int64_t i3 =  idx / (ne0*ne1*ne2);
+    const int64_t i1  = blockIdx.y;
+    const int64_t i23 = blockIdx.z;
+    const int64_t i2  = i23 % ne2;
+    const int64_t i3  = i23 / ne2;
 
-        const int64_t j = (i0 % ne10)*s10 + (i1 % ne11)*s11 +
-                          (i2 % ne12)*s12 + (i3 % ne13)*s13;
+    const int64_t row1 = bcast_idx(i1, ne11, ne1)*s11 +
+                         bcast_idx(i2, ne12, ne2)*s12 +
+                         bcast_idx(i3, ne13, ne3)*s13;
 
-        float acc = bf2f(src0[i0*s00 + i1*s01 + i2*s02 + i3*s03]);
+    const __nv_bfloat16 * __restrict__ r0 = src0 + i1*s01 + i2*s02 + i3*s03;
+    __nv_bfloat16 *       __restrict__ rd = dst  + i1*d1  + i2*d2  + i3*d3;
+
+    for (int64_t i0 = (int64_t) blockIdx.x*blockDim.x + threadIdx.x; i0 < ne0;
+         i0 += (int64_t) gridDim.x*blockDim.x) {
+        const int64_t j = row1 + bcast_idx(i0, ne10, ne0)*s10;
+
+        float acc = bf2f(r0[i0*s00]);
         for (int k = 0; k < n_fuse; ++k) {
-            const float b = (float) srcs.p[k][j];
-            acc = (op == BinOp::Add) ? acc + b : acc * b;
+            acc = apply_bin(op, acc, (float) srcs.p[k][j]);
         }
-        dst[i0*d0 + i1*d1 + i2*d2 + i3*d3] = f2bf(acc);
+        rd[i0*d0] = f2bf(acc);
     }
 }
 
@@ -209,15 +311,17 @@ bool fused_bin_bcast(ggml_tensor * dst, int n_fuse, cudaStream_t stream) {
         }
     }
 
-    const int64_t total  = ggml_nelements(dst);
-    const int64_t blocks = (total + BLOCK - 1) / BLOCK;
-    const int     grid   = (int) (blocks < 65535 ? blocks : 65535);
+    // No flat fallback here: declining just sends the run to ggml's fused
+    // kernel, which aborts on BF16, so an unaddressable shape must decline
+    // before the hook claims it.
+    const RowGrid g = row_grid(dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3]);
+    if (!g.ok) return false;
 
 #define VLA_LAUNCH_FUSED(TYPE)                                                    \
     do {                                                                          \
         SrcPtrs<TYPE> srcs{};                                                     \
         for (int k = 0; k < n_fuse; ++k) srcs.p[k] = (const TYPE *) dst->src[k + 1]->data; \
-        k_fused_bin_bcast_bf16<op, TYPE><<<grid, BLOCK, 0, stream>>>(             \
+        k_fused_bin_bcast_bf16<op, TYPE><<<g.grid, g.block, 0, stream>>>(         \
             (const __nv_bfloat16 *) src0->data, srcs, n_fuse,                     \
             (__nv_bfloat16 *) dst->data,                                          \
             dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],                       \
