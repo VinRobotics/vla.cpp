@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "arch.h"
+#include "loader.h"
 #include "options.h"
 #include "model.h"
 
@@ -389,17 +390,11 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
                              nullptr,  true };
     m->ctx_weights = ggml_init(wp);
     if (!m->ctx_weights) { std::fprintf(stderr, "vla(evo1): ggml_init(ctx_weights) failed\n"); return nullptr; }
-    ggml_context * W = m->ctx_weights;
-
-    auto mk = [&](const char * name, ggml_type type) -> ggml_tensor * {
-        const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(evo1): missing tensor %s\n", name); return nullptr; }
-        ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), ggml_n_dims(gt), gt->ne);
-        ggml_set_name(t, name);
-        return t;
-    };
-    auto mk_mm = [&](const char * name) { return mk(name, m->matmul_type); };
-    auto mk_f32 = [&](const char * name) { return mk(name, GGML_TYPE_F32); };
+    // The vision tower is optional here, so misses are reported by the ok chain
+    // below rather than by the loader.
+    WeightLoader L("evo1", g, m->ctx_weights, m->matmul_type);
+    auto mk_mm  = [&](const char * name) { return L.opt_gemm("%s", name); };
+    auto mk_f32 = [&](const char * name) { return L.opt_f32 ("%s", name); };
 
     bool ok = true;
     m->lm_output_norm = mk_f32("vlm.output_norm.weight"); ok &= (m->lm_output_norm != nullptr);
@@ -445,7 +440,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
           m->head_W2 && m->head_b2 && m->time_pos && m->state_W1 && m->state_b1 && m->state_W2 && m->state_b2;
 
     if (g.meta("vit.patch_embd.weight") && ok) {
-        m->vit_patch_w = mk("vit.patch_embd.weight", GGML_TYPE_F32);
+        m->vit_patch_w = mk_f32("vit.patch_embd.weight");
         m->vit_patch_b = mk_f32("vit.patch_embd.bias");
         m->vit_cls     = mk_f32("vit.class_embd");
         m->vit_pos     = mk_f32("vit.pos_embd");
@@ -472,19 +467,11 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
     }
     if (!ok) { std::fprintf(stderr, "vla(evo1): weight tensor setup failed\n"); return nullptr; }
 
-    m->weight_buf = ggml_backend_alloc_ctx_tensors(m->ctx_weights, m->backend);
-    if (!m->weight_buf) { std::fprintf(stderr, "vla(evo1): ggml_backend_alloc_ctx_tensors failed (OOM?)\n"); return nullptr; }
-    for (ggml_tensor * t = ggml_get_first_tensor(W); t; t = ggml_get_next_tensor(W, t)) {
-        std::vector<uint8_t> bytes = g.read_convert(ggml_get_name(t), t->type);
-        if (bytes.empty() || bytes.size() != ggml_nbytes(t)) {
-            std::fprintf(stderr, "vla(evo1): failed to load %s (%zu vs %zu bytes)\n",
-                         ggml_get_name(t), bytes.size(), ggml_nbytes(t)); return nullptr;
-        }
-        ggml_backend_tensor_set(t, bytes.data(), 0, bytes.size());
-    }
+    if (!L.upload(m->backend, &m->weight_buf)) return nullptr;
+
     std::printf("vla(evo1): weights resident in %.2f GiB (%s)%s\n",
                 ggml_backend_buffer_get_size(m->weight_buf) / (1024.0 * 1024.0 * 1024.0),
-                m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16",
+                dtype_name(m->matmul_type),
                 m->have_vision ? " - incl. InternViT vision tower" : " - vision tower NOT loaded (precomputed_img_emb required)");
 
     m->state_min  = g.read_f32("state_min");

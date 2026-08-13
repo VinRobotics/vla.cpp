@@ -40,6 +40,10 @@ public:
     ggml_tensor * gemm(const char * fmt, ...) __attribute__((format(printf, 2, 3)));
     ggml_tensor * f32 (const char * fmt, ...) __attribute__((format(printf, 2, 3)));
 
+    // Explicit resident type, for weights that are neither a plain GEMM input
+    // nor F32 (BitVLA's int2-packed ternary blocks).
+    ggml_tensor * typed(ggml_type want, const char * fmt, ...) __attribute__((format(printf, 3, 4)));
+
     // A miss is not an error.
     ggml_tensor * opt_gemm(const char * fmt, ...) __attribute__((format(printf, 2, 3)));
     ggml_tensor * opt_f32 (const char * fmt, ...) __attribute__((format(printf, 2, 3)));

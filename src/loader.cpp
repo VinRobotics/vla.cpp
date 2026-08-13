@@ -74,6 +74,14 @@ VLA_DECLARE_FN(f32_gemma_norm, GGML_TYPE_F32,  true,  true)
 
 #undef VLA_DECLARE_FN
 
+ggml_tensor * WeightLoader::typed(ggml_type want, const char * fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    ggml_tensor * t = declare(want, true, false, fmt, ap);
+    va_end(ap);
+    return t;
+}
+
 ggml_tensor * WeightLoader::fuse_gemm(const char * out_name, const std::vector<std::string> & srcs) {
     return fuse(gemm_, out_name, srcs);
 }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "arch.h"
+#include "loader.h"
 #include "options.h"
 #include "model.h"
 
@@ -576,18 +577,10 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
     ggml_init_params wp = {  (size_t) 32 * 1024 * 1024,  nullptr,  true };
     m->ctx_weights = ggml_init(wp);
     if (!m->ctx_weights) { std::fprintf(stderr, "vla(bitvla): ggml_init(ctx_weights) failed\n"); return nullptr; }
-    ggml_context * W = m->ctx_weights;
-    auto mk = [&](const char * name, ggml_type type) -> ggml_tensor * {
-        const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(bitvla): missing tensor %s\n", name); return nullptr; }
-        ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), ggml_n_dims(gt), gt->ne);
-        ggml_set_name(t, name);
-        return t;
-    };
-    auto mk_mm  = [&](const char * name) { return mk(name, m->matmul_type); };
-    auto mk_f32 = [&](const char * name) { return mk(name, GGML_TYPE_F32); };
-
-    auto mk_bit = [&](const char * name) { return mk(name, m->packed_int2 ? GGML_TYPE_I8 : m->matmul_type); };
+    WeightLoader L("bitvla", g, m->ctx_weights, m->matmul_type);
+    auto mk_mm  = [&](const char * name) { return L.gemm("%s", name); };
+    auto mk_f32 = [&](const char * name) { return L.f32 ("%s", name); };
+    auto mk_bit = [&](const char * name) { return L.typed(m->packed_int2 ? GGML_TYPE_I8 : m->matmul_type, "%s", name); };
 
     bool ok = true;
 
@@ -654,15 +647,8 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
           m->ah_ln2_w&&m->ah_ln2_b&&m->ah_fc2_w&&m->ah_fc2_b;
     if (!ok) { std::fprintf(stderr, "vla(bitvla): weight tensor setup failed\n"); return nullptr; }
 
-    m->weight_buf = ggml_backend_alloc_ctx_tensors(m->ctx_weights, m->backend);
-    if (!m->weight_buf) { std::fprintf(stderr, "vla(bitvla): ggml_backend_alloc_ctx_tensors failed (OOM?)\n"); return nullptr; }
-    for (ggml_tensor * t = ggml_get_first_tensor(W); t; t = ggml_get_next_tensor(W, t)) {
-        std::vector<uint8_t> bytes = g.read_convert(ggml_get_name(t), t->type);
-        if (bytes.empty() || bytes.size() != ggml_nbytes(t)) {
-            std::fprintf(stderr, "vla(bitvla): failed to load %s (%zu vs %zu bytes)\n", ggml_get_name(t), bytes.size(), ggml_nbytes(t)); return nullptr;
-        }
-        ggml_backend_tensor_set(t, bytes.data(), 0, bytes.size());
-    }
+    if (!L.upload(m->backend, &m->weight_buf)) return nullptr;
+
     std::printf("vla(bitvla): weights resident in %.2f GiB (%s); image_id=%d proprio_id=%d action_begin_id=%d stop_id=%d\n",
                 ggml_backend_buffer_get_size(m->weight_buf) / (1024.0 * 1024.0 * 1024.0),
                 m->packed_int2 ? "int2-packed + F32 sidecars"
