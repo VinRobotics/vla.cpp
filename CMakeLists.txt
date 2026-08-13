@@ -36,10 +36,15 @@ if(GGML_CUDA)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_cuda_ext_hook.py <SOURCE_DIR>)
 endif()
+# Overridable so a regression can be bisected against another tag in a separate
+# build dir (-DVLA_LLAMA_TAG=b10326) without editing this file. The patch
+# anchors in scripts/patch_ggml_cuda_ext_hook.py are checked against the default.
+set(VLA_LLAMA_TAG "b10331" CACHE STRING "llama.cpp tag to fetch")
+
 include(FetchContent)
 FetchContent_Declare(llama
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp
-    GIT_TAG        b10331
+    GIT_TAG        ${VLA_LLAMA_TAG}
     GIT_SHALLOW    TRUE
     ${_vla_llama_patch}
 )
