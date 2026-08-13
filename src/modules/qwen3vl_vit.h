@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include "layers/attn.h"
+#include "layers/rope.h"
 #include "model.h"
 
 #include "ggml.h"
@@ -36,23 +38,6 @@ constexpr float QWEN3VL_STD [3] = {0.5f, 0.5f, 0.5f};
 struct VitLayerW { ggml_tensor *ln1w,*ln1b,*ln2w,*ln2b,*Wqkv,*bqkv,*Wo,*bo,*Wfc1,*bfc1,*Wfc2,*bfc2; };
 struct MergerW   { ggml_tensor *nw,*nb,*fc1w,*fc1b,*fc2w,*fc2b; };
 
-inline ggml_tensor * rope2d(ggml_context * C, ggml_tensor * x, ggml_tensor * cos_t, ggml_tensor * sin_t) {
-    const int64_t hd = x->ne[0], S = x->ne[1], Hh = x->ne[2]; const int64_t half = hd / 2;
-    ggml_tensor * x1 = ggml_cont(C, ggml_view_3d(C, x, half, S, Hh, x->nb[1], x->nb[2], 0));
-    ggml_tensor * x2 = ggml_cont(C, ggml_view_3d(C, x, half, S, Hh, x->nb[1], x->nb[2], (size_t) half * x->nb[0]));
-    ggml_tensor * rot = ggml_concat(C, ggml_neg(C, x2), x1, 0);
-    return ggml_add(C, ggml_mul(C, x, cos_t), ggml_mul(C, rot, sin_t));
-}
-
-inline ggml_tensor * flash_attn(ggml_context * C, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
-                                ggml_tensor * mask, float scale) {
-    ggml_tensor * kf = (k->type == GGML_TYPE_F16) ? k : ggml_cast(C, k, GGML_TYPE_F16);
-    ggml_tensor * vf = (v->type == GGML_TYPE_F16) ? v : ggml_cast(C, v, GGML_TYPE_F16);
-    ggml_tensor * o  = ggml_flash_attn_ext(C, q, kf, vf, mask, scale, 0.0f, 0.0f);
-    ggml_flash_attn_ext_set_prec(o, GGML_PREC_F32);
-    return ggml_reshape_2d(C, o, o->ne[0] * o->ne[1], o->ne[2] * o->ne[3]);
-}
-
 inline ggml_tensor * build_vit_layer(ggml_context * C, const VitLayerW & w, ggml_tensor * x,
                                      ggml_tensor * cos_t, ggml_tensor * sin_t,
                                      int64_t seq, int64_t heads, int64_t hd, int64_t hidden, float ln_eps) {
@@ -62,19 +47,11 @@ inline ggml_tensor * build_vit_layer(ggml_context * C, const VitLayerW & w, ggml
     ggml_tensor * q = ggml_cont(C, ggml_view_2d(C, qkv, hidden, seq, qkv->nb[1], 0));
     ggml_tensor * k = ggml_cont(C, ggml_view_2d(C, qkv, hidden, seq, qkv->nb[1], (size_t) hidden * qkv->nb[0]));
     ggml_tensor * v = ggml_cont(C, ggml_view_2d(C, qkv, hidden, seq, qkv->nb[1], (size_t) 2 * hidden * qkv->nb[0]));
-    ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, hd, heads, seq), 0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, hd, heads, seq), 0, 2, 1, 3));
-    Q = rope2d(C, Q, cos_t, sin_t); K = rope2d(C, K, cos_t, sin_t);
+    ggml_tensor * Q = rope_2d(C, to_heads(C, q, hd, heads, seq), cos_t, sin_t);
+    ggml_tensor * K = rope_2d(C, to_heads(C, k, hd, heads, seq), cos_t, sin_t);
     ggml_tensor * att;
-    if (vla::flash_attn_enabled()) {
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, heads, seq), 0, 2, 1, 3));
-        att = flash_attn(C, Q, K, V, nullptr, scale);
-    } else {
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, heads, seq), 1, 2, 0, 3));
-        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-        ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
-        att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
-    }
+    if (vla::flash_attn_enabled()) att = flash_attention(C, Q, K, to_heads  (C, v, hd, heads, seq), nullptr, scale);
+    else                          att = attention      (C, Q, K, to_heads_v(C, v, hd, heads, seq), nullptr, scale, hidden, seq);
     ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
     ggml_tensor * n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.ln2w), w.ln2b);
     ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, ggml_gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);

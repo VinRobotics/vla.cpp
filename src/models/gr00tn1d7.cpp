@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "arch.h"
+#include "layers/attn.h"
 #include "options.h"
 #include "model.h"
 
@@ -134,18 +135,11 @@ ggml_tensor * build_vlsa_layer(ggml_context * C, const VlsaLayerW & w, ggml_tens
     ggml_tensor * q = ggml_add(C, ggml_mul_mat(C, w.Wq, n1), w.bq);
     ggml_tensor * k = ggml_add(C, ggml_mul_mat(C, w.Wk, n1), w.bk);
     ggml_tensor * v = ggml_add(C, ggml_mul_mat(C, w.Wv, n1), w.bv);
-    ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, hd, heads, seq), 0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, hd, heads, seq), 0, 2, 1, 3));
+    ggml_tensor * Q = to_heads(C, q, hd, heads, seq);
+    ggml_tensor * K = to_heads(C, k, hd, heads, seq);
     ggml_tensor * att;
-    if (vla::flash_attn_enabled()) {
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, heads, seq), 0, 2, 1, 3));
-        att = flash_attn(C, Q, K, V, nullptr, scale);
-    } else {
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, heads, seq), 1, 2, 0, 3));
-        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-        ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
-        att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
-    }
+    if (vla::flash_attn_enabled()) att = flash_attention(C, Q, K, to_heads  (C, v, hd, heads, seq), nullptr, scale);
+    else                          att = attention      (C, Q, K, to_heads_v(C, v, hd, heads, seq), nullptr, scale, hidden, seq);
     ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
     ggml_tensor * n3 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.n3w), w.n3b);
     ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wff2, ggml_gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wff0, n3), w.bff0))), w.bff2);
@@ -171,15 +165,8 @@ ggml_tensor * build_qwen3_layer(ggml_context * C, const Gr00tN1d7ModelArch & m, 
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, qr, 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, kr, 0, 2, 1, 3));
     ggml_tensor * att;
-    if (vla::flash_attn_enabled()) {
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, vh, 0, 2, 1, 3));
-        att = flash_attn(C, Q, K, V, ggml_cast(C, mask, GGML_TYPE_F16), scale);
-    } else {
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, vh, 1, 2, 0, 3));
-        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-        ggml_tensor * aw = ggml_soft_max_ext(C, kq, mask, scale, 0.0f);
-        att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hq, seq);
-    }
+    if (vla::flash_attn_enabled()) att = flash_attention(C, Q, K, ggml_cont(C, ggml_permute(C, vh, 0, 2, 1, 3)), ggml_cast(C, mask, GGML_TYPE_F16), scale);
+    else                          att = attention      (C, Q, K, ggml_cont(C, ggml_permute(C, vh, 1, 2, 0, 3)), mask, scale, hq, seq);
     ggml_tensor * h_attn = ggml_add(C, h, ggml_mul_mat(C, w.Wo, att));
     ggml_tensor * hn2 = ggml_mul(C, ggml_rms_norm(C, h_attn, m.lm_rms_eps), w.ffn_norm);
     ggml_tensor * gate = ggml_silu(C, ggml_mul_mat(C, w.Wgate, hn2));
