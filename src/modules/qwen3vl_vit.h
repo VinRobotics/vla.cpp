@@ -17,6 +17,7 @@
 #pragma once
 
 #include "layers/attn.h"
+#include "loader.h"
 #include "layers/rope.h"
 #include "model.h"
 
@@ -37,6 +38,55 @@ constexpr float QWEN3VL_STD [3] = {0.5f, 0.5f, 0.5f};
 
 struct VitLayerW { ggml_tensor *ln1w,*ln1b,*ln2w,*ln2b,*Wqkv,*bqkv,*Wo,*bo,*Wfc1,*bfc1,*Wfc2,*bfc2; };
 struct MergerW   { ggml_tensor *nw,*nb,*fc1w,*fc1b,*fc2w,*fc2b; };
+
+struct Qwen3VLTower {
+    std::vector<VitLayerW> blk;
+    MergerW                deepstack[3];
+    MergerW                merger;
+    ggml_tensor *          patch_w = nullptr;
+    ggml_tensor *          patch_b = nullptr;
+    ggml_tensor *          pos     = nullptr;
+
+    void declare(WeightLoader & L, const char * prefix, int64_t layers) {
+        patch_w = L.gemm("%s.patch_embd.weight", prefix);
+        patch_b = L.f32 ("%s.patch_embd.bias",   prefix);
+        pos     = L.f32 ("%s.pos_embd",          prefix);
+
+        blk.resize(layers);
+        for (int64_t i=0; i<layers; ++i) {
+            VitLayerW & w = blk[i];
+            w.ln1w = L.f32 ("%s.blk.%lld.ln1.weight",      prefix, (long long)i);
+            w.ln1b = L.f32 ("%s.blk.%lld.ln1.bias",        prefix, (long long)i);
+            w.ln2w = L.f32 ("%s.blk.%lld.ln2.weight",      prefix, (long long)i);
+            w.ln2b = L.f32 ("%s.blk.%lld.ln2.bias",        prefix, (long long)i);
+            w.Wqkv = L.gemm("%s.blk.%lld.attn_qkv.weight", prefix, (long long)i);
+            w.bqkv = L.f32 ("%s.blk.%lld.attn_qkv.bias",   prefix, (long long)i);
+            w.Wo   = L.gemm("%s.blk.%lld.attn_o.weight",   prefix, (long long)i);
+            w.bo   = L.f32 ("%s.blk.%lld.attn_o.bias",     prefix, (long long)i);
+            w.Wfc1 = L.gemm("%s.blk.%lld.fc1.weight",      prefix, (long long)i);
+            w.bfc1 = L.f32 ("%s.blk.%lld.fc1.bias",        prefix, (long long)i);
+            w.Wfc2 = L.gemm("%s.blk.%lld.fc2.weight",      prefix, (long long)i);
+            w.bfc2 = L.f32 ("%s.blk.%lld.fc2.bias",        prefix, (long long)i);
+        }
+
+        auto merger_w = [&](MergerW & w, const char * name) {
+            w.nw   = L.f32 ("%s.norm.weight", name);
+            w.nb   = L.f32 ("%s.norm.bias",   name);
+            w.fc1w = L.gemm("%s.fc1.weight",  name);
+            w.fc1b = L.f32 ("%s.fc1.bias",    name);
+            w.fc2w = L.gemm("%s.fc2.weight",  name);
+            w.fc2b = L.f32 ("%s.fc2.bias",    name);
+        };
+
+        char name[160];
+        for (int j = 0; j < 3; ++j) {
+            std::snprintf(name, sizeof(name), "%s.deepstack.%d", prefix, j);
+            merger_w(deepstack[j], name);
+        }
+        std::snprintf(name, sizeof(name), "%s.merger", prefix);
+        merger_w(merger, name);
+    }
+};
 
 inline ggml_tensor * build_vit_layer(ggml_context * C, const VitLayerW & w, ggml_tensor * x,
                                      ggml_tensor * cos_t, ggml_tensor * sin_t,

@@ -50,7 +50,10 @@ struct DitHead {
     ggml_tensor *te_l1W = nullptr, *te_l1b = nullptr, *te_l2W = nullptr, *te_l2b = nullptr;
     ggml_tensor *po1W   = nullptr, *po1b   = nullptr, *po2W   = nullptr, *po2b   = nullptr;
 
-    void declare(WeightLoader & L, const char * prefix, bool fuse_qkv = false, bool interleave = false);
+    // outer names time_emb and proj_out when they do not sit under the block
+    // prefix; null means they do.
+    void declare(WeightLoader & L, const char * prefix, bool fuse_qkv = false, bool interleave = false,
+                 const char * outer = nullptr);
 
     void kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
             ggml_tensor ** K_out, ggml_tensor ** V_out) const;

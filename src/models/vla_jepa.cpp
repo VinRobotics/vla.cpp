@@ -23,7 +23,11 @@
 #include "gguf.h"
 #include "gguf_reader.h"
 #include "scratch_ctx.h"
-#include "models/dit_common.h"
+#include "layers/embed.h"
+#include "layers/linear.h"
+#include "layers/norm.h"
+#include "modules/dit_head.h"
+#include "modules/qwen3_lm.h"
 #include "modules/qwen3vl_vit.h"
 #include "env_flag.h"
 
@@ -43,9 +47,6 @@
 namespace vla {
 namespace {
 
-
-struct Qwen3LayerW { ggml_tensor *attn_norm,*Wq,*Wk,*Wv,*Wo,*q_norm,*k_norm,*ffn_norm,*Wgate,*Wup,*Wdown; };
-struct DitLayerW   { ggml_tensor *adaln_w,*adaln_b,*Wq,*bq,*Wk,*bk,*Wv,*bv,*Wo,*bo,*Wff0,*bff0,*Wff2,*bff2; };
 
 }
 
@@ -92,20 +93,14 @@ struct VlaJepaModelArch : public ModelArchBase {
     float   vit_ln_eps=1e-6f, vit_rope_base=10000.0f, lm_rms_eps=1e-6f, lm_rope_base=5000000.0f, connector_ln_eps=1e-6f;
     float   dit_ln_eps=1e-5f, dit_norm_out_eps=1e-6f;
 
-    ggml_tensor *vit_patch_w=nullptr,*vit_patch_b=nullptr,*vit_pos=nullptr;
-    std::vector<VitLayerW> vit;
-    MergerW deepstack[3];
-    MergerW merger;
-    ggml_tensor *lm_output_norm=nullptr;
-    std::vector<Qwen3LayerW> lm;
+    Qwen3VLTower vit;
+    Qwen3LM      lm;
+    DitHead      dit;
 
     ggml_tensor *ae_l1W=nullptr,*ae_l1b=nullptr,*ae_l2W=nullptr,*ae_l2b=nullptr,*ae_l3W=nullptr,*ae_l3b=nullptr;
     ggml_tensor *se_l1W=nullptr,*se_l1b=nullptr,*se_l2W=nullptr,*se_l2b=nullptr;
     ggml_tensor *ad_l1W=nullptr,*ad_l1b=nullptr,*ad_l2W=nullptr,*ad_l2b=nullptr;
     ggml_tensor *future_tokens=nullptr,*pos_embd=nullptr;
-    ggml_tensor *te_l1W=nullptr,*te_l1b=nullptr,*te_l2W=nullptr,*te_l2b=nullptr;
-    std::vector<DitLayerW> dit;
-    ggml_tensor *po1W=nullptr,*po1b=nullptr,*po2W=nullptr,*po2b=nullptr;
 
     bool                            caches_ready = false;
     std::vector<int64_t>            c_grow, c_gcol;
@@ -120,56 +115,7 @@ struct VlaJepaModelArch : public ModelArchBase {
 
 namespace {
 
-ggml_tensor * build_qwen3_layer(ggml_context * C, const VlaJepaModelArch & m, const Qwen3LayerW & w,
-                                ggml_tensor * h, ggml_tensor * positions, ggml_tensor * mask, int64_t seq) {
-    const int64_t hd = m.lm_head_dim, n_q = m.n_q, n_kv = m.n_kv, hq = n_q * hd;
-    const float scale = 1.0f / std::sqrt((float) hd);
-    ggml_tensor * hn = ggml_mul(C, ggml_rms_norm(C, h, m.lm_rms_eps), w.attn_norm);
-    ggml_tensor * qp = ggml_mul_mat(C, w.Wq, hn);
-    ggml_tensor * kp = ggml_mul_mat(C, w.Wk, hn);
-    ggml_tensor * vp = ggml_mul_mat(C, w.Wv, hn);
-    ggml_tensor * qh = ggml_reshape_3d(C, qp, hd, n_q,  seq);
-    ggml_tensor * kh = ggml_reshape_3d(C, kp, hd, n_kv, seq);
-    ggml_tensor * vh = ggml_reshape_3d(C, vp, hd, n_kv, seq);
-    ggml_tensor * qn = ggml_mul(C, ggml_rms_norm(C, qh, m.lm_rms_eps), w.q_norm);
-    ggml_tensor * kn = ggml_mul(C, ggml_rms_norm(C, kh, m.lm_rms_eps), w.k_norm);
-    int sections[4] = { 24, 20, 20, 0 };
-    ggml_tensor * qr = ggml_rope_multi(C, qn, positions, nullptr, (int) hd, sections, GGML_ROPE_TYPE_IMROPE, 0, m.lm_rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
-    ggml_tensor * kr = ggml_rope_multi(C, kn, positions, nullptr, (int) hd, sections, GGML_ROPE_TYPE_IMROPE, 0, m.lm_rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
-    ggml_tensor * Q = ggml_cont(C, ggml_permute(C, qr, 0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(C, ggml_permute(C, kr, 0, 2, 1, 3));
-    ggml_tensor * V = ggml_cont(C, ggml_permute(C, vh, 1, 2, 0, 3));
-    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-    ggml_tensor * aw = ggml_soft_max_ext(C, kq, mask, scale, 0.0f);
-    ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hq, seq);
-    ggml_tensor * h_attn = ggml_add(C, h, ggml_mul_mat(C, w.Wo, att));
-    ggml_tensor * hn2 = ggml_mul(C, ggml_rms_norm(C, h_attn, m.lm_rms_eps), w.ffn_norm);
-    ggml_tensor * gate = ggml_silu(C, ggml_mul_mat(C, w.Wgate, hn2));
-    ggml_tensor * up   = ggml_mul_mat(C, w.Wup, hn2);
-    return ggml_add(C, h_attn, ggml_mul_mat(C, w.Wdown, ggml_mul(C, gate, up)));
-}
 
-ggml_tensor * build_dit_block(ggml_context * C, const VlaJepaModelArch & m, const DitLayerW & w,
-                              ggml_tensor * h, ggml_tensor * temb, ggml_tensor * enc) {
-    const int64_t hd = m.dit_head_dim, heads = m.dit_heads, dim = m.dit_hidden, Tk = h->ne[1];
-    const float scale = 1.0f / std::sqrt((float) hd);
-    ggml_tensor * n = adaln(C, h, temb, w.adaln_w, w.adaln_b, dim, m.dit_ln_eps);
-    ggml_tensor * kv = enc ? enc : n;
-    const int64_t Tkv = kv->ne[1];
-    ggml_tensor * q = ggml_add(C, ggml_mul_mat(C, w.Wq, n),  w.bq);
-    ggml_tensor * k = ggml_add(C, ggml_mul_mat(C, w.Wk, kv), w.bk);
-    ggml_tensor * v = ggml_add(C, ggml_mul_mat(C, w.Wv, kv), w.bv);
-    ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, hd, heads, Tk),  0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, hd, heads, Tkv), 0, 2, 1, 3));
-    ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, heads, Tkv), 1, 2, 0, 3));
-    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-    ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
-    ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), dim, Tk);
-    ggml_tensor * h1 = ggml_add(C, h, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
-    ggml_tensor * n3 = ggml_norm(C, h1, m.dit_ln_eps);
-    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wff2, ggml_gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wff0, n3), w.bff0))), w.bff2);
-    return ggml_add(C, h1, ff);
-}
 
 bool load_config(const gguf_reader & g, VlaJepaModelArch & m, Config & cfg) {
     auto U = [&](const char * k, int64_t & dst) { if (g.has(k)) dst = (int64_t) g.u32(k); };
@@ -208,6 +154,29 @@ bool load_config(const gguf_reader & g, VlaJepaModelArch & m, Config & cfg) {
         std::fprintf(stderr, "vla(vla_jepa): time_proj_dim %lld, expected 256\n", (long long) m.time_proj_dim);
         return false;
     }
+
+    m.lm.cfg.hidden      = m.lm_hidden;
+    m.lm.cfg.layers      = m.lm_layers;
+    m.lm.cfg.n_q         = m.n_q;
+    m.lm.cfg.n_kv        = m.n_kv;
+    m.lm.cfg.head_dim    = m.lm_head_dim;
+    m.lm.cfg.inter       = m.lm_inter;
+    m.lm.cfg.rms_eps     = m.lm_rms_eps;
+    m.lm.cfg.flash_attn  = flash_attn_enabled();
+    m.lm.cfg.rope.type   = GGML_ROPE_TYPE_IMROPE;
+    m.lm.cfg.rope.n_dims = (int) m.lm_head_dim;
+    m.lm.cfg.rope.freq_base   = m.lm_rope_base;
+    m.lm.cfg.rope.sections[0] = 24;
+    m.lm.cfg.rope.sections[1] = 20;
+    m.lm.cfg.rope.sections[2] = 20;
+    m.lm.cfg.rope.sections[3] = 0;
+
+    m.dit.cfg.hidden       = m.dit_hidden;
+    m.dit.cfg.heads        = m.dit_heads;
+    m.dit.cfg.head_dim     = m.dit_head_dim;
+    m.dit.cfg.layers       = m.dit_layers;
+    m.dit.cfg.ln_eps       = m.dit_ln_eps;
+    m.dit.cfg.norm_out_eps = m.dit_norm_out_eps;
 
     cfg = Config{};
     cfg.n_img = (m.image_target_size / m.patch_size / m.spatial_merge) * (m.image_target_size / m.patch_size / m.spatial_merge);
@@ -261,89 +230,31 @@ std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
         m->backend = b.handle;
     }
 
-    ggml_init_params wp = {  (size_t) 32 * 1024 * 1024,  nullptr,  true };
+    ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };
     m->ctx_weights = ggml_init(wp);
     if (!m->ctx_weights) { std::fprintf(stderr, "vla(vla_jepa): ggml_init(ctx_weights) failed\n"); return nullptr; }
-    ggml_context * W = m->ctx_weights;
-    auto mk = [&](const char * name, ggml_type type) -> ggml_tensor * {
-        const ggml_tensor * gt = g.meta(name);
-        if (!gt) { std::fprintf(stderr, "vla(vla_jepa): missing tensor %s\n", name); return nullptr; }
-        ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), ggml_n_dims(gt), gt->ne);
-        ggml_set_name(t, name); return t;
-    };
-    auto mk_mm  = [&](const char * name) { return mk(name, m->matmul_type); };
-    auto mk_f32 = [&](const char * name) { return mk(name, GGML_TYPE_F32); };
 
-    bool ok = true;
+    WeightLoader L("vla_jepa", g, m->ctx_weights, m->matmul_type);
 
-    m->vit_patch_w = mk_mm("vit.patch_embd.weight"); m->vit_patch_b = mk_f32("vit.patch_embd.bias"); m->vit_pos = mk_f32("vit.pos_embd");
-    m->vit.resize(m->vit_layers);
-    for (int64_t i = 0; i < m->vit_layers && ok; ++i) {
-        char p[64]; auto N = [&](const char * s) { std::snprintf(p, sizeof(p), "vit.blk.%lld.%s", (long long) i, s); return p; };
-        auto & w = m->vit[i];
-        w.ln1w=mk_f32(N("ln1.weight")); w.ln1b=mk_f32(N("ln1.bias")); w.ln2w=mk_f32(N("ln2.weight")); w.ln2b=mk_f32(N("ln2.bias"));
-        w.Wqkv=mk_mm(N("attn_qkv.weight")); w.bqkv=mk_f32(N("attn_qkv.bias")); w.Wo=mk_mm(N("attn_o.weight")); w.bo=mk_f32(N("attn_o.bias"));
-        w.Wfc1=mk_mm(N("fc1.weight")); w.bfc1=mk_f32(N("fc1.bias")); w.Wfc2=mk_mm(N("fc2.weight")); w.bfc2=mk_f32(N("fc2.bias"));
-        ok &= w.ln1w&&w.ln1b&&w.ln2w&&w.ln2b&&w.Wqkv&&w.bqkv&&w.Wo&&w.bo&&w.Wfc1&&w.bfc1&&w.Wfc2&&w.bfc2;
-    }
-    for (int j = 0; j < 3; ++j) {
-        char p[64]; auto N = [&](const char * s) { std::snprintf(p, sizeof(p), "vit.deepstack.%d.%s", j, s); return p; };
-        auto & w = m->deepstack[j];
-        w.nw=mk_f32(N("norm.weight")); w.nb=mk_f32(N("norm.bias")); w.fc1w=mk_mm(N("fc1.weight")); w.fc1b=mk_f32(N("fc1.bias")); w.fc2w=mk_mm(N("fc2.weight")); w.fc2b=mk_f32(N("fc2.bias"));
-        ok &= w.nw&&w.nb&&w.fc1w&&w.fc1b&&w.fc2w&&w.fc2b;
-    }
-    { auto & w = m->merger;
-      w.nw=mk_f32("vit.merger.norm.weight"); w.nb=mk_f32("vit.merger.norm.bias"); w.fc1w=mk_mm("vit.merger.fc1.weight"); w.fc1b=mk_f32("vit.merger.fc1.bias"); w.fc2w=mk_mm("vit.merger.fc2.weight"); w.fc2b=mk_f32("vit.merger.fc2.bias");
-      ok &= w.nw&&w.nb&&w.fc1w&&w.fc1b&&w.fc2w&&w.fc2b; }
+    m->vit.declare(L, "vit", m->vit_layers);
+    m->lm.declare(L, "vlm");
 
-    m->lm_output_norm = mk_f32("vlm.output_norm.weight");
-    m->lm.resize(m->lm_layers);
-    for (int64_t i = 0; i < m->lm_layers && ok; ++i) {
-        char p[64]; auto N = [&](const char * s) { std::snprintf(p, sizeof(p), "vlm.blk.%lld.%s", (long long) i, s); return p; };
-        auto & w = m->lm[i];
-        w.attn_norm=mk_f32(N("attn_norm.weight"));
-        w.Wq=mk_mm(N("attn_q.weight")); w.Wk=mk_mm(N("attn_k.weight")); w.Wv=mk_mm(N("attn_v.weight")); w.Wo=mk_mm(N("attn_o.weight"));
-        w.q_norm=mk_f32(N("attn_q_norm.weight")); w.k_norm=mk_f32(N("attn_k_norm.weight")); w.ffn_norm=mk_f32(N("ffn_norm.weight"));
-        w.Wgate=mk_mm(N("ffn_gate.weight")); w.Wup=mk_mm(N("ffn_up.weight")); w.Wdown=mk_mm(N("ffn_down.weight"));
-        ok &= w.attn_norm&&w.Wq&&w.Wk&&w.Wv&&w.Wo&&w.q_norm&&w.k_norm&&w.ffn_norm&&w.Wgate&&w.Wup&&w.Wdown;
-    }
+    m->ae_l1W = L.f32("ah.act_enc.l1.weight");   m->ae_l1b = L.f32("ah.act_enc.l1.bias");
+    m->ae_l2W = L.f32("ah.act_enc.l2.weight");   m->ae_l2b = L.f32("ah.act_enc.l2.bias");
+    m->ae_l3W = L.f32("ah.act_enc.l3.weight");   m->ae_l3b = L.f32("ah.act_enc.l3.bias");
+    m->se_l1W = L.f32("ah.state_enc.l1.weight"); m->se_l1b = L.f32("ah.state_enc.l1.bias");
+    m->se_l2W = L.f32("ah.state_enc.l2.weight"); m->se_l2b = L.f32("ah.state_enc.l2.bias");
+    m->ad_l1W = L.f32("ah.act_dec.l1.weight");   m->ad_l1b = L.f32("ah.act_dec.l1.bias");
+    m->ad_l2W = L.f32("ah.act_dec.l2.weight");   m->ad_l2b = L.f32("ah.act_dec.l2.bias");
+    m->future_tokens = L.f32("ah.future_tokens");
+    m->pos_embd      = L.f32("ah.pos_embd");
 
-    m->ae_l1W=mk_f32("ah.act_enc.l1.weight"); m->ae_l1b=mk_f32("ah.act_enc.l1.bias");
-    m->ae_l2W=mk_f32("ah.act_enc.l2.weight"); m->ae_l2b=mk_f32("ah.act_enc.l2.bias");
-    m->ae_l3W=mk_f32("ah.act_enc.l3.weight"); m->ae_l3b=mk_f32("ah.act_enc.l3.bias");
-    m->se_l1W=mk_f32("ah.state_enc.l1.weight"); m->se_l1b=mk_f32("ah.state_enc.l1.bias");
-    m->se_l2W=mk_f32("ah.state_enc.l2.weight"); m->se_l2b=mk_f32("ah.state_enc.l2.bias");
-    m->ad_l1W=mk_f32("ah.act_dec.l1.weight"); m->ad_l1b=mk_f32("ah.act_dec.l1.bias");
-    m->ad_l2W=mk_f32("ah.act_dec.l2.weight"); m->ad_l2b=mk_f32("ah.act_dec.l2.bias");
-    m->future_tokens=mk_f32("ah.future_tokens"); m->pos_embd=mk_f32("ah.pos_embd");
-    m->te_l1W=mk_mm("ah.time_emb.l1.weight"); m->te_l1b=mk_f32("ah.time_emb.l1.bias");
-    m->te_l2W=mk_mm("ah.time_emb.l2.weight"); m->te_l2b=mk_f32("ah.time_emb.l2.bias");
-    m->dit.resize(m->dit_layers);
-    for (int64_t i = 0; i < m->dit_layers && ok; ++i) {
-        char p[64]; auto N = [&](const char * s) { std::snprintf(p, sizeof(p), "ah.dit.%lld.%s", (long long) i, s); return p; };
-        auto & w = m->dit[i];
-        w.adaln_w=mk_mm(N("adaln.weight")); w.adaln_b=mk_f32(N("adaln.bias"));
-        w.Wq=mk_mm(N("attn_q.weight")); w.bq=mk_f32(N("attn_q.bias")); w.Wk=mk_mm(N("attn_k.weight")); w.bk=mk_f32(N("attn_k.bias"));
-        w.Wv=mk_mm(N("attn_v.weight")); w.bv=mk_f32(N("attn_v.bias")); w.Wo=mk_mm(N("attn_o.weight")); w.bo=mk_f32(N("attn_o.bias"));
-        w.Wff0=mk_mm(N("ff0.weight")); w.bff0=mk_f32(N("ff0.bias")); w.Wff2=mk_mm(N("ff2.weight")); w.bff2=mk_f32(N("ff2.bias"));
-        ok &= w.adaln_w&&w.adaln_b&&w.Wq&&w.bq&&w.Wk&&w.bk&&w.Wv&&w.bv&&w.Wo&&w.bo&&w.Wff0&&w.bff0&&w.Wff2&&w.bff2;
-    }
-    m->po1W=mk_mm("ah.proj_out1.weight"); m->po1b=mk_f32("ah.proj_out1.bias"); m->po2W=mk_mm("ah.proj_out2.weight"); m->po2b=mk_f32("ah.proj_out2.bias");
-    ok &= m->vit_patch_w&&m->vit_patch_b&&m->vit_pos&&m->lm_output_norm&&m->ae_l1W&&m->ae_l2W&&m->ae_l3W&&m->se_l1W&&m->se_l2W&&m->ad_l1W&&m->ad_l2W&&
-          m->future_tokens&&m->pos_embd&&m->te_l1W&&m->te_l1b&&m->te_l2W&&m->te_l2b&&m->po1W&&m->po1b&&m->po2W&&m->po2b;
-    if (!ok) { std::fprintf(stderr, "vla(vla_jepa): weight tensor setup failed\n"); return nullptr; }
+    m->dit.declare(L, "ah.dit", false, false, "ah");
 
-    m->weight_buf = ggml_backend_alloc_ctx_tensors(m->ctx_weights, m->backend);
-    if (!m->weight_buf) { std::fprintf(stderr, "vla(vla_jepa): ggml_backend_alloc_ctx_tensors failed (OOM?)\n"); return nullptr; }
-    for (ggml_tensor * t = ggml_get_first_tensor(W); t; t = ggml_get_next_tensor(W, t)) {
-        std::vector<uint8_t> bytes = g.read_convert(ggml_get_name(t), t->type);
-        if (bytes.empty() || bytes.size() != ggml_nbytes(t)) {
-            std::fprintf(stderr, "vla(vla_jepa): failed to load %s (%zu vs %zu bytes)\n", ggml_get_name(t), bytes.size(), ggml_nbytes(t)); return nullptr;
-        }
-        ggml_backend_tensor_set(t, bytes.data(), 0, bytes.size());
-    }
-    std::printf("vla(vla_jepa): weights resident in %.2f GiB (%s) - Qwen3-VL backbone + deepstack + DiT-B head\n",
-                ggml_backend_buffer_get_size(m->weight_buf) / (1024.0 * 1024.0 * 1024.0), m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
+    if (!L.upload(m->backend, &m->weight_buf)) return nullptr;
+
+    std::printf("vla(vla_jepa): weights resident in %.2f GiB (%s)\n",
+                ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0*1024.0), dtype_name(m->matmul_type));
     if (!m->build_caches()) { std::fprintf(stderr, "vla(vla_jepa): build_caches failed\n"); return nullptr; }
     return m;
 }
@@ -437,17 +348,17 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         ggml_tensor * t_pos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, vit_hidden, n_patches);     ggml_set_input(t_pos);
         ggml_tensor * t_cos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hd_vit, n_patches);          ggml_set_input(t_cos);
         ggml_tensor * t_sin     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hd_vit, n_patches);          ggml_set_input(t_sin);
-        ggml_tensor * h = ggml_add(VC, ggml_add(VC, ggml_mul_mat(VC, vit_patch_w, t_patches), vit_patch_b), t_pos);
+        ggml_tensor * h = ggml_add(VC, ggml_add(VC, ggml_mul_mat(VC, vit.patch_w, t_patches), vit.patch_b), t_pos);
         ggml_set_output(h);
         ggml_tensor * stash[3] = {nullptr, nullptr, nullptr};
         for (int64_t i = 0; i < vit_layers; ++i) {
-            h = build_vit_layer(VC, vit[i], h, t_cos, t_sin, n_patches, vit_heads, hd_vit, vit_hidden, vit_ln_eps);
+            h = build_vit_layer(VC, vit.blk[i], h, t_cos, t_sin, n_patches, vit_heads, hd_vit, vit_hidden, vit_ln_eps);
             ggml_set_output(h);
             for (int j = 0; j < 3; ++j) if (i == deepstack_idx[j]) stash[j] = h;
         }
         ggml_tensor * ds_out[3];
-        for (int j = 0; j < 3; ++j) { ds_out[j] = build_merger(VC, deepstack[j], stash[j] ? stash[j] : h, vit_hidden, m2, connector_ln_eps, false); ggml_set_output(ds_out[j]); }
-        ggml_tensor * vit_embeds = build_merger(VC, merger, h, vit_hidden, m2, connector_ln_eps, true);
+        for (int j = 0; j < 3; ++j) { ds_out[j] = build_merger(VC, vit.deepstack[j], stash[j] ? stash[j] : h, vit_hidden, m2, connector_ln_eps, false); ggml_set_output(ds_out[j]); }
+        ggml_tensor * vit_embeds = build_merger(VC, vit.merger, h, vit_hidden, m2, connector_ln_eps, true);
         ggml_set_output(vit_embeds);
         ggml_cgraph * vg = ggml_new_graph_custom(VC, 16384, false);
         ggml_build_forward_expand(vg, vit_embeds);
@@ -514,7 +425,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         for (int j = 0; j < 3; ++j) { t_ds[j] = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ); ggml_set_input(t_ds[j]); }
         ggml_tensor * hh = t_embeds;
         for (int64_t i = 0; i < lm_layers; ++i) {
-            hh = build_qwen3_layer(C, *this, lm[i], hh, t_pos2, t_lmmask, SEQ);
+            hh = lm.block(C, lm.blk[i], hh, t_pos2, t_lmmask, SEQ);
             if (i < 3) hh = ggml_add(C, hh, t_ds[i]);
         }
         ggml_tensor * eagle = hh;
@@ -598,7 +509,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
     ggml_tensor * actions = t_x0;
     for (int64_t s = 0; s < num_steps; ++s) {
 
-        ggml_tensor * temb = ggml_add(C, ggml_mul_mat(C, te_l2W, ggml_silu(C, ggml_add(C, ggml_mul_mat(C, te_l1W, t_tproj[s]), te_l1b))), te_l2b);
+        ggml_tensor * temb = ggml_add(C, ggml_mul_mat(C, dit.te_l2W, ggml_silu(C, ggml_add(C, ggml_mul_mat(C, dit.te_l1W, t_tproj[s]), dit.te_l1b))), dit.te_l2b);
 
         ggml_tensor * a_emb = ggml_add(C, ggml_mul_mat(C, ae_l1W, actions), ae_l1b);
         ggml_tensor * cat   = ggml_concat(C, a_emb, t_tau[s], 0);
@@ -610,14 +521,14 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         ggml_tensor * x = seq;
         for (int64_t i = 0; i < dit_layers; ++i) {
             ggml_tensor * enc = (i % 2 == 0) ? t_cond : nullptr;
-            x = build_dit_block(C, *this, dit[i], x, temb, enc);
+            x = dit.block(C, dit.blk[i], x, temb, enc);
         }
 
-        ggml_tensor * po = ggml_add(C, ggml_mul_mat(C, po1W, ggml_silu(C, temb)), po1b);
+        ggml_tensor * po = ggml_add(C, ggml_mul_mat(C, dit.po1W, ggml_silu(C, temb)), dit.po1b);
         ggml_tensor * sh = ggml_view_1d(C, po, dit_hidden, 0), * sc = ggml_view_1d(C, po, dit_hidden, (size_t) dit_hidden * sizeof(float));
         ggml_tensor * xn = ggml_norm(C, x, dit_norm_out_eps);
         ggml_tensor * h_mod = ggml_add(C, ggml_add(C, xn, ggml_mul(C, xn, sc)), sh);
-        ggml_tensor * model_output = ggml_add(C, ggml_mul_mat(C, po2W, h_mod), po2b);
+        ggml_tensor * model_output = ggml_add(C, ggml_mul_mat(C, dit.po2W, h_mod), dit.po2b);
         step_pred[s] = model_output;
 
         ggml_tensor * last = ggml_cont(C, ggml_view_2d(C, model_output, OUTD, AH, model_output->nb[1], (size_t) (Nseq - AH) * model_output->nb[1]));

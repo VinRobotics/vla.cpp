@@ -24,11 +24,13 @@
 
 namespace vla {
 
-void DitHead::declare(WeightLoader & L, const char * prefix, bool fuse_qkv, bool interleave) {
-    te_l1W = L.gemm("%s.time_emb.l1.weight", prefix);
-    te_l1b = L.f32 ("%s.time_emb.l1.bias",   prefix);
-    te_l2W = L.gemm("%s.time_emb.l2.weight", prefix);
-    te_l2b = L.f32 ("%s.time_emb.l2.bias",   prefix);
+void DitHead::declare(WeightLoader & L, const char * prefix, bool fuse_qkv, bool interleave, const char * outer) {
+    if (!outer) outer = prefix;
+
+    te_l1W = L.gemm("%s.time_emb.l1.weight", outer);
+    te_l1b = L.f32 ("%s.time_emb.l1.bias",   outer);
+    te_l2W = L.gemm("%s.time_emb.l2.weight", outer);
+    te_l2b = L.f32 ("%s.time_emb.l2.bias",   outer);
 
     blk.resize(cfg.layers);
     for (int64_t i=0; i<cfg.layers; ++i) {
@@ -75,10 +77,10 @@ void DitHead::declare(WeightLoader & L, const char * prefix, bool fuse_qkv, bool
         }
     }
 
-    po1W = L.gemm("%s.proj_out1.weight", prefix);
-    po1b = L.f32 ("%s.proj_out1.bias",   prefix);
-    po2W = L.gemm("%s.proj_out2.weight", prefix);
-    po2b = L.f32 ("%s.proj_out2.bias",   prefix);
+    po1W = L.gemm("%s.proj_out1.weight", outer);
+    po1b = L.f32 ("%s.proj_out1.bias",   outer);
+    po2W = L.gemm("%s.proj_out2.weight", outer);
+    po2b = L.f32 ("%s.proj_out2.bias",   outer);
 }
 
 void DitHead::kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
