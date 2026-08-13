@@ -30,16 +30,18 @@ set(LLAMA_BUILD_TOOLS    ON  CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-# PATCH_COMMAND adds the CUDA extension hook; see scripts/patch_ggml_cuda_ext_hook.py.
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(_vla_llama_patch "")
+if(GGML_CUDA)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_cuda_ext_hook.py <SOURCE_DIR>)
+endif()
 include(FetchContent)
 FetchContent_Declare(llama
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp
     GIT_TAG        b10331
     GIT_SHALLOW    TRUE
-    PATCH_COMMAND  ${Python3_EXECUTABLE}
-                   ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_cuda_ext_hook.py
-                   <SOURCE_DIR>
+    ${_vla_llama_patch}
 )
 FetchContent_MakeAvailable(llama)
 
