@@ -246,6 +246,10 @@ int main(int argc, char ** argv) {
         } else if (a == "-h" || a == "--help") {
             usage(argv[0]);
             return 0;
+        } else if (a.size() > 1 && a[0] == '-') {
+            std::fprintf(stderr, "vla-server: unknown option '%s'\n", a.c_str());
+            usage(argv[0]);
+            return 1;
         } else {
             positionals.push_back(std::move(a));
         }
