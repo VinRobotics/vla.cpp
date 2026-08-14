@@ -12,6 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Runtime knobs that trade precision for speed. Only options a model
+// actually consumes belong here: an advertised flag nothing reads is how a
+// benchmark ends up measuring a configuration nobody asked for.
+//
+// Thread count, solver steps, GR00T embodiment and un-normalisation key stay
+// environment variables (VLA_N_THREADS, VLA_NUM_STEPS, VLA_GR00T_EMBODIMENT,
+// VLA_*_UNNORM_KEY) until the loaders read them from here.
+//
 // Runtime knobs that trade precision for speed. Every field is unset by
 // default; a model reads one with value_or() so its own default stays at its
 // own call site, and both branches are always compiled.
@@ -33,10 +41,6 @@ struct Options {
     std::optional<ggml_type>   act_dtype;
     std::optional<bool>        flash_attn;
     std::optional<bool>        mm_prec_f32;
-    std::optional<int>         n_threads;
-    std::optional<int>         num_steps;
-    std::optional<std::string> embodiment;
-    std::optional<std::string> unnorm_key;
 
     // Consumes argv[i] (and its value) if it names an option. Returns false
     // with err set on a bad value; leaves i untouched and err empty when the

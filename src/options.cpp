@@ -49,14 +49,6 @@ bool parse_bool(const std::string & v, bool & out) {
     return false;
 }
 
-bool parse_int(const std::string & v, int & out) {
-    char * end = nullptr;
-    const long n = std::strtol(v.c_str(), &end, 10);
-    if (end == v.c_str() || *end)
-        return false;
-    out = (int) n;
-    return true;
-}
 
 }
 
@@ -87,11 +79,7 @@ const char * Options::usage() {
     return "  --weight-dtype f32|bf16   resident dtype for GEMM weights\n"
            "  --act-dtype f32|bf16      activation dtype (needs CUDA and bf16 weights)\n"
            "  --flash-attn [0|1]        flash attention; faster, changes numerics\n"
-           "  --mm-prec default|f32     matmul accumulation precision\n"
-           "  --n-threads N             CPU threads for the in-tree loaders\n"
-           "  --num-steps N             flow-matching solver steps\n"
-           "  --embodiment TAG          GR00T embodiment tag or id\n"
-           "  --unnorm-key KEY          un-normalisation statistics key\n";
+           "  --mm-prec default|f32     matmul accumulation precision\n";
 }
 
 bool Options::parse_arg(int argc, char ** argv, int & i, std::string & err) {
@@ -145,38 +133,6 @@ bool Options::parse_arg(int argc, char ** argv, int & i, std::string & err) {
         }
         err = "--mm-prec: expected default or f32, got '"+v+"'";
         return false;
-    }
-
-    if (a == "--n-threads" || a == "--num-steps") {
-        std::string v;
-        if (!next(v))
-            return false;
-
-        int n = 0;
-        if (!parse_int(v, n) || n <= 0) {
-            err = a+": expected a positive integer, got '"+v+"'";
-            return false;
-        }
-        if (a == "--n-threads")
-            n_threads = n;
-        else
-            num_steps = n;
-        return true;
-    }
-
-    if (a == "--embodiment") {
-        std::string v;
-        if (!next(v))
-            return false;
-        embodiment = v;
-        return true;
-    }
-    if (a == "--unnorm-key") {
-        std::string v;
-        if (!next(v))
-            return false;
-        unnorm_key = v;
-        return true;
     }
 
     err.clear();
@@ -242,14 +198,6 @@ bool Options::load_json(const std::string & path, std::string & err) {
             flash_attn  = r["flash_attn"].get<bool>();
         if (r.contains("mm_prec"))
             mm_prec_f32 = r["mm_prec"].get<std::string>() == "f32";
-        if (r.contains("n_threads"))
-            n_threads   = r["n_threads"].get<int>();
-        if (r.contains("num_steps"))
-            num_steps   = r["num_steps"].get<int>();
-        if (r.contains("embodiment"))
-            embodiment  = r["embodiment"].get<std::string>();
-        if (r.contains("unnorm_key"))
-            unnorm_key  = r["unnorm_key"].get<std::string>();
     } catch (const std::exception & e) {
         err = std::string("config json runtime: ")+e.what();
         return false;
