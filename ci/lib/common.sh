@@ -139,7 +139,7 @@ apply_gr00t_env() {
     local arch="$1"
     case "$arch" in
         gr00t_n1_5|gr00t_n1_6|gr00t_n1_7)
-            : ;;
+            export VLA_GR00T_BF16_WEIGHTS="${VLA_GR00T_BF16_WEIGHTS:-1}" ;;
     esac
     case "$arch" in
         gr00t_n1_5) export VLA_GR00T_EMBODIMENT="${VLA_GR00T_EMBODIMENT:-new_embodiment}" ;;

@@ -56,7 +56,7 @@ Notes:
   accept the licence, or point `--tokenizer` at a local copy.
 - **GR00T** arches need `--stats-json <ckpt>/dataset_statistics.json` and an embodiment selected
   server-side via `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda` for N1.6,
-  `libero_sim` for N1.7). BF16 weights are the default, which is also what fits an 8 GB card.
+  `libero_sim` for N1.7), plus `VLA_GR00T_BF16_WEIGHTS=1` to fit an 8 GB card.
 
 To sweep every model over `libero_object` tasks 0–9, use `eval/run_libero.sh -i <MODELS_ROOT>`.
 
@@ -66,7 +66,7 @@ So far only **GR00T-N1.6** is wired (the `gr00t-n1d6-bridge` checkpoint with the
 embodiment). Serve it, then drive from the SimplerEnv venv:
 
 ```bash
-VLA_GR00T_EMBODIMENT=oxe_widowx \
+VLA_GR00T_BF16_WEIGHTS=1 VLA_GR00T_EMBODIMENT=oxe_widowx \
     ./build/vla-server "$GR00T_N1D6_GGUF"
 
 eval/sim/simpler/simpler_uv/.venv/bin/python eval/client/run_simpler_client_direct.py \

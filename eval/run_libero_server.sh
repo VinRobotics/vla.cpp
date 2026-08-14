@@ -45,7 +45,7 @@ Usage: $(basename "$0") -m MODEL [-i MODELS_ROOT] [-a BIND_ADDR] [-o LOG_DIR] [-
   -B               skip the cmake build (use the existing vla-server binary)
   -h               show this help
 
-Env overrides: BIND_ADDR, SERVER_BIN, VLA_GR00T_EMBODIMENT
+Env overrides: BIND_ADDR, SERVER_BIN, VLA_GR00T_BF16_WEIGHTS, VLA_GR00T_EMBODIMENT
 EOF
 }
 
@@ -143,9 +143,13 @@ case "${MODEL}" in
 esac
 
 # GR00T env. Honour a user-supplied VLA_GR00T_EMBODIMENT; otherwise default per
-# arch (matches eval/run_libero.sh). BF16 weights are the shipping default and
-# the smaller weight path - important on the Nano's 8 GB unified RAM.
+# arch (matches eval/run_libero.sh). VLA_GR00T_BF16_WEIGHTS defaults to 1 (BF16 is
+# the smaller weight path - important on the Nano's 8 GB unified RAM).
 _USER_VLA_GR00T_EMBODIMENT="${VLA_GR00T_EMBODIMENT-}"
+if [[ "${MODEL}" == gr00t_n1_5 || "${MODEL}" == gr00t_n1_6 || "${MODEL}" == gr00t_n1_7 ]]; then
+    export VLA_GR00T_BF16_WEIGHTS="${VLA_GR00T_BF16_WEIGHTS:-1}"
+    echo "[${MODEL}] VLA_GR00T_BF16_WEIGHTS=${VLA_GR00T_BF16_WEIGHTS}"
+fi
 if [[ -n "${_USER_VLA_GR00T_EMBODIMENT}" ]]; then
     export VLA_GR00T_EMBODIMENT="${_USER_VLA_GR00T_EMBODIMENT}"
 else

@@ -142,20 +142,21 @@ EOF
             ;;
         gr00t_n1_5)
             cat <<EOF
-    VLA_GR00T_EMBODIMENT=new_embodiment \\
+    VLA_GR00T_BF16_WEIGHTS=1 VLA_GR00T_EMBODIMENT=new_embodiment \\
     ./build/vla-server --bind tcp://*:${PORT} \\
         \${MODELS_ROOT}/gr00tn1d5-libero-object-gguf/gr00tn1d5-libero-object.gguf
 EOF
             ;;
         gr00t_n1_6)
             cat <<EOF
-    VLA_GR00T_EMBODIMENT=libero_panda \\
+    VLA_GR00T_BF16_WEIGHTS=1 VLA_GR00T_EMBODIMENT=libero_panda \\
     ./build/vla-server --bind tcp://*:${PORT} \\
         \${MODELS_ROOT}/gr00t-n1d6-libero-gguf/gr00t-n1d6-libero.gguf
 EOF
             ;;
         gr00t_n1_7)
             cat <<EOF
+    VLA_GR00T_BF16_WEIGHTS=1 \\
     ./build/vla-server --bind tcp://*:${PORT} \\
         \${MODELS_ROOT}/gr00t-n1d7-libero-object-gguf/gr00t-n1d7-libero-object.gguf
 EOF
