@@ -913,19 +913,6 @@ static void vram_probe(ggml_backend_t backend, const char * label) {
     have_prev = true;
 }
 
-static ggml_type resolve_weight_dtype() {
-    const char * e = std::getenv("VLA_WEIGHT_DTYPE");
-    if (!e)
-        return GGML_TYPE_BF16;
-    if (std::strcmp(e, "f32")  == 0)
-        return GGML_TYPE_F32;
-    if (std::strcmp(e, "bf16") == 0)
-        return GGML_TYPE_BF16;
-    if (std::strcmp(e, "f16")  == 0)
-        return GGML_TYPE_F16;
-    std::fprintf(stderr, "vla: unknown VLA_WEIGHT_DTYPE='%s', using bf16\n", e);
-    return GGML_TYPE_BF16;
-}
 
 static void backend_set_from_f32(ggml_tensor * t, const float * src, int64_t n) {
     switch (t->type) {
@@ -951,7 +938,8 @@ static void backend_set_from_f32(ggml_tensor * t, const float * src, int64_t n) 
     }
 }
 
-SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
+SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
+                                    const std::string& mmproj_path,
                                     const std::string& ckpt_path,
                                     const std::string& config_path) {
     auto* m = new SmolVLAModelArch();
@@ -990,7 +978,7 @@ SmolVLAModelArch* smolvla_load_impl(const std::string& mmproj_path,
     }
     vram_probe(m->backend, "after backend init");
 
-    m->weight_dtype = resolve_weight_dtype();
+    m->weight_dtype = weight_dtype;
     std::printf("vla: tower weights resident as %s\n", ggml_type_name(m->weight_dtype));
 
     // Vision tower geometry: from gguf KV (self-contained ckpt), else SmolVLM2-500M defaults.
@@ -1974,7 +1962,8 @@ std::unique_ptr<ModelArchBase> smolvla_create(const std::string& mmproj_path,
                                               const std::string& ckpt_path,
                                               const std::string& config_path,
                                               const Options& opts) {
-    SmolVLAModelArch* raw = smolvla_load_impl(mmproj_path, ckpt_path, config_path);
+    SmolVLAModelArch* raw = smolvla_load_impl(opts.weight_dtype.value_or(GGML_TYPE_BF16),
+                                             mmproj_path, ckpt_path, config_path);
     if (!raw)
         return nullptr;
     return std::unique_ptr<ModelArchBase>(raw);

@@ -210,10 +210,8 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
 
     ggml_init_params wp = { (size_t)64*1024*1024, nullptr, true };
     m->ctx_weights = ggml_init(wp);
-    ggml_context * W = m->ctx_weights;
     bool ok = true;
     WeightLoader L("openvla_oft", g, m->ctx_weights, m->mt);
-    auto mk  = [&](const char * n, ggml_type ty) { return ty == GGML_TYPE_F32 ? L.f32("%s", n) : L.gemm("%s", n); };
     auto mm  = [&](const char * n) { return L.gemm("%s", n); };
     auto f32 = [&](const char * n) { return L.f32("%s", n); };
 

@@ -26,13 +26,15 @@
 
 #pragma once
 
-#include "options.h"
-
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace vla {
+
+// Declared in options.h. Kept incomplete here so this header stays free of
+// ggml, which tests/test_vision_common.cpp and the pure CI job rely on.
+struct Options;
 
 /**
  * @brief Resolved hyper-parameters of a loaded model.
@@ -166,7 +168,14 @@ struct Inputs {
  * @return Owning handle. Free with @ref model_free.
  */
 Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
-                  const std::string& config_path = "", const Options& opts = Options{});
+                  const std::string& config_path = "");
+
+/**
+ * @brief Load with explicit runtime options; include options.h to use it.
+ * @copydetails model_load
+ */
+Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
+                  const std::string& config_path, const Options& opts);
 
 /**
  * @brief Release a model handle returned by @ref model_load.

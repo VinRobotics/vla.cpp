@@ -14,6 +14,7 @@
 
 #include "arch.h"
 #include "model.h"
+#include "options.h"
 
 #include "gguf.h"
 
@@ -189,6 +190,11 @@ bool detect_arch_from_ckpt(const std::string& ckpt_path, Arch* out) {
     if (ends_with_gguf(ckpt_path))
         return detect_arch_gguf(ckpt_path, out);
     return detect_arch_safetensors(ckpt_path, out);
+}
+
+Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
+                  const std::string& config_path) {
+    return model_load(mmproj_path, ckpt_path, config_path, Options{});
 }
 
 Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,

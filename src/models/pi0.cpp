@@ -50,13 +50,6 @@ namespace vla {
 namespace {
 
 
-// The +1 RMSNorm fixup is a Gemma quirk that must only touch the language towers,
-// never the SigLIP LayerNorms (whose names would otherwise never match anyway).
-bool is_gemma_norm(const std::string & name) {
-    const bool lm = name.rfind("vlm.", 0) == 0 || name.rfind("aex.", 0) == 0;
-    return lm && name.find("norm.weight") != std::string::npos;
-}
-
 bool ends_with(const std::string & s, const char * sfx) {
     const size_t n = std::strlen(sfx);
     return s.size() >= n && s.compare(s.size()-n, n, sfx) == 0;

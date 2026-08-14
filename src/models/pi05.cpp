@@ -66,15 +66,6 @@ bool ends_with(const std::string & s, const char * sfx) {
     const size_t n = std::strlen(sfx);
     return s.size() >= n && s.compare(s.size()-n, n, sfx) == 0;
 }
-bool starts_with(const std::string & s, const char * pfx) {
-    const size_t n = std::strlen(pfx);
-    return s.size() >= n && s.compare(0, n, pfx) == 0;
-}
-
-bool is_gemma_norm_pi05(const std::string & name) {
-    return starts_with(name, "vlm.") && name.find("norm.weight") != std::string::npos;
-}
-
 }
 
 struct Pi05ModelArch : public ModelArchBase {
@@ -462,42 +453,6 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
             return nullptr;
         }
     }
-    ggml_context * W = m->ctx_weights;
-    std::vector<ggml_tensor *> weights;
-    // A miss returns before pushing, so the null scan below cannot see it.
-    bool missing = false;
-
-    auto mk = [&](const char * name, ggml_type type, int n_dims, const int64_t * ne) -> ggml_tensor * {
-        const ggml_tensor * gt = g.meta(name);
-        if (!gt) {
-            std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name);
-            missing = true;
-            return nullptr;
-        }
-        ggml_tensor * t = ggml_new_tensor(W, g.resident_type(gt, type), n_dims, ne);
-        ggml_set_name(t, name);
-        weights.push_back(t);
-        return t;
-    };
-    auto mk_mm = [&](const char * name) -> ggml_tensor * {
-        const ggml_tensor * gt = g.meta(name);
-        if (!gt) {
-            std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name);
-            missing = true;
-            return nullptr;
-        }
-        return mk(name, m->matmul_type, GGML_MAX_DIMS, gt->ne);
-    };
-    auto mk_f32 = [&](const char * name) -> ggml_tensor * {
-        const ggml_tensor * gt = g.meta(name);
-        if (!gt) {
-            std::fprintf(stderr, "vla(pi05): missing tensor %s\n", name);
-            missing = true;
-            return nullptr;
-        }
-        return mk(name, GGML_TYPE_F32, GGML_MAX_DIMS, gt->ne);
-    };
-
     WeightLoader L("pi05", g, m->ctx_weights, m->matmul_type);
 
     m->vit.declare(L, "vit", m->vit_layers);

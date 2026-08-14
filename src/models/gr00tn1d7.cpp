@@ -116,12 +116,6 @@ struct Gr00tN1d7ModelArch : public ModelArchBase {
 
 namespace {
 
-ggml_tensor * head_view(ggml_context * C, ggml_tensor * proj, int64_t hd, int64_t heads,
-                        int64_t T, int64_t E, int nblk, int blk) {
-    const size_t es = ggml_element_size(proj);
-    return ggml_view_3d(C, proj, hd, heads, T, (size_t) hd * es, (size_t) nblk * E * es, (size_t) blk * E * es);
-}
-
 
 
 
