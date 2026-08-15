@@ -2,6 +2,50 @@
 
 Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://keepachangelog.com).
 
+## [0.3.0] - 2026-08-14
+
+Every architecture is byte-identical to 0.2.0 at matching settings.
+`libero_object`, 100 episodes per model, on one RTX 3090:
+
+| Model | SR | Latency, fastest | Fastest flags |
+|---|---:|---:|---|
+| `bitvla` | 99/100 | 48.0 ms | `--weight-dtype bf16` |
+| `gr00t_n1_5` | 99/100 | 67.9 ms | *(none)* |
+| `gr00t_n1_7` | 98/100 | 55.4 ms | *(none)* |
+| `openvla_oft` | 97/100 | 219.5 ms | *(none)* |
+| `pi05` | 96/100 | 112.3 ms | *(none)* |
+| `vla_adapter` | 96/100 | 69.7 ms | *(none)* |
+| `evo1` | 91/100 | 114.1 ms | `--act-dtype bf16 --flash-attn` |
+| `smolvla` | 90/100 | 50.5 ms | `--flash-attn --mm-prec default` |
+| `gr00t_n1_6` | 84/100 | 55.5 ms | *(none)* |
+| `pi0` | 81/100 | 94.1 ms | `--act-dtype bf16 --flash-attn` |
+| `vla_jepa` | not evaluated | 44.0 ms | *(none)* |
+
+SR is measured at each model's defaults, so it does not carry over to the four
+rows whose fastest flags change numerics. Full detail in `refactor-report.md`.
+
+### Added
+- Model code split into three levels: `src/layers/` (stateless graph fragments), `src/modules/` (weights plus the graph consuming them), `src/models/` (config, composition, `predict`).
+- `vla::WeightLoader`: declares weights by name, reports a miss once, allocates and uploads in one call. Replaces the `mk`/`mk_mm`/`mk_f32` lambdas and `ok &= a&&b&&c` chain each of the eleven architectures carried.
+- `vla-server` flags `--weight-dtype f32|bf16`, `--act-dtype f32|bf16`, `--flash-attn [0|1]`, `--mm-prec default|f32`, also readable from a `"runtime"` object in the `--config` JSON.
+- `eval/refactor_verify.sh`: diffs every architecture's action chunk at two precisions against a reference run, with `BENCH=N` for per-config `predict()` timing.
+
+### Changed
+- GR00T N1.5/N1.6/N1.7 and VLA-JEPA default to BF16 weights. `--weight-dtype f32` restores the old default of v0.2.0, bit-identically.
+- The per-architecture precision switches (`VLA_GR00T_BF16_WEIGHTS`, `VLA_*_FA`, `VLA_*_BF16_ACT`, `VLA_*_F32_WEIGHTS`, `VLA_MM_PREC`, `VLA_WEIGHT_DTYPE`) are retired. Setting one now fails the load naming its replacement instead of being ignored.
+- Deduplicated: `build_dit_block` 4 copies to 1, `SigLipLayerW` 5 to 1, `Qwen3LayerW` 4 to 1, the DINOv2+SigLIP declaration 2 to 1. 1,817 lines of shared code now serve all eleven architectures.
+- BF16 elementwise kernels address rows by block index instead of a per-element 64-bit divide, and move eight values per thread on contiguous rows. `VLA_BF16_FLAT=1` selects the scalar path.
+
+### Fixed
+- BF16 activations aborted on any fused elementwise run: ggml fuses upstream of the extension hook, and its fused path handles F32/F16 only. The hook now gets first refusal on fused add/mul.
+- Boolean environment switches read their value, not their presence, so `VLA_EVO1_FA=0` no longer enabled flash attention.
+- SmolVLA ignored its runtime options, leaving its weight dtype unsettable once `VLA_WEIGHT_DTYPE` retired.
+
+
+### Known limitations
+- Thread count, solver steps, GR00T embodiment and un-normalisation key remain environment-only (`VLA_N_THREADS`, `VLA_NUM_STEPS`, `VLA_GR00T_EMBODIMENT`, `VLA_*_UNNORM_KEY`).
+- VLA-JEPA has no LIBERO success rate; the client cannot emit its `<embodied>` tokens.
+
 ## [0.2.0] - 2026-08-12
 
 ### Added
