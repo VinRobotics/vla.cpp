@@ -36,23 +36,35 @@ public:
     scratch_ctx() = default;
     scratch_ctx(const scratch_ctx &) = delete;
     scratch_ctx & operator=(const scratch_ctx &) = delete;
-    ~scratch_ctx() { release(); }
+    ~scratch_ctx() {
+        release();
+    }
 
     ggml_context * reset(size_t arena) {
-        if (ctx_) { ggml_reset(ctx_); return ctx_; }
+        if (ctx_) {
+            ggml_reset(ctx_);
+            return ctx_;
+        }
         ggml_init_params p = { arena, nullptr, true };
         ctx_ = ggml_init(p);
         return ctx_;
     }
 
     bool alloc(ggml_backend_t backend, ggml_cgraph * gf) {
-        if (!galloc_) galloc_ = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+        if (!galloc_)
+            galloc_ = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
         return galloc_ && ggml_gallocr_alloc_graph(galloc_, gf);
     }
 
     void release() {
-        if (galloc_) { ggml_gallocr_free(galloc_); galloc_ = nullptr; }
-        if (ctx_)    { ggml_free(ctx_);            ctx_    = nullptr; }
+        if (galloc_) {
+            ggml_gallocr_free(galloc_);
+            galloc_ = nullptr;
+        }
+        if (ctx_)    {
+            ggml_free(ctx_);
+            ctx_    = nullptr;
+        }
     }
 
 private:
@@ -69,31 +81,51 @@ public:
     graph_cache() = default;
     graph_cache(const graph_cache &) = delete;
     graph_cache & operator=(const graph_cache &) = delete;
-    ~graph_cache() { release(); }
+    ~graph_cache() {
+        release();
+    }
 
     template <class Build>
     bool ensure(ggml_backend_t backend, const Key & key, size_t arena, Build && build) {
-        if (valid_ && key_ == key) return true;
+        if (valid_ && key_ == key)
+            return true;
         release();
         ggml_init_params p = { arena, nullptr, true };
         ctx_ = ggml_init(p);
-        if (!ctx_) return false;
+        if (!ctx_)
+            return false;
         io_ = IO{};
         gf_ = build(ctx_, io_);
-        if (!gf_) { release(); return false; }
+        if (!gf_) {
+            release();
+            return false;
+        }
         galloc_ = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!galloc_ || !ggml_gallocr_alloc_graph(galloc_, gf_)) { release(); return false; }
+        if (!galloc_ || !ggml_gallocr_alloc_graph(galloc_, gf_)) {
+            release();
+            return false;
+        }
         key_   = key;
         valid_ = true;
         return true;
     }
 
-    IO &          io()    { return io_; }
-    ggml_cgraph * graph() { return gf_; }
+    IO &          io()    {
+        return io_;
+    }
+    ggml_cgraph * graph() {
+        return gf_;
+    }
 
     void release() {
-        if (galloc_) { ggml_gallocr_free(galloc_); galloc_ = nullptr; }
-        if (ctx_)    { ggml_free(ctx_);            ctx_    = nullptr; }
+        if (galloc_) {
+            ggml_gallocr_free(galloc_);
+            galloc_ = nullptr;
+        }
+        if (ctx_)    {
+            ggml_free(ctx_);
+            ctx_    = nullptr;
+        }
         gf_ = nullptr;
         io_ = IO{};
         valid_ = false;

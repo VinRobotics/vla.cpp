@@ -26,22 +26,27 @@ namespace vla {
 
 // Repo ids reach a shell command, so reject anything outside this set.
 inline bool hf_token_ok(const std::string & s, bool allow_slash) {
-    if (s.empty() || s.size() > 200) return false;
+    if (s.empty() || s.size() > 200)
+        return false;
     // A leading '/' would make fs::path join replace the cache root instead of
     // extending it, putting the download anywhere on disk.
-    if (s.front() == '-' || s.front() == '/' || s.find("..") != std::string::npos) return false;
+    if (s.front() == '-' || s.front() == '/' || s.find("..") != std::string::npos)
+        return false;
     for (const char c : s) {
         const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                         (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' ||
                         (allow_slash && c == '/');
-        if (!ok) return false;
+        if (!ok)
+            return false;
     }
     return true;
 }
 
 inline std::string hf_cache_root() {
-    if (const char * e = std::getenv("VLA_CACHE"); e && *e) return e;
-    if (const char * h = std::getenv("HOME");     h && *h) return std::string(h) + "/.cache/vla";
+    if (const char * e = std::getenv("VLA_CACHE"); e && *e)
+        return e;
+    if (const char * h = std::getenv("HOME");     h && *h)
+        return std::string(h) + "/.cache/vla";
     return ".vla-cache";
 }
 
@@ -52,16 +57,23 @@ inline std::string hf_pick_gguf(const std::filesystem::path & dir, const std::st
     std::string best;
     uintmax_t best_size = 0;
     for (fs::recursive_directory_iterator it(dir, ec), end; it != end && !ec; it.increment(ec)) {
-        if (!it->is_regular_file(ec) || it->path().extension() != ".gguf") continue;
+        if (!it->is_regular_file(ec) || it->path().extension() != ".gguf")
+            continue;
         const std::string name = it->path().filename().string();
         if (!want.empty()) {
-            if (name == want) return it->path().string();
+            if (name == want)
+                return it->path().string();
             continue;
         }
-        if (name.rfind("mmproj", 0) == 0) continue;
+        if (name.rfind("mmproj", 0) == 0)
+            continue;
         const uintmax_t sz = it->file_size(ec);
-        if (ec) continue;
-        if (sz > best_size) { best_size = sz; best = it->path().string(); }
+        if (ec)
+            continue;
+        if (sz > best_size) {
+            best_size = sz;
+            best = it->path().string();
+        }
     }
     return best;
 }
@@ -72,7 +84,7 @@ inline std::string hf_resolve(const std::string & spec) {
 
     const size_t colon = spec.find(':');
     const std::string repo = spec.substr(0, colon);
-    const std::string file = (colon == std::string::npos) ? "" : spec.substr(colon + 1);
+    const std::string file = (colon == std::string::npos) ? "" : spec.substr(colon+1);
 
     if (repo.find('/') == std::string::npos || !hf_token_ok(repo, true) ||
         (!file.empty() && !hf_token_ok(file, false))) {
@@ -80,12 +92,13 @@ inline std::string hf_resolve(const std::string & spec) {
         return "";
     }
 
-    const fs::path dir = fs::path(hf_cache_root()) / repo;
+    const fs::path dir = fs::path(hf_cache_root())/repo;
 
     std::error_code ec;
     if (fs::is_directory(dir, ec)) {
         const std::string hit = hf_pick_gguf(dir, file);
-        if (!hit.empty()) return hit;
+        if (!hit.empty())
+            return hit;
     }
 
     fs::create_directories(dir, ec);
@@ -102,7 +115,8 @@ inline std::string hf_resolve(const std::string & spec) {
     }
 
     std::string cmd = "hf download " + repo;
-    if (!file.empty()) cmd += " " + file;
+    if (!file.empty())
+        cmd += " " + file;
     cmd += " --local-dir '" + dir.string() + "'";
     std::fprintf(stderr, "vla: %s\n", cmd.c_str());
 
@@ -115,7 +129,8 @@ inline std::string hf_resolve(const std::string & spec) {
     }
 
     const std::string hit = hf_pick_gguf(dir, file);
-    if (hit.empty()) std::fprintf(stderr, "vla: no .gguf under %s after download\n", dir.string().c_str());
+    if (hit.empty())
+        std::fprintf(stderr, "vla: no .gguf under %s after download\n", dir.string().c_str());
     return hit;
 }
 

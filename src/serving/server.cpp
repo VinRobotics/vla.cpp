@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "model.h"
+#include "options.h"
 #include "serving/hf_fetch.h"
 #include "serving/vla.pb.h"
 
@@ -40,7 +41,9 @@ namespace {
 
 std::atomic<bool> g_shutdown{false};
 
-void on_signal(int) { g_shutdown.store(true, std::memory_order_relaxed); }
+void on_signal(int) {
+    g_shutdown.store(true, std::memory_order_relaxed);
+}
 
 // Reject absurd image dimensions before any size arithmetic, so an untrusted
 // width or height cannot overflow size_t or truncate to a negative int.
@@ -87,7 +90,7 @@ bool decode_image(const vla::Image & img,
             stbi_image_free(px);
             return false;
         }
-        u8.assign(px, px + size_t(3) * w * h);
+        u8.assign(px, px+size_t(3)*w * h);
         stbi_image_free(px);
         view = { u8.data(), w, h, vla::PixelFormat::U8 };
         return true;
@@ -98,14 +101,14 @@ bool decode_image(const vla::Image & img,
                          img.width(), img.height(), kMaxImageDim);
             return false;
         }
-        const size_t expected = size_t(3) * img.width() * img.height();
+        const size_t expected = size_t(3)*img.width()*img.height();
         if (img.data().size() != expected) {
             std::fprintf(stderr, "vla-server: RGB_U8 size %zu != 3*%u*%u = %zu\n",
                          img.data().size(), img.width(), img.height(), expected);
             return false;
         }
         u8.assign(reinterpret_cast<const uint8_t*>(img.data().data()),
-                  reinterpret_cast<const uint8_t*>(img.data().data()) + expected);
+                  reinterpret_cast<const uint8_t*>(img.data().data())+expected);
         view = { u8.data(), int(img.width()), int(img.height()), vla::PixelFormat::U8 };
         return true;
     } else if (img.encoding() == vla::Image::F32_RGB_01) {
@@ -115,7 +118,7 @@ bool decode_image(const vla::Image & img,
                          img.width(), img.height(), kMaxImageDim);
             return false;
         }
-        const size_t pixels   = size_t(3) * img.width() * img.height();
+        const size_t pixels   = size_t(3)*img.width()*img.height();
         const size_t expected = pixels * sizeof(float);
         if (img.data().size() != expected) {
             std::fprintf(stderr, "vla-server: F32_RGB_01 size %zu != 4*3*%u*%u = %zu\n",
@@ -127,7 +130,7 @@ bool decode_image(const vla::Image & img,
         std::memcpy(f32.data(), img.data().data(), expected);
         // State and noise are swept for NaN/Inf; pixels were not, so a bad pixel
         // came back out as a robot action.
-        for (size_t i = 0; i < pixels; ++i) {
+        for (size_t i=0; i<pixels; ++i) {
             if (!std::isfinite(f32[i])) {
                 std::fprintf(stderr, "vla-server: F32_RGB_01 pixel %zu is not finite\n", i);
                 return false;
@@ -159,15 +162,17 @@ Drain drain_extra_frames(zmq::socket_t & sock) {
     Drain d = Drain::Clean;
     while (sock.get(zmq::sockopt::rcvmore)) {
         zmq::message_t junk;
-        if (!sock.recv(junk, zmq::recv_flags::none)) return Drain::Stalled;
+        if (!sock.recv(junk, zmq::recv_flags::none))
+            return Drain::Stalled;
         d = Drain::Extra;
     }
     return d;
 }
 
 int find_non_finite(const float * data, int n) {
-    for (int i = 0; i < n; ++i) {
-        if (!std::isfinite(data[i])) return i;
+    for (int i=0; i<n; ++i) {
+        if (!std::isfinite(data[i]))
+            return i;
     }
     return -1;
 }
@@ -190,10 +195,11 @@ void usage(const char * prog) {
         "                          'none'  : single ms_inference\n"
         "                          'phase' : ms_prefill + ms_denoise broken out\n"
         "                          (π0 currently reports only the combined ms_inference)\n"
+        "%s"
         "  --config PATH           LeRobot policy config.json (SmolVLA safetensors only;\n"
         "                          ignored for GGUF checkpoints). If omitted, uses\n"
         "                          <dirname(ckpt)>/config.json.\n",
-        prog);
+        prog, vla::Options::usage());
 }
 
 }
@@ -209,35 +215,49 @@ int main(int argc, char ** argv) {
     std::string hf_spec;
     std::string config_path;
     vla::TimingDetail timing_detail = vla::TimingDetail::NONE;
+    vla::Options opts;
+    std::string  opt_err;
 
     std::vector<std::string> positionals;
-    for (int i = 1; i < argc; ++i) {
+    for (int i=1; i<argc; ++i) {
         std::string a = argv[i];
-        if (a == "--bind" && i + 1 < argc) {
+        if (a == "--bind" && i+1 < argc) {
             bind_addr = argv[++i];
-        } else if (a == "-hf" && i + 1 < argc) {
+        } else if (a == "-hf" && i+1 < argc) {
             hf_spec = argv[++i];
-        } else if (a == "--config" && i + 1 < argc) {
+        } else if (a == "--config" && i+1 < argc) {
             config_path = argv[++i];
-        } else if (a == "--timing-detail" && i + 1 < argc) {
+        } else if (a == "--timing-detail" && i+1 < argc) {
             const std::string v = argv[++i];
-            if      (v == "none")  timing_detail = vla::TimingDetail::NONE;
+            if      (v == "none")
+                timing_detail = vla::TimingDetail::NONE;
             else if (v == "phase") timing_detail = vla::TimingDetail::PHASE;
             else {
                 std::fprintf(stderr, "vla-server: bad --timing-detail value '%s'\n", v.c_str());
                 usage(argv[0]);
                 return 1;
             }
+        } else if (opts.parse_arg(argc, argv, i, opt_err)) {
+            continue;
+        } else if (!opt_err.empty()) {
+            std::fprintf(stderr, "vla-server: %s\n", opt_err.c_str());
+            usage(argv[0]);
+            return 1;
         } else if (a == "-h" || a == "--help") {
             usage(argv[0]);
             return 0;
+        } else if (a.size() > 1 && a[0] == '-') {
+            std::fprintf(stderr, "vla-server: unknown option '%s'\n", a.c_str());
+            usage(argv[0]);
+            return 1;
         } else {
             positionals.push_back(std::move(a));
         }
     }
     if (!hf_spec.empty() && positionals.empty()) {
         ckpt_path = vla::hf_resolve(hf_spec);
-        if (ckpt_path.empty()) return 1;
+        if (ckpt_path.empty())
+            return 1;
     } else if (positionals.size() == 1) {
         ckpt_path = positionals[0];
     } else if (positionals.size() == 2) {
@@ -261,7 +281,12 @@ int main(int argc, char ** argv) {
     if (!config_path.empty()) {
         std::printf("  config: %s\n", config_path.c_str());
     }
-    vla::Model * model = vla::model_load(mmproj_path, ckpt_path, config_path);
+    if (!opts.load_json(config_path, opt_err)) {
+        std::fprintf(stderr, "vla-server: %s\n", opt_err.c_str());
+        return 1;
+    }
+
+    vla::Model * model = vla::model_load(mmproj_path, ckpt_path, config_path, opts);
     if (!model) {
         std::fprintf(stderr, "vla-server: model_load failed\n");
         return 1;
@@ -278,7 +303,7 @@ int main(int argc, char ** argv) {
     sock.set(zmq::sockopt::linger, 0);
     // 64 MiB is above any real request (16 views of 512x512 F32 RGB is ~50 MiB) and
     // low enough to bound protobuf's expansion during ParseFromArray.
-    sock.set(zmq::sockopt::maxmsgsize, int64_t(64) * 1024 * 1024);
+    sock.set(zmq::sockopt::maxmsgsize, int64_t(64)*1024*1024);
     // A peer that sends a frame with SNDMORE and then stalls would otherwise park
     // this single-threaded loop in recv for good, starving every other client.
     sock.set(zmq::sockopt::rcvtimeo, 5000);
@@ -317,20 +342,26 @@ int main(int argc, char ** argv) {
         try {
             zmq::poll(poll, 1, std::chrono::milliseconds(200));
         } catch (const zmq::error_t & e) {
-            if (e.num() == EINTR) continue;
-            if (e.num() == ETERM) break;
+            if (e.num() == EINTR)
+                continue;
+            if (e.num() == ETERM)
+                break;
             std::fprintf(stderr, "vla-server: zmq error: %s\n", e.what());
             continue;
         }
-        if (!(poll[0].revents & ZMQ_POLLIN)) continue;
+        if (!(poll[0].revents & ZMQ_POLLIN))
+            continue;
 
         zmq::message_t req_msg;
         try {
             auto rr = sock.recv(req_msg, zmq::recv_flags::none);
-            if (!rr) continue;
+            if (!rr)
+                continue;
         } catch (const zmq::error_t & e) {
-            if (e.num() == EINTR) continue;
-            if (e.num() == ETERM) break;
+            if (e.num() == EINTR)
+                continue;
+            if (e.num() == ETERM)
+                break;
             std::fprintf(stderr, "vla-server: zmq error: %s\n", e.what());
             continue;
         }
@@ -378,7 +409,7 @@ int main(int argc, char ** argv) {
         }
         {
             bool tokens_ok = true;
-            for (int t = 0; t < req.lang_tokens_size(); ++t) {
+            for (int t=0; t<req.lang_tokens_size(); ++t) {
                 if (req.lang_tokens(t) < 0) {
                     char buf[128]; std::snprintf(buf, sizeof(buf),
                         "lang_tokens[%d] = %d is negative", t, req.lang_tokens(t));
@@ -387,7 +418,8 @@ int main(int argc, char ** argv) {
                     break;
                 }
             }
-            if (!tokens_ok) continue;
+            if (!tokens_ok)
+                continue;
         }
         if (req.state_size() != int(cfg.max_state_dim)) {
             char buf[128]; std::snprintf(buf, sizeof(buf),
@@ -396,7 +428,7 @@ int main(int argc, char ** argv) {
             send_reply(make_error_response(rid, buf));
             continue;
         }
-        const int expected_noise_n = int(cfg.n_suffix * cfg.max_action_dim);
+        const int expected_noise_n = int(cfg.n_suffix*cfg.max_action_dim);
         if (req.noise_size() != 0 && req.noise_size() != expected_noise_n) {
             char buf[128]; std::snprintf(buf, sizeof(buf),
                 "noise length %d != 0 or %d (chunk_size * action_dim)",
@@ -416,7 +448,7 @@ int main(int argc, char ** argv) {
 
         if (use_precomputed) {
             precomputed_n_views = static_cast<int>(req.precomputed_img_emb_n_views());
-            const int64_t per_view = cfg.n_img * cfg.hidden;
+            const int64_t per_view = cfg.n_img*cfg.hidden;
             const int64_t expected = per_view * static_cast<int64_t>(precomputed_n_views);
             if (precomputed_n_views < 1 ||
                 static_cast<int64_t>(req.precomputed_img_emb_size()) != expected) {
@@ -441,7 +473,7 @@ int main(int argc, char ** argv) {
         } else {
 
             bool decode_ok = true;
-            for (int v = 0; v < n_views; ++v) {
+            for (int v=0; v<n_views; ++v) {
                 if (!decode_image(req.images(v), u8_bufs[v], f32_bufs[v], img_views[v])) {
                     char buf[64]; std::snprintf(buf, sizeof(buf), "image[%d] decode failed", v);
                     send_reply(make_error_response(rid, buf));
@@ -449,7 +481,8 @@ int main(int argc, char ** argv) {
                     break;
                 }
             }
-            if (!decode_ok) continue;
+            if (!decode_ok)
+                continue;
         }
 
         std::vector<int32_t> lang_tokens(req.lang_tokens().begin(), req.lang_tokens().end());
@@ -511,7 +544,8 @@ int main(int argc, char ** argv) {
         vla::PredictResponse resp;
         resp.set_request_id(rid);
         resp.mutable_action_chunk()->Reserve(static_cast<int>(action_chunk.size()));
-        for (float v : action_chunk) resp.add_action_chunk(v);
+        for (float v : action_chunk)
+            resp.add_action_chunk(v);
         resp.set_chunk_size(static_cast<uint32_t>(cfg.n_suffix));
         resp.set_action_dim(static_cast<uint32_t>(cfg.max_action_dim));
         resp.set_latency_ms_total(st.ms_total);
@@ -524,9 +558,9 @@ int main(int argc, char ** argv) {
         send_reply(body);
 
         ++served;
-        if (served % 10 == 1) {
+        if (served%10 == 1) {
             const float ms_other = std::max(0.f,
-                st.ms_total - st.ms_vision - st.ms_inference);
+                st.ms_total-st.ms_vision-st.ms_inference);
             if (timing_detail == vla::TimingDetail::PHASE) {
                 std::printf("vla-server: rid=%llu  served=%llu  total=%.1f ms  "
                             "vision=%.1f  inf=%.1f (prefill=%.1f + denoise=%.1f)  other=%.1f\n",

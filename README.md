@@ -153,6 +153,16 @@ Use `--bind` to change the address and port. Stop the server with `Ctrl-C`.
 
 `vla-server` also takes `-hf user/repo[:file.gguf]` in place of a checkpoint path.
 
+Precision flags (`vla-server --help` for the full list).
+The fastest configuration per model, with measured latency and success rate, is
+in [`CHANGELOG.md`](CHANGELOG.md):
+
+- `--weight-dtype f32|bf16` - resident dtype for GEMM weights.
+- `--act-dtype f32|bf16` - activation dtype; needs CUDA and bf16 weights.
+- `--flash-attn` - faster on the larger towers, but changes numerics.
+- `--mm-prec default|f32` - matmul accumulation precision.
+
+
 Environment knobs that apply to every arch:
 
 - `VLA_N_THREADS` - CPU backend thread count, default core count capped at 16.
@@ -180,14 +190,14 @@ python eval/client/run_sim_client_direct.py \
 The GR00T models need two extras:
 
 - client side: `--stats-json /path/to/dataset_statistics.json`
-- server side: `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda` for N1.6, `libero_sim` for N1.7) and `VLA_GR00T_BF16_WEIGHTS=1` (to fit the 8 GB card).
+- server side: `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda` for N1.6, `libero_sim` for N1.7).
 
 ### SimplerEnv
 
 So far only **GR00T-N1.6** is wired (the `gr00t-n1d6-bridge` checkpoint with the `oxe_widowx` embodiment). Start `vla-server` on port 5566 with `oxe_widowx` embodiment:
 
 ```bash
-VLA_GR00T_BF16_WEIGHTS=1 VLA_GR00T_EMBODIMENT=oxe_widowx \
+VLA_GR00T_EMBODIMENT=oxe_widowx \
     ./build/vla-server "$GR00T_N1D6_GGUF"
 ```
 

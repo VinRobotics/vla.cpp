@@ -30,7 +30,7 @@
 #include "ggml-cuda.h"
 
 #include "cuda/vla_cuda_ops.h"
-#include "models/act_dtype.h"
+#include "act_dtype.h"
 
 #include <cmath>
 #include <cstdio>

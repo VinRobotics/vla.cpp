@@ -31,15 +31,16 @@ extern "C" void bitvla_act_quant_cuda(const __nv_bfloat16* in, int8_t* out,
                                        int M, int K, cudaStream_t stream);
 
 __global__ void gelu_erf_bf16_kernel(const __nv_bfloat16* in, __nv_bfloat16* out, int N) {
-    const int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-    if (i >= N) return;
+    const int i = (int)(blockIdx.x*blockDim.x+threadIdx.x);
+    if (i >= N)
+        return;
     const float x = __bfloat162float(in[i]);
     const float inv_sqrt2 = 0.7071067811865475f;
-    out[i] = __float2bfloat16(0.5f * x * (1.0f + erff(x * inv_sqrt2)));
+    out[i] = __float2bfloat16(0.5f * x * (1.0f+erff(x * inv_sqrt2)));
 }
 static void gelu_erf_bf16(const __nv_bfloat16* in, __nv_bfloat16* out, int N, cudaStream_t stream) {
     constexpr int B = 256;
-    gelu_erf_bf16_kernel<<<dim3((N + B - 1) / B, 1, 1), dim3(B, 1, 1), 0, stream>>>(in, out, N);
+    gelu_erf_bf16_kernel<<<dim3((N+B-1)/B, 1, 1), dim3(B, 1, 1), 0, stream>>>(in, out, N);
 }
 
 #define CUDA_OK(call) do { cudaError_t e = (call); if (e != cudaSuccess) { \
@@ -96,14 +97,14 @@ bitvla_vit_cuda_ctx* bitvla_vit_cuda_init(int n_layers, int hidden, int n_heads,
     ctx->n_layers = n_layers;
     ctx->hidden   = hidden;
     ctx->n_heads  = n_heads;
-    ctx->head_dim = hidden / n_heads;
+    ctx->head_dim = hidden/n_heads;
     ctx->ffn      = ffn;
     ctx->n_patches  = n_patches;
     ctx->patch_flat = patch_flat;
     ctx->ln_eps   = ln_eps;
     ctx->mm_out   = mm_out;
 
-    ctx->ffn_pad = ((ffn + 127) / 128) * 128;
+    ctx->ffn_pad = ((ffn+127)/128)*128;
     ctx->layers.resize(n_layers);
 
     if (cublasCreate(&ctx->cublas) != CUBLAS_STATUS_SUCCESS) {
@@ -119,24 +120,25 @@ bitvla_vit_cuda_ctx* bitvla_vit_cuda_init(int n_layers, int hidden, int n_heads,
     CUDA_OKV(cudaMalloc(&ctx->d_q_proj,       (size_t) n_patches * hidden  * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_k_proj,       (size_t) n_patches * hidden  * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_v_proj,       (size_t) n_patches * hidden  * bf16));
-    CUDA_OKV(cudaMalloc(&ctx->d_q_HShd,       (size_t) n_heads * n_patches * ctx->head_dim * bf16));
-    CUDA_OKV(cudaMalloc(&ctx->d_k_HShd,       (size_t) n_heads * n_patches * ctx->head_dim * bf16));
-    CUDA_OKV(cudaMalloc(&ctx->d_v_HShd,       (size_t) n_heads * n_patches * ctx->head_dim * bf16));
+    CUDA_OKV(cudaMalloc(&ctx->d_q_HShd,       (size_t) n_heads * n_patches * ctx->head_dim*bf16));
+    CUDA_OKV(cudaMalloc(&ctx->d_k_HShd,       (size_t) n_heads * n_patches * ctx->head_dim*bf16));
+    CUDA_OKV(cudaMalloc(&ctx->d_v_HShd,       (size_t) n_heads * n_patches * ctx->head_dim*bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_scores,       (size_t) n_heads * n_patches * n_patches    * bf16));
-    CUDA_OKV(cudaMalloc(&ctx->d_attn_out,     (size_t) n_heads * n_patches * ctx->head_dim * bf16));
+    CUDA_OKV(cudaMalloc(&ctx->d_attn_out,     (size_t) n_heads * n_patches * ctx->head_dim*bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_attn_merged,  (size_t) n_patches * hidden  * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_o_out,        (size_t) n_patches * hidden  * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_fc1_dense,    (size_t) n_patches * ffn         * bf16));
-    CUDA_OKV(cudaMalloc(&ctx->d_fc1_padded,   (size_t) n_patches * ctx->ffn_pad * bf16));
+    CUDA_OKV(cudaMalloc(&ctx->d_fc1_padded,   (size_t) n_patches * ctx->ffn_pad*bf16));
 
-    CUDA_OKV(cudaMemset(ctx->d_fc1_padded, 0, (size_t) n_patches * ctx->ffn_pad * bf16));
+    CUDA_OKV(cudaMemset(ctx->d_fc1_padded, 0, (size_t) n_patches * ctx->ffn_pad*bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_fc2_out,      (size_t) n_patches * hidden  * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_mm_h1,        (size_t) n_patches * mm_out  * bf16));
     return ctx;
 }
 
 void bitvla_vit_cuda_free(bitvla_vit_cuda_ctx* ctx) {
-    if (!ctx) return;
+    if (!ctx)
+        return;
     cublasDestroy(ctx->cublas);
     cudaFree(ctx->d_h);   cudaFree(ctx->d_h_norm);
     cudaFree(ctx->d_act_int8_h);   cudaFree(ctx->d_act_int8_ffn);   cudaFree(ctx->d_act_s);
@@ -200,9 +202,12 @@ static int run_vit_layer(bitvla_vit_cuda_ctx* ctx, int L, cudaStream_t stream) {
         &beta,
         ctx->d_scores, CUDA_R_16BF, seq, (long long) seq * seq,
         n_heads, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-    if (cbs != CUBLAS_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla_vit_cuda): QK^T gemm @L%d failed (%d)\n", L, cbs); return -1; }
+    if (cbs != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(bitvla_vit_cuda): QK^T gemm @L%d failed (%d)\n", L, cbs);
+        return -1;
+    }
 
-    const float scl = 1.0f / std::sqrt((float) hd);
+    const float scl = 1.0f/std::sqrt((float) hd);
     bitvla_softmax_scaled_bf16(ctx->d_scores, scl, n_heads * seq, seq, stream);
 
     cbs = cublasGemmStridedBatchedEx(
@@ -213,7 +218,10 @@ static int run_vit_layer(bitvla_vit_cuda_ctx* ctx, int L, cudaStream_t stream) {
         &beta,
         ctx->d_attn_out, CUDA_R_16BF, hd, (long long) seq * hd,
         n_heads, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-    if (cbs != CUBLAS_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla_vit_cuda): attn@V gemm @L%d failed (%d)\n", L, cbs); return -1; }
+    if (cbs != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(bitvla_vit_cuda): attn@V gemm @L%d failed (%d)\n", L, cbs);
+        return -1;
+    }
 
     bitvla_transpose_NshHd_to_sNhd_bf16(ctx->d_attn_out, ctx->d_attn_merged, n_heads, seq, hd, stream);
 
@@ -265,15 +273,19 @@ int bitvla_vit_cuda_forward(bitvla_vit_cuda_ctx* ctx,
         &beta,
         ctx->d_h,     CUDA_R_16BF, H,
         CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-    if (cbs != CUBLAS_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla_vit_cuda): patch_embed gemm failed (%d)\n", cbs); return -1; }
+    if (cbs != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(bitvla_vit_cuda): patch_embed gemm failed (%d)\n", cbs);
+        return -1;
+    }
 
     bitvla_add_bias_bf16(ctx->d_h, ctx->patch_b, ctx->d_h, seq, H, stream);
 
     bitvla_add_bf16(ctx->d_h, ctx->pos_emb, ctx->d_h, seq * H, stream);
 
-    for (int L = 0; L < ctx->n_layers; ++L) {
+    for (int L=0; L<ctx->n_layers; ++L) {
         int rc = run_vit_layer(ctx, L, stream);
-        if (rc != 0) return rc;
+        if (rc != 0)
+            return rc;
     }
 
     cbs = cublasGemmEx(
@@ -284,7 +296,10 @@ int bitvla_vit_cuda_forward(bitvla_vit_cuda_ctx* ctx,
         &beta,
         ctx->d_mm_h1, CUDA_R_16BF, M,
         CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-    if (cbs != CUBLAS_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla_vit_cuda): MM linear_1 gemm failed (%d)\n", cbs); return -1; }
+    if (cbs != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(bitvla_vit_cuda): MM linear_1 gemm failed (%d)\n", cbs);
+        return -1;
+    }
     bitvla_add_bias_bf16(ctx->d_mm_h1, ctx->mm_b1, ctx->d_mm_h1, seq, M, stream);
     gelu_erf_bf16(ctx->d_mm_h1, ctx->d_mm_h1, seq * M, stream);
 
@@ -296,7 +311,10 @@ int bitvla_vit_cuda_forward(bitvla_vit_cuda_ctx* ctx,
         &beta,
         d_out, CUDA_R_16BF, M,
         CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-    if (cbs != CUBLAS_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla_vit_cuda): MM linear_2 gemm failed (%d)\n", cbs); return -1; }
+    if (cbs != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(bitvla_vit_cuda): MM linear_2 gemm failed (%d)\n", cbs);
+        return -1;
+    }
     bitvla_add_bias_bf16(d_out, ctx->mm_b2, d_out, seq, M, stream);
     return 0;
 }

@@ -14,6 +14,8 @@
 
 #include "bitnet_kernels.h"
 
+#include "env_flag.h"
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -67,7 +69,7 @@ extern "C" void bitlinear_int8xint2(int8_t* input0, int8_t* input1, __nv_bfloat1
 // VLA_BITVLA_NARROW_GEMM=1 to fall back to the one-tile-per-CTA kernel, which
 // is what the A/B correctness harness and any regression bisect want.
 static bool bitlinear_use_wide() {
-    static const bool wide = (std::getenv("VLA_BITVLA_NARROW_GEMM") == nullptr);
+    static const bool wide = !vla::env_flag("VLA_BITVLA_NARROW_GEMM");
     return wide;
 }
 
@@ -81,7 +83,8 @@ extern "C" void bitlinear_int8xint2_m(
 #define WIDE(NN, KK, WS) \
     launch_ladder_int8xint2_m_wide<NN, KK, WS, 128, bitvla_n_tiles_for(NN, KK)>( \
         input0, input1, output0, s, ws, M, stream)
-        if      (N == 2560  && K == 2560) WIDE(2560,  2560, 1);
+        if      (N == 2560  && K == 2560)
+            WIDE(2560,  2560, 1);
         else if (N == 640   && K == 2560) WIDE(640,   2560, 1);
         else if (N == 13824 && K == 2560) WIDE(13824, 2560, 2);
         else if (N == 2560  && K == 6912) WIDE(2560,  6912, 1);
@@ -97,7 +100,8 @@ extern "C" void bitlinear_int8xint2_m(
         return;
     }
 
-    if      (N == 2560  && K == 2560) launch_ladder_int8xint2_m<2560,  2560, 1, 128>(input0, input1, output0, s, ws, M, stream);
+    if      (N == 2560  && K == 2560)
+        launch_ladder_int8xint2_m<2560,  2560, 1, 128>(input0, input1, output0, s, ws, M, stream);
     else if (N == 640   && K == 2560) launch_ladder_int8xint2_m<640,   2560, 1, 128>(input0, input1, output0, s, ws, M, stream);
     else if (N == 13824 && K == 2560) launch_ladder_int8xint2_m<13824, 2560, 2, 128>(input0, input1, output0, s, ws, M, stream);
     else if (N == 2560  && K == 6912) launch_ladder_int8xint2_m<2560,  6912, 1, 128>(input0, input1, output0, s, ws, M, stream);

@@ -15,7 +15,7 @@
 // Unit test for the IDEFICS3/SmolVLM pixel-shuffle channel order: a c-outermost
 // (wrong) arrangement fails the hard-coded expectations below.
 
-#include "models/vision_common.h"
+#include "modules/preprocess.h"
 
 #undef NDEBUG  // keep assert() live even in Release builds
 #include <cassert>

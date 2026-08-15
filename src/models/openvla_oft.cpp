@@ -13,17 +13,19 @@
 // limitations under the License.
 
 #include "arch.h"
+#include "options.h"
 #include "model.h"
-#include "vision_common.h"
-#include "models/dual_tower.h"
+#include "modules/preprocess.h"
+#include "modules/dual_tower.h"
 
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include "ggml-backend.h"
 #include "backend.h"
 #include "gguf.h"
-#include "models/gguf_reader.h"
-#include "models/scratch_ctx.h"
+#include "gguf_reader.h"
+#include "scratch_ctx.h"
+#include "env_flag.h"
 
 #include <chrono>
 #include <cmath>
@@ -47,33 +49,52 @@ bool parse_stats(const std::string & js, int64_t want, std::vector<float> & q01,
     };
     const char * env = std::getenv("VLA_OPENVLA_OFT_UNNORM_KEY");
     size_t suite_pos;
-    if (env) { suite = env; suite_pos = find_key(0, suite); }
+    if (env) {
+        suite = env;
+        suite_pos = find_key(0, suite);
+    }
     else {
         size_t b = js.find('{'); size_t q = js.find('"', b);
-        size_t qe = js.find('"', q + 1);
-        suite = js.substr(q + 1, qe - q - 1); suite_pos = q;
+        size_t qe = js.find('"', q+1);
+        suite = js.substr(q+1, qe-q-1); suite_pos = q;
     }
-    if (suite_pos == std::string::npos) { std::fprintf(stderr, "vla(openvla_oft): suite '%s' not in stats\n", suite.c_str()); return false; }
+    if (suite_pos == std::string::npos) {
+        std::fprintf(stderr, "vla(openvla_oft): suite '%s' not in stats\n", suite.c_str());
+        return false;
+    }
     size_t act = find_key(suite_pos, "action");
-    if (act == std::string::npos) return false;
+    if (act == std::string::npos)
+        return false;
     auto read_arr = [&](const std::string & key, std::vector<float> & out) -> bool {
         size_t k = find_key(act, key); if (k == std::string::npos) return false;
         size_t lb = js.find('[', k); size_t rb = js.find(']', lb);
-        if (lb == std::string::npos || rb == std::string::npos) return false;
-        out.clear(); size_t p = lb + 1;
+        if (lb == std::string::npos || rb == std::string::npos)
+            return false;
+        out.clear(); size_t p = lb+1;
         while (p < rb) {
-            while (p < rb && (js[p] == ',' || js[p] == ' ' || js[p] == '\n' || js[p] == '\t' || js[p] == '\r')) ++p;
-            if (p >= rb) break;
+            while (p < rb && (js[p] == ',' || js[p] == ' ' || js[p] == '\n' || js[p] == '\t' || js[p] == '\r'))
+                ++p;
+            if (p >= rb)
+                break;
             bool t = (js.compare(p, 4, "true") == 0), f = (js.compare(p, 5, "false") == 0);
-            if (t || f) { out.push_back(t ? 1.0f : 0.0f); p += t ? 4 : 5; }
-            else { out.push_back(std::strtof(js.c_str() + p, nullptr)); while (p < rb && js[p] != ',') ++p; }
+            if (t || f) {
+                out.push_back(t ? 1.0f : 0.0f);
+                p += t ? 4 : 5;
+            }
+            else {
+                out.push_back(std::strtof(js.c_str()+p, nullptr));
+                while (p < rb && js[p] != ',')
+                    ++p;
+            }
         }
         return true;
     };
     std::vector<float> mk;
-    if (!read_arr("q01", q01) || !read_arr("q99", q99)) return false;
-    if (!read_arr("mask", mk)) mk.assign(want, 1.0f);
-    mask.assign(mk.size(), 1); for (size_t i = 0; i < mk.size(); ++i) mask[i] = mk[i] != 0.0f ? 1 : 0;
+    if (!read_arr("q01", q01) || !read_arr("q99", q99))
+        return false;
+    if (!read_arr("mask", mk))
+        mk.assign(want, 1.0f);
+    mask.assign(mk.size(), 1); for (size_t i=0; i<mk.size(); ++i) mask[i] = mk[i] != 0.0f ? 1 : 0;
     return (int64_t) q01.size() == want && (int64_t) q99.size() == want;
 }
 
@@ -85,9 +106,12 @@ struct HeadBlkW  { ggml_tensor *lnw,*lnb,*linw,*linb; };
 struct OpenVlaOftModelArch : public ModelArchBase {
     OpenVlaOftModelArch() : ModelArchBase(Arch::OPENVLA_OFT) {}
     ~OpenVlaOftModelArch() override {
-        if (weight_buf)  ggml_backend_buffer_free(weight_buf);
-        if (ctx_weights) ggml_free(ctx_weights);
-        if (backend)     ggml_backend_free(backend);
+        if (weight_buf)
+            ggml_backend_buffer_free(weight_buf);
+        if (ctx_weights)
+            ggml_free(ctx_weights);
+        if (backend)
+            ggml_backend_free(backend);
     }
 
     ggml_backend_t backend = nullptr;
@@ -97,7 +121,9 @@ struct OpenVlaOftModelArch : public ModelArchBase {
 
     struct MainKey {
         int64_t seq=-1, n_views=-1, n_lang=-1;
-        bool operator==(const MainKey & o) const { return seq==o.seq && n_views==o.n_views && n_lang==o.n_lang; }
+        bool operator==(const MainKey & o) const {
+            return seq==o.seq && n_views==o.n_views && n_lang==o.n_lang;
+        }
     };
     struct MainIO {
         ggml_tensor *t_ids=nullptr,*t_state=nullptr,*t_proj=nullptr,*act0=nullptr,*t_pos=nullptr,*norm_actions=nullptr;
@@ -116,9 +142,7 @@ struct OpenVlaOftModelArch : public ModelArchBase {
     float   head_ln_eps=1e-5f;
     int64_t stop_id=2;
 
-    ggml_tensor *d_patch_w,*d_patch_b,*d_cls,*d_reg,*d_pos; std::vector<ViTLayerW> dvit;
-    ggml_tensor *s_patch_w,*s_patch_b,*s_pos;               std::vector<ViTLayerW> svit;
-    ggml_tensor *pj_fc1w,*pj_fc1b,*pj_fc2w,*pj_fc2b,*pj_fc3w,*pj_fc3b;
+    DualTower vis;
     ggml_tensor *token_embd,*lm_out_norm; std::vector<LMLayerW> lm;
     ggml_tensor *pp_fc1w,*pp_fc1b,*pp_fc2w,*pp_fc2b;
     ggml_tensor *h_ln1w,*h_ln1b,*h_fc1w,*h_fc1b,*h_ln2w,*h_ln2b,*h_fc2w,*h_fc2b; std::vector<HeadBlkW> hblk;
@@ -130,15 +154,20 @@ struct OpenVlaOftModelArch : public ModelArchBase {
 
 std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path,
                                                   const std::string& ckpt_path,
-                                                  const std::string& ) {
+                                                  const std::string&,
+                                                  const Options& opts) {
     if (!mmproj_path.empty())
         std::printf("vla(openvla_oft): note - mmproj '%s' ignored (vision baked into combined GGUF)\n", mmproj_path.c_str());
     auto m = std::make_unique<OpenVlaOftModelArch>();
-    m->mt = std::getenv("VLA_OPENVLA_OFT_F32_WEIGHTS") ? GGML_TYPE_F32 : GGML_TYPE_BF16;
+    m->mt = opts.weight_dtype.value_or(GGML_TYPE_BF16);
 
     gguf_reader g("openvla_oft");
-    if (!g.open(ckpt_path)) return nullptr;
-    if (!g.has("openvla_oft.architecture")) { std::fprintf(stderr, "vla(openvla_oft): not an openvla_oft GGUF\n"); return nullptr; }
+    if (!g.open(ckpt_path))
+        return nullptr;
+    if (!g.has("openvla_oft.architecture")) {
+        std::fprintf(stderr, "vla(openvla_oft): not an openvla_oft GGUF\n");
+        return nullptr;
+    }
 
     auto U=[&](const char*k,int64_t&d){ if(g.has(k)) d=(int64_t)g.u32(k); };
     auto F=[&](const char*k,float&d){ if(g.has(k)) d=g.f32(k); };
@@ -159,52 +188,34 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
     // No empty_id: the reference zeroes the action-slot embeddings instead
     // (modeling_prismatic.py:891), which is what act0 below does.
     U("openvla_oft.tokens.stop_id",m->stop_id);
-    if (m->lm_head_dim==0) m->lm_head_dim = m->lm_hidden / m->n_q;
+    if (m->lm_head_dim==0)
+        m->lm_head_dim = m->lm_hidden/m->n_q;
 
     if (g.has("openvla_oft.statistics_json")) {
         if (!parse_stats(g.str("openvla_oft.statistics_json"), m->action_dim, m->q01, m->q99, m->unnorm_mask, m->suite))
-            { std::fprintf(stderr, "vla(openvla_oft): failed to parse statistics_json\n"); return nullptr; }
+            {
+                std::fprintf(stderr, "vla(openvla_oft): failed to parse statistics_json\n");
+                return nullptr;
+            }
         std::printf("vla(openvla_oft): unnorm suite = %s (q99 dim %zu)\n", m->suite.c_str(), m->q99.size());
     }
 
     {
         const Backend b = backend_init("vla(openvla_oft)", m->n_threads);
-        if (!b.handle) { return nullptr; }
+        if (!b.handle) {
+            return nullptr;
+        }
         m->backend = b.handle;
     }
 
     ggml_init_params wp = { (size_t)64*1024*1024, nullptr, true };
     m->ctx_weights = ggml_init(wp);
-    ggml_context * W = m->ctx_weights;
     bool ok = true;
-    auto mk=[&](const char*name, ggml_type ty)->ggml_tensor*{ const ggml_tensor*gt=g.meta(name);
-        if(!gt){ std::fprintf(stderr,"vla(openvla_oft): missing %s\n",name); ok=false; return nullptr; }
-        ggml_tensor*t=ggml_new_tensor(W,g.resident_type(gt,ty),ggml_n_dims(gt),gt->ne); ggml_set_name(t,name); return t; };
-    auto mm=[&](const char*n){ return mk(n,m->mt); };
-    auto f32=[&](const char*n){ return mk(n,GGML_TYPE_F32); };
+    WeightLoader L("openvla_oft", g, m->ctx_weights, m->mt);
+    auto mm  = [&](const char * n) { return L.gemm("%s", n); };
+    auto f32 = [&](const char * n) { return L.f32("%s", n); };
 
-    m->d_patch_w=mk("vis.d.patch.weight",GGML_TYPE_F32); m->d_patch_b=f32("vis.d.patch.bias");
-    m->d_cls=f32("vis.d.cls"); m->d_reg=f32("vis.d.reg"); m->d_pos=f32("vis.d.pos");
-    m->dvit.resize(m->d_layers);
-    for(int i=0;i<m->d_layers;++i){ auto&w=m->dvit[i]; char b[64];
-        auto N=[&](const char*s){ std::snprintf(b,sizeof(b),"vis.d.blk.%d.%s",i,s); return (const char*)b; };
-        w.n1w=f32(N("ln1.weight")); w.n1b=f32(N("ln1.bias")); w.n2w=f32(N("ln2.weight")); w.n2b=f32(N("ln2.bias"));
-        w.ls1=f32(N("ls1")); w.ls2=f32(N("ls2")); w.Wqkv=mm(N("qkv.weight")); w.bqkv=f32(N("qkv.bias"));
-        w.Wproj=mm(N("proj.weight")); w.bproj=f32(N("proj.bias")); w.Wfc1=mm(N("fc1.weight")); w.bfc1=f32(N("fc1.bias"));
-        w.Wfc2=mm(N("fc2.weight")); w.bfc2=f32(N("fc2.bias")); }
-
-    m->s_patch_w=mk("vis.s.patch.weight",GGML_TYPE_F32); m->s_patch_b=f32("vis.s.patch.bias"); m->s_pos=f32("vis.s.pos");
-    m->svit.resize(m->s_layers);
-    for(int i=0;i<m->s_layers;++i){ auto&w=m->svit[i]; char b[64];
-        auto N=[&](const char*s){ std::snprintf(b,sizeof(b),"vis.s.blk.%d.%s",i,s); return (const char*)b; };
-        w.n1w=f32(N("ln1.weight")); w.n1b=f32(N("ln1.bias")); w.n2w=f32(N("ln2.weight")); w.n2b=f32(N("ln2.bias"));
-        w.ls1=nullptr; w.ls2=nullptr; w.Wqkv=mm(N("qkv.weight")); w.bqkv=f32(N("qkv.bias"));
-        w.Wproj=mm(N("proj.weight")); w.bproj=f32(N("proj.bias")); w.Wfc1=mm(N("fc1.weight")); w.bfc1=f32(N("fc1.bias"));
-        w.Wfc2=mm(N("fc2.weight")); w.bfc2=f32(N("fc2.bias")); }
-
-    m->pj_fc1w=mm("vis.proj.fc1.weight"); m->pj_fc1b=f32("vis.proj.fc1.bias");
-    m->pj_fc2w=mm("vis.proj.fc2.weight"); m->pj_fc2b=f32("vis.proj.fc2.bias");
-    m->pj_fc3w=mm("vis.proj.fc3.weight"); m->pj_fc3b=f32("vis.proj.fc3.bias");
+    m->vis.declare(L, m->d_layers, m->s_layers);
 
     m->token_embd=mm("token_embd.weight"); m->lm_out_norm=f32("lm.output_norm.weight");
     m->lm.resize(m->lm_layers);
@@ -225,17 +236,16 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
     for(int i=0;i<m->head_blocks;++i){ auto&w=m->hblk[i]; char b[64];
         auto N=[&](const char*s){ std::snprintf(b,sizeof(b),"aex.head.blk.%d.%s",i,s); return (const char*)b; };
         w.lnw=f32(N("ln.weight")); w.lnb=f32(N("ln.bias")); w.linw=mm(N("lin.weight")); w.linb=f32(N("lin.bias")); }
-    if(!ok){ std::fprintf(stderr,"vla(openvla_oft): weight setup failed\n"); return nullptr; }
-
-    m->weight_buf = ggml_backend_alloc_ctx_tensors(m->ctx_weights, m->backend);
-    if(!m->weight_buf){ std::fprintf(stderr,"vla(openvla_oft): alloc_ctx_tensors failed (OOM?)\n"); return nullptr; }
-    for(ggml_tensor*t=ggml_get_first_tensor(W); t; t=ggml_get_next_tensor(W,t)){
-        std::vector<uint8_t> bytes=g.read_convert(ggml_get_name(t),t->type);
-        if(bytes.empty()||bytes.size()!=ggml_nbytes(t)){ std::fprintf(stderr,"vla(openvla_oft): load %s (%zu vs %zu)\n",ggml_get_name(t),bytes.size(),ggml_nbytes(t)); return nullptr; }
-        ggml_backend_tensor_set(t,bytes.data(),0,bytes.size());
+    if(!ok){
+        std::fprintf(stderr,"vla(openvla_oft): weight setup failed\n");
+        return nullptr;
     }
+
+    if (!L.upload(m->backend, &m->weight_buf))
+        return nullptr;
+
     std::printf("vla(openvla_oft): weights resident %.2f GiB (%s) - DINOv2+SigLIP towers + Llama-2-7B + MLPResNet L1 head\n",
-                ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0*1024.0), m->mt==GGML_TYPE_F32?"F32":"BF16");
+                ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0*1024.0), dtype_name(m->mt));
 
     m->cfg.n_suffix = m->chunk; m->cfg.max_action_dim = m->action_dim;
     m->cfg.real_action_dim = m->action_dim; m->cfg.real_state_dim = m->proprio_dim;
@@ -254,7 +264,7 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     if (n_views < 1) { std::fprintf(stderr, "vla(openvla_oft): need >=1 image view\n"); return {}; }
     if (!in.images) { std::fprintf(stderr, "vla(openvla_oft): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
     // towers read S*S*3 per view; reject any view that is not exactly SxS.
-    for (int64_t v = 0; v < n_views; ++v) {
+    for (int64_t v=0; v<n_views; ++v) {
         const ImageView& iv = in.images[v];
         if (!view_is_side(iv.data, iv.w, iv.h, S)) {
             std::fprintf(stderr, "vla(openvla_oft): image view %lld is %dx%d, expected %lldx%lld\n",
@@ -274,14 +284,14 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
         for(int v=0; v<n_views; ++v){
             px_d[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(px_d[v]);
             px_s[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(px_s[v]);
-            ggml_tensor*pd=tower(C,px_d[v],d_patch_w,d_patch_b,d_pos,d_cls,d_reg,dvit,d_hidden,d_heads,d_head_dim,d_inter,patch_size,vit_ln_eps,true);
-            ggml_tensor*ps=tower(C,px_s[v],s_patch_w,s_patch_b,s_pos,nullptr,nullptr,svit,s_hidden,s_heads,s_head_dim,s_inter,patch_size,vit_ln_eps,false);
+            ggml_tensor*pd=tower(C,px_d[v],vis.d_patch_w,vis.d_patch_b,vis.d_pos,vis.d_cls,vis.d_reg,vis.dvit,d_hidden,d_heads,d_head_dim,d_inter,patch_size,vit_ln_eps,true);
+            ggml_tensor*ps=tower(C,px_s[v],vis.s_patch_w,vis.s_patch_b,vis.s_pos,nullptr,nullptr,vis.svit,s_hidden,s_heads,s_head_dim,s_inter,patch_size,vit_ln_eps,false);
             cmb[v]=ggml_concat(C,pd,ps,0);
         }
         ggml_tensor*allp=cmb[0]; for(int v=1;v<n_views;++v) allp=ggml_concat(C,allp,cmb[v],1);
-        ggml_tensor*ph=ggml_add(C,ggml_mul_mat(C,pj_fc1w,allp),pj_fc1b); ph=ggml_gelu_erf(C,ph);
-        ph=ggml_add(C,ggml_mul_mat(C,pj_fc2w,ph),pj_fc2b); ph=ggml_gelu_erf(C,ph);
-        ggml_tensor*proj=ggml_add(C,ggml_mul_mat(C,pj_fc3w,ph),pj_fc3b); ggml_set_output(proj);
+        ggml_tensor*ph=ggml_add(C,ggml_mul_mat(C,vis.pj_fc1w,allp),vis.pj_fc1b); ph=ggml_gelu_erf(C,ph);
+        ph=ggml_add(C,ggml_mul_mat(C,vis.pj_fc2w,ph),vis.pj_fc2b); ph=ggml_gelu_erf(C,ph);
+        ggml_tensor*proj=ggml_add(C,ggml_mul_mat(C,vis.pj_fc3w,ph),vis.pj_fc3b); ggml_set_output(proj);
         ggml_cgraph*vg=ggml_new_graph_custom(C,16384,false); ggml_build_forward_expand(vg,proj);
         if(!vision_scratch.alloc(backend,vg)){ std::fprintf(stderr,"vla(openvla_oft): vision gallocr failed\n"); return {}; }
         std::vector<float> dbuf, sbuf;
@@ -296,7 +306,7 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
 
     const int64_t L = in.n_lang;
     // ggml_get_rows does not bound-check, so reject out-of-range tokens here.
-    for (int64_t i = 0; i < L; ++i)
+    for (int64_t i=0; i<L; ++i)
         if (in.lang_tokens[i] < 0 || in.lang_tokens[i] >= vocab) {
             std::fprintf(stderr, "vla(openvla_oft): token %d out of vocab\n", in.lang_tokens[i]);
             return {};
@@ -306,10 +316,10 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
         return {};
     }
     const int64_t n_act = chunk * action_dim;
-    const int64_t NUM_PATCHES = NPATCH + 1;
-    const int64_t NUM_PROMPT_TOKENS = L - 1;
-    const int64_t ACT_START = NUM_PATCHES + NUM_PROMPT_TOKENS;
-    const int64_t SEQ = 1 + NUM_PATCHES + (L-1) + n_act + 1;
+    const int64_t NUM_PATCHES = NPATCH+1;
+    const int64_t NUM_PROMPT_TOKENS = L-1;
+    const int64_t ACT_START = NUM_PATCHES+NUM_PROMPT_TOKENS;
+    const int64_t SEQ = 1+NUM_PATCHES+(L-1)+n_act+1;
     const auto ti=clock::now();
     // LM + action head graph depends only on the sequence layout.
     const MainKey mkey{ SEQ, n_views, L };
@@ -317,7 +327,8 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
                                          [&](ggml_context*C, MainIO & gio)->ggml_cgraph*{
     ggml_tensor*t_ids=ggml_new_tensor_1d(C,GGML_TYPE_I32,L+1); ggml_set_input(t_ids);
     ggml_tensor*emb=ggml_get_rows(C,token_embd,t_ids);
-    if(emb->type!=GGML_TYPE_F32) emb=ggml_cast(C,emb,GGML_TYPE_F32);
+    if(emb->type!=GGML_TYPE_F32)
+        emb=ggml_cast(C,emb,GGML_TYPE_F32);
     ggml_tensor*bos =ggml_cont(C,ggml_view_2d(C,emb,HC,1,emb->nb[1],0));
     ggml_tensor*rest=ggml_cont(C,ggml_view_2d(C,emb,HC,L-1,emb->nb[1],emb->nb[1]));
     ggml_tensor*stop=ggml_cont(C,ggml_view_2d(C,emb,HC,1,emb->nb[1],L*emb->nb[1]));
@@ -386,14 +397,23 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     ggml_tensor*act0=gio.act0,*t_pos=gio.t_pos,*norm_actions=gio.norm_actions;
 
     { std::vector<int32_t> ids(L+1);
-      for(int64_t i=0;i<L;++i) ids[i]=in.lang_tokens[i];
+      for(int64_t i=0;i<L;++i)
+          ids[i]=in.lang_tokens[i];
       ids[L]=(int32_t)stop_id;
       ggml_backend_tensor_set(t_ids,ids.data(),0,ggml_nbytes(t_ids)); }
     ggml_backend_tensor_set(t_proj,proj_host.data(),0,ggml_nbytes(t_proj));
-    { std::vector<int32_t> pp(SEQ); for(int64_t i=0;i<SEQ;++i)pp[i]=(int32_t)i; ggml_backend_tensor_set(t_pos,pp.data(),0,ggml_nbytes(t_pos)); }
+    {
+        std::vector<int32_t> pp(SEQ);
+        for(int64_t i=0;i<SEQ;++i)
+            pp[i]=(int32_t)i;
+        ggml_backend_tensor_set(t_pos,pp.data(),0,ggml_nbytes(t_pos));
+    }
     { std::vector<float> sv(proprio_dim,0.0f); for(int64_t i=0;i<proprio_dim && in.state;++i) sv[i]=in.state[i];
       ggml_backend_tensor_set(t_state,sv.data(),0,ggml_nbytes(t_state)); }
-    { std::vector<float> z((size_t)HC*n_act,0.0f); ggml_backend_tensor_set(act0,z.data(),0,ggml_nbytes(act0)); }
+    {
+        std::vector<float> z((size_t)HC*n_act,0.0f);
+        ggml_backend_tensor_set(act0,z.data(),0,ggml_nbytes(act0));
+    }
 
     if(ggml_backend_graph_compute(backend,gf)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(openvla_oft): main compute failed\n"); return {}; }
     std::vector<float> na((size_t)action_dim*chunk);

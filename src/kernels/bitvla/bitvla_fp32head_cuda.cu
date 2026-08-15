@@ -58,24 +58,34 @@ struct bitvla_fp32head_cuda_ctx {
 static float* upload_f32(const float* h, size_t n) {
     float* d = nullptr;
     cudaError_t e = cudaMalloc(&d, n * sizeof(float));
-    if (e != cudaSuccess) { std::fprintf(stderr, "vla(bitvla_fp32head): cudaMalloc failed (%zu)\n", n); return nullptr; }
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "vla(bitvla_fp32head): cudaMalloc failed (%zu)\n", n);
+        return nullptr;
+    }
     e = cudaMemcpy(d, h, n * sizeof(float), cudaMemcpyHostToDevice);
-    if (e != cudaSuccess) { std::fprintf(stderr, "vla(bitvla_fp32head): cudaMemcpy H2D failed (%zu)\n", n); cudaFree(d); return nullptr; }
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "vla(bitvla_fp32head): cudaMemcpy H2D failed (%zu)\n", n);
+        cudaFree(d);
+        return nullptr;
+    }
     return d;
 }
 
 __global__ void gelu_erf_fp32_kernel(const float* __restrict__ in, float* __restrict__ out, int N) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= N) return;
+    const int i = blockIdx.x*blockDim.x+threadIdx.x;
+    if (i >= N)
+        return;
     float x = in[i];
-    out[i] = 0.5f * x * (1.0f + erff(x * 0.70710678118654752440f));
+    out[i] = 0.5f * x * (1.0f+erff(x*0.70710678118654752440f));
 }
 
 __global__ void relu_fp32_kernel(float* __restrict__ inout, int N) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= N) return;
+    const int i = blockIdx.x*blockDim.x+threadIdx.x;
+    if (i >= N)
+        return;
     float v = inout[i];
-    if (v < 0.0f) inout[i] = 0.0f;
+    if (v < 0.0f)
+        inout[i] = 0.0f;
 }
 
 template <int BLOCK>
@@ -86,57 +96,68 @@ __global__ void layernorm_fp32_kernel(const float* __restrict__ x,
                                        float eps, int K) {
     const int m = blockIdx.x;
     const int tid = threadIdx.x;
-    const float* row = x + (size_t)m * K;
-    float*       o   = out + (size_t)m * K;
+    const float* row = x+(size_t)m * K;
+    float*       o   = out+(size_t)m * K;
 
     float sum = 0.0f;
-    for (int k = tid; k < K; k += BLOCK) sum += row[k];
-    for (int off = 16; off > 0; off >>= 1) sum += __shfl_down_sync(0xffffffff, sum, off);
+    for (int k=tid; k<K; k += BLOCK)
+        sum += row[k];
+    for (int off=16; off>0; off >>= 1)
+        sum += __shfl_down_sync(0xffffffff, sum, off);
     __shared__ float smem[32];
-    if ((tid & 31) == 0) smem[tid >> 5] = sum;
+    if ((tid & 31) == 0)
+        smem[tid >> 5] = sum;
     __syncthreads();
     if ((tid >> 5) == 0) {
-        float v = (tid < (BLOCK + 31) / 32) ? smem[tid] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffff, v, off);
-        if (tid == 0) smem[0] = v;
+        float v = (tid < (BLOCK+31)/32) ? smem[tid] : 0.0f;
+        for (int off=16; off>0; off >>= 1)
+            v += __shfl_down_sync(0xffffffff, v, off);
+        if (tid == 0)
+            smem[0] = v;
     }
     __syncthreads();
-    const float mean = smem[0] / (float)K;
+    const float mean = smem[0]/(float)K;
 
     float vsum = 0.0f;
-    for (int k = tid; k < K; k += BLOCK) {
-        float v = row[k] - mean;
+    for (int k=tid; k<K; k += BLOCK) {
+        float v = row[k]-mean;
         vsum += v * v;
     }
-    for (int off = 16; off > 0; off >>= 1) vsum += __shfl_down_sync(0xffffffff, vsum, off);
-    if ((tid & 31) == 0) smem[tid >> 5] = vsum;
+    for (int off=16; off>0; off >>= 1)
+        vsum += __shfl_down_sync(0xffffffff, vsum, off);
+    if ((tid & 31) == 0)
+        smem[tid >> 5] = vsum;
     __syncthreads();
     if ((tid >> 5) == 0) {
-        float v = (tid < (BLOCK + 31) / 32) ? smem[tid] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffff, v, off);
-        if (tid == 0) smem[0] = v;
+        float v = (tid < (BLOCK+31)/32) ? smem[tid] : 0.0f;
+        for (int off=16; off>0; off >>= 1)
+            v += __shfl_down_sync(0xffffffff, v, off);
+        if (tid == 0)
+            smem[0] = v;
     }
     __syncthreads();
-    const float inv_std = rsqrtf(smem[0] / (float)K + eps);
+    const float inv_std = rsqrtf(smem[0]/(float)K+eps);
 
-    for (int k = tid; k < K; k += BLOCK) {
-        o[k] = (row[k] - mean) * inv_std * w[k] + b[k];
+    for (int k=tid; k<K; k += BLOCK) {
+        o[k] = (row[k]-mean)*inv_std * w[k]+b[k];
     }
 }
 
 __global__ void add_bias_fp32_kernel(const float* x, const float* bias,
                                       float* out, int M, int K) {
     const int m = blockIdx.x;
-    const int k = blockIdx.y * blockDim.x + threadIdx.x;
-    if (k >= K) return;
-    const size_t i = (size_t)m * K + k;
-    out[i] = x[i] + bias[k];
+    const int k = blockIdx.y*blockDim.x+threadIdx.x;
+    if (k >= K)
+        return;
+    const size_t i = (size_t)m * K+k;
+    out[i] = x[i]+bias[k];
 }
 
 __global__ void add_fp32_kernel(const float* a, const float* b, float* out, int N) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= N) return;
-    out[i] = a[i] + b[i];
+    const int i = blockIdx.x*blockDim.x+threadIdx.x;
+    if (i >= N)
+        return;
+    out[i] = a[i]+b[i];
 }
 
 static int linear_bias_fp32(
@@ -160,7 +181,7 @@ static int linear_bias_fp32(
     }
     if (bias) {
         const int B = 256;
-        const int n_kb = (N_out + B - 1) / B;
+        const int n_kb = (N_out+B-1)/B;
         add_bias_fp32_kernel<<<dim3(M, n_kb, 1), dim3(B, 1, 1), 0, stream>>>(out, bias, out, M, N_out);
     }
     return 0;
@@ -225,8 +246,8 @@ extern "C" bitvla_fp32head_cuda_ctx* bitvla_fp32head_cuda_init(
     CUDA_OK_NULL(cudaMalloc(&ctx->d_pp_h1,   (size_t)lm_hidden  * sizeof(float)));
     CUDA_OK_NULL(cudaMalloc(&ctx->d_pp_out,  (size_t)lm_hidden  * sizeof(float)));
 
-    CUDA_OK_NULL(cudaMalloc(&ctx->d_ah_in,       (size_t)chunk * ctx->ah_in_dim * sizeof(float)));
-    CUDA_OK_NULL(cudaMalloc(&ctx->d_ah_norm_big, (size_t)chunk * ctx->ah_in_dim * sizeof(float)));
+    CUDA_OK_NULL(cudaMalloc(&ctx->d_ah_in,       (size_t)chunk * ctx->ah_in_dim*sizeof(float)));
+    CUDA_OK_NULL(cudaMalloc(&ctx->d_ah_norm_big, (size_t)chunk * ctx->ah_in_dim*sizeof(float)));
     CUDA_OK_NULL(cudaMalloc(&ctx->d_ah_h,         (size_t)chunk * lm_hidden  * sizeof(float)));
     CUDA_OK_NULL(cudaMalloc(&ctx->d_ah_tmp,       (size_t)chunk * lm_hidden  * sizeof(float)));
     CUDA_OK_NULL(cudaMalloc(&ctx->d_ah_tmp2,      (size_t)chunk * lm_hidden  * sizeof(float)));
@@ -254,7 +275,7 @@ extern "C" int bitvla_fp32head_proprio_forward(
     cudaStream_t stream)
 {
 
-    CUDA_OK_RET(cudaMemcpyAsync(ctx->d_state, host_state, (size_t)ctx->proprio_dim * sizeof(float),
+    CUDA_OK_RET(cudaMemcpyAsync(ctx->d_state, host_state, (size_t)ctx->proprio_dim*sizeof(float),
                                  cudaMemcpyHostToDevice, stream));
 
     if (linear_bias_fp32(ctx->cublas, stream, ctx->pp_fc1_w, ctx->pp_fc1_b,
@@ -263,13 +284,13 @@ extern "C" int bitvla_fp32head_proprio_forward(
     {
         const int B = 256;
         const int N = ctx->lm_hidden;
-        gelu_erf_fp32_kernel<<<dim3((N + B - 1) / B), dim3(B), 0, stream>>>(ctx->d_pp_h1, ctx->d_pp_h1, N);
+        gelu_erf_fp32_kernel<<<dim3((N+B-1)/B), dim3(B), 0, stream>>>(ctx->d_pp_h1, ctx->d_pp_h1, N);
     }
 
     if (linear_bias_fp32(ctx->cublas, stream, ctx->pp_fc2_w, ctx->pp_fc2_b,
                          ctx->d_pp_h1, ctx->d_pp_out, 1, ctx->lm_hidden, ctx->lm_hidden) != 0) return -1;
 
-    CUDA_OK_RET(cudaMemcpyAsync(host_out, ctx->d_pp_out, (size_t)ctx->lm_hidden * sizeof(float),
+    CUDA_OK_RET(cudaMemcpyAsync(host_out, ctx->d_pp_out, (size_t)ctx->lm_hidden*sizeof(float),
                                  cudaMemcpyDeviceToHost, stream));
     CUDA_OK_RET(cudaStreamSynchronize(stream));
     return 0;
@@ -301,7 +322,7 @@ extern "C" int bitvla_fp32head_action_forward(
     {
         const int B = 256;
         const int N = M * H;
-        relu_fp32_kernel<<<dim3((N + B - 1) / B), dim3(B), 0, stream>>>(ctx->d_ah_h, N);
+        relu_fp32_kernel<<<dim3((N+B-1)/B), dim3(B), 0, stream>>>(ctx->d_ah_h, N);
     }
 
     {
@@ -316,13 +337,13 @@ extern "C" int bitvla_fp32head_action_forward(
     {
         const int B = 256;
         const int N = M * H;
-        relu_fp32_kernel<<<dim3((N + B - 1) / B), dim3(B), 0, stream>>>(ctx->d_ah_tmp2, N);
+        relu_fp32_kernel<<<dim3((N+B-1)/B), dim3(B), 0, stream>>>(ctx->d_ah_tmp2, N);
     }
 
     {
         const int B = 256;
         const int N = M * H;
-        add_fp32_kernel<<<dim3((N + B - 1) / B), dim3(B), 0, stream>>>(ctx->d_ah_h, ctx->d_ah_tmp2, ctx->d_ah_h, N);
+        add_fp32_kernel<<<dim3((N+B-1)/B), dim3(B), 0, stream>>>(ctx->d_ah_h, ctx->d_ah_tmp2, ctx->d_ah_h, N);
     }
 
     {
@@ -335,12 +356,12 @@ extern "C" int bitvla_fp32head_action_forward(
     {
         const int B = 256;
         const int N = M * H;
-        relu_fp32_kernel<<<dim3((N + B - 1) / B), dim3(B), 0, stream>>>(ctx->d_ah_tmp2, N);
+        relu_fp32_kernel<<<dim3((N+B-1)/B), dim3(B), 0, stream>>>(ctx->d_ah_tmp2, N);
     }
     {
         const int B = 256;
         const int N = M * H;
-        add_fp32_kernel<<<dim3((N + B - 1) / B), dim3(B), 0, stream>>>(ctx->d_ah_h, ctx->d_ah_tmp2, ctx->d_ah_h, N);
+        add_fp32_kernel<<<dim3((N+B-1)/B), dim3(B), 0, stream>>>(ctx->d_ah_h, ctx->d_ah_tmp2, ctx->d_ah_h, N);
     }
 
     {
@@ -358,7 +379,8 @@ extern "C" int bitvla_fp32head_action_forward(
 }
 
 extern "C" void bitvla_fp32head_cuda_free(bitvla_fp32head_cuda_ctx* ctx) {
-    if (!ctx) return;
+    if (!ctx)
+        return;
     float* ws[] = {
         ctx->pp_fc1_w, ctx->pp_fc1_b, ctx->pp_fc2_w, ctx->pp_fc2_b,
         ctx->ah_ln1_w, ctx->ah_ln1_b, ctx->ah_fc1_w, ctx->ah_fc1_b,
@@ -368,7 +390,10 @@ extern "C" void bitvla_fp32head_cuda_free(bitvla_fp32head_cuda_ctx* ctx) {
         ctx->d_state, ctx->d_pp_h1, ctx->d_pp_out,
         ctx->d_ah_in, ctx->d_ah_norm_big, ctx->d_ah_h, ctx->d_ah_tmp, ctx->d_ah_tmp2, ctx->d_ah_out,
     };
-    for (float* p : ws) if (p) cudaFree(p);
-    if (ctx->cublas) cublasDestroy(ctx->cublas);
+    for (float* p : ws)
+        if (p)
+            cudaFree(p);
+    if (ctx->cublas)
+        cublasDestroy(ctx->cublas);
     delete ctx;
 }

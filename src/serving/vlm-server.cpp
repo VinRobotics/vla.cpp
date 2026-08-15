@@ -37,7 +37,9 @@
 namespace {
 
 std::atomic<bool> g_shutdown{false};
-void on_signal(int) { g_shutdown.store(true, std::memory_order_relaxed); }
+void on_signal(int) {
+    g_shutdown.store(true, std::memory_order_relaxed);
+}
 
 // Reject absurd image dimensions before any size arithmetic on untrusted input.
 constexpr unsigned kMaxImageDim = 8192;
@@ -73,13 +75,13 @@ int main(int argc, char ** argv) {
     vlm::LoadParams lp;
     std::vector<std::string> positionals;
 
-    for (int i = 1; i < argc; ++i) {
+    for (int i=1; i<argc; ++i) {
         std::string a = argv[i];
-        if (a == "--bind" && i + 1 < argc) {
+        if (a == "--bind" && i+1 < argc) {
             bind_addr = argv[++i];
-        } else if ((a == "-c" || a == "--n-ctx") && i + 1 < argc) {
+        } else if ((a == "-c" || a == "--n-ctx") && i+1 < argc) {
             lp.n_ctx = std::atoi(argv[++i]);
-        } else if (a == "--ngl" && i + 1 < argc) {
+        } else if (a == "--ngl" && i+1 < argc) {
             lp.n_gpu_layers = std::atoi(argv[++i]);
         } else if (a == "--no-mmproj-gpu") {
             lp.mmproj_use_gpu = false;
@@ -111,7 +113,7 @@ int main(int argc, char ** argv) {
     zmq::socket_t  sock(zctx, zmq::socket_type::router);
     sock.set(zmq::sockopt::linger, 0);
     // Per frame only; the recv loop caps the multipart total.
-    sock.set(zmq::sockopt::maxmsgsize, int64_t(64) * 1024 * 1024);
+    sock.set(zmq::sockopt::maxmsgsize, int64_t(64)*1024*1024);
     // A peer that sends a frame with SNDMORE and then stalls would otherwise park
     // this single-threaded loop in recv for good, starving every other client.
     sock.set(zmq::sockopt::rcvtimeo, 5000);
@@ -137,17 +139,20 @@ int main(int argc, char ** argv) {
         try {
             zmq::poll(poll, 1, std::chrono::milliseconds(200));
         } catch (const zmq::error_t & e) {
-            if (e.num() == EINTR) continue;
-            if (e.num() == ETERM) break;
+            if (e.num() == EINTR)
+                continue;
+            if (e.num() == ETERM)
+                break;
             std::fprintf(stderr, "vlm-server: zmq error: %s\n", e.what());
             continue;
         }
-        if (!(poll[0].revents & ZMQ_POLLIN)) continue;
+        if (!(poll[0].revents & ZMQ_POLLIN))
+            continue;
 
         // maxmsgsize bounds each frame but not how many, so a peer could stream
         // sub-limit frames until memory runs out.
         constexpr size_t kMaxEnvFrames = 8;
-        constexpr size_t kMaxEnvBytes  = 64 * 1024;
+        constexpr size_t kMaxEnvBytes  = 64*1024;
 
         std::vector<std::string> env;
         std::string payload;
@@ -157,7 +162,10 @@ int main(int argc, char ** argv) {
             zmq::message_t part;
             try {
                 auto rr = sock.recv(part, zmq::recv_flags::none);
-                if (!rr) { recv_ok = false; break; }
+                if (!rr) {
+                    recv_ok = false;
+                    break;
+                }
             } catch (const zmq::error_t & e) {
                 if (e.num() != EINTR)
                     std::fprintf(stderr, "vlm-server: zmq recv error: %s\n", e.what());
@@ -181,7 +189,8 @@ int main(int argc, char ** argv) {
             std::fprintf(stderr, "vlm-server: oversized ROUTER envelope; request dropped\n");
             continue;
         }
-        if (!recv_ok || !have_payload || env.empty()) continue;
+        if (!recv_ok || !have_payload || env.empty())
+            continue;
 
         auto send_reply = [&](const std::string & body) {
             try {
@@ -212,13 +221,14 @@ int main(int argc, char ** argv) {
         // One 60 MiB payload of tiny messages would cost template formatting and
         // tokenization far beyond anything n_ctx could consume.
         constexpr int    kMaxMessages  = 512;
-        constexpr size_t kMaxTextBytes = 4u * 1024 * 1024;
+        constexpr size_t kMaxTextBytes = 4u*1024*1024;
         if (req.messages_size() > kMaxMessages) {
             send_reply(make_error_stream(rid, "too many messages (max 512)"));
             continue;
         }
         size_t text_bytes = 0;
-        for (const auto & m : req.messages()) text_bytes += m.content().size();
+        for (const auto & m : req.messages())
+            text_bytes += m.content().size();
         if (text_bytes > kMaxTextBytes) {
             send_reply(make_error_stream(rid, "message text too large (max 4 MiB)"));
             continue;
@@ -231,7 +241,7 @@ int main(int argc, char ** argv) {
         std::vector<vlm::Image> images;
         images.reserve(req.images_size());
         bool decode_ok = true;
-        for (int v = 0; v < req.images_size(); ++v) {
+        for (int v=0; v<req.images_size(); ++v) {
             const vlm_chat::Image & im = req.images(v);
             vlm::Image out;
             if (im.encoding() == vlm_chat::Image::JPEG) {
@@ -263,7 +273,7 @@ int main(int argc, char ** argv) {
                     send_reply(make_error_stream(rid, buf));
                     decode_ok = false; break;
                 }
-                const size_t expected = size_t(3) * im.width() * im.height();
+                const size_t expected = size_t(3)*im.width()*im.height();
                 if (im.data().size() != expected) {
                     char buf[96]; std::snprintf(buf, sizeof(buf),
                         "image[%d] RGB_U8 size %zu != 3*%u*%u", v,
@@ -281,7 +291,8 @@ int main(int argc, char ** argv) {
             }
             images.push_back(std::move(out));
         }
-        if (!decode_ok) continue;
+        if (!decode_ok)
+            continue;
 
         std::vector<vlm::Message> messages;
         messages.reserve(req.messages_size());
@@ -318,7 +329,7 @@ int main(int argc, char ** argv) {
         const auto t0 = std::chrono::steady_clock::now();
         const vlm::ChatResult r = engine.chat(messages, images, sp, on_token);
         const float ms_total = std::chrono::duration<float, std::milli>(
-            std::chrono::steady_clock::now() - t0).count();
+            std::chrono::steady_clock::now()-t0).count();
 
         vlm_chat::StreamMessage sm;
         vlm_chat::ChatResponse * resp = sm.mutable_final();
@@ -330,7 +341,8 @@ int main(int argc, char ** argv) {
         resp->set_latency_ms_total(ms_total);
         resp->set_latency_ms_prefill(r.ms_prefill);
         resp->set_latency_ms_decode(r.ms_decode);
-        if (r.finish_reason == "error") resp->set_error(r.error);
+        if (r.finish_reason == "error")
+            resp->set_error(r.error);
         send_reply(sm.SerializeAsString());
 
         ++served;

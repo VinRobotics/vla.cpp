@@ -57,7 +57,8 @@ namespace vla {
 inline void setenv_default(const char * key, const char * val) {
 #ifdef _WIN32
     size_t len = 0;
-    if (getenv_s(&len, nullptr, 0, key) == 0 && len > 0) return;
+    if (getenv_s(&len, nullptr, 0, key) == 0 && len > 0)
+        return;
     _putenv_s(key, val);
 #else
     setenv(key, val, /*overwrite=*/0);
@@ -79,7 +80,8 @@ struct Backend {
 /// silently read as device 0.
 inline int backend_device_index() {
     const char * e = std::getenv("VLA_DEVICE");
-    if (!e || !*e) return 0;
+    if (!e || !*e)
+        return 0;
     char * end = nullptr;
     const long idx = std::strtol(e, &end, 10);
     if (*end != '\0' || idx < 0 || idx > 1024) {

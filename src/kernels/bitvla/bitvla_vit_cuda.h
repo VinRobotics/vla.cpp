@@ -14,7 +14,7 @@
 
 /**
  * @file bitvla_vit_cuda.h
- * @brief CUDA forward path for the BitVLA vision tower (ViT + mmproj).
+ * @brief CUDA forward path for the BitVLA vision tower (ViT+mmproj).
  *
  * Mirrors the layout of @ref bitvla_lm_cuda.h: an opaque
  * @ref bitvla_vit_cuda_ctx owns device buffers; per-layer weights are

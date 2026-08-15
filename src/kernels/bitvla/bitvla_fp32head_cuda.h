@@ -14,7 +14,7 @@
 
 /**
  * @file bitvla_fp32head_cuda.h
- * @brief FP32 BitVLA action head + proprioception projection.
+ * @brief FP32 BitVLA action head+proprioception projection.
  *
  * BitVLA's LM and ViT are 1.58-bit ternary; its small action head and
  * proprio projector are kept in FP32 (cuBLAS GEMM) to preserve regression
@@ -97,7 +97,7 @@ bitvla_fp32head_cuda_ctx* bitvla_fp32head_cuda_init(
  * @param ctx        Context returned by @ref bitvla_fp32head_cuda_init.
  * @param host_state Length-@c proprio_dim FP32 input on the host.
  * @param host_out   Length-@c lm_hidden  FP32 output on the host.
- * @param stream     CUDA stream used for the H2D / D2H transfers.
+ * @param stream     CUDA stream used for the H2D/D2H transfers.
  * @return 0 on success, non-zero on dispatch failure.
  */
 int bitvla_fp32head_proprio_forward(
@@ -113,7 +113,7 @@ int bitvla_fp32head_proprio_forward(
  * @param host_norm_actions Length-@c chunk*action_dim FP32 output on the
  *        host, normalised to training statistics. The caller un-normalises
  *        to world units.
- * @param stream           CUDA stream used for the H2D / D2H transfers.
+ * @param stream           CUDA stream used for the H2D/D2H transfers.
  * @return 0 on success, non-zero on dispatch failure.
  */
 int bitvla_fp32head_action_forward(

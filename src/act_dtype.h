@@ -62,7 +62,7 @@ inline ggml_tensor * as_type(ggml_context * C, ggml_tensor * t, ggml_type ty) {
 inline ggml_tensor * mul_mat_t(ggml_context * C, ggml_tensor * a, ggml_tensor * b, ggml_type type) {
     // ggml_can_mul_mat is internal to ggml; this is the same condition.
     GGML_ASSERT(a->ne[0] == b->ne[0]);
-    GGML_ASSERT(b->ne[2] % a->ne[2] == 0 && b->ne[3] % a->ne[3] == 0);
+    GGML_ASSERT(b->ne[2]%a->ne[2] == 0 && b->ne[3]%a->ne[3] == 0);
     GGML_ASSERT(!ggml_is_transposed(a));
 
     const int64_t ne[4] = { a->ne[1], b->ne[1], b->ne[2], b->ne[3] };

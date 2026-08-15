@@ -42,29 +42,33 @@ __global__ void rmsnorm_bf16_kernel(const __nv_bfloat16* __restrict__ x,
 {
     const int m   = (int)blockIdx.x;
     const int tid = (int)threadIdx.x;
-    const __nv_bfloat16* row = x + m * K;
-    __nv_bfloat16*       o   = out + m * K;
+    const __nv_bfloat16* row = x+m * K;
+    __nv_bfloat16*       o   = out+m * K;
 
     float ss = 0.0f;
-    for (int k = tid; k < K; k += BLOCK) {
+    for (int k=tid; k<K; k += BLOCK) {
         float v = __bfloat162float(row[k]);
         ss += v * v;
     }
-    for (int off = 16; off > 0; off >>= 1) ss += __shfl_down_sync(0xffffffff, ss, off);
+    for (int off=16; off>0; off >>= 1)
+        ss += __shfl_down_sync(0xffffffff, ss, off);
     __shared__ float smem[32];
-    if ((tid & 31) == 0) smem[tid >> 5] = ss;
+    if ((tid & 31) == 0)
+        smem[tid >> 5] = ss;
     __syncthreads();
     if ((tid >> 5) == 0) {
-        float v = (tid < (BLOCK + 31) / 32) ? smem[tid] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffff, v, off);
-        if (tid == 0) smem[0] = v;
+        float v = (tid < (BLOCK+31)/32) ? smem[tid] : 0.0f;
+        for (int off=16; off>0; off >>= 1)
+            v += __shfl_down_sync(0xffffffff, v, off);
+        if (tid == 0)
+            smem[0] = v;
     }
     __syncthreads();
-    const float mean  = smem[0] / (float)K;
-    const float scale = rsqrtf(mean + eps);
+    const float mean  = smem[0]/(float)K;
+    const float scale = rsqrtf(mean+eps);
 
-    for (int k = tid; k < K; k += BLOCK) {
-        float v  = __bfloat162float(row[k]) * scale;
+    for (int k=tid; k<K; k += BLOCK) {
+        float v  = __bfloat162float(row[k])*scale;
         float wv = __bfloat162float(w[k]);
         o[k] = __float2bfloat16(v * wv);
     }
@@ -79,17 +83,17 @@ __global__ void rope_neox_bf16_kernel(__nv_bfloat16* __restrict__ inout,
     const int h    = (int)blockIdx.x;
     const int s    = (int)blockIdx.y;
     const int tid  = (int)threadIdx.x;
-    const int half = D / 2;
-    __nv_bfloat16* row = inout + ((size_t)h * S + s) * D;
-    const float* c_row = cos_tab + (size_t)s * half;
-    const float* s_row = sin_tab + (size_t)s * half;
-    for (int k = tid; k < half; k += BLOCK) {
+    const int half = D/2;
+    __nv_bfloat16* row = inout+((size_t)h * S+s)*D;
+    const float* c_row = cos_tab+(size_t)s * half;
+    const float* s_row = sin_tab+(size_t)s * half;
+    for (int k=tid; k<half; k += BLOCK) {
         float c = c_row[k];
         float si= s_row[k];
         float a = __bfloat162float(row[k]);
-        float b = __bfloat162float(row[k + half]);
-        row[k]        = __float2bfloat16(a * c - b * si);
-        row[k + half] = __float2bfloat16(b * c + a * si);
+        float b = __bfloat162float(row[k+half]);
+        row[k]        = __float2bfloat16(a * c-b * si);
+        row[k+half] = __float2bfloat16(b * c+a * si);
     }
 }
 
@@ -99,48 +103,57 @@ __global__ void softmax_scaled_bf16_kernel(__nv_bfloat16* __restrict__ inout,
 {
     const int row = (int)blockIdx.x;
     const int tid = (int)threadIdx.x;
-    __nv_bfloat16* r = inout + (size_t)row * S;
+    __nv_bfloat16* r = inout+(size_t)row * S;
 
     float mx = -INFINITY;
-    for (int i = tid; i < S; i += BLOCK) {
-        float v = __bfloat162float(r[i]) * scale;
-        if (v > mx) mx = v;
+    for (int i=tid; i<S; i += BLOCK) {
+        float v = __bfloat162float(r[i])*scale;
+        if (v > mx)
+            mx = v;
     }
-    for (int off = 16; off > 0; off >>= 1) {
+    for (int off=16; off>0; off >>= 1) {
         float other = __shfl_down_sync(0xffffffff, mx, off);
-        if (other > mx) mx = other;
+        if (other > mx)
+            mx = other;
     }
     __shared__ float smem[32];
-    if ((tid & 31) == 0) smem[tid >> 5] = mx;
+    if ((tid & 31) == 0)
+        smem[tid >> 5] = mx;
     __syncthreads();
     if ((tid >> 5) == 0) {
-        float v = (tid < (BLOCK + 31) / 32) ? smem[tid] : -INFINITY;
-        for (int off = 16; off > 0; off >>= 1) {
+        float v = (tid < (BLOCK+31)/32) ? smem[tid] : -INFINITY;
+        for (int off=16; off>0; off >>= 1) {
             float other = __shfl_down_sync(0xffffffff, v, off);
-            if (other > v) v = other;
+            if (other > v)
+                v = other;
         }
-        if (tid == 0) smem[0] = v;
+        if (tid == 0)
+            smem[0] = v;
     }
     __syncthreads();
     const float max_v = smem[0];
 
     float s_sum = 0.0f;
-    for (int i = tid; i < S; i += BLOCK) {
-        s_sum += expf(__bfloat162float(r[i]) * scale - max_v);
+    for (int i=tid; i<S; i += BLOCK) {
+        s_sum += expf(__bfloat162float(r[i])*scale-max_v);
     }
-    for (int off = 16; off > 0; off >>= 1) s_sum += __shfl_down_sync(0xffffffff, s_sum, off);
-    if ((tid & 31) == 0) smem[tid >> 5] = s_sum;
+    for (int off=16; off>0; off >>= 1)
+        s_sum += __shfl_down_sync(0xffffffff, s_sum, off);
+    if ((tid & 31) == 0)
+        smem[tid >> 5] = s_sum;
     __syncthreads();
     if ((tid >> 5) == 0) {
-        float v = (tid < (BLOCK + 31) / 32) ? smem[tid] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffff, v, off);
-        if (tid == 0) smem[0] = v;
+        float v = (tid < (BLOCK+31)/32) ? smem[tid] : 0.0f;
+        for (int off=16; off>0; off >>= 1)
+            v += __shfl_down_sync(0xffffffff, v, off);
+        if (tid == 0)
+            smem[0] = v;
     }
     __syncthreads();
-    const float inv_sum = 1.0f / smem[0];
+    const float inv_sum = 1.0f/smem[0];
 
-    for (int i = tid; i < S; i += BLOCK) {
-        float v = expf(__bfloat162float(r[i]) * scale - max_v) * inv_sum;
+    for (int i=tid; i<S; i += BLOCK) {
+        float v = expf(__bfloat162float(r[i])*scale-max_v)*inv_sum;
         r[i] = __float2bfloat16(v);
     }
 }
@@ -148,18 +161,21 @@ __global__ void softmax_scaled_bf16_kernel(__nv_bfloat16* __restrict__ inout,
 __global__ void squared_relu_mul_bf16_kernel(const __nv_bfloat16* g,
                                               const __nv_bfloat16* u,
                                               __nv_bfloat16* out, int N) {
-    const int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-    if (i >= N) return;
+    const int i = (int)(blockIdx.x*blockDim.x+threadIdx.x);
+    if (i >= N)
+        return;
     float gv = __bfloat162float(g[i]);
-    if (gv < 0.0f) gv = 0.0f;
+    if (gv < 0.0f)
+        gv = 0.0f;
     out[i] = __float2bfloat16(gv * gv * __bfloat162float(u[i]));
 }
 
 __global__ void add_bf16_kernel(const __nv_bfloat16* a, const __nv_bfloat16* b,
                                  __nv_bfloat16* out, int N) {
-    const int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-    if (i >= N) return;
-    out[i] = __float2bfloat16(__bfloat162float(a[i]) + __bfloat162float(b[i]));
+    const int i = (int)(blockIdx.x*blockDim.x+threadIdx.x);
+    if (i >= N)
+        return;
+    out[i] = __float2bfloat16(__bfloat162float(a[i])+__bfloat162float(b[i]));
 }
 
 __global__ void repeat_kv_bf16_kernel(const __nv_bfloat16* in, __nv_bfloat16* out,
@@ -167,9 +183,9 @@ __global__ void repeat_kv_bf16_kernel(const __nv_bfloat16* in, __nv_bfloat16* ou
     const int q_h = (int)blockIdx.x;
     const int s   = (int)blockIdx.y;
     const int tid = (int)threadIdx.x;
-    const int kv_h = q_h * n_kv / n_q;
-    for (int k = tid; k < hd; k += blockDim.x) {
-        out[((size_t)q_h * seq + s) * hd + k] = in[((size_t)kv_h * seq + s) * hd + k];
+    const int kv_h = q_h * n_kv/n_q;
+    for (int k=tid; k<hd; k += blockDim.x) {
+        out[((size_t)q_h * seq+s)*hd+k] = in[((size_t)kv_h * seq+s)*hd+k];
     }
 }
 
@@ -179,8 +195,8 @@ __global__ void transpose_sHhd_to_HShd_bf16_kernel(const __nv_bfloat16* in,
     const int s   = (int)blockIdx.y;
     const int h   = (int)blockIdx.x;
     const int tid = (int)threadIdx.x;
-    for (int k = tid; k < hd; k += blockDim.x) {
-        out[((size_t)h * S + s) * hd + k] = in[((size_t)s * H + h) * hd + k];
+    for (int k=tid; k<hd; k += blockDim.x) {
+        out[((size_t)h * S+s)*hd+k] = in[((size_t)s * H+h)*hd+k];
     }
 }
 
@@ -190,8 +206,8 @@ __global__ void transpose_HShd_to_sHhd_bf16_kernel(const __nv_bfloat16* in,
     const int h   = (int)blockIdx.x;
     const int s   = (int)blockIdx.y;
     const int tid = (int)threadIdx.x;
-    for (int k = tid; k < hd; k += blockDim.x) {
-        out[((size_t)s * H + h) * hd + k] = in[((size_t)h * S + s) * hd + k];
+    for (int k=tid; k<hd; k += blockDim.x) {
+        out[((size_t)s * H+h)*hd+k] = in[((size_t)h * S+s)*hd+k];
     }
 }
 
@@ -202,8 +218,8 @@ __global__ void gather_rows_bf16_kernel(const __nv_bfloat16* in,
     const int m = (int)blockIdx.x;
     const int r = row_ids[m];
     const int tid = (int)threadIdx.x;
-    for (int k = tid; k < K; k += blockDim.x) {
-        out[(size_t)m * K + k] = in[(size_t)r * K + k];
+    for (int k=tid; k<K; k += blockDim.x) {
+        out[(size_t)m * K+k] = in[(size_t)r * K+k];
     }
 }
 
@@ -227,12 +243,12 @@ extern "C" void bitvla_softmax_scaled_bf16(__nv_bfloat16* inout, float scale,
 extern "C" void bitvla_squared_relu_mul_bf16(const __nv_bfloat16* g, const __nv_bfloat16* u,
                                               __nv_bfloat16* out, int N, cudaStream_t stream) {
     constexpr int B = 256;
-    squared_relu_mul_bf16_kernel<<<dim3((N + B - 1) / B, 1, 1), dim3(B, 1, 1), 0, stream>>>(g, u, out, N);
+    squared_relu_mul_bf16_kernel<<<dim3((N+B-1)/B, 1, 1), dim3(B, 1, 1), 0, stream>>>(g, u, out, N);
 }
 extern "C" void bitvla_add_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b,
                                  __nv_bfloat16* out, int N, cudaStream_t stream) {
     constexpr int B = 256;
-    add_bf16_kernel<<<dim3((N + B - 1) / B, 1, 1), dim3(B, 1, 1), 0, stream>>>(a, b, out, N);
+    add_bf16_kernel<<<dim3((N+B-1)/B, 1, 1), dim3(B, 1, 1), 0, stream>>>(a, b, out, N);
 }
 extern "C" void bitvla_repeat_kv_bf16(const __nv_bfloat16* in, __nv_bfloat16* out,
                                        int n_q, int n_kv, int seq, int hd, cudaStream_t stream) {
@@ -308,29 +324,33 @@ extern "C" bitvla_lm_cuda_ctx* bitvla_lm_cuda_init(int hidden, int n_q, int n_kv
     ctx->layers.resize(n_layers);
 
     cublasStatus_t cbs = cublasCreate(&ctx->cublas);
-    if (cbs != CUBLAS_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla_lm_cuda): cublasCreate failed\n"); delete ctx; return nullptr; }
+    if (cbs != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(bitvla_lm_cuda): cublasCreate failed\n");
+        delete ctx;
+        return nullptr;
+    }
 
-    const int half = head_dim / 2;
+    const int half = head_dim/2;
     std::vector<float> h_cos((size_t)max_seq * half), h_sin((size_t)max_seq * half);
-    for (int s = 0; s < max_seq; ++s) {
-        for (int k = 0; k < half; ++k) {
-            float freq = 1.0f / std::pow(rope_base, (float)(2 * k) / (float)head_dim);
+    for (int s=0; s<max_seq; ++s) {
+        for (int k=0; k<half; ++k) {
+            float freq = 1.0f/std::pow(rope_base, (float)(2*k)/(float)head_dim);
             float ang  = (float)s * freq;
-            h_cos[(size_t)s * half + k] = std::cos(ang);
-            h_sin[(size_t)s * half + k] = std::sin(ang);
+            h_cos[(size_t)s * half+k] = std::cos(ang);
+            h_sin[(size_t)s * half+k] = std::sin(ang);
         }
     }
     CUDA_OKV(cudaMalloc(&ctx->d_cos, (size_t)max_seq * half * sizeof(float)));
     CUDA_OKV(cudaMalloc(&ctx->d_sin, (size_t)max_seq * half * sizeof(float)));
-    CUDA_OKV(cudaMemcpy(ctx->d_cos, h_cos.data(), h_cos.size() * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_OKV(cudaMemcpy(ctx->d_sin, h_sin.data(), h_sin.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_OKV(cudaMemcpy(ctx->d_cos, h_cos.data(), h_cos.size()*sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_OKV(cudaMemcpy(ctx->d_sin, h_sin.data(), h_sin.size()*sizeof(float), cudaMemcpyHostToDevice));
 
     const size_t bf16 = sizeof(__nv_bfloat16);
     CUDA_OKV(cudaMalloc(&ctx->d_h,           (size_t)max_seq * hidden       * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_h_norm,      (size_t)max_seq * hidden       * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_act_int8_h,  (size_t)max_seq * hidden));
     CUDA_OKV(cudaMalloc(&ctx->d_act_s,       (size_t)max_seq                * sizeof(float)));
-    CUDA_OKV(cudaMalloc(&ctx->d_qkv,         (size_t)max_seq * (ctx->hidden_q + 2 * ctx->hidden_kv) * bf16));
+    CUDA_OKV(cudaMalloc(&ctx->d_qkv,         (size_t)max_seq * (ctx->hidden_q+2*ctx->hidden_kv)*bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_q_HShd,      (size_t)n_q  * max_seq * head_dim * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_k_HShd,      (size_t)n_kv * max_seq * head_dim * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_v_HShd,      (size_t)n_kv * max_seq * head_dim * bf16));
@@ -341,14 +361,15 @@ extern "C" bitvla_lm_cuda_ctx* bitvla_lm_cuda_init(int hidden, int n_q, int n_kv
     CUDA_OKV(cudaMalloc(&ctx->d_attn_merged, (size_t)max_seq * ctx->hidden_q   * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_o_out,       (size_t)max_seq * hidden          * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_act_int8_ffn,(size_t)max_seq * ffn));
-    CUDA_OKV(cudaMalloc(&ctx->d_gate_up,     (size_t)max_seq * 2 * ffn * bf16));
+    CUDA_OKV(cudaMalloc(&ctx->d_gate_up,     (size_t)max_seq*2*ffn * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_gate_sq_up,  (size_t)max_seq * ffn     * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_down_out,    (size_t)max_seq * hidden  * bf16));
     return ctx;
 }
 
 extern "C" void bitvla_lm_cuda_free(bitvla_lm_cuda_ctx* ctx) {
-    if (!ctx) return;
+    if (!ctx)
+        return;
     cublasDestroy(ctx->cublas);
     cudaFree(ctx->d_cos);  cudaFree(ctx->d_sin);
     cudaFree(ctx->d_h);    cudaFree(ctx->d_h_norm);
@@ -378,12 +399,13 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
 
     const char* l0_dir = (L == 0) ? std::getenv("VLA_BITVLA_DUMP_L0") : nullptr;
     auto l0_dump = [&](const char* name, const __nv_bfloat16* d_ptr, size_t n) {
-        if (!l0_dir) return;
+        if (!l0_dir)
+            return;
         cudaStreamSynchronize(stream);
         std::vector<__nv_bfloat16> tmp(n);
         std::vector<float> f32(n);
         cudaMemcpy(tmp.data(), d_ptr, n * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-        for (size_t i = 0; i < n; ++i) {
+        for (size_t i=0; i<n; ++i) {
             uint16_t u = *reinterpret_cast<uint16_t*>(&tmp[i]);
             uint32_t b = ((uint32_t) u) << 16;
             float f; std::memcpy(&f, &b, 4);
@@ -391,7 +413,10 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
         }
         std::string path = std::string(l0_dir) + "/" + name + ".bin";
         FILE* f = std::fopen(path.c_str(), "wb");
-        if (f) { std::fwrite(f32.data(), sizeof(float), n, f); std::fclose(f); }
+        if (f) {
+            std::fwrite(f32.data(), sizeof(float), n, f);
+            std::fclose(f);
+        }
     };
 
     bitvla_rmsnorm_bf16(ctx->d_h, lr.attn_norm_w, ctx->d_h_norm, ctx->rms_eps, seq, hidden, stream);
@@ -400,15 +425,15 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
     bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hidden, stream);
 
     __nv_bfloat16* q_dense = ctx->d_qkv;
-    __nv_bfloat16* k_dense = ctx->d_qkv + (size_t)seq * hq;
-    __nv_bfloat16* v_dense = ctx->d_qkv + (size_t)seq * (hq + hkv);
+    __nv_bfloat16* k_dense = ctx->d_qkv+(size_t)seq * hq;
+    __nv_bfloat16* v_dense = ctx->d_qkv+(size_t)seq * (hq+hkv);
     bitlinear_int8xint2_m(ctx->d_act_int8_h, lr.q_packed, q_dense,
                           ctx->d_act_s, lr.q_ws, seq, hq,  hidden, stream);
     bitlinear_int8xint2_m(ctx->d_act_int8_h, lr.k_packed, k_dense,
                           ctx->d_act_s, lr.k_ws, seq, hkv, hidden, stream);
     bitlinear_int8xint2_m(ctx->d_act_int8_h, lr.v_packed, v_dense,
                           ctx->d_act_s, lr.v_ws, seq, hkv, hidden, stream);
-    l0_dump("L0_02_qkv_proj", ctx->d_qkv, (size_t)seq * (hq + 2*hkv));
+    l0_dump("L0_02_qkv_proj", ctx->d_qkv, (size_t)seq * (hq+2*hkv));
 
     // Split the interleaved [seq, H*hd] projections into head-major [H, seq, hd]
     // with one kernel per tensor instead of a cudaMemcpy2DAsync per head (30 tiny
@@ -435,9 +460,12 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
         ctx->d_scores,CUDA_R_16BF, seq, (long long)seq * seq,
         n_q,
         CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-    if (cbs != CUBLAS_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla_lm_cuda): QK^T gemm failed @L%d (%d)\n", L, cbs); return -1; }
+    if (cbs != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(bitvla_lm_cuda): QK^T gemm failed @L%d (%d)\n", L, cbs);
+        return -1;
+    }
 
-    const float scl = 1.0f / std::sqrt((float)hd);
+    const float scl = 1.0f/std::sqrt((float)hd);
     bitvla_softmax_scaled_bf16(ctx->d_scores, scl, n_q * seq, seq, stream);
 
     cbs = cublasGemmStridedBatchedEx(
@@ -450,7 +478,10 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
         ctx->d_attn_out, CUDA_R_16BF, hd, (long long)seq * hd,
         n_q,
         CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-    if (cbs != CUBLAS_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla_lm_cuda): attn@V gemm failed @L%d (%d)\n", L, cbs); return -1; }
+    if (cbs != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(bitvla_lm_cuda): attn@V gemm failed @L%d (%d)\n", L, cbs);
+        return -1;
+    }
 
     bitvla_transpose_NshHd_to_sNhd_bf16(ctx->d_attn_out, ctx->d_attn_merged, n_q, seq, hd, stream);
 
@@ -473,7 +504,7 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
     bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hidden, stream);
 
     bitlinear_int8xint2_m(ctx->d_act_int8_h, lr.gate_up_packed, ctx->d_gate_up,
-                          ctx->d_act_s, lr.gate_up_ws, seq, 2 * ffn, hidden, stream);
+                          ctx->d_act_s, lr.gate_up_ws, seq, 2*ffn, hidden, stream);
 
     gate_up_fused_sqrelu_mul_bf16(ctx->d_gate_up, ctx->d_gate_sq_up, seq, ffn, stream);
 
@@ -496,22 +527,24 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
 __global__ void gate_up_fused_sqrelu_mul_bf16_kernel(const __nv_bfloat16* __restrict__ gu,
                                                       __nv_bfloat16* __restrict__ out,
                                                       int seq, int ffn) {
-    const int idx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    const int idx = (int)(blockIdx.x*blockDim.x+threadIdx.x);
     const int total = seq * ffn;
-    if (idx >= total) return;
-    const int s = idx / ffn;
-    const int k = idx % ffn;
-    const size_t row_base = (size_t)s * 2 * ffn;
-    float g = __bfloat162float(gu[row_base + k]);
-    float u = __bfloat162float(gu[row_base + ffn + k]);
-    if (g < 0.0f) g = 0.0f;
+    if (idx >= total)
+        return;
+    const int s = idx/ffn;
+    const int k = idx%ffn;
+    const size_t row_base = (size_t)s*2*ffn;
+    float g = __bfloat162float(gu[row_base+k]);
+    float u = __bfloat162float(gu[row_base+ffn+k]);
+    if (g < 0.0f)
+        g = 0.0f;
     out[(size_t)idx] = __float2bfloat16(g * g * u);
 }
 extern "C" void gate_up_fused_sqrelu_mul_bf16(const __nv_bfloat16* gu, __nv_bfloat16* out,
                                                int seq, int ffn, cudaStream_t stream) {
     const int total = seq * ffn;
     const int B = 256;
-    gate_up_fused_sqrelu_mul_bf16_kernel<<<dim3((total + B - 1) / B, 1, 1),
+    gate_up_fused_sqrelu_mul_bf16_kernel<<<dim3((total+B-1)/B, 1, 1),
                                             dim3(B, 1, 1), 0, stream>>>(gu, out, seq, ffn);
 }
 
@@ -524,73 +557,85 @@ __global__ void layernorm_bias_bf16_kernel(const __nv_bfloat16* __restrict__ x,
 {
     const int m   = (int)blockIdx.x;
     const int tid = (int)threadIdx.x;
-    const __nv_bfloat16* row = x + (size_t)m * K;
-    __nv_bfloat16*       o   = out + (size_t)m * K;
+    const __nv_bfloat16* row = x+(size_t)m * K;
+    __nv_bfloat16*       o   = out+(size_t)m * K;
 
     float sum = 0.0f;
-    for (int k = tid; k < K; k += BLOCK) sum += __bfloat162float(row[k]);
-    for (int off = 16; off > 0; off >>= 1) sum += __shfl_down_sync(0xffffffff, sum, off);
+    for (int k=tid; k<K; k += BLOCK)
+        sum += __bfloat162float(row[k]);
+    for (int off=16; off>0; off >>= 1)
+        sum += __shfl_down_sync(0xffffffff, sum, off);
     __shared__ float smem[32];
-    if ((tid & 31) == 0) smem[tid >> 5] = sum;
+    if ((tid & 31) == 0)
+        smem[tid >> 5] = sum;
     __syncthreads();
     if ((tid >> 5) == 0) {
-        float v = (tid < (BLOCK + 31) / 32) ? smem[tid] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffff, v, off);
-        if (tid == 0) smem[0] = v;
+        float v = (tid < (BLOCK+31)/32) ? smem[tid] : 0.0f;
+        for (int off=16; off>0; off >>= 1)
+            v += __shfl_down_sync(0xffffffff, v, off);
+        if (tid == 0)
+            smem[0] = v;
     }
     __syncthreads();
-    const float mean = smem[0] / (float)K;
+    const float mean = smem[0]/(float)K;
 
     float vsum = 0.0f;
-    for (int k = tid; k < K; k += BLOCK) {
-        float v = __bfloat162float(row[k]) - mean;
+    for (int k=tid; k<K; k += BLOCK) {
+        float v = __bfloat162float(row[k])-mean;
         vsum += v * v;
     }
-    for (int off = 16; off > 0; off >>= 1) vsum += __shfl_down_sync(0xffffffff, vsum, off);
-    if ((tid & 31) == 0) smem[tid >> 5] = vsum;
+    for (int off=16; off>0; off >>= 1)
+        vsum += __shfl_down_sync(0xffffffff, vsum, off);
+    if ((tid & 31) == 0)
+        smem[tid >> 5] = vsum;
     __syncthreads();
     if ((tid >> 5) == 0) {
-        float v = (tid < (BLOCK + 31) / 32) ? smem[tid] : 0.0f;
-        for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffff, v, off);
-        if (tid == 0) smem[0] = v;
+        float v = (tid < (BLOCK+31)/32) ? smem[tid] : 0.0f;
+        for (int off=16; off>0; off >>= 1)
+            v += __shfl_down_sync(0xffffffff, v, off);
+        if (tid == 0)
+            smem[0] = v;
     }
     __syncthreads();
-    const float inv_std = rsqrtf(smem[0] / (float)K + eps);
+    const float inv_std = rsqrtf(smem[0]/(float)K+eps);
 
-    for (int k = tid; k < K; k += BLOCK) {
-        float v = (__bfloat162float(row[k]) - mean) * inv_std;
+    for (int k=tid; k<K; k += BLOCK) {
+        float v = (__bfloat162float(row[k])-mean)*inv_std;
         float wv = __bfloat162float(w[k]);
         float bv = __bfloat162float(b[k]);
-        o[k] = __float2bfloat16(v * wv + bv);
+        o[k] = __float2bfloat16(v * wv+bv);
     }
 }
 
 __global__ void gelu_tanh_bf16_kernel(const __nv_bfloat16* in, __nv_bfloat16* out, int N) {
-    const int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-    if (i >= N) return;
+    const int i = (int)(blockIdx.x*blockDim.x+threadIdx.x);
+    if (i >= N)
+        return;
     float x = __bfloat162float(in[i]);
 
     const float kAlpha = 0.7978845608028654f;
     const float kBeta  = 0.044715f;
-    float u = kAlpha * (x + kBeta * x * x * x);
+    float u = kAlpha * (x+kBeta * x * x * x);
     float t = tanhf(u);
-    out[i] = __float2bfloat16(0.5f * x * (1.0f + t));
+    out[i] = __float2bfloat16(0.5f * x * (1.0f+t));
 }
 
 __global__ void add_bias_bf16_kernel(const __nv_bfloat16* x, const __nv_bfloat16* bias,
                                       __nv_bfloat16* out, int M, int K) {
     const int m = (int)blockIdx.x;
-    const int k = (int)(blockIdx.y * blockDim.x + threadIdx.x);
-    if (k >= K) return;
-    const size_t i = (size_t)m * K + k;
-    out[i] = __float2bfloat16(__bfloat162float(x[i]) + __bfloat162float(bias[k]));
+    const int k = (int)(blockIdx.y*blockDim.x+threadIdx.x);
+    if (k >= K)
+        return;
+    const size_t i = (size_t)m * K+k;
+    out[i] = __float2bfloat16(__bfloat162float(x[i])+__bfloat162float(bias[k]));
 }
 
 __global__ void zero_tail_bf16_kernel(__nv_bfloat16* x, int total_cols, int start_col) {
     const int m = (int)blockIdx.x;
-    const int k = (int)(start_col + blockIdx.y * blockDim.x + threadIdx.x);
-    if (k >= total_cols) return;
-    x[(size_t)m * total_cols + k] = __float2bfloat16(0.0f);
+    const int k = (int)(start_col+blockIdx.y*blockDim.x+threadIdx.x);
+    if (k >= total_cols)
+        return;
+    x[(size_t)m * total_cols+k] = __float2bfloat16(0.0f);
 }
 
 extern "C" void bitvla_layernorm_bf16(const __nv_bfloat16* x, const __nv_bfloat16* w,
@@ -602,20 +647,21 @@ extern "C" void bitvla_layernorm_bf16(const __nv_bfloat16* x, const __nv_bfloat1
 extern "C" void bitvla_gelu_tanh_bf16(const __nv_bfloat16* x, __nv_bfloat16* out,
                                        int N, cudaStream_t stream) {
     constexpr int B = 256;
-    gelu_tanh_bf16_kernel<<<dim3((N + B - 1) / B, 1, 1), dim3(B, 1, 1), 0, stream>>>(x, out, N);
+    gelu_tanh_bf16_kernel<<<dim3((N+B-1)/B, 1, 1), dim3(B, 1, 1), 0, stream>>>(x, out, N);
 }
 extern "C" void bitvla_add_bias_bf16(const __nv_bfloat16* x, const __nv_bfloat16* bias,
                                       __nv_bfloat16* out, int M, int K, cudaStream_t stream) {
     constexpr int B = 256;
-    const int n_kb = (K + B - 1) / B;
+    const int n_kb = (K+B-1)/B;
     add_bias_bf16_kernel<<<dim3(M, n_kb, 1), dim3(B, 1, 1), 0, stream>>>(x, bias, out, M, K);
 }
 extern "C" void bitvla_zero_tail_bf16(__nv_bfloat16* x, int M, int total_cols,
                                        int start_col, cudaStream_t stream) {
-    if (start_col >= total_cols) return;
+    if (start_col >= total_cols)
+        return;
     constexpr int B = 128;
-    const int len = total_cols - start_col;
-    const int n_kb = (len + B - 1) / B;
+    const int len = total_cols-start_col;
+    const int n_kb = (len+B-1)/B;
     zero_tail_bf16_kernel<<<dim3(M, n_kb, 1), dim3(B, 1, 1), 0, stream>>>(x, total_cols, start_col);
 }
 
@@ -633,11 +679,12 @@ extern "C" int bitvla_lm_cuda_forward(bitvla_lm_cuda_ctx* ctx,
     std::vector<__nv_bfloat16> h_dump;
     std::vector<float>         h_dump_f32;
     auto dump_to_file = [&](const char* name, const __nv_bfloat16* d_ptr) {
-        if (!dump_dir) return;
+        if (!dump_dir)
+            return;
         const size_t n = (size_t) seq * ctx->hidden;
         h_dump.resize(n); h_dump_f32.resize(n);
         cudaMemcpy(h_dump.data(), d_ptr, n * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-        for (size_t i = 0; i < n; ++i) {
+        for (size_t i=0; i<n; ++i) {
             uint16_t u = *reinterpret_cast<uint16_t*>(&h_dump[i]);
             uint32_t b = ((uint32_t) u) << 16;
             float f; std::memcpy(&f, &b, 4);
@@ -645,18 +692,22 @@ extern "C" int bitvla_lm_cuda_forward(bitvla_lm_cuda_ctx* ctx,
         }
         std::string path = std::string(dump_dir) + "/" + name + ".bin";
         FILE* f = std::fopen(path.c_str(), "wb");
-        if (f) { std::fwrite(h_dump_f32.data(), sizeof(float), n, f); std::fclose(f); }
+        if (f) {
+            std::fwrite(h_dump_f32.data(), sizeof(float), n, f);
+            std::fclose(f);
+        }
     };
 
-    CUDA_OK(cudaMemcpyAsync(ctx->d_h, d_in, (size_t)seq * ctx->hidden * sizeof(__nv_bfloat16),
+    CUDA_OK(cudaMemcpyAsync(ctx->d_h, d_in, (size_t)seq * ctx->hidden*sizeof(__nv_bfloat16),
                              cudaMemcpyDeviceToDevice, stream));
     if (dump_dir) {
         cudaStreamSynchronize(stream);
         dump_to_file("lm_layer_input", ctx->d_h);
     }
-    for (int L = 0; L < ctx->n_layers; ++L) {
+    for (int L=0; L<ctx->n_layers; ++L) {
         int rc = run_layer(ctx, L, seq, stream);
-        if (rc != 0) return rc;
+        if (rc != 0)
+            return rc;
         if (dump_dir) {
             cudaStreamSynchronize(stream);
             char name[64]; std::snprintf(name, sizeof(name), "lm_layer_%d", L);

@@ -39,9 +39,12 @@ struct gguf_reader {
 
     explicit gguf_reader(const char * arch_ = "vla") : arch(arch_) {}
     ~gguf_reader() {
-        if (fp)       std::fclose(fp);
-        if (gctx)     gguf_free(gctx);
-        if (meta_ctx) ggml_free(meta_ctx);
+        if (fp)
+            std::fclose(fp);
+        if (gctx)
+            gguf_free(gctx);
+        if (meta_ctx)
+            ggml_free(meta_ctx);
     }
     gguf_reader(const gguf_reader &) = delete;
     gguf_reader & operator=(const gguf_reader &) = delete;
@@ -51,20 +54,29 @@ struct gguf_reader {
         p.no_alloc = true;
         p.ctx      = &meta_ctx;
         gctx = gguf_init_from_file(path.c_str(), p);
-        if (!gctx) { std::fprintf(stderr, "vla(%s): gguf_init_from_file failed for %s\n", arch, path.c_str()); return false; }
+        if (!gctx) {
+            std::fprintf(stderr, "vla(%s): gguf_init_from_file failed for %s\n", arch, path.c_str());
+            return false;
+        }
         fp = std::fopen(path.c_str(), "rb");
-        if (!fp) { std::fprintf(stderr, "vla(%s): fopen failed for %s\n", arch, path.c_str()); return false; }
+        if (!fp) {
+            std::fprintf(stderr, "vla(%s): fopen failed for %s\n", arch, path.c_str());
+            return false;
+        }
         data_off = gguf_get_data_offset(gctx);
         return true;
     }
 
-    bool has(const char * k) const { return gguf_find_key(gctx, k) >= 0; }
+    bool has(const char * k) const {
+        return gguf_find_key(gctx, k) >= 0;
+    }
 
     // gguf_get_val_* asserts on a type mismatch, killing the process on a bad
     // file. Check the declared type first.
     bool typed_key(const char * k, gguf_type want, int64_t * id_out) const {
         const int64_t id = gguf_find_key(gctx, k);
-        if (id < 0) return false;
+        if (id < 0)
+            return false;
         if (gguf_get_kv_type(gctx, id) != want) {
             std::fprintf(stderr, "vla(%s): key %s has unexpected type %d\n",
                          arch, k, (int) gguf_get_kv_type(gctx, id));
@@ -74,11 +86,25 @@ struct gguf_reader {
         return true;
     }
 
-    uint32_t u32(const char * k) const { int64_t id; return typed_key(k, GGUF_TYPE_UINT32,  &id) ? gguf_get_val_u32(gctx, id) : 0u; }
-    float    f32(const char * k) const { int64_t id; return typed_key(k, GGUF_TYPE_FLOAT32, &id) ? gguf_get_val_f32(gctx, id) : 0.f; }
-    double   f64(const char * k) const { int64_t id; return typed_key(k, GGUF_TYPE_FLOAT64, &id) ? gguf_get_val_f64(gctx, id) : 0.0; }
-    std::string str(const char * k) const { int64_t id; return typed_key(k, GGUF_TYPE_STRING, &id) ? std::string(gguf_get_val_str(gctx, id)) : std::string(); }
-    const ggml_tensor * meta(const char * name) const { return ggml_get_tensor(meta_ctx, name); }
+    uint32_t u32(const char * k) const {
+        int64_t id;
+        return typed_key(k, GGUF_TYPE_UINT32,  &id) ? gguf_get_val_u32(gctx, id) : 0u;
+    }
+    float    f32(const char * k) const {
+        int64_t id;
+        return typed_key(k, GGUF_TYPE_FLOAT32, &id) ? gguf_get_val_f32(gctx, id) : 0.f;
+    }
+    double   f64(const char * k) const {
+        int64_t id;
+        return typed_key(k, GGUF_TYPE_FLOAT64, &id) ? gguf_get_val_f64(gctx, id) : 0.0;
+    }
+    std::string str(const char * k) const {
+        int64_t id;
+        return typed_key(k, GGUF_TYPE_STRING, &id) ? std::string(gguf_get_val_str(gctx, id)) : std::string();
+    }
+    const ggml_tensor * meta(const char * name) const {
+        return ggml_get_tensor(meta_ctx, name);
+    }
 
     // Resident type for a weight: keep a quantized source type (Q8_0, Q4_0, ...)
     // so it stays packed and ggml_mul_mat dequantizes at compute; otherwise use
@@ -92,15 +118,19 @@ struct gguf_reader {
     // partially written.
     bool read_raw(const char * name, void * buf, size_t cap) {
         const int64_t id = gguf_find_tensor(gctx, name);
-        if (id < 0) { std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name); return false; }
-        const size_t off = data_off + gguf_get_tensor_offset(gctx, id);
+        if (id < 0) {
+            std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name);
+            return false;
+        }
+        const size_t off = data_off+gguf_get_tensor_offset(gctx, id);
         const size_t nb  = gguf_get_tensor_size(gctx, id);
         if (nb != cap) {
             std::fprintf(stderr, "vla(%s): tensor %s is %zu bytes, caller expects %zu\n",
                          arch, name, nb, cap);
             return false;
         }
-        if (fseeko(fp, (off_t) off, SEEK_SET) != 0) return false;
+        if (fseeko(fp, (off_t) off, SEEK_SET) != 0)
+            return false;
         return std::fread(buf, 1, nb, fp) == nb;
     }
 
@@ -109,8 +139,8 @@ struct gguf_reader {
         if (!t) { std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch, name); return {}; }
         const int64_t n = ggml_nelements(t);
         std::vector<float> out(n);
-        if (t->type == GGML_TYPE_F32) { if (!read_raw(name, out.data(), out.size() * sizeof(float))) return {}; }
-        else if (t->type == GGML_TYPE_BF16) { std::vector<ggml_bf16_t> tmp(n); if (!read_raw(name, tmp.data(), tmp.size() * sizeof(ggml_bf16_t))) return {}; ggml_bf16_to_fp32_row(tmp.data(), out.data(), n); }
+        if (t->type == GGML_TYPE_F32) { if (!read_raw(name, out.data(), out.size()*sizeof(float))) return {}; }
+        else if (t->type == GGML_TYPE_BF16) { std::vector<ggml_bf16_t> tmp(n); if (!read_raw(name, tmp.data(), tmp.size()*sizeof(ggml_bf16_t))) return {}; ggml_bf16_to_fp32_row(tmp.data(), out.data(), n); }
         else { std::fprintf(stderr, "vla(%s): tensor %s unsupported type %d\n", arch, name, (int) t->type); return {}; }
         return out;
     }
@@ -136,29 +166,50 @@ struct gguf_reader {
         std::vector<float> f = read_f32(name);
         if (f.empty()) return {};
         const int64_t n = (int64_t) f.size();
-        if (gemma_norm) for (int64_t i = 0; i < n; ++i) f[i] += 1.0f;
-        if (target == GGML_TYPE_F32)  { std::vector<uint8_t> o(n * sizeof(float));      std::memcpy(o.data(), f.data(), o.size()); return o; }
-        if (target == GGML_TYPE_BF16) { std::vector<uint8_t> o(n * sizeof(ggml_bf16_t)); ggml_fp32_to_bf16_row(f.data(), reinterpret_cast<ggml_bf16_t *>(o.data()), n); return o; }
+        if (gemma_norm) for (int64_t i=0; i<n; ++i) f[i] += 1.0f;
+        if (target == GGML_TYPE_F32)  {
+            std::vector<uint8_t> o(n * sizeof(float));
+            std::memcpy(o.data(), f.data(), o.size());
+            return o;
+        }
+        if (target == GGML_TYPE_BF16) {
+            std::vector<uint8_t> o(n * sizeof(ggml_bf16_t));
+            ggml_fp32_to_bf16_row(f.data(), reinterpret_cast<ggml_bf16_t *>(o.data()), n);
+            return o;
+        }
         std::fprintf(stderr, "vla(%s): unsupported resident type %d for %s\n", arch, (int) target, name); return {};
     }
 
     bool fetch_rows_f32(const char * name, const std::vector<int32_t> & row_ids, float * dst, int64_t cols) {
         const ggml_tensor * t = meta(name);
-        if (!t || t->ne[0] != cols || t->ne[2] != 1 || t->ne[3] != 1) { std::fprintf(stderr, "vla(%s): %s shape unfit for row-fetch\n", arch, name); return false; }
-        if (t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_BF16) { std::fprintf(stderr, "vla(%s): %s type %d not f32/bf16 for row-fetch\n", arch, name, (int) t->type); return false; }
+        if (!t || t->ne[0] != cols || t->ne[2] != 1 || t->ne[3] != 1) {
+            std::fprintf(stderr, "vla(%s): %s shape unfit for row-fetch\n", arch, name);
+            return false;
+        }
+        if (t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_BF16) {
+            std::fprintf(stderr, "vla(%s): %s type %d not f32/bf16 for row-fetch\n", arch, name, (int) t->type);
+            return false;
+        }
         const int64_t rows = t->ne[1];
         const int64_t id   = gguf_find_tensor(gctx, name);
-        const size_t  base = data_off + gguf_get_tensor_offset(gctx, id);
+        const size_t  base = data_off+gguf_get_tensor_offset(gctx, id);
         const size_t  elsz = (t->type == GGML_TYPE_F32) ? 4u : 2u;
         const size_t  rb   = (size_t) cols * elsz;
         std::vector<uint8_t> row(rb);
-        for (size_t k = 0; k < row_ids.size(); ++k) {
+        for (size_t k=0; k<row_ids.size(); ++k) {
             const int32_t r = row_ids[k];
-            if (r < 0 || r >= rows) { std::fprintf(stderr, "vla(%s): row %d out of range for %s\n", arch, r, name); return false; }
-            if (fseeko(fp, (off_t) (base + (size_t) r * rb), SEEK_SET) != 0) return false;
-            if (std::fread(row.data(), 1, rb, fp) != rb) return false;
-            if (elsz == 4) std::memcpy(dst + k * cols, row.data(), rb);
-            else ggml_bf16_to_fp32_row(reinterpret_cast<ggml_bf16_t *>(row.data()), dst + k * cols, cols);
+            if (r < 0 || r >= rows) {
+                std::fprintf(stderr, "vla(%s): row %d out of range for %s\n", arch, r, name);
+                return false;
+            }
+            if (fseeko(fp, (off_t) (base+(size_t) r * rb), SEEK_SET) != 0)
+                return false;
+            if (std::fread(row.data(), 1, rb, fp) != rb)
+                return false;
+            if (elsz == 4)
+                std::memcpy(dst+k * cols, row.data(), rb);
+            else
+                ggml_bf16_to_fp32_row(reinterpret_cast<ggml_bf16_t *>(row.data()), dst+k * cols, cols);
         }
         return true;
     }

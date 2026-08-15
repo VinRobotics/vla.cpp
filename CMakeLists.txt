@@ -36,10 +36,15 @@ if(GGML_CUDA)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_cuda_ext_hook.py <SOURCE_DIR>)
 endif()
+# Overridable so a regression can be bisected against another tag in a separate
+# build dir (-DVLA_LLAMA_TAG=b10326) without editing this file. The patch
+# anchors in scripts/patch_ggml_cuda_ext_hook.py are checked against the default.
+set(VLA_LLAMA_TAG "b10331" CACHE STRING "llama.cpp tag to fetch")
+
 include(FetchContent)
 FetchContent_Declare(llama
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp
-    GIT_TAG        b10331
+    GIT_TAG        ${VLA_LLAMA_TAG}
     GIT_SHALLOW    TRUE
     ${_vla_llama_patch}
 )
@@ -64,6 +69,14 @@ vla_exclude_fetched_targets(${llama_SOURCE_DIR})
 
 add_library(vla_core
     src/model.cpp
+    src/loader.cpp
+    src/options.cpp
+    src/modules/action_expert.cpp
+    src/modules/dit_head.cpp
+    src/modules/encoder.cpp
+    src/modules/prompt.cpp
+    src/modules/qwen3_lm.cpp
+    src/modules/siglip_vit.cpp
     src/models/smolvla.cpp
     src/models/pi0.cpp
     src/models/pi05.cpp
@@ -113,6 +126,9 @@ if(GGML_CUDA)
     set_target_properties(bitvla_cuda_kernels PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         POSITION_INDEPENDENT_CODE ON
+    )
+    target_include_directories(bitvla_cuda_kernels PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_compile_features(bitvla_cuda_kernels PRIVATE cxx_std_17)
     target_compile_options(bitvla_cuda_kernels PRIVATE

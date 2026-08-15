@@ -61,7 +61,9 @@ struct Engine::Impl {
 Engine::Engine() : impl_(std::make_unique<Impl>()) {}
 Engine::~Engine() = default;
 
-bool Engine::loaded() const { return impl_ && impl_->lctx != nullptr; }
+bool Engine::loaded() const {
+    return impl_ && impl_->lctx != nullptr;
+}
 
 bool Engine::load(const LoadParams & lp) {
     ensure_global_init();
@@ -124,7 +126,7 @@ bool bitmap_to_image(mtmd::bitmap & bmp, Image & out) {
     }
     out.width  = bmp.nx();
     out.height = bmp.ny();
-    out.rgb.assign(bmp.data(), bmp.data() + bmp.n_bytes());
+    out.rgb.assign(bmp.data(), bmp.data()+bmp.n_bytes());
     return true;
 }
 }
@@ -178,17 +180,20 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
     }
 
     int img_msg_idx = -1;
-    for (int i = (int) messages.size() - 1; i >= 0; --i) {
-        if (messages[i].role == "user") { img_msg_idx = i; break; }
+    for (int i=(int) messages.size()-1; i>=0; --i) {
+        if (messages[i].role == "user") {
+            img_msg_idx = i;
+            break;
+        }
     }
     if (img_msg_idx < 0) {
-        img_msg_idx = (int) messages.size() - 1;
+        img_msg_idx = (int) messages.size()-1;
     }
 
     const char * marker = mtmd_default_marker();
     const int64_t t_prefill_start = ggml_time_us();
 
-    for (size_t i = 0; i < messages.size(); ++i) {
+    for (size_t i=0; i<messages.size(); ++i) {
         common_chat_msg msg;
         msg.role    = messages[i].role;
         msg.content = messages[i].content;
@@ -198,11 +203,12 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
 
             if (msg.content.find(marker) == std::string::npos) {
                 std::string prefix;
-                for (size_t k = 0; k < images.size(); ++k) prefix += marker;
-                msg.content = prefix + msg.content;
+                for (size_t k=0; k<images.size(); ++k)
+                    prefix += marker;
+                msg.content = prefix+msg.content;
             }
             for (const auto & im : images) {
-                if (im.rgb.size() != (size_t) im.width * im.height * 3) {
+                if (im.rgb.size() != (size_t) im.width*im.height*3) {
                     res.finish_reason = "error";
                     res.error         = "image rgb size != w*h*3";
                     common_sampler_free(smpl);
@@ -224,7 +230,8 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
         text.parse_special = true;
 
         std::vector<const mtmd_bitmap *> bmp_ptrs(bmps.size());
-        for (size_t k = 0; k < bmps.size(); ++k) bmp_ptrs[k] = bmps[k].ptr.get();
+        for (size_t k=0; k<bmps.size(); ++k)
+            bmp_ptrs[k] = bmps[k].ptr.get();
 
         mtmd::input_chunks chunks(mtmd_input_chunks_init());
         if (mtmd_tokenize(impl_->vision.get(), chunks.ptr.get(), &text,
@@ -247,13 +254,13 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
         n_past = new_n_past;
     }
     res.prompt_tokens = (int32_t) n_past;
-    res.ms_prefill    = (ggml_time_us() - t_prefill_start) / 1000.0f;
+    res.ms_prefill    = (ggml_time_us()-t_prefill_start)/1000.0f;
 
     const int n_predict = sampling.max_tokens <= 0 ? INT_MAX : sampling.max_tokens;
     std::vector<llama_token> generated;
     const int64_t t_decode_start = ggml_time_us();
     res.finish_reason = "length";
-    for (int i = 0; i < n_predict; ++i) {
+    for (int i=0; i<n_predict; ++i) {
         const llama_token tok = common_sampler_sample(smpl, impl_->lctx, -1);
         common_sampler_accept(smpl, tok, true);
         generated.push_back(tok);
@@ -279,7 +286,7 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
         }
     }
     res.completion_tokens = (int32_t) generated.size();
-    res.ms_decode         = (ggml_time_us() - t_decode_start) / 1000.0f;
+    res.ms_decode         = (ggml_time_us()-t_decode_start)/1000.0f;
 
     if (res.finish_reason != "error") {
         res.text = common_detokenize(impl_->lctx, generated, false);
