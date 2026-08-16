@@ -8,7 +8,7 @@ license = { text = "Apache-2.0" }
 dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
-# scripts/convert_*_to_gguf.py, scripts/merge_*_mmproj_to_gguf.py, scripts/bitvla_int2_pack.py
+# scripts/convert_*_to_gguf.py and the gguf_common / gguf_blocks modules they share
 convert = [
     "torch>=2.5",
     "safetensors>=0.4",

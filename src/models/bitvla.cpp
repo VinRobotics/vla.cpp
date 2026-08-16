@@ -429,7 +429,7 @@ namespace {
 
 static void recover_ternary_and_scale(const float* W, int64_t n,
                                        std::vector<int8_t>& ternary, float& absmean) {
-    // Per-tensor absmean scale (1/mean|W|), matching scripts/bitvla_int2_pack.py;
+    // Per-tensor absmean scale (1/mean|W|), matching scripts/convert_bitvla_to_gguf.py;
     // the int2-packed path bakes the same scale.
     double s = 0.0;
     for (int64_t i=0; i<n; ++i)
