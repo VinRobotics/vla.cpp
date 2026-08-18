@@ -269,41 +269,6 @@ view count.
 | Evo-1       | 1 | 448 | 52.2 | 55.2 | 57.3 | 17.8 |
 | pi0.5       | 2 | 224 | 53.4 | 56.1 | 59.3 | 11.4 |
 
-Jetson targets are absent: they have not been re-measured with `vla-bench`.
-
-### Apple Silicon (Metal)
-
-The same harness on the Metal backend. Apple M5 Max (18-core CPU,
-40-core GPU, 64 GB unified memory), macOS 26.6.1, High Power Mode, llama.cpp
-`b10331`, weights as shipped, 20 reps after 3 warmups, best of three sweeps
-(the sweep with the lowest p50), each model at its native input size and view
-count.
-
-| Model | Views | Input | min ms | p50 ms | p90 ms | vision ms |
-|---|--:|--:|--:|--:|--:|--:|
-| VLA-Adapter | 1 | 224 |  64.5 |  64.8 |  65.1 | 33.0 |
-| VLA-JEPA    | 1 | 256 |  74.9 |  75.1 |  75.4 | 17.2 |
-| GR00T N1.5  | 1 | 224 | 104.0 | 104.3 | 104.6 | 20.7 |
-| SmolVLA     | 2 | 512 | 114.8 | 115.2 | 115.9 | 29.0 |
-| GR00T N1.7  | 1 | 256 | 128.0 | 128.4 | 128.9 | 17.3 |
-| GR00T N1.6  | 1 | 224 | 133.0 | 133.3 | 134.4 | 21.3 |
-| OpenVLA-OFT | 1 | 224 | 183.4 | 184.2 | 184.6 | 33.7 |
-| Evo-1       | 1 | 448 | 214.5 | 215.0 | 216.2 | 50.3 |
-| pi0         | 2 | 224 | 220.2 | 220.8 | 221.3 | 39.3 |
-| pi0.5       | 2 | 224 | 237.1 | 237.5 | 237.7 | 39.1 |
-
-Every run came up on Metal (`backend = Metal` in the load banner); none fell
-back to CPU. The three sweeps agree to within 0.6% per model, and `min` to `p90`
-spans no more than 2 ms, so these settle rather than scatter.
-
-BitVLA has no row. Its shipped GGUFs are int2-packed and the loader rejects them
-outside a CUDA build (`VLA_BITVLA_CUDA_KERNELS`), and its ggml graph is CPU-only
-by design with the LM offloading to CUDA, so there is nothing to measure on
-Metal.
-
-These are latency numbers on the Metal backend, not a support claim: see
-[Roadmap](#roadmap) for which pairings are released and benchmarked.
-
 ### Task success
 
 Latency says nothing about whether a policy works. LIBERO-Object, 10 tasks and 20
@@ -319,12 +284,12 @@ episodes per model, terminated episodes counted as failures:
 | π0         | 32 |  87.5% |
 | GR00T N1.6 | 16 |  86.5% |
 
-From [eval/reports/report-rtx-3060.md](eval/reports/report-rtx-3060.md), swept on
-an RTX 3060 at commit `dcc29a3` (2026-05-24). It predates π0.5, VLA-Adapter,
-OpenVLA-OFT and VLA-JEPA, which have not been swept. Jetson AGX Orin and Orin
-Nano runs are in the same directory. Success rate belongs to the checkpoint, not
-the engine; `vla_predict_check` in [CONTRIBUTING.md](CONTRIBUTING.md) is how a
+Success rate belongs to the checkpoint, not the engine;
+`vla_predict_check` in [CONTRIBUTING.md](CONTRIBUTING.md) is how a
 change is shown to leave it alone.
+
+Experimental results on other platforms can be found in
+[eval/reports](eval/reports) or  [docs/backend](docs/backend).
 
 ---
 
@@ -346,22 +311,6 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | - | 
 | [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | - | 
 | [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | - | 
-
-The Metal column was filled from a sweep on an Apple M5 Max: every model marked
-`Y` there loads on Metal at stock defaults, times as shown in
-[Benchmarks](#apple-silicon-metal), and was diffed against the CPU backend with
-`vla_predict_check` on fixed images, tokens, state and noise. Worst case per
-model is 6.9e-3 absolute on actions peaking near 1.0 (RMS 1.7e-3) - BF16/F32
-kernel rounding, the same conclusion
-[docs/backend/sycl.md](docs/backend/sycl.md) reaches for SYCL. π0 and GR00T
-N1.7, both already `Y`, deviate most at 1.9e-2 and 1.4e-2, which is what
-iterating a denoise loop in a different rounding regime costs; the seven cells
-this sweep moved are all tighter than that.
-
-BitVLA stays short of `Y` on Metal for a structural reason rather than an
-untested one: its graph is CPU-only by design and its published GGUFs are
-int2-packed for CUDA, so there is nothing to run. See
-[Benchmarks](#apple-silicon-metal).
 
 ---
 

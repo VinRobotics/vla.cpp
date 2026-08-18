@@ -80,23 +80,53 @@ to load rather than running slowly.
 
 ## Results
 
-For current per-model latency on Apple Silicon, see the Apple Silicon (Metal)
-table in [the README](../../README.md#benchmarks): that one is measured with
-`vla-bench`, in-process on synthetic inputs, and is directly comparable to the
-CUDA table above it.
+`vla-bench` times `predict()` in-process on synthetic inputs: engine only, no
+transport, no simulator, no claim about task success. Apple M5 Max (18-core CPU,
+40-core GPU, 64 GB unified memory), macOS 26.6.1, High Power Mode, llama.cpp
+`b10331`, weights as shipped, 20 reps after 3 warmups, best of three sweeps (the
+sweep with the lowest p50), each model at its native input size and view count -
+the same counts the RTX 5090 table in
+[the README](../../README.md#benchmarks) uses, so the two compare cell for cell.
 
-Outputs were checked against the CPU backend on all ten models in that table, on
-an M5 Max, using `vla_predict_check` on fixed images, tokens, state and noise -
-the same build twice, once as configured and once with `-DGGML_METAL=OFF`. The
-loosest model is π0: 1.9e-2 absolute on actions peaking near 1.0, RMS 5.2e-4 for
-that model, with a worst per-model RMS of 1.7e-3 across the set. Eight of the ten
-stay under 7e-3 absolute. The two outliers are π0 and GR00T N1.7 (1.4e-2), which
-run multi-step denoise loops where per-step rounding compounds.
+| Model | Views | Input | min ms | p50 ms | p90 ms | vision ms |
+|---|--:|--:|--:|--:|--:|--:|
+| VLA-Adapter | 1 | 224 |  64.5 |  64.8 |  65.1 | 33.0 |
+| VLA-JEPA    | 1 | 256 |  74.9 |  75.1 |  75.4 | 17.2 |
+| GR00T N1.5  | 1 | 224 | 104.0 | 104.3 | 104.6 | 20.7 |
+| SmolVLA     | 2 | 512 | 114.8 | 115.2 | 115.9 | 29.0 |
+| GR00T N1.7  | 1 | 256 | 128.0 | 128.4 | 128.9 | 17.3 |
+| GR00T N1.6  | 1 | 224 | 133.0 | 133.3 | 134.4 | 21.3 |
+| OpenVLA-OFT | 1 | 224 | 183.4 | 184.2 | 184.6 | 33.7 |
+| Evo-1       | 1 | 448 | 214.5 | 215.0 | 216.2 | 50.3 |
+| pi0         | 2 | 224 | 220.2 | 220.8 | 221.3 | 39.3 |
+| pi0.5       | 2 | 224 | 237.1 | 237.5 | 237.7 | 39.1 |
+
+Every run came up on Metal (`backend = Metal` in the load banner); none fell
+back to CPU. The three sweeps agree to within 0.6% per model, and `min` to `p90`
+spans no more than 2 ms, so these settle rather than scatter.
+
+BitVLA has no row, for the reason in the section above: there is no Metal path
+to time.
+
+### Agreement with the CPU backend
+
+Outputs were checked against the CPU backend on all ten models above, on an M5
+Max, using `vla_predict_check` on fixed images, tokens, state and noise - the
+same build twice, once as configured and once with `-DGGML_METAL=OFF`. It is a
+test target, so add `-DVLA_BUILD_TESTS=ON` to the configure line above to get
+it.
+
+The loosest model is π0: 1.9e-2 absolute on actions peaking near 1.0, RMS 5.2e-4
+for that model, with a worst per-model RMS of 1.7e-3 across the set. Eight of
+the ten stay under 7e-3 absolute. The two outliers are π0 and GR00T N1.7
+(1.4e-2), which run multi-step denoise loops where per-step rounding compounds.
 Metal output is deterministic run to run - repeated runs are bit-identical - so
 these are BF16/F32 kernel rounding, not instability.
 
-The measurements below predate it and are not the same experiment - they were
-taken end-to-end through `vla-server` on an M4, so they include transport and
+### Older M4 figures
+
+These predate the table above and are not the same experiment - they were taken
+end-to-end through `vla-server` on an M4, so they include transport and
 preprocessing that `vla-bench` excludes, and they come from an older revision.
 Read them as evidence that GPU offload is worth having, not as current numbers.
 
