@@ -106,7 +106,7 @@ distribution as `vla-server`, so the full serving loop - sim reset/render →
 client preprocess → `vla-server` inference → action → sim step → video - runs on
 one Windows machine with no separate Linux host.
 
-Two WSL-specific gotchas:
+Three WSL-specific gotchas:
 
 - **Work from the Linux filesystem, not `/mnt/c` or `/mnt/d`.** `uv`/venv installs
   are slow and unreliable on the Windows-mounted drives (drvfs); `git clone` the
@@ -123,8 +123,10 @@ Two WSL-specific gotchas:
   #   wsl --shutdown
   ```
 
-Install the LIBERO client into an isolated `uv` venv. Set `UV_LINK_MODE=copy` and
-a home-directory cache so `uv` does not try to hardlink across filesystems:
+- **Set `UV_LINK_MODE=copy`** and a home-directory `uv` cache, so `uv` does not
+  try to hardlink across filesystems while building the venv.
+
+Install the LIBERO client into an isolated `uv` venv:
 
 ```bash
 export UV_LINK_MODE=copy
@@ -137,18 +139,15 @@ to `vla-server` over ZeroMQ:
 
 ```bash
 # terminal 1 - server (GPU inference)
-./build/vla-server --bind 'tcp://*:5555' "$VLA_GGUF"
+./build/vla-server --bind 'tcp://127.0.0.1:5555' "$VLA_GGUF"
 
 # terminal 2 - client (LIBERO sim + preprocessing)
 export MUJOCO_GL=egl CUDA_VISIBLE_DEVICES=0
 eval/sim/libero/libero_uv/.venv/bin/python eval/client/run_sim_client_direct.py \
-    --arch smolvla --vla-addr tcp://localhost:5555 \
+    --arch smolvla --vla-addr tcp://127.0.0.1:5555 \
     --task libero_object --task-id 0 --n-episodes 1 --n-action-steps 1 \
     --output-dir outputs/wsl_smoke
 ```
-
-The client writes `episode_000000.mp4` and `summary.txt` under
-`outputs/wsl_smoke/smolvla/libero_object/task_0/`.
 
 ### One-command runner
 
@@ -163,7 +162,7 @@ bash eval/run_libero_wsl.sh 3 5      # task-id 3, 5 episodes, no prompt
 ```
 
 Override the served model, suite, or output dir via environment
-(`VLA_GGUF`, `TASK_SUITE`, `OUTPUT_DIR`); see the header of the script.
+(`VLA_GGUF`, `TASK_SUITE`, `OUTPUT_DIR`, `BIND_ADDR`/`CLIENT_ADDR`).
 
 ## Results
 
