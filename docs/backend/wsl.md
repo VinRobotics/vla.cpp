@@ -99,6 +99,71 @@ SmolVLA ships a combined GGUF plus a separate `mmproj` vision tower (see
 # vla-server: bound to tcp://*:5555. ready.
 ```
 
+## End-to-end evaluation (LIBERO client on WSL)
+
+The eval client (LIBERO simulator + preprocessing) can run in the *same* WSL
+distribution as `vla-server`, so the full serving loop - sim reset/render →
+client preprocess → `vla-server` inference → action → sim step → video - runs on
+one Windows machine with no separate Linux host.
+
+Three WSL-specific gotchas:
+
+- **Work from the Linux filesystem, not `/mnt/c` or `/mnt/d`.** `uv`/venv installs
+  are slow and unreliable on the Windows-mounted drives (drvfs); `git clone` the
+  repo into your home directory (e.g. `~/vla.cpp`) and run from there. This also
+  sidesteps CRLF issues in the shell scripts.
+- **Add your user to the `render` group** so MuJoCo's EGL renderer can open the
+  GPU render node (`/dev/dri/renderD128`, owned `root:render`). Without it, EGL
+  fails with `libEGL warning: failed to open /dev/dri/renderD128: Permission
+  denied` and falls back to software rendering:
+
+  ```bash
+  sudo usermod -aG render "$USER"
+  # then, from PowerShell, restart WSL so the new group takes effect:
+  #   wsl --shutdown
+  ```
+
+- **Set `UV_LINK_MODE=copy`** and a home-directory `uv` cache, so `uv` does not
+  try to hardlink across filesystems while building the venv.
+
+Install the LIBERO client into an isolated `uv` venv:
+
+```bash
+export UV_LINK_MODE=copy
+export UV_CACHE_DIR=$HOME/.cache/uv-vla
+bash eval/sim/libero/setup_libero.sh
+```
+
+Then serve SmolVLA and drive one episode. The client renders with EGL and talks
+to `vla-server` over ZeroMQ:
+
+```bash
+# terminal 1 - server (GPU inference)
+./build/vla-server --bind 'tcp://127.0.0.1:5555' "$VLA_GGUF"
+
+# terminal 2 - client (LIBERO sim + preprocessing)
+export MUJOCO_GL=egl CUDA_VISIBLE_DEVICES=0
+eval/sim/libero/libero_uv/.venv/bin/python eval/client/run_sim_client_direct.py \
+    --arch smolvla --vla-addr tcp://127.0.0.1:5555 \
+    --task libero_object --task-id 0 --n-episodes 1 --n-action-steps 1 \
+    --output-dir outputs/wsl_smoke
+```
+
+### One-command runner
+
+`eval/run_libero_wsl.sh` wraps the two steps above - it starts `vla-server`,
+waits for it to become ready, drives one client run, and stops the server on
+exit. Pass the task-id and episode count as arguments, or run with none and it
+prompts for them:
+
+```bash
+bash eval/run_libero_wsl.sh          # prompts for task-id + episodes
+bash eval/run_libero_wsl.sh 3 5      # task-id 3, 5 episodes, no prompt
+```
+
+Override the served model, suite, or output dir via environment
+(`VLA_GGUF`, `TASK_SUITE`, `OUTPUT_DIR`, `BIND_ADDR`/`CLIENT_ADDR`).
+
 ## Results
 
 Evo1 (libero, 1.20 GiB BF16 weights incl. InternViT vision tower),
@@ -114,3 +179,18 @@ steady state:
 
 On libero_object task 0 (pick up the alphabet soup and place it in the basket),
 the episode succeeded after 171 steps at ~2114 ms/step client-side.
+
+SmolVLA (libero, 532 MB GGUF), **NVIDIA GeForce RTX 4050 Laptop GPU** (6 GB VRAM,
+~1.07 GB allocated), with the full server + LIBERO client stack co-resident on a
+single WSL2 (Ubuntu 24.04) machine, steady state:
+
+| Stage         | CUDA (WSL2) |
+|---------------|------------:|
+| vision        |      ~84 ms |
+| inference     |      ~46 ms |
+| other         |       ~1 ms |
+| **total/req** | **~131 ms** |
+
+On libero_object task 0 the episode succeeded end-to-end (`is_success: True`,
+149 requests served) at ~155 ms/step client-side (including software EGL
+rendering), producing a rendered MP4.
