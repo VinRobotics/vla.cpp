@@ -2,7 +2,9 @@
 
 This document describes the Docker Compose evaluation stack, which runs the
 vla.cpp inference server and the Python simulation client in separate
-containers. The stack supports both **CUDA GPU** and **CPU-only** deployments.
+containers. The current `eval/docker-compose.yml` is a **CUDA GPU** stack that
+requests an NVIDIA CDI device; CPU-only Docker commands are provided separately
+below.
 
 | Container | Image | Purpose |
 |-----------|-------|---------|
@@ -20,9 +22,9 @@ containers. The stack supports both **CUDA GPU** and **CPU-only** deployments.
 ### Prerequisites
 
 - [Docker Compose](https://docs.docker.com/compose/) v2.24+
-- NVIDIA GPU with proprietary driver ≥ 535. GPU access uses **CDI**
-  (`devices: - nvidia.com/gpu=all`) — no `nvidia-container-toolkit` needed.
-  See [CUDA GPU access](#cuda-gpu-access) for details.
+- NVIDIA GPU with proprietary driver ≥ 535.
+- CDI GPU access for Docker (`devices: - nvidia.com/gpu=all`). See
+  [CUDA GPU access](#cuda-gpu-access) for runtime setup details.
 
 ### 1. Download model GGUF files
 
@@ -33,7 +35,9 @@ docker compose -f eval/docker-compose.yml run --no-deps --rm client \
 ```
 
 > `--no-deps` skips building the server image, which isn't needed for downloads.
-> Each model ships as a single self-contained GGUF — no separate `mmproj` file.
+> The Compose file mounts the host directory `/tmp/smolvla-models` into both
+> containers as `/models`; the default server command expects
+> `/models/smolvla-libero.gguf`.
 
 Models are mounted into both containers at `/models`.
 
@@ -49,7 +53,7 @@ Build args accepted by the server `Dockerfile`:
 |-----|---------|-------|
 | `BACKEND` | `cuda` | `cuda` or `cpu` |
 | `CUDA_ARCH` | `120` | Blackwell; `89` for RTX40, `87` for Orin, `86` for RTX30 |
-| `BASE_IMAGE` | `nvidia/cuda:12.9.1-devel-ubuntu24.04` | Overridden automatically for CPU |
+| `BASE_IMAGE` | `nvidia/cuda:12.9.1-devel-ubuntu24.04` | Set to `ubuntu:24.04` when building a CPU image |
 | `JOBS` | `nproc` | Lower if nvcc segfaults on flash-attn kernels |
 
 Override via e.g. `docker compose -f eval/docker-compose.yml build --build-arg CUDA_ARCH=89 server`.
@@ -62,12 +66,21 @@ docker compose -f eval/docker-compose.yml logs server
 # … vla-server: bound to tcp://*:5555. ready.
 ```
 
-The default `command` in `eval/docker-compose.yml` starts SmolVLA for LIBERO.
-For other models (e.g. GR00T-N1.7):
+The default `command` in `eval/docker-compose.yml` starts SmolVLA for LIBERO:
+`--bind tcp://*:5555 /models/smolvla-libero.gguf`. To serve another model,
+create a Compose override that replaces only `server.command`; for example:
 
 ```bash
-docker compose -f eval/docker-compose.yml run --rm server \
-    --bind tcp://*:5555 /models/gr00tn1d7-libero.gguf
+cat >/tmp/vla-compose.override.yml <<'YAML'
+services:
+  server:
+    command:
+      - --bind
+      - tcp://*:5555
+      - /models/gr00tn1d7-libero.gguf
+YAML
+
+docker compose -f eval/docker-compose.yml -f /tmp/vla-compose.override.yml up -d server
 ```
 
 > **π0 note**: π0 needs a separate `mmproj` vision GGUF. Pass both files:
@@ -110,8 +123,10 @@ vla-cpp-direct[arch=smolvla]: connected to tcp://server:5555
 
 ## Quick start (CPU-only, no GPU)
 
-On machines without an NVIDIA GPU,
-build and run the server image with `BACKEND=cpu`:
+The checked-in Compose file requests `devices: - nvidia.com/gpu=all`, so use
+plain `docker build` / `docker run` for a CPU-only host unless you also maintain
+a local Compose override that removes the GPU device request. Build and run the
+server image with `BACKEND=cpu`:
 
 ### 1. Build the server image for CPU
 
@@ -202,8 +217,8 @@ via hostname `server`.
 
 ### CUDA GPU access
 
-The server uses CDI (`devices: - nvidia.com/gpu=all`). This works without
-`nvidia-container-toolkit` as long as:
+The server service in `eval/docker-compose.yml` uses CDI
+(`devices: - nvidia.com/gpu=all`). This works when:
 1. The NVIDIA proprietary driver is installed (≥ 535).
 2. A CDI-enabled container runtime is available (containerd ≥ 1.7,
    cri-o ≥ 1.29, or Docker with `nvidia-ctk` from `nvidia-container-toolkit`
@@ -267,18 +282,20 @@ docker run --rm -it --network host \
 | `pandas` segfaults on import | Pin `pandas==2.0.3` (last NumPy 1.x-compatible release) |
 | MuJoCo 3.x: robosuite init fails | Pin `mujoco<3.0` (2.3.7 known-good) |
 | `nvidia-container-toolkit` not installed | Use CDI (`devices: - nvidia.com/gpu=all`) instead of `runtime: nvidia` |
-| CPU-only: no GPU available | Use `BACKEND=cpu` build arg and `BASE_IMAGE=ubuntu:24.04` instead of CUDA base |
+| CPU-only: no GPU available | Use the CPU-only `docker build` / `docker run` flow above, or maintain a Compose override that removes `devices: - nvidia.com/gpu=all` and builds with `BACKEND=cpu` plus `BASE_IMAGE=ubuntu:24.04` |
 
 ---
 
 ## Summary
 
-The Docker Compose evaluation stack provides a reproducible two-container
-workflow for vla.cpp:
+The Docker evaluation stack provides a reproducible two-container workflow for
+vla.cpp:
 
-1. **Server** — upstream `Dockerfile`, compiles `vla-server` with GPU or CPU backend.
+1. **Server** — upstream `Dockerfile`, compiles `vla-server` with GPU by default
+   in Compose or with a CPU backend in the standalone CPU flow.
 2. **Client** — `eval/Dockerfile.client`, Python simulation stack with pinned
    dependency versions (NumPy 1.x, MuJoCo 2.x, Pandas 2.0.x).
-3. **CDI** eliminates the `nvidia-container-toolkit` dependency for GPU access.
-4. **CPU-only** mode works without any GPU — use `BACKEND=cpu` build arg.
+3. **CDI** is the GPU access path used by the checked-in Compose file.
+4. **CPU-only** mode works without any GPU through the standalone Docker commands
+   above.
 5. **First-step overhead** (~35 s CUDA graph warmup) occurs once per process (GPU only).
