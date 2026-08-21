@@ -6,5 +6,9 @@ build/
 build-*/
 outputs/
 third_party/
-eval/sim/
+# Clone targets and venvs (large, runtime-only)
+eval/sim/libero/LIBERO/
+eval/sim/libero/libero_uv/
+eval/sim/simpler/SimplerEnv/
+eval/sim/simpler/simpler_uv/
 *.gguf
