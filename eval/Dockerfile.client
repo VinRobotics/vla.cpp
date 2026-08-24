@@ -55,7 +55,6 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
 
 WORKDIR /workspace/vla.cpp
-COPY . .
 
 # ---------------------------------------------------------------------------
 # Python dependencies — order matters to avoid version conflicts
@@ -96,7 +95,7 @@ RUN pip3 install lerobot==0.4.3 && \
 RUN pip3 install \
     transformers==4.51.3 \
     gymnasium==0.29.1 \
-    zmq \
+    pyzmq \
     msgpack==1.1.0 \
     msgpack-numpy==0.4.8 \
     pillow \
@@ -112,7 +111,7 @@ RUN pip3 install \
     albumentations==1.4.18 \
     pyarrow==12.0.1 \
     diffusers==0.30.1 \
-    huggingface-hub
+    huggingface-hub==0.35.3
 
 # Re-pin numpy to 1.x — later deps (albumentations, tianshou, etc.) pull in 2.x
 RUN pip3 install numpy==1.26.4
@@ -123,5 +122,9 @@ RUN sed -i 's/np_core = np._core if is_numpy_available("2.0.0") else np.core/np_
 
 # Clean up pip cache to keep image size small
 RUN rm -rf /root/.cache/pip
+
+# The repo goes last: it changes every commit, and everything above it is a
+# half-hour of installs worth caching.
+COPY . .
 
 CMD ["bash"]

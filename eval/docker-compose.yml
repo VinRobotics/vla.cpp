@@ -22,7 +22,8 @@ services:
   # vla-server — C++ inference daemon (upstream Dockerfile)
   # Build args:
   #   BACKEND=cuda|cpu   (default: cuda)
-  #   CUDA_ARCH          (default: 120, use 89 for RTX40, 87 for Orin, etc.)
+  #   CUDA_ARCH          (from the environment, default 120; 89 for RTX40, 87 for Orin)
+  # e.g. CUDA_ARCH=89 docker compose -f eval/docker-compose.yml build server
   # --------------------------------------------------------------------------
   server:
     build:
@@ -30,7 +31,7 @@ services:
       dockerfile: Dockerfile
       args:
         BACKEND: cuda
-        CUDA_ARCH: "120"
+        CUDA_ARCH: "${CUDA_ARCH:-120}"
     image: vla-cpp-server
     container_name: vla-cpp-server
     devices:

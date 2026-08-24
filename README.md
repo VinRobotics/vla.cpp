@@ -70,6 +70,7 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 Check [docs/backend](docs/backend) for compiling `vla.cpp` on other platforms.
 WSL2, Apple Silicon, and Intel GPU are all tested.
+To build and run in containers instead, see [docs/DOCKER.md](docs/DOCKER.md).
 
 ---
 

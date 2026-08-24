@@ -52,11 +52,12 @@ Build args accepted by the server `Dockerfile`:
 | Arg | Default | Notes |
 |-----|---------|-------|
 | `BACKEND` | `cuda` | `cuda` or `cpu` |
-| `CUDA_ARCH` | `120` | Blackwell; `89` for RTX40, `87` for Orin, `86` for RTX30 |
+| `CUDA_ARCH` | `120` in Compose, `89` in the `Dockerfile` | Blackwell; `89` for RTX40, `87` for Orin, `86` for RTX30 |
 | `BASE_IMAGE` | `nvidia/cuda:12.9.1-devel-ubuntu24.04` | Set to `ubuntu:24.04` when building a CPU image |
 | `JOBS` | `nproc` | Lower if nvcc segfaults on flash-attn kernels |
 
-Override via e.g. `docker compose -f eval/docker-compose.yml build --build-arg CUDA_ARCH=89 server`.
+Override the arch from the environment, `CUDA_ARCH=89 docker compose -f eval/docker-compose.yml build server`,
+or per build, `docker compose -f eval/docker-compose.yml build --build-arg CUDA_ARCH=89 server`.
 
 ### 3. Start the server
 
