@@ -7,7 +7,7 @@ runtime on the configure line.
 
 > **Status: builds and runs, no arch completes a prediction yet.** The backend
 > comes up, weights fold in, and the vision towers translate and execute - on
-> the CPU plugin and on the GPU plugin alike. The language model and action
+> the CPU, GPU and NPU plugins alike. The language model and action
 > expert do not: ggml's OpenVINO backend models a decoder-only LLM with one
 > position input and an F16 KV cache, and every vla.cpp arch has several
 > position inputs and no KV cache. See
@@ -15,8 +15,11 @@ runtime on the configure line.
 > README support matrix stays `-` until an arch passes end to end.
 
 Checked on an **Intel Core Ultra X7 358H** (Panther Lake) with the Arc B390
-iGPU, Ubuntu 24.04, OpenVINO 2026.2.1, against `vrfai/smolvla-libero-gguf` and
-`vrfai/pi05-libero-gguf`.
+iGPU and the AI Boost NPU, Ubuntu 24.04, OpenVINO 2026.2.1, against
+`vrfai/smolvla-libero-gguf` and `vrfai/pi05-libero-gguf`. All three devices
+behave the same, including the NPU: the naive graph path this build selects is
+device-independent, so the NPU never reaches the static prefill/decode path
+where it would differ.
 
 OpenVINO is Intel's inference toolkit; ggml's backend translates a ggml compute
 graph into an OpenVINO model and hands it to the CPU, GPU or NPU plugin, which
@@ -56,23 +59,36 @@ always means the render group has not taken effect yet. Without it,
 For the GPU compute runtime and NPU driver packages themselves, follow
 [llama.cpp's OpenVINO notes](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/OPENVINO.md).
 
-The NPU additionally needs the **Level Zero loader**, which the NPU driver
-packages do not pull in:
-
-```bash
-sudo apt-get install -y libze1          # provides libze_loader.so.1
-```
-
-`intel-level-zero-npu` ships `libze_intel_npu.so.1`, the *driver*; OpenVINO's NPU
-plugin reaches it through the loader and enumerates nothing without one. The
-symptom is not an error - the device simply does not appear:
+The NPU needs two more things that its driver packages do not pull in. Neither
+failure is reported as an error - the device simply does not appear, and every
+`GGML_OPENVINO_DEVICE=NPU` run lands on the CPU plugin instead:
 
 ```text
 GGML OpenVINO Backend: device NPU is not available, fallback to CPU
 OpenVINO: using device CPU
 ```
 
+**1. The Level Zero loader.** `intel-level-zero-npu` ships `libze_intel_npu.so.1`,
+the *driver*; OpenVINO's NPU plugin only reaches it through the loader.
+
+```bash
+sudo apt-get install -y libze1          # provides libze_loader.so.1
+```
+
 `ldconfig -p | grep ze_loader` is the check.
+
+**2. Point the loader at the NPU driver.** Ubuntu's loader (1.16.1 in noble)
+does not discover `libze_intel_npu.so.1` on its own, so installing it is not
+enough by itself. Name the driver explicitly:
+
+```bash
+export ZE_ENABLE_ALT_DRIVERS=/lib/x86_64-linux-gnu/libze_intel_npu.so.1
+```
+
+With that set the device enumerates as `NPU  Intel(R) AI Boost` and the startup
+banner reads `OpenVINO: using device NPU`. A loader from Intel's own graphics
+repository, version-matched to the NPU driver, should discover it without the
+override - untested here.
 
 ### 2. OpenVINO runtime + OpenCL headers
 
