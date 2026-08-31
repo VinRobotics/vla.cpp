@@ -75,7 +75,7 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      dynamic path already handles freshly built tensors.
 
   6. openvino/op_table.cpp - add the four missing op translators.
-     RELU, GELU_ERF, NEG and SQR have no entry in the table, and with no per-op
+     RELU, GELU_ERF, NEG (a unary op) and SQR have no entry in the table, and with no per-op
      CPU fallback in the core an arch that uses one cannot run at all. Between
      them they block every arch except SmolVLA, pi0 and pi0.5. All four map
      onto ov ops directly: Relu, Gelu (whose default is the exact erf form
@@ -414,7 +414,7 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
         // approximation and keeps the mapping it already had.
         {"GGML_UNARY_OP_GELU_ERF",  op::translate_1to1_match_1_input<v7::Gelu>     },
         {"GGML_UNARY_OP_RELU",      op::translate_1to1_match_1_input<v0::Relu>     },
-        {"GGML_OP_NEG",             op::translate_1to1_match_1_input<v0::Negative> },
+        {"GGML_UNARY_OP_NEG",       op::translate_1to1_match_1_input<v0::Negative> },
         {"GGML_OP_SQR",             op::translate_sqr                              },""",
         ),
     ],
