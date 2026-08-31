@@ -347,11 +347,22 @@ is therefore **untested**: only BitVLA emits it, and BitVLA never reaches this
 backend. It is in the table because it is a real gap in ggml-openvino, not
 because anything here exercises it.
 
+**GR00T N1.7 translates but computes the wrong answer.** It runs to completion
+and returns a full action chunk, so nothing errors, but 86% of the 5,280 values
+are off by more than 1e-2 and the worst is 1.48 against a peak of 0.948. The
+result is deterministic and identical on the CPU and GPU plugins, so this is a
+translation bug rather than a device or precision effect. It is **not** the mrope
+handling: fixes 9 and 10 in `scripts/patch_ggml_openvino.py` both target that
+path and neither moved the number by a digit. VLA-JEPA shares the same Qwen3-VL
+vision tower and the same interleaved mrope and is only ~1% off, which points at
+GR00T N1.7's own action expert rather than anything shared. Not yet diagnosed;
+the arch stays `-` in the README matrix.
+
 **Untested archs.** π0 and OpenVLA-OFT are untested here for want of a local
 checkpoint, not because anything is known to block them; both use op sets already
-covered by tested archs (π0 matches π0.5, OpenVLA-OFT matches VLA-Adapter). The
-GR00T family is being brought up separately. Treat any untested arch as `-` in
-the README matrix until it has actually produced actions.
+covered by tested archs (π0 matches π0.5, OpenVLA-OFT matches VLA-Adapter). GR00T
+N1.5 and N1.6 are still being fetched. Treat any untested arch as `-` in the
+README matrix until it has actually produced actions.
 
 **Splitting across devices.** Intel's own
 [π0.5 write-up](https://docs.openedgeplatform.intel.com/2026.1/OEP-articles/publications/optimizing-pi0.5-lva-model.html)

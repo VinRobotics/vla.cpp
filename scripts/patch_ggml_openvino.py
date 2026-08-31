@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Nine fixes to the fetched ggml OpenVINO backend.
+"""Eleven fixes to the fetched ggml OpenVINO backend.
 
 ggml-openvino is written against llama.cpp's graphs: one decoder-only
 transformer, one position input, an F16 KV cache. vla.cpp drives it with vision
@@ -99,7 +99,26 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      here is what let vla.cpp drop an arch-specific workaround that had moved
      SmolVLA's time tiles into their own buffer.
 
-  9. utils.cpp - make the naive-path graph-size threshold settable.
+  9. openvino/utils.cpp - bound the interleaved-mrope sector cycle by sections.
+     ggml's IMROPE cycles t/h/w by sector % 3, but only while the sector is
+     inside 3 * sections[k]; past that it falls through to the fourth position
+     stream (ggml_rope_cache_init in ggml/src/ggml-cpu/ops.cpp). The translator
+     cycled unconditionally, so with sections {24,20,20,0} and n_dims 128
+     sectors 61 and 62 took h and w instead of e. NOTE: this matches the ggml
+     reference but had no measurable effect on any arch tested here, because the
+     fourth stream happens to carry the same positions as the first. Kept
+     because it removes a real divergence from the reference, not because a
+     measurement demanded it.
+
+ 10. openvino/translate_session.cpp - pass the mode to the shared sin/cos table.
+     add_rope_sin_cos() called make_sin_cos() without the imrope flag, so a graph
+     with a single position input and interleaved mrope got a table built with
+     the plain-rope layout - silently wrong, not an error. Same caveat as 9: every
+     mrope arch here has several position inputs, so the shared precompute is
+     skipped and this path is untested. It is strictly closer to the reference
+     than what it replaces.
+
+ 11. utils.cpp - make the naive-path graph-size threshold settable.
      Graphs under 20 nodes bypass the LLM decoder and translate literally, with
      static shapes and no KV-cache inference. That literal path is the one that
      suits a vision tower, but a vision tower is ~450 nodes. The constant
@@ -339,6 +358,34 @@ EDITS = {
     "ggml/src/ggml-openvino/openvino/utils.cpp": [
         ("#include <memory>", "#include <memory>\n#include <numeric>"),
         (
+            """        std::vector<int64_t> gather_indices(n_dims_half);
+        for (size_t j = 0; j < n_dims_half; j++) {
+            gather_indices[j] = j % 3;
+            factor[j] = std::pow(theta_scale, j);
+        }""",
+            """        // vla.cpp: ggml's interleaved mrope cycles t/h/w by sector % 3, but only
+        // while the sector is still inside 3 * sections[k]; past that it falls
+        // through to the fourth position stream. Ignoring the bound sends the
+        // tail sectors to the wrong stream -- with sections {24,20,20,0} and
+        // n_dims 128, sectors 61 and 62 take h and w instead of e. See
+        // ggml_rope_cache_init in ggml/src/ggml-cpu/ops.cpp.
+        const int32_t * sections = rope_params + 11;
+        std::vector<int64_t> gather_indices(n_dims_half);
+        for (size_t j = 0; j < n_dims_half; j++) {
+            const int sector = (int) j;
+            int64_t stream = 3;
+            if (sector % 3 == 1 && sector < 3 * sections[1]) {
+                stream = 1;
+            } else if (sector % 3 == 2 && sector < 3 * sections[2]) {
+                stream = 2;
+            } else if (sector % 3 == 0 && sector < 3 * sections[0]) {
+                stream = 0;
+            }
+            gather_indices[j] = stream;
+            factor[j] = std::pow(theta_scale, j);
+        }""",
+        ),
+        (
             "#include <openvino/op/transpose.hpp>",
             "#include <openvino/op/transpose.hpp>\n#include <openvino/op/unsqueeze.hpp>",
         ),
@@ -555,6 +602,16 @@ struct decoder_runtime_ctx {""",
         const char * env = getenv("GGML_OPENVINO_NAIVE_GRAPH_SIZE");
         return (env && *env) ? atoi(env) : 20;
     }();""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/translate_session.cpp": [
+        (
+            "    auto sin_cos = make_sin_cos(rope_params, inp_pos, rope_freqs_weight);",
+            """    // vla.cpp: rope_params[2] is the mode. The shared precompute never looked at
+    // it, so a graph with one position input and interleaved mrope got a table
+    // built with the plain-rope layout -- silently wrong actions, not an error.
+    const bool imrope = rope_params[2] == GGML_ROPE_TYPE_IMROPE;
+    auto sin_cos = make_sin_cos(rope_params, inp_pos, rope_freqs_weight, imrope, false);""",
         ),
     ],
 }
