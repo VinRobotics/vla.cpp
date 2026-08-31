@@ -5,9 +5,9 @@ account of how far it currently runs. Like SYCL, OpenVINO is **not**
 auto-detected: it needs an explicit `-DGGML_OPENVINO=ON` and the OpenVINO
 runtime on the configure line.
 
-> **Status: four architectures translate faithfully, two drift, one is wrong.**
+> **Status: five architectures translate faithfully, two drift, one is wrong.**
 > Evo-1 and VLA-Adapter agree with an F32 CPU reference to six decimal places;
-> SmolVLA and π0.5 to under 1e-3. VLA-JEPA (5.5e-3) and GR00T N1.5 (2.7e-2) run to
+> SmolVLA and π0.5 to under 1e-3; GR00T N1.6 lands on the bar at 3.0e-3. VLA-JEPA (5.5e-3) and GR00T N1.5 (2.7e-2) run to
 > completion but sit outside the bar the SYCL backend is held to, for reasons only
 > partly established. GR00T N1.7 translates and returns plausible-looking actions
 > that are simply wrong. On the Arc B390 iGPU the speedup over the native CPU
@@ -180,6 +180,7 @@ reason in [Known issues](#known-issues).
 | Evo-1       | 448 | 3,114 ms | 4,523 ms | **574 ms** (5.4x) | not supported |
 | VLA-Adapter | 224 | 1,228 ms | 1,603 ms | **162 ms** (7.6x) | not supported |
 | VLA-JEPA    | 256 | 1,046 ms | 1,265 ms | **128 ms** (8.2x) | not supported |
+| GR00T N1.6  | 224 | 1,276 ms | not timed | **322 ms** (4.0x) | not supported |
 | GR00T N1.5  | 224 | not timed | not timed | not timed | not supported |
 
 GR00T N1.5 is deliberately not timed: it drifts too far from the CPU backend to
@@ -202,8 +203,11 @@ you compare against matters more than it looks.
 OpenVINO folds the checkpoint's BF16 weights in as constants and its CPU plugin
 executes them at F32. ggml's CPU backend, on the same checkpoint, keeps them BF16.
 So a naive comparison charges the OpenVINO backend for a precision *upgrade*.
-Running the reference with `--weight-dtype f32` removes that term and leaves only
-what the translation itself contributes:
+Running the reference with `--weight-dtype f32` removes that term.
+
+The two references bracket the answer, and which one is tighter is arch-dependent
+- it turns on how much of a given checkpoint is BF16 in the first place. Report
+both and take the smaller as the fidelity figure:
 
 | Model | vs BF16 reference (default) | vs F32 reference | what the gap was |
 |---|---:|---:|---|
@@ -212,10 +216,15 @@ what the translation itself contributes:
 | π0.5        | 8.9e-4 | **2.5e-4** | mostly |
 | SmolVLA     | 1.2e-3 | **9.8e-4** | partly |
 | VLA-JEPA    | 1.2e-2 | **5.5e-3** | about half |
+| GR00T N1.6  | **3.0e-3** | 4.7e-3 | none - BF16 is the tighter reference here |
 | GR00T N1.5  | 2.2e-2 | **2.7e-2** | none - not a precision effect |
 
 Evo-1 and VLA-Adapter agree with an F32 reference to six decimal places, which is
-as close to "the translation is exact" as this harness can show. For context, the
+as close to "the translation is exact" as this harness can show - for those two,
+OpenVINO is doing F32 arithmetic and the BF16 comparison was measuring nothing but
+the dtype. GR00T N1.6 is the counterexample that stops this being a universal
+rule: it lands closer to the BF16 reference, so its checkpoint evidently is not
+uniformly BF16 where it matters. For context, the
 CPU backend's own output moves by 2.0e-3 (SmolVLA), 2.7e-3 (Evo-1) or 1.1e-2
 (VLA-JEPA) when you flip that one flag, so the model's intrinsic sensitivity to
 precision is the same size as the numbers being reported.
@@ -226,13 +235,17 @@ Against the F32 reference, which is the fidelity number:
 
 | Model | OpenVINO CPU | OpenVINO GPU | OpenVINO NPU |
 |---|---:|---:|---:|
-| SmolVLA     | 9.8e-4 | 1.1e-3 | 1.6e-2 (vs BF16 ref) |
-| π0.5        | 2.5e-4 | 5.0e-4 | 1.6e-3 (vs BF16 ref) |
+| SmolVLA     | 9.8e-4 | 1.1e-3 | 1.6e-2 |
+| π0.5        | 2.5e-4 | 5.0e-4 | 1.6e-3 |
 | Evo-1       | 3.6e-6 | 1.2e-3 | not supported |
 | VLA-Adapter | 2.4e-6 | 2.7e-3 | not supported |
+| GR00T N1.6  | 3.0e-3 | 3.3e-3 | plugin throws |
 | VLA-JEPA    | 5.5e-3 | 5.4e-3 | returns NaN |
 | GR00T N1.5  | 2.7e-2 | 6.1e-2 | NPUW throws |
 | GR00T N1.7  | 1.5e0  | 1.5e0  | not attempted |
+
+GR00T N1.6 sits right on the bar (3.0e-3 against 2.9e-3) rather than comfortably
+inside it.
 
 The GPU is consistently looser than the CPU plugin because that plugin runs F16
 internally; it stays within the band the SYCL backend is held to (2.9e-3) for
@@ -353,9 +366,10 @@ and π0.5 run. The others do not:
 | VLA-Adapter | compiler rejects: `Input channels '261' is not aligned by '16'` |
 | VLA-JEPA | compiles and runs, returns all `NaN` |
 | GR00T N1.5 | NPUW partitioning throws (`partitioning.cpp:1350`) |
+| GR00T N1.6 | plugin throws (`core.cpp:117`) |
 | GR00T N1.7 | not attempted - wrong on CPU and GPU already |
 
-Four distinct failures, none of them vla.cpp's. The two alignment rejections are
+Five archs, four distinct failures, none of them vla.cpp's. The two alignment rejections are
 Intel's NPU compiler: 1025 is Evo-1's 1024
 patches plus a CLS token, 261 is VLA-Adapter's 256 plus 5, and neither is a
 multiple of 16. SmolVLA and π0.5 happen to have 16-aligned sequence lengths. The
@@ -409,9 +423,9 @@ and each could be compared in isolation.
 
 **Untested archs.** π0 and OpenVLA-OFT are untested here for want of a local
 checkpoint, not because anything is known to block them; both use op sets already
-covered by tested archs (π0 matches π0.5, OpenVLA-OFT matches VLA-Adapter). GR00T
-N1.6 is still being fetched. Treat any untested arch as `-` in the README matrix
-until it has actually produced actions.
+covered by tested archs (π0 matches π0.5, OpenVLA-OFT matches VLA-Adapter). Treat
+any untested arch as `-` in the README matrix until it has actually produced
+actions.
 
 **Splitting across devices.** Intel's own
 [π0.5 write-up](https://docs.openedgeplatform.intel.com/2026.1/OEP-articles/publications/optimizing-pi0.5-lva-model.html)

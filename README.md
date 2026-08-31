@@ -312,10 +312,10 @@ Experimental results on other platforms can be found in
 Support matrix of models (rows) against platforms (columns). Legend: `Y` =
 supported (released and benchmarked), `~` = in progress, `-` = planned.
 
-OpenVINO runs SmolVLA, π0.5, Evo-1 and VLA-Adapter on Intel CPUs, GPUs and NPUs,
-matching the CPU backend to 3e-3; on an Arc B390 iGPU that is 3.1x to 8.2x the
-native CPU backend. VLA-JEPA and GR00T N1.5 run but drift further than that and
-are marked in progress. Read the known issues in
+OpenVINO runs SmolVLA, π0.5, Evo-1, VLA-Adapter and GR00T N1.6 on Intel CPUs,
+GPUs and NPUs, matching the CPU backend to 3e-3; on an Arc B390 iGPU that is 3.1x
+to 8.2x the native CPU backend. VLA-JEPA and GR00T N1.5 run but drift further and
+are marked in progress; GR00T N1.7 is wrong and stays unsupported. Read the known issues in
 [docs/backend/ov.md](docs/backend/ov.md) before running it - in particular, do
 not set `GGML_OPENVINO_CACHE_DIR`.
 
@@ -325,7 +325,7 @@ not set `GGML_OPENVINO_CACHE_DIR`.
 | [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | ~ | 
 | [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | Y | Y | 
 | [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | Y | ~ | 
-| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | - | 
+| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | Y | 
 | [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | - | 
 | [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | ~ | - | 
 | [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | Y | 
