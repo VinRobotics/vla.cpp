@@ -5,16 +5,20 @@ account of how far it currently runs. Like SYCL, OpenVINO is **not**
 auto-detected: it needs an explicit `-DGGML_OPENVINO=ON` and the OpenVINO
 runtime on the configure line.
 
-> **Status: four architectures match the CPU backend, two more run but drift,
-> one is wrong.** SmolVLA, π0.5, Evo-1 and VLA-Adapter agree with the CPU backend
-> to 3e-3 or better - the same bar the SYCL backend is held to. VLA-JEPA and
-> GR00T N1.5 run to completion but deviate 4-20x more than that, which is not yet
-> explained and is enough to matter for control. GR00T N1.7 translates and returns
-> plausible-looking actions that are simply wrong. On the Arc B390 iGPU the
-> speedup over the native CPU backend runs from 3.1x to 8.2x. Eleven fixes were
-> needed, nine of them inside ggml's OpenVINO backend, which is written against
-> llama.cpp's graphs and had never seen a vision tower or an action expert - see
+> **Status: four architectures translate faithfully, two drift, one is wrong.**
+> Evo-1 and VLA-Adapter agree with an F32 CPU reference to six decimal places;
+> SmolVLA and π0.5 to under 1e-3. VLA-JEPA (5.5e-3) and GR00T N1.5 (2.7e-2) run to
+> completion but sit outside the bar the SYCL backend is held to, for reasons only
+> partly established. GR00T N1.7 translates and returns plausible-looking actions
+> that are simply wrong. On the Arc B390 iGPU the speedup over the native CPU
+> backend runs from 3.1x to 8.2x. Eleven fixes were needed, nine of them inside
+> ggml's OpenVINO backend, which is written against llama.cpp's graphs and had
+> never seen a vision tower or an action expert - see
 > [What had to change](#what-had-to-change).
+>
+> Note the baseline: OpenVINO executes the checkpoint's BF16 weights at F32, so
+> compare against `--weight-dtype f32` or you will charge the backend for a
+> precision upgrade. See [Picking the right baseline](#picking-the-right-baseline).
 
 Measured on an **Intel Core Ultra X7 358H** (Panther Lake) with the Arc B390
 iGPU and the AI Boost NPU, Ubuntu 24.04, OpenVINO 2026.2.1, llama.cpp `b10331`
@@ -189,48 +193,58 @@ translation. The NPU beats the CPU backend on the two models it accepts while
 drawing far less power, which is the interesting result for a robot - see the
 NPU limits under [Known issues](#known-issues).
 
-Actions checked against the CPU backend on identical inputs. Both sides are
-deterministic run to run, so these are exact, not sampled. The SYCL backend's
-accepted bar is 2.9e-3 max; the rows are grouped against it.
+### Picking the right baseline
 
-**Matches the CPU backend** - safe to treat as a drop-in:
+Actions are checked against the CPU backend on identical inputs; both sides are
+deterministic, so the numbers are exact rather than sampled. But **which** CPU run
+you compare against matters more than it looks.
 
-| Model | device | max abs deviation | RMS | peak action |
-|---|---|---:|---:|---:|
-| SmolVLA     | CPU | 1.2e-3 | 1.7e-4 | 0.995 |
-| SmolVLA     | GPU | 1.2e-3 | 1.9e-4 | 0.995 |
-| π0.5        | CPU | 8.9e-4 | 8.7e-5 | 0.904 |
-| π0.5        | GPU | 6.9e-4 | 1.1e-4 | 0.904 |
-| π0.5        | NPU | 1.6e-3 | 1.9e-4 | 0.904 |
-| Evo-1       | CPU | 2.7e-3 | 3.8e-4 | 0.899 |
-| Evo-1       | GPU | 2.9e-3 | 4.2e-4 | 0.899 |
-| VLA-Adapter | CPU | 2.1e-3 | 7.1e-4 | 0.662 |
-| VLA-Adapter | GPU | 2.9e-3 | 1.1e-3 | 0.662 |
+OpenVINO folds the checkpoint's BF16 weights in as constants and its CPU plugin
+executes them at F32. ggml's CPU backend, on the same checkpoint, keeps them BF16.
+So a naive comparison charges the OpenVINO backend for a precision *upgrade*.
+Running the reference with `--weight-dtype f32` removes that term and leaves only
+what the translation itself contributes:
 
-**Runs, but drifts** - 4-20x the bar above, cause not established. Do not put
-these on a robot without checking them against your own policy first:
+| Model | vs BF16 reference (default) | vs F32 reference | what the gap was |
+|---|---:|---:|---|
+| Evo-1       | 2.7e-3 | **3.6e-6** | almost entirely BF16 vs F32 |
+| VLA-Adapter | 2.1e-3 | **2.4e-6** | almost entirely BF16 vs F32 |
+| π0.5        | 8.9e-4 | **2.5e-4** | mostly |
+| SmolVLA     | 1.2e-3 | **9.8e-4** | partly |
+| VLA-JEPA    | 1.2e-2 | **5.5e-3** | about half |
+| GR00T N1.5  | 2.2e-2 | **2.7e-2** | none - not a precision effect |
 
-| Model | device | max abs deviation | RMS | peak action | share of values off by >1e-2 |
-|---|---|---:|---:|---:|---:|
-| VLA-JEPA    | CPU | 1.2e-2 | 4.1e-3 | 1.145 | - |
-| VLA-JEPA    | GPU | 9.1e-3 | 4.5e-3 | 1.145 | - |
-| GR00T N1.5  | CPU | 2.2e-2 | 5.2e-3 | 0.869 | 6.1% |
-| GR00T N1.5  | GPU | 5.5e-2 | 1.3e-2 | 0.869 | - |
-| SmolVLA     | NPU | 1.6e-2 | 2.1e-3 | 0.995 | - |
+Evo-1 and VLA-Adapter agree with an F32 reference to six decimal places, which is
+as close to "the translation is exact" as this harness can show. For context, the
+CPU backend's own output moves by 2.0e-3 (SmolVLA), 2.7e-3 (Evo-1) or 1.1e-2
+(VLA-JEPA) when you flip that one flag, so the model's intrinsic sensitivity to
+precision is the same size as the numbers being reported.
 
-**Wrong**: GR00T N1.7, 1.5e0 max on both CPU and GPU, 86% of values off by more
-than 1e-2. See [What is left](#what-is-left).
+### Full results
 
-Most of the first group sits in the same band as the SYCL backend's numbers -
-kernel rounding, plus the F16 K/V conversion the SDPA fix introduces. The second
-group is the honest open question of this port. SmolVLA on the NPU is explained
-(the NPU compile config turns on dynamic quantization, and π0.5 on the same
-device stays tight). VLA-JEPA and GR00T N1.5 on CPU and GPU are not explained:
-the error is spread across the action vector rather than concentrated, neither
-uses flash attention, and GR00T N1.5 does not use mrope either, so the three
-usual suspects are all ruled out. GR00T N1.5 is also the one arch that is
-markedly worse on the GPU than on the CPU plugin, which points at kernel
-precision rather than a structural translation error.
+Against the F32 reference, which is the fidelity number:
+
+| Model | OpenVINO CPU | OpenVINO GPU | OpenVINO NPU |
+|---|---:|---:|---:|
+| SmolVLA     | 9.8e-4 | 1.1e-3 | 1.6e-2 (vs BF16 ref) |
+| π0.5        | 2.5e-4 | 5.0e-4 | 1.6e-3 (vs BF16 ref) |
+| Evo-1       | 3.6e-6 | 1.2e-3 | not supported |
+| VLA-Adapter | 2.4e-6 | 2.7e-3 | not supported |
+| VLA-JEPA    | 5.5e-3 | 5.4e-3 | returns NaN |
+| GR00T N1.5  | 2.7e-2 | 6.1e-2 | NPUW throws |
+| GR00T N1.7  | 1.5e0  | 1.5e0  | not attempted |
+
+The GPU is consistently looser than the CPU plugin because that plugin runs F16
+internally; it stays within the band the SYCL backend is held to (2.9e-3) for
+every arch except the two below.
+
+**Two archs remain unexplained.** VLA-JEPA sits at 5.5e-3, roughly 2x the bar,
+with half its original gap accounted for by precision and half not. GR00T N1.5 is
+the real outlier: 2.7e-2 that does **not** move with the weight dtype, does not
+improve with `--mm-prec f32`, and gets worse on the GPU (6.1e-2). It does not use
+mrope or flash attention, so those paths are ruled out. Both stay `~` in the
+README matrix. GR00T N1.7 is wrong outright - see
+[What is left](#what-is-left).
 
 ## What had to change
 
@@ -382,15 +396,16 @@ vision tower and the same interleaved mrope and is only ~1% off, which points at
 GR00T N1.7's own action expert rather than anything shared. Not yet diagnosed;
 the arch stays `-` in the README matrix.
 
-**The drift on VLA-JEPA and GR00T N1.5 is the open question.** Both run, both
-are deterministic, and both land 4-20x outside the bar the other four meet. The
-three obvious explanations are ruled out: the error is spread across the action
-vector rather than concentrated in a few elements, neither uses flash attention
-so the SDPA F16 conversion is not implicated, and GR00T N1.5 does not use mrope.
-GR00T N1.5 is meaningfully worse on the GPU (5.5e-2) than on the CPU plugin
-(2.2e-2), which suggests kernel precision rather than a structural translation
-error - but that is a hypothesis, not a finding. Until it is understood, both are
-`~` in the README matrix rather than `Y`.
+**VLA-JEPA and GR00T N1.5 drift, and only half of it is explained.** Measured
+against an F32 reference, VLA-JEPA is 5.5e-3 and GR00T N1.5 is 2.7e-2, against a
+bar of 2.9e-3. Half of VLA-JEPA's original gap turned out to be the BF16/F32
+baseline; the rest did not. GR00T N1.5's did not move at all with the weight
+dtype, nor with `--mm-prec f32`, and it is worse on the GPU (6.1e-2) than the CPU
+plugin. Neither arch uses flash attention, and GR00T N1.5 does not use mrope, so
+those paths are ruled out. Both stay `~` rather than `Y` until the residual is
+understood - the next thing to try is bisecting the graph, since vla.cpp runs the
+vision tower and the action head as separate `ggml_backend_graph_compute` calls
+and each could be compared in isolation.
 
 **Untested archs.** π0 and OpenVLA-OFT are untested here for want of a local
 checkpoint, not because anything is known to block them; both use op sets already
