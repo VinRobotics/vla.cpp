@@ -6,12 +6,17 @@ auto-detected: it needs an explicit `-DGGML_OPENVINO=ON` and the OpenVINO
 runtime on the configure line.
 
 > **Status: builds and runs, no arch completes a prediction yet.** The backend
-> comes up, weights fold in, and the vision towers translate and execute. The
-> language model and action expert do not: ggml's OpenVINO backend models a
-> decoder-only LLM with one position input and an F16 KV cache, and every
-> vla.cpp arch has several position inputs and no KV cache. See
+> comes up, weights fold in, and the vision towers translate and execute - on
+> the CPU plugin and on the GPU plugin alike. The language model and action
+> expert do not: ggml's OpenVINO backend models a decoder-only LLM with one
+> position input and an F16 KV cache, and every vla.cpp arch has several
+> position inputs and no KV cache. See
 > [What still blocks it](#what-still-blocks-it). The OpenVINO column of the
 > README support matrix stays `-` until an arch passes end to end.
+
+Checked on an **Intel Core Ultra X7 358H** (Panther Lake) with the Arc B390
+iGPU, Ubuntu 24.04, OpenVINO 2026.2.1, against `vrfai/smolvla-libero-gguf` and
+`vrfai/pi05-libero-gguf`.
 
 OpenVINO is Intel's inference toolkit; ggml's backend translates a ggml compute
 graph into an OpenVINO model and hands it to the CPU, GPU or NPU plugin, which
@@ -50,6 +55,24 @@ always means the render group has not taken effect yet. Without it,
 
 For the GPU compute runtime and NPU driver packages themselves, follow
 [llama.cpp's OpenVINO notes](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/OPENVINO.md).
+
+The NPU additionally needs the **Level Zero loader**, which the NPU driver
+packages do not pull in:
+
+```bash
+sudo apt-get install -y libze1          # provides libze_loader.so.1
+```
+
+`intel-level-zero-npu` ships `libze_intel_npu.so.1`, the *driver*; OpenVINO's NPU
+plugin reaches it through the loader and enumerates nothing without one. The
+symptom is not an error - the device simply does not appear:
+
+```text
+GGML OpenVINO Backend: device NPU is not available, fallback to CPU
+OpenVINO: using device CPU
+```
+
+`ldconfig -p | grep ze_loader` is the check.
 
 ### 2. OpenVINO runtime + OpenCL headers
 
