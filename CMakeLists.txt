@@ -12,7 +12,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(_vla_accel "")
-foreach(_flag GGML_CUDA GGML_SYCL GGML_METAL)
+foreach(_flag GGML_CUDA GGML_SYCL GGML_METAL GGML_OPENVINO)
     if(${_flag})
         list(APPEND _vla_accel ${_flag})
     endif()
@@ -35,10 +35,15 @@ if(GGML_CUDA)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_cuda_ext_hook.py <SOURCE_DIR>)
+elseif(GGML_OPENVINO)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_openvino.py <SOURCE_DIR>)
 endif()
 # Overridable so a regression can be bisected against another tag in a separate
 # build dir (-DVLA_LLAMA_TAG=b10326) without editing this file. The patch
-# anchors in scripts/patch_ggml_cuda_ext_hook.py are checked against the default.
+# anchors in scripts/patch_ggml_cuda_ext_hook.py and scripts/patch_ggml_openvino.py
+# are checked against the default.
 set(VLA_LLAMA_TAG "b10331" CACHE STRING "llama.cpp tag to fetch")
 
 include(FetchContent)
@@ -171,6 +176,20 @@ endif()
 # Precedence matches the ladder in src/backend.h.
 if(GGML_METAL AND NOT GGML_CUDA AND NOT GGML_SYCL)
     target_compile_definitions(vla_core PUBLIC GGML_USE_METAL)
+endif()
+
+if(GGML_OPENVINO AND NOT GGML_CUDA AND NOT GGML_SYCL AND NOT GGML_METAL)
+    # ggml's own OpenVINO backend target finds the toolkit; this only tells the
+    # archs which branch of the backend.h ladder to compile. Fail early with a
+    # pointer to setupvars.sh rather than deep inside the fetched tree.
+    find_package(OpenVINO QUIET COMPONENTS Runtime)
+    if(NOT OpenVINO_FOUND)
+        message(FATAL_ERROR
+            "GGML_OPENVINO=ON but the OpenVINO runtime was not found. Install it "
+            "(scripts/install_ov.sh) and 'source /opt/intel/openvino/setupvars.sh' "
+            "in the shell that configures. See docs/backend/ov.md.")
+    endif()
+    target_compile_definitions(vla_core PUBLIC GGML_USE_OPENVINO)
 endif()
 
 add_library(vlm_core

@@ -374,6 +374,7 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
         }
         if (vok) {
             ggml_backend_tensor_set(t_patches, patches_all.data(), 0, ggml_nbytes(t_patches));
+            graph_unique_names(vgA);
             if (ggml_backend_graph_compute(backend, vgA) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(gr00tn1d6): vision compute A failed\n");
                 vok = false;
@@ -386,6 +387,7 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
                                    shuf_host.data()+(size_t) v*c4*K);
 
             ggml_backend_tensor_set(t_shuf, shuf_host.data(), 0, ggml_nbytes(t_shuf));
+            graph_unique_names(vgB);
             if (ggml_backend_graph_compute(backend, vgB) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(gr00tn1d6): vision compute B failed\n");
                 vok = false;
@@ -515,6 +517,7 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(gio.t_tproj[s], tpr.data(), 0, ggml_nbytes(gio.t_tproj[s]));
     }
 
+    graph_unique_names(main_graph.graph());
     const auto tc0 = std::chrono::steady_clock::now();
     const ggml_status status = ggml_backend_graph_compute(backend, main_graph.graph());
     const auto tc1 = std::chrono::steady_clock::now();

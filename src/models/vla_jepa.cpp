@@ -426,6 +426,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
             ggml_backend_tensor_set(t_pos, c_pos_interp.data(), 0, ggml_nbytes(t_pos));
             ggml_backend_tensor_set(t_cos, c_rope_cos.data(), 0, ggml_nbytes(t_cos));
             ggml_backend_tensor_set(t_sin, c_rope_sin.data(), 0, ggml_nbytes(t_sin));
+            graph_unique_names(vg);
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(vla_jepa): vision compute failed\n");
                 vok = false;
@@ -565,6 +566,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
             ggml_backend_tensor_set(t_ds[j], ds_pad[j].data(), 0, ggml_nbytes(t_ds[j]));
 
         const auto tp0 = std::chrono::steady_clock::now();
+        graph_unique_names(lg);
         if (ggml_backend_graph_compute(backend, lg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(vla_jepa): LM compute failed\n"); return {}; }
         stats.ms_prefill = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now()-tp0).count();
         if (dump_prefix) {
@@ -670,6 +672,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
     }
 
     const auto td0 = std::chrono::steady_clock::now();
+    graph_unique_names(hg);
     if (ggml_backend_graph_compute(backend, hg) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(vla_jepa): head compute failed\n"); return {}; }
     stats.ms_denoise = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now()-td0).count();
     stats.ms_inference = stats.ms_prefill+stats.ms_denoise;

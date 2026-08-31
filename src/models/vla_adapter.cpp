@@ -342,6 +342,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
             normalize_tower(in.images[v],S,DMEAN,DSTD,dbuf); ggml_backend_tensor_set(px_d[v],dbuf.data(),0,ggml_nbytes(px_d[v]));
             normalize_tower(in.images[v],S,SMEAN,SSTD,sbuf); ggml_backend_tensor_set(px_s[v],sbuf.data(),0,ggml_nbytes(px_s[v]));
         }
+        graph_unique_names(vg);
         if(ggml_backend_graph_compute(backend,vg)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(vla_adapter): vision compute failed\n"); return {}; }
         ggml_backend_tensor_get(proj,proj_host.data(),0,proj_host.size()*sizeof(float));
         stats.ms_vision = std::chrono::duration<float,std::milli>(clock::now()-tv).count();
@@ -500,6 +501,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(cc,cb.data(),0,ggml_nbytes(cc)); ggml_backend_tensor_set(ss,sb.data(),0,ggml_nbytes(ss)); };
     fill_cs(cT,sT,chunk); fill_cs(cA,sA,num_tokens+1); fill_cs(cK,sK,NPATCH);
 
+    graph_unique_names(gf);
     if(ggml_backend_graph_compute(backend,gf)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(vla_adapter): main compute failed\n"); return {}; }
     std::vector<float> na((size_t)action_dim*chunk);
     ggml_backend_tensor_get(norm_actions,na.data(),0,na.size()*sizeof(float));

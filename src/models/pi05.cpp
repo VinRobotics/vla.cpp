@@ -555,6 +555,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         for (int v=0; v<in.n_images; ++v) {
             if (!preprocess_image_chw("pi05", in.images[v], vit_image_size, chw)) { return {}; }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
+            graph_unique_names(vg);
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(pi05): vision compute failed (view %d)\n", v);
                 return {};
@@ -673,6 +674,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(t_time[s], tv.data(), 0, ggml_nbytes(t_time[s]));
     }
 
+    graph_unique_names(gf);
     const auto ti0 = clk::now();
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
     stats.ms_inference = std::chrono::duration<float, std::milli>(clk::now()-ti0).count();

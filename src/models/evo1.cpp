@@ -566,6 +566,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             if (!preprocess_image_chw(in.images[v], image_size, chw)) { return {}; }
             ggml_backend_tensor_set(t_px[v], chw.data(), 0, ggml_nbytes(t_px[v]));
         }
+        graph_unique_names(vg);
         if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
             std::fprintf(stderr, "vla(evo1): vision graph compute failed (%lld views)\n", (long long) n_views);
             return {};
@@ -799,6 +800,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     { std::vector<float> qm(SEQ, 0.0f); for (int64_t p=0; p<SEQ; ++p) qm[p] = attn_ok[p] ? 1.0f : 0.0f;
       ggml_backend_tensor_set(t_qmask, qm.data(), 0, ggml_nbytes(t_qmask)); }
 
+    graph_unique_names(gf);
     const auto tc0 = std::chrono::steady_clock::now();
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
     const auto tc1 = std::chrono::steady_clock::now();

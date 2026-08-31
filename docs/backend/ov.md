@@ -1,78 +1,185 @@
-# OpenVINO Backend for vla.cpp
+# `vla.cpp` on Intel CPUs, GPUs and NPUs (OpenVINO backend)
 
-OpenVINO is an open-source toolkit for optimizing and deploying high-performance AI inference, specifically designed for Intel hardware, including CPUs, GPUs, and NPUs, in the cloud, on-premises, and on the edge. OpenVINO backend for vla.cpp enables hardware-accelerated inference on Intel® CPUs, GPUs, and NPUs while remaining compatible with the existing GGUF model ecosystem. The backend translates GGML compute graphs into OpenVINO graphs and leverages graph compilation, kernel fusion, and device-specific optimizations to improve inference performance on supported Intel hardware.
+Notes for building `vla.cpp` against ggml's OpenVINO backend, and an honest
+account of how far it currently runs. Like SYCL, OpenVINO is **not**
+auto-detected: it needs an explicit `-DGGML_OPENVINO=ON` and the OpenVINO
+runtime on the configure line.
 
-## Supported Devices
-OpenVINO backend supports the following hardware:
+> **Status: builds and runs, no arch completes a prediction yet.** The backend
+> comes up, weights fold in, and the vision towers translate and execute. The
+> language model and action expert do not: ggml's OpenVINO backend models a
+> decoder-only LLM with one position input and an F16 KV cache, and every
+> vla.cpp arch has several position inputs and no KV cache. See
+> [What still blocks it](#what-still-blocks-it). The OpenVINO column of the
+> README support matrix stays `-` until an arch passes end to end.
+
+OpenVINO is Intel's inference toolkit; ggml's backend translates a ggml compute
+graph into an OpenVINO model and hands it to the CPU, GPU or NPU plugin, which
+compiles and fuses it for the device. Unlike SYCL it needs no separate compiler:
+the stock GCC/Clang build links `libopenvino` and everything else is ordinary
+C++.
+
+## Supported devices
+
 - Intel CPUs
-- Intel GPUs (integrated and discrete)
-- Intel NPUs
+- Intel GPUs (integrated Xe / Arc, and discrete)
+- Intel NPUs (Core Ultra)
 
 ## Prerequisites
 
-- Linux system (22.04 or 24.04) with Intel hardware (CPU, GPU, or NPU)
-- For Intel GPU or NPU Usage: Install the appropriate hardware drivers for your Intel GPU or NPU. For detailed instructions, see: [Additional Configurations for Hardware Acceleration](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/OPENVINO.md)
-- OpenCL C++ headers, required to build the backend (the automatic install
-  script below installs them):
-    ```bash
-    sudo apt-get install opencl-clhpp-headers ocl-icd-opencl-dev
-    ```
+Linux (Ubuntu 22.04 or 24.04) on Intel hardware.
 
-## Install OpenVINO Runtime
-- For manual installation, follow the guide to install OpenVINO Runtime from an archive file: [Install OpenVINO Runtime from an Archive File](https://docs.openvino.ai/2026/get-started/install-openvino/install-openvino-archive-linux.html)
-- For automatic installation, run the following command:
-    ```bash
-    bash scripts/install_ov.sh
-    ```
+### 1. Device access
 
-## Build
+The CPU plugin needs nothing. The GPU and NPU plugins reach the hardware through
+`/dev/dri/renderD*` and `/dev/accel/accel0`, both owned by the `render` group:
 
-Initialize the OpenVINO environment, configure the OpenVINO GGML backend, patch
-the fetched llama.cpp sources, and build the server:
+```bash
+sudo usermod -aG render,video "$USER"
+```
+
+Re-login, then check that the OpenCL runtime actually enumerates the GPU:
+
+```bash
+clinfo -l
+```
+
+`Number of platforms 0` with `/etc/OpenCL/vendors/intel.icd` present almost
+always means the render group has not taken effect yet. Without it,
+`GGML_OPENVINO_DEVICE=GPU` warns and silently falls back to the CPU plugin.
+
+For the GPU compute runtime and NPU driver packages themselves, follow
+[llama.cpp's OpenVINO notes](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/OPENVINO.md).
+
+### 2. OpenVINO runtime + OpenCL headers
+
+```bash
+sudo apt-get install -y opencl-clhpp-headers ocl-icd-opencl-dev opencl-headers
+```
+
+Then either install OpenVINO
+[from the archive](https://docs.openvino.ai/2026/get-started/install-openvino/install-openvino-archive-linux.html)
+by hand, or run the bundled installer, which also pulls the GPU driver stack and
+adds you to `render`:
+
+```bash
+bash scripts/install_ov.sh
+```
+
+Plus the usual host dependencies:
+
+```bash
+sudo apt-get install -y cmake ninja-build pkg-config \
+    protobuf-compiler libprotobuf-dev libzmq3-dev cppzmq-dev
+```
+
+## Configure & build
 
 ```bash
 source /opt/intel/openvino/setupvars.sh
-cmake -B build/ReleaseOV -G Ninja \
+
+cmake -B build-ov -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DGGML_OPENVINO=ON
-git -C build/ReleaseOV/_deps/llama-src apply "scripts/openvino.patch"
-cmake --build build/ReleaseOV --parallel
+cmake --build build-ov -j$(nproc)
 ```
 
-The patch makes the backend select the Intel OpenCL platform. Without it, on a
-machine with more than one OpenCL runtime (e.g. an NVIDIA GPU next to the Intel
-GPU), `GGML_OPENVINO_DEVICE=GPU` aborts at startup with "Incompatible OpenCL
-runtime: program is not in expected ELF format". Configure fetches llama.cpp
-before the patch step, so apply it again after a clean reconfigure.
+`setvars`-style sourcing is needed in every shell that builds *or* runs the
+binaries: `libopenvino.so` and its TBB live under `/opt/intel`. Configure fails
+early with a pointer back here if the runtime is not on `CMAKE_PREFIX_PATH`.
+
+`scripts/patch_ggml_openvino.py` runs as the FetchContent patch step, so the
+four ggml fixes described in its docstring are applied automatically and
+re-applied on a clean reconfigure. There is no manual `git apply`.
 
 ## Run
 
-Set `GGML_OPENVINO_DEVICE` to the actual target name. Do not enter the
-documentation placeholder `<DEVICE_TYPE>` literally: in a shell, angle brackets
-are interpreted as input redirection.
+`GGML_OPENVINO_DEVICE` picks the target by name. Do not type the placeholder
+`<DEVICE_TYPE>` literally - in a shell the angle brackets are input redirection.
 
 ```bash
-GGML_OPENVINO_DEVICE=GPU \
-GGML_OPENVINO_STATEFUL_EXECUTION=1 \
-./build/ReleaseOV/vla-server ./weights/smolvla-libero.gguf
+GGML_OPENVINO_DEVICE=GPU ./build-ov/vla-server ./weights/smolvla-libero.gguf
 ```
 
-Use `CPU`, `GPU`, or `NPU` according to the devices exposed by the installed
-OpenVINO runtime. At startup, two diagnostics identify the selection:
+Two lines identify the selection at startup:
 
 ```text
 OpenVINO: using device GPU
 vla: backend = OPENVINO (requested device GPU)
 ```
 
-The first line is authoritative for the resolved OpenVINO device. If the
-requested device is unavailable, the OpenVINO backend emits a warning, falls
-back to CPU, and reports `OpenVINO: using device CPU`. The `vla:` line separately
-confirms that GGML is using its OpenVINO backend rather than its native CPU
-backend.
+The first comes from ggml and is authoritative: an unavailable device logs a
+warning there and falls back to `CPU`, which is still the OpenVINO CPU plugin,
+not ggml's native CPU backend. The second line echoes what was requested, so the
+pair tells you whether you got the device you asked for. `VLA_DEVICE` does *not*
+apply - ggml exposes OpenVINO as a single device and the target is chosen by
+name.
 
-OpenVINO compiles the model graphs on the first inference request (SmolVLA:
-about 1 minute on CPU, 2-3 minutes on GPU). Use a client receive timeout above
-this. Set `GGML_OPENVINO_CACHE_DIR=<dir>` to cache compiled graphs across
-server restarts.
+OpenVINO compiles each graph on first use, which is slow (minutes for a vision
+tower). Set `GGML_OPENVINO_CACHE_DIR=<dir>` to keep compiled graphs across
+restarts, and give any client a receive timeout well above the first request.
 
+## What vla.cpp had to change
+
+Three of these are ordinary correctness fixes that happen to be invisible on the
+other backends:
+
+- **Weight buffers are tagged.** `ggml_backend_alloc_ctx_tensors` leaves a
+  buffer on `GGML_BACKEND_BUFFER_USAGE_ANY`, and ggml-openvino reads ANY as "KV
+  cache", giving every weight a dynamic sequence dimension. `vla::alloc_weights`
+  in [`src/backend.h`](../../src/backend.h) tags it `..._WEIGHTS`, which is what
+  llama.cpp does with its own weights and what lets the frontend fold them in as
+  constants.
+- **Graph tensors get unique names.** ggml derives a result's name from its
+  source, so `ggml_reshape_2d` of an unnamed tensor is called `" (reshaped)"` -
+  and a graph whose intermediates were never named ends up with many tensors
+  sharing one name. ggml-openvino keys its translation map on those names, so
+  duplicates silently collapse into one node and the graph wires up the wrong
+  tensor. `vla::graph_unique_names` relabels duplicates before compute. It
+  compiles to nothing outside an OpenVINO build.
+- **SmolVLA's time tiles moved out of the weight buffer.** They are precomputed
+  once but they are graph inputs, not checkpoint parameters. As weights they
+  became 2-D constants that could not be concatenated with the 4-D activation
+  beside them.
+- **`GGML_OPENVINO_NAIVE_GRAPH_SIZE` defaults high.** ggml-openvino translates a
+  graph under 20 nodes literally and sends anything larger through an LLM model
+  builder. The literal path is the one that fits a vision tower; the threshold is
+  raised in `backend_init`, and an explicit setting still wins.
+
+None of it changes what the other backends compute: `vla_predict_check` on a CPU
+build of this branch is byte-identical to the same build of `main` for SmolVLA
+and π0.5, apart from the `weight_buf` line, which drops by the size of the time
+tiles that moved.
+
+## What still blocks it
+
+With the above in place, SmolVLA's SigLIP tower translates and runs, and the
+prefix/expert graph reaches OpenVINO's shape inference before failing:
+
+```text
+opset1::Multiply (Split[1]:f32[1,113,5,32], Multiply[0]:f32[1,50,1,32])
+Argument shapes are inconsistent.
+```
+
+The two operands are RoPE tables of different lengths. `GgmlOvDecoder` maps
+*every* tensor feeding a `GGML_OP_ROPE`'s second input to one graph parameter
+named `inp_pos`, because an llama.cpp graph has exactly one position input. Every
+vla.cpp arch has several - SmolVLA alone passes a prefill, a full and a rebased
+position tensor - and they collapse onto each other.
+
+π0.5 fails on the same node with the same message (`[1,50,1,128]` against
+`[1,262,1,128]`), so this is the shared blocker rather than a SmolVLA quirk.
+
+That is not something vla.cpp can work around from the outside: the fix belongs
+in ggml-openvino, which needs to key position inputs per tensor rather than by a
+fixed name. The same class of assumption shows up in the KV-cache-shaped dynamic
+sequence dimension and in the `compute_op_case` pattern tables, two of which
+already needed narrowing (see `scripts/patch_ggml_openvino.py`).
+
+Separately, several archs use ops the backend has no translator for at all -
+`GGML_UNARY_OP_RELU` (every GR00T, Evo-1, VLA-Adapter, OpenVLA-OFT, BitVLA,
+VLA-JEPA), `GGML_UNARY_OP_GELU_ERF`, `GGML_OP_NEG`, `GGML_OP_SQR` - and the core
+drives a single backend through `gallocr` rather than a scheduler, so there is no
+per-op CPU fallback to absorb them. SmolVLA, π0 and π0.5 are the three archs
+whose op sets are fully covered today, which is why SmolVLA is the one to retest
+first when the position-input handling lands upstream.

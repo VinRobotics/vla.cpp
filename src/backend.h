@@ -21,10 +21,10 @@
  * instead; the ladder lives here once.
  *
  * Exactly one accelerator is compiled in, picked by the CMake flag that was
- * used (`GGML_CUDA` / `GGML_SYCL` / `GGML_METAL`). There is no per-op CPU
- * fallback: the core drives a single backend through `gallocr` rather than a
- * scheduler, so an arch that hits an op the backend does not implement asserts
- * at predict time instead of silently limping.
+ * used (`GGML_CUDA` / `GGML_SYCL` / `GGML_METAL` / `GGML_OPENVINO`). There is no
+ * per-op CPU fallback: the core drives a single backend through `gallocr` rather
+ * than a scheduler, so an arch that hits an op the backend does not implement
+ * asserts at predict time instead of silently limping.
  */
 
 #pragma once
@@ -42,17 +42,24 @@
 #ifdef GGML_USE_METAL
 #include "ggml-metal.h"
 #endif
+#ifdef GGML_USE_OPENVINO
+#include "ggml-openvino.h"
+#endif
 
 #include <cstdio>
 #include <cstdlib>
-#ifdef GGML_USE_SYCL
+#ifdef GGML_USE_OPENVINO
+#include <string>
+#include <unordered_set>
+#endif
+#if defined(GGML_USE_SYCL) || defined(GGML_USE_OPENVINO)
 #include <stdlib.h>  // setenv / _putenv_s
 #include <mutex>
 #endif
 
 namespace vla {
 
-#ifdef GGML_USE_SYCL
+#if defined(GGML_USE_SYCL) || defined(GGML_USE_OPENVINO)
 // setenv is POSIX. _putenv_s has no "do not overwrite" mode, so check first.
 inline void setenv_default(const char * key, const char * val) {
 #ifdef _WIN32
@@ -75,6 +82,59 @@ struct Backend {
     /// archs gate on this rather than on the compiled-in accelerator.
     bool           is_cuda = false;
 };
+
+/**
+ * @brief Give every tensor in a built graph a name unique within that graph.
+ *
+ * ggml derives a name for a result from its source -- `ggml_reshape_2d` of an
+ * unnamed tensor is called " (reshaped)" -- so a graph whose intermediates were
+ * never named ends up with many tensors sharing one name. That is legal ggml,
+ * and llama.cpp never trips over it because it labels every node it builds.
+ *
+ * ggml-openvino keys its translation map on those names: two nodes with the same
+ * name silently become one, and the graph it hands OpenVINO wires the wrong
+ * tensor into the next op. Renaming duplicates in place before compute is enough
+ * to keep them apart, and only the OpenVINO build pays for it -- elsewhere this
+ * compiles to nothing, so backend logs and profiles keep the names ggml chose.
+ *
+ * @param gf Graph to relabel, already built.
+ */
+inline void graph_unique_names([[maybe_unused]] ggml_cgraph * gf) {
+#ifdef GGML_USE_OPENVINO
+    // Leafs cannot collide: ggml names an unnamed one "leaf_<i>" as it walks the
+    // graph, and a named one came from the checkpoint. Only results carry a name
+    // derived from their source, so only nodes are checked.
+    std::unordered_set<std::string> seen;
+    const int n = ggml_graph_n_nodes(gf);
+    for (int i = 0; i < n; ++i) {
+        ggml_tensor * t = ggml_graph_node(gf, i);
+        if (seen.insert(ggml_get_name(t)).second) continue;
+        ggml_format_name(t, "%s#%d", ggml_get_name(t), i);
+        seen.insert(ggml_get_name(t));
+    }
+#endif
+}
+
+/**
+ * @brief Allocate an arch's weights and tag the buffer as holding weights.
+ *
+ * `ggml_backend_alloc_ctx_tensors` leaves the buffer on the default
+ * `GGML_BACKEND_BUFFER_USAGE_ANY`, which backends read as "this is not weights".
+ * ggml-openvino takes it literally and classifies every ANY tensor as a KV
+ * cache, giving it a dynamic sequence dimension; the first translator that asks
+ * a weight for its static shape then throws `to_shape was called on a dynamic
+ * shape`. Tagging the buffer is what llama.cpp does with its own weights, and it
+ * is what lets the OpenVINO frontend fold them in as constants.
+ *
+ * @return The weight buffer, or null if the allocation failed (OOM).
+ */
+inline ggml_backend_buffer_t alloc_weights(ggml_context * ctx, ggml_backend_t backend) {
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf) {
+        ggml_backend_buffer_set_usage(buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+    }
+    return buf;
+}
 
 /// GPU ordinal for CUDA and SYCL; `VLA_DEVICE` overrides. Junk is rejected, not
 /// silently read as device 0.
@@ -151,6 +211,35 @@ inline Backend backend_init(const char * tag, int n_threads) {
             std::printf("%s: backend = Metal\n", tag);
         } else {
             std::fprintf(stderr, "%s: ggml_backend_metal_init failed; falling back to CPU\n", tag);
+        }
+    }
+#elif defined(GGML_USE_OPENVINO)
+    {
+        // ggml-openvino translates a graph under 20 nodes literally and anything
+        // larger through a decoder-only-LLM model builder that infers a KV cache
+        // and one position input. No vla.cpp graph is that shape and all of them
+        // are far larger, so raise the bar the literal path is chosen under;
+        // scripts/patch_ggml_openvino.py is what makes the threshold settable.
+        // Only a default: an explicit setting wins. ggml caches the value on its
+        // first OpenVINO entry point, so it has to be set before the init below,
+        // and call_once because a concurrent model_load would race on the
+        // environment.
+        static std::once_flag naive_once;
+        std::call_once(naive_once, [] { setenv_default("GGML_OPENVINO_NAIVE_GRAPH_SIZE", "1000000"); });
+
+        // ggml exposes OpenVINO as a single device, so VLA_DEVICE does not apply:
+        // the target is chosen by name through GGML_OPENVINO_DEVICE (CPU / GPU /
+        // NPU) and resolved inside ggml, which prints the winner as "OpenVINO:
+        // using device X" and quietly falls back to CPU when the requested one is
+        // not enumerated. Echo what was asked for, so the two lines together say
+        // whether you got the device you wanted.
+        const char * want = std::getenv("GGML_OPENVINO_DEVICE");
+        b.handle = ggml_backend_openvino_init(0);
+        if (b.handle) {
+            std::printf("%s: backend = OPENVINO (requested device %s)\n",
+                        tag, (want && *want) ? want : "CPU");
+        } else {
+            std::fprintf(stderr, "%s: ggml_backend_openvino_init failed; falling back to CPU\n", tag);
         }
     }
 #endif

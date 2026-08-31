@@ -414,6 +414,7 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
             ggml_backend_tensor_set(t_cos, rope_cos.data(), 0, ggml_nbytes(t_cos));
             ggml_backend_tensor_set(t_sin, rope_sin.data(), 0, ggml_nbytes(t_sin));
             ggml_backend_tensor_set(t_patches, patches.data(), 0, ggml_nbytes(t_patches));
+            graph_unique_names(vg);
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(gr00tn1d7): vision compute failed\n");
                 vok = false;
@@ -699,6 +700,7 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(t_tproj[s], c_tproj[(size_t) s].data(), 0, ggml_nbytes(t_tproj[s]));
     }
 
+    graph_unique_names(gf);
     const auto tc0 = std::chrono::steady_clock::now();
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
     const auto tc1 = std::chrono::steady_clock::now();

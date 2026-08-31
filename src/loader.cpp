@@ -14,6 +14,8 @@
 
 #include "loader.h"
 
+#include "backend.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -134,9 +136,9 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
         return false;
     }
 
-    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx_, backend);
+    ggml_backend_buffer_t buf = alloc_weights(ctx_, backend);
     if (!buf) {
-        std::fprintf(stderr, "vla(%s): ggml_backend_alloc_ctx_tensors failed (OOM?)\n", arch_);
+        std::fprintf(stderr, "vla(%s): alloc_weights failed (OOM?)\n", arch_);
         return false;
     }
     *out_buf = buf;

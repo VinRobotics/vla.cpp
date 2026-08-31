@@ -27,6 +27,8 @@ from consumer GPUs down to Jetson-class boards - or **Intel GPUs** via SYCL.
 - CUDA 12.x (optional - required only for CUDA GPU builds)
 - Intel oneAPI 2025.x + GPU compute runtime (optional - only for Intel GPU
   builds, see [docs/backend/sycl.md](docs/backend/sycl.md))
+- OpenVINO 2026.x runtime (optional - only for the in-progress OpenVINO backend,
+  see [docs/backend/ov.md](docs/backend/ov.md))
 - `libzmq3-dev`, `cppzmq-dev`, `libprotobuf-dev`, `protobuf-compiler`
 
 ```bash
@@ -308,6 +310,10 @@ Experimental results on other platforms can be found in
 
 Support matrix of models (rows) against platforms (columns). Legend: `Y` =
 supported (released and benchmarked), `~` = in progress, `-` = planned.
+
+OpenVINO builds and selects its backend today, but no arch completes a
+prediction yet - the remaining blocker is upstream in ggml's OpenVINO backend,
+written up in [docs/backend/ov.md](docs/backend/ov.md).
 
 | Model | CPU (x86-64 / ARM) | CUDA | SYCL (Intel) | Metal | OpenVINO |
 |---|:--:|:--:|:--:|:--:|:--:|

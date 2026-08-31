@@ -24,6 +24,7 @@
 #include "ggml-cuda.h"
 #endif
 #include "gguf.h"
+#include "backend.h"
 #include "gguf_reader.h"
 #include "scratch_ctx.h"
 
@@ -1184,6 +1185,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
             ggml_build_forward_expand(gf, mm2);
             if (!vision_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr_alloc_graph failed (view %lld)\n", (long long) v); return {}; }
             ggml_backend_tensor_set(x_in, patches.data(), 0, ggml_nbytes(x_in));
+            graph_unique_names(gf);
             if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(bitvla): vision graph compute failed (view %lld)\n", (long long) v);
                 return {};
@@ -1224,6 +1226,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         ggml_build_forward_expand(gf, out);
         if (!proprio_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr failed (proprio)\n"); return {}; }
         ggml_backend_tensor_set(x_in, state_host.data(), 0, ggml_nbytes(x_in));
+        graph_unique_names(gf);
         if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): proprio compute failed\n"); return {}; }
         ggml_backend_tensor_get(out, proprio_embed_host.data(), 0, (size_t) hidden_l * sizeof(float));
     }
@@ -1381,6 +1384,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
             aids[i] = (int32_t) (seq-2-n_action+i);
         ggml_backend_tensor_set(action_ids, aids.data(), 0, ggml_nbytes(action_ids));
 
+        graph_unique_names(gf);
         if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): lm prefill compute failed\n"); return {}; }
         ggml_backend_tensor_get(action_hidden, last_hidden_at_actions.data(), 0, (size_t) n_action * hidden_l * sizeof(float));
     }
@@ -1430,6 +1434,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         ggml_build_forward_expand(gf, y);
         if (!head_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr failed (action_head)\n"); return {}; }
         ggml_backend_tensor_set(x, last_hidden_at_actions.data(), 0, ggml_nbytes(x));
+        graph_unique_names(gf);
         if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): action_head compute failed\n"); return {}; }
         ggml_backend_tensor_get(y, normalized_actions.data(), 0, (size_t) chunk * action_dim * sizeof(float));
     }
