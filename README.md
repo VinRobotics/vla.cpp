@@ -312,10 +312,9 @@ Experimental results on other platforms can be found in
 Support matrix of models (rows) against platforms (columns). Legend: `Y` =
 supported (released and benchmarked), `~` = in progress, `-` = planned.
 
-OpenVINO covers SmolVLA and π0.5 on Intel CPUs, GPUs and NPUs; on an Arc B390
-iGPU it is 2.9x and 4.4x the native CPU backend, and the NPU beats the CPU
-backend on both. The other archs are blocked on ops ggml's OpenVINO backend has
-no translator for. Read the known issues in
+OpenVINO covers SmolVLA, π0.5, Evo-1, VLA-Adapter and VLA-JEPA on Intel CPUs,
+GPUs and NPUs; on an Arc B390 iGPU it is 3.1x to 8.2x the native CPU backend.
+The NPU takes two of the five. Read the known issues in
 [docs/backend/ov.md](docs/backend/ov.md) before running it - in particular, do
 not set `GGML_OPENVINO_CACHE_DIR`.
 
@@ -328,10 +327,10 @@ not set `GGML_OPENVINO_CACHE_DIR`.
 | [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | - | 
 | [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | - | 
 | [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | ~ | - | 
-| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | - | 
-| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | - | 
-| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | - | 
-| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | - | 
+| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | Y | 
+| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | Y | 
+| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | ~ | 
+| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | 
 
 ---
 
