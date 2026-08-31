@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Six fixes to the fetched ggml OpenVINO backend.
+"""Nine fixes to the fetched ggml OpenVINO backend.
 
 ggml-openvino is written against llama.cpp's graphs: one decoder-only
 transformer, one position input, an F16 KV cache. vla.cpp drives it with vision
@@ -74,7 +74,32 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      decoder to the new graph through the existing update_io(), which is how the
      dynamic path already handles freshly built tensors.
 
-  6. utils.cpp - make the naive-path graph-size threshold settable.
+  6. openvino/op_table.cpp - add the four missing op translators.
+     RELU, GELU_ERF, NEG and SQR have no entry in the table, and with no per-op
+     CPU fallback in the core an arch that uses one cannot run at all. Between
+     them they block every arch except SmolVLA, pi0 and pi0.5. All four map
+     onto ov ops directly: Relu, Gelu (whose default is the exact erf form
+     GELU_ERF asks for), Negative, and -- since no single-input ov op squares --
+     Multiply with the input on both sides.
+
+  7. openvino/utils.cpp - give a folded weight its full rank before slicing.
+     A ggml tensor that is 2-D folds in as a rank-2 ov constant, which is what a
+     GEMM operand wants, but process_view_input_new() indexes a viewed tensor at
+     its full ggml rank, so the slice axis lands outside it:
+     "Slice (Constant aex.blk.0.attn_in.weight[0]:bf16[2688,896], ...)
+      Axis 2 out of the tensor rank range [-2, 1]."
+     Evo-1 hits it by viewing Q, K and V out of one fused attn_in weight.
+     Left-pad the input with 1s, which is the shape ggml gave it anyway.
+
+  8. openvino/op/concat.cpp - align input ranks.
+     The same rank-2 constants reach CONCAT, which unlike the broadcasting
+     elementwise ops needs both inputs at the graph's rank or the axis falls
+     outside them. Evo-1 concatenates a CLS weight onto 4-D patch embeddings;
+     SmolVLA concatenates a precomputed time tile onto a 4-D activation. Padding
+     here is what let vla.cpp drop an arch-specific workaround that had moved
+     SmolVLA's time tiles into their own buffer.
+
+  9. utils.cpp - make the naive-path graph-size threshold settable.
      Graphs under 20 nodes bypass the LLM decoder and translate literally, with
      static shapes and no KV-cache inference. That literal path is the one that
      suits a vision tower, but a vision tower is ~450 nodes. The constant
@@ -275,6 +300,123 @@ EDITS = {
         ),
         (USM_LOOKUP % (("clEnqueueMemFillINTEL",) * 2), USM_LOOKUP_NEW % (("clEnqueueMemFillINTEL",) * 2)),
         (USM_LOOKUP % (("clEnqueueMemcpyINTEL",) * 2), USM_LOOKUP_NEW % (("clEnqueueMemcpyINTEL",) * 2)),
+    ],
+    "ggml/src/ggml-openvino/openvino/op/concat.cpp": [
+        (
+            """#include <openvino/op/concat.hpp>
+#include <openvino/op/convert.hpp>""",
+            """#include <openvino/op/concat.hpp>
+#include <openvino/op/constant.hpp>
+#include <openvino/op/convert.hpp>
+#include <openvino/op/unsqueeze.hpp>""",
+        ),
+        ("#include <memory>", "#include <memory>\n#include <numeric>"),
+        (
+            """    const auto axis = static_cast<int64_t>(rank - 1 - ggml_dim);
+    auto res = std::make_shared<ov::op::v0::Concat>(OutputVector{input_0, input_1}, axis);""",
+            """    // vla.cpp: a weight that is 2-D in ggml is folded in as a rank-2 constant,
+    // because that is what a GEMM operand wants. Concat is the one op where that
+    // matters: it needs both inputs at the graph's rank, or the axis computed
+    // below falls outside them. Left-pad the shorter one with 1s, which is the
+    // shape ggml gave it anyway.
+    auto align_rank = [rank](ov::Output<ov::Node> in) {
+        const auto & ps = in.get_partial_shape();
+        if (ps.rank().is_dynamic() || ps.rank().get_length() >= rank) {
+            return in;
+        }
+        std::vector<int64_t> axes(rank - ps.rank().get_length());
+        std::iota(axes.begin(), axes.end(), 0);
+        auto axes_node = ov::op::v0::Constant::create(ov::element::i64, {axes.size()}, axes);
+        return ov::Output<ov::Node>(std::make_shared<ov::op::v0::Unsqueeze>(in, axes_node));
+    };
+    input_0 = align_rank(input_0);
+    input_1 = align_rank(input_1);
+
+    const auto axis = static_cast<int64_t>(rank - 1 - ggml_dim);
+    auto res = std::make_shared<ov::op::v0::Concat>(OutputVector{input_0, input_1}, axis);""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/utils.cpp": [
+        ("#include <memory>", "#include <memory>\n#include <numeric>"),
+        (
+            "#include <openvino/op/transpose.hpp>",
+            "#include <openvino/op/transpose.hpp>\n#include <openvino/op/unsqueeze.hpp>",
+        ),
+        (
+            """    size_t view_input_size = context.get_view_input_size(input_index);
+    if (view_input_size == 0) {
+        // No view inputs, return the input as is
+        return input;
+    }
+""",
+            """    size_t view_input_size = context.get_view_input_size(input_index);
+    if (view_input_size == 0) {
+        // No view inputs, return the input as is
+        return input;
+    }
+
+    // vla.cpp: a ggml tensor that is 2-D folds in as a rank-2 ov constant, which
+    // is what a GEMM operand wants, but every slice below indexes the tensor at
+    // its full ggml rank. Left-pad with 1s so the axes line up. Evo-1 hits this
+    // by viewing Q/K/V out of one fused attn_in weight.
+    {
+        const auto src_ggml_shape = context.get_view_input_src_ggml_shape(input_index, 0);
+        const auto & in_ps = input.get_partial_shape();
+        if (in_ps.rank().is_static() && (size_t) in_ps.rank().get_length() < src_ggml_shape.size()) {
+            std::vector<int64_t> axes(src_ggml_shape.size() - (size_t) in_ps.rank().get_length());
+            std::iota(axes.begin(), axes.end(), 0);
+            input = std::make_shared<ov::op::v0::Unsqueeze>(
+                input, ov::op::v0::Constant::create(ov::element::i64, {axes.size()}, axes));
+        }
+    }
+""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/op_table.cpp": [
+        (
+            """#include <openvino/op/multiply.hpp>
+#include <openvino/op/subtract.hpp>
+#include <openvino/op/tanh.hpp>
+
+namespace ov {
+namespace frontend {
+namespace ggml {
+
+std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
+            """#include <openvino/op/multiply.hpp>
+#include <openvino/op/negative.hpp>
+#include <openvino/op/relu.hpp>
+#include <openvino/op/subtract.hpp>
+#include <openvino/op/tanh.hpp>
+
+namespace ov {
+namespace frontend {
+namespace ggml {
+
+namespace op {
+// vla.cpp: no ov op takes one input and squares it, so pair the input with
+// itself rather than route it through Power and a constant exponent.
+OutputVector translate_sqr(const NodeContext & context) {
+    num_inputs_check(context, 1, 1);
+    auto input = process_view_input_new(context, 0);
+    auto res = std::make_shared<ov::op::v1::Multiply>(input, input);
+    return rename_outputs_with_suffix({res}, context.get_name());
+}
+}  // namespace op
+
+std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
+        ),
+        (
+            """        {"GGML_UNARY_OP_GELU",      op::translate_1to1_match_1_input<v7::Gelu>     },""",
+            """        {"GGML_UNARY_OP_GELU",      op::translate_1to1_match_1_input<v7::Gelu>     },
+        // vla.cpp: ov's Gelu defaults to the exact erf formulation, which is what
+        // GELU_ERF asks for. GGML_UNARY_OP_GELU above is ggml's tanh
+        // approximation and keeps the mapping it already had.
+        {"GGML_UNARY_OP_GELU_ERF",  op::translate_1to1_match_1_input<v7::Gelu>     },
+        {"GGML_UNARY_OP_RELU",      op::translate_1to1_match_1_input<v0::Relu>     },
+        {"GGML_OP_NEG",             op::translate_1to1_match_1_input<v0::Negative> },
+        {"GGML_OP_SQR",             op::translate_sqr                              },""",
+        ),
     ],
     "ggml/src/ggml-openvino/openvino/op/flash_attn_ext.cpp": [
         (
