@@ -12,7 +12,8 @@ A C++ inference engine for **Vision-Language-Action (VLA) models**, built on [`l
 It runs the open VLA policies - SmolVLA, π0, BitVLA, Evo-1, GR00T N1.5/1.6/1.7 and more -
 under one runtime, each packaged as a single self-contained GGUF that needs no Python or
 PyTorch at inference time. The binaries drive robots on **CPU**, **Apple Silicon**, **CUDA** -
-from consumer GPUs down to Jetson-class boards - or **Intel GPUs** via SYCL.
+from consumer GPUs down to Jetson-class boards - or **Intel GPUs and NPUs** via
+SYCL and OpenVINO.
 
 [**Learn vla.cpp**](https://fai-modelopt-tech.github.io/learn-vla-cpp/) walks through the engine design and how each policy is implemented on ggml.
 
@@ -27,8 +28,8 @@ from consumer GPUs down to Jetson-class boards - or **Intel GPUs** via SYCL.
 - CUDA 12.x (optional - required only for CUDA GPU builds)
 - Intel oneAPI 2025.x + GPU compute runtime (optional - only for Intel GPU
   builds, see [docs/backend/sycl.md](docs/backend/sycl.md))
-- OpenVINO 2026.x runtime (optional - only for the in-progress OpenVINO backend,
-  see [docs/backend/ov.md](docs/backend/ov.md))
+- OpenVINO 2026.x runtime (optional - only for Intel CPU/GPU/NPU builds via
+  OpenVINO, see [docs/backend/ov.md](docs/backend/ov.md))
 - `libzmq3-dev`, `cppzmq-dev`, `libprotobuf-dev`, `protobuf-compiler`
 
 ```bash
@@ -311,15 +312,18 @@ Experimental results on other platforms can be found in
 Support matrix of models (rows) against platforms (columns). Legend: `Y` =
 supported (released and benchmarked), `~` = in progress, `-` = planned.
 
-OpenVINO builds and selects its backend today, but no arch completes a
-prediction yet - the remaining blocker is upstream in ggml's OpenVINO backend,
-written up in [docs/backend/ov.md](docs/backend/ov.md).
+OpenVINO covers SmolVLA and π0.5 on Intel CPUs, GPUs and NPUs; on an Arc B390
+iGPU it is 2.9x and 4.4x the native CPU backend, and the NPU beats the CPU
+backend on both. The other archs are blocked on ops ggml's OpenVINO backend has
+no translator for. Read the known issues in
+[docs/backend/ov.md](docs/backend/ov.md) before running it - in particular, do
+not set `GGML_OPENVINO_CACHE_DIR`.
 
 | Model | CPU (x86-64 / ARM) | CUDA | SYCL (Intel) | Metal | OpenVINO |
 |---|:--:|:--:|:--:|:--:|:--:|
-| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | - | 
-| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | - | 
-| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | Y | - | 
+| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | Y | 
+| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | ~ | 
+| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | Y | Y | 
 | [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | Y | - | 
 | [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | - | 
 | [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | - | 

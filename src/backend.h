@@ -233,6 +233,19 @@ inline Backend backend_init(const char * tag, int n_threads) {
         // using device X" and quietly falls back to CPU when the requested one is
         // not enumerated. Echo what was asked for, so the two lines together say
         // whether you got the device you wanted.
+        // OpenVINO's on-disk blob cache reloads a compiled graph that computes
+        // the wrong thing here: a cold run is correct, and the next run reading
+        // those blobs back is not, with no error anywhere. Silently wrong
+        // actions are the worst failure mode a policy server has, so say so
+        // loudly rather than let it look like a free speedup.
+        if (const char * cd = std::getenv("GGML_OPENVINO_CACHE_DIR"); cd && *cd) {
+            std::fprintf(stderr,
+                         "%s: WARNING GGML_OPENVINO_CACHE_DIR is set. Reloading cached blobs has been\n"
+                         "%s:         seen to produce silently incorrect actions on the GPU plugin.\n"
+                         "%s:         Unset it unless you have verified the outputs. See docs/backend/ov.md.\n",
+                         tag, tag, tag);
+        }
+
         const char * want = std::getenv("GGML_OPENVINO_DEVICE");
         b.handle = ggml_backend_openvino_init(0);
         if (b.handle) {
