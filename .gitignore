@@ -1,6 +1,5 @@
 # Build
-build/
-build-*/
+build*/
 out/
 cmake-build-*/
 _workdir*

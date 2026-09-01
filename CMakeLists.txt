@@ -63,7 +63,16 @@ endif()
 # build dir (-DVLA_LLAMA_TAG=b10326) without editing this file. The patch
 # anchors in scripts/patch_ggml_cuda_ext_hook.py and scripts/patch_ggml_openvino.py
 # are checked against the default.
-set(VLA_LLAMA_TAG "b10729" CACHE STRING "llama.cpp tag to fetch")
+set(_vla_llama_tag_default "b10729")
+set(VLA_LLAMA_TAG "${_vla_llama_tag_default}" CACHE STRING "llama.cpp tag to fetch")
+# A cache entry survives an edit to the line above, so an existing build dir keeps
+# the tag it was first configured with and quietly builds the wrong llama.cpp.
+if(NOT VLA_LLAMA_TAG STREQUAL _vla_llama_tag_default)
+    message(WARNING
+        "VLA_LLAMA_TAG is ${VLA_LLAMA_TAG}, not the default ${_vla_llama_tag_default}. "
+        "If that was not deliberate, this build dir predates the bump: reconfigure with "
+        "-DVLA_LLAMA_TAG=${_vla_llama_tag_default} or use a fresh one.")
+endif()
 
 include(FetchContent)
 FetchContent_Declare(llama
