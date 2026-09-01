@@ -441,9 +441,21 @@ namespace frontend {
 namespace ggml {
 
 namespace op {
+// vla.cpp: ggml's GGML_UNARY_OP_GELU is the *tanh* approximation (its CPU kernel
+// additionally reads an fp16 lookup table); ov::op::v7::Gelu defaults to the
+// exact erf formulation. Mapping the tanh op onto erf is a real approximation
+// mismatch -- small per node, but a vision tower has dozens of them and the
+// error compounds through the whole encoder.
+static OutputVector translate_gelu_tanh(const NodeContext & context) {
+    num_inputs_check(context, 1, 1);
+    auto input = process_view_input_new(context, 0);
+    auto res = std::make_shared<ov::op::v7::Gelu>(input, ov::op::GeluApproximationMode::TANH);
+    return rename_outputs_with_suffix({res}, context.get_name());
+}
+
 // vla.cpp: no ov op takes one input and squares it, so pair the input with
 // itself rather than route it through Power and a constant exponent.
-OutputVector translate_sqr(const NodeContext & context) {
+static OutputVector translate_sqr(const NodeContext & context) {
     num_inputs_check(context, 1, 1);
     auto input = process_view_input_new(context, 0);
     auto res = std::make_shared<ov::op::v1::Multiply>(input, input);
@@ -455,10 +467,9 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
         ),
         (
             """        {"GGML_UNARY_OP_GELU",      op::translate_1to1_match_1_input<v7::Gelu>     },""",
-            """        {"GGML_UNARY_OP_GELU",      op::translate_1to1_match_1_input<v7::Gelu>     },
-        // vla.cpp: ov's Gelu defaults to the exact erf formulation, which is what
-        // GELU_ERF asks for. GGML_UNARY_OP_GELU above is ggml's tanh
-        // approximation and keeps the mapping it already had.
+            """        {"GGML_UNARY_OP_GELU",      op::translate_gelu_tanh                        },
+        // vla.cpp: tanh approximation for GELU, exact erf for GELU_ERF. ov's Gelu
+        // defaults to erf, so the tanh variant must set its mode explicitly.
         {"GGML_UNARY_OP_GELU_ERF",  op::translate_1to1_match_1_input<v7::Gelu>     },
         {"GGML_UNARY_OP_RELU",      op::translate_1to1_match_1_input<v0::Relu>     },
         {"GGML_UNARY_OP_NEG",       op::translate_1to1_match_1_input<v0::Negative> },
@@ -605,6 +616,10 @@ struct decoder_runtime_ctx {""",
         ),
     ],
     "ggml/src/ggml-openvino/openvino/translate_session.cpp": [
+        (
+            '#include "translate_session.h"\n',
+            '#include "translate_session.h"\n\n#include "ggml.h"   // vla.cpp: GGML_ROPE_TYPE_IMROPE\n',
+        ),
         (
             "    auto sin_cos = make_sin_cos(rope_params, inp_pos, rope_freqs_weight);",
             """    // vla.cpp: rope_params[2] is the mode. The shared precompute never looked at
