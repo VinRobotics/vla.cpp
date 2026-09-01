@@ -1,6 +1,5 @@
 # Build
-build/
-build-*/
+build*/
 out/
 cmake-build-*/
 _workdir*
@@ -48,7 +47,6 @@ outputs/
 weights/
 CLAUDE.md
 
-third_party/llama.cpp/
 eval/sim/libero/LIBERO/
 eval/sim/libero/libero_uv/
 eval/sim/simpler/SimplerEnv/

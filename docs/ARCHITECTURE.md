@@ -16,7 +16,7 @@ source is the detail.
   contexts, vision tower, weights, and compute graph.
 - `src/models/gguf_reader.h` - the shared GGUF reader (metadata, tensor bytes,
   on-demand embedding rows).
-- `src/models/vision_common.h` - small pure vision helpers (pixel-shuffle, view checks).
+- `src/modules/preprocess.h` - small pure vision helpers (pixel-shuffle, view checks).
 - `src/serving/` - `vla-server` (ZeroMQ + protobuf, action prediction), `vlm-server`
   (chat), and `vla-cli` (one-shot inference).
 - `src/kernels/bitvla/` - custom 1.58-bit ternary CUDA kernels for BitVLA.
@@ -64,4 +64,4 @@ count; CUDA and Metal run the towers and the transformer on the GPU.
 
 Extend the `Arch` enum, declare a `*_create` factory in `arch.h`, implement it under
 `src/models/`, wire detection and dispatch in `src/model.cpp`, and add a converter in
-`scripts/`. Reuse `gguf_reader.h` and `vision_common.h` rather than copying them.
+`scripts/`. Reuse `gguf_reader.h` and `modules/preprocess.h` rather than copying them.

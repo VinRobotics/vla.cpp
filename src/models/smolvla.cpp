@@ -21,7 +21,7 @@
 #include "model.h"
 #include "modules/preprocess.h"
 #include "scratch_ctx.h"
-#include "models/dit_common.h"
+#include "layers/embed.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -1241,9 +1241,9 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
                                                    cfg.expert_h, cfg.n_suffix);
     }
 
-    m->weight_buf = ggml_backend_alloc_ctx_tensors(m->ctx_weights, m->backend);
+    m->weight_buf = alloc_weights(m->ctx_weights, m->backend);
     if (!m->weight_buf) {
-        std::fprintf(stderr, "vla: ggml_backend_alloc_ctx_tensors (weights) failed\n");
+        std::fprintf(stderr, "vla: alloc_weights failed\n");
         delete m;
         return nullptr;
     }
@@ -1551,12 +1551,14 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
                 break;
             }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
+            graph_unique_names(gA);
             if (ggml_backend_graph_compute(m->backend, gA) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(smolvla): vision compute A failed (view %d)\n", v); vok = false; break;
             }
             ggml_backend_tensor_get(post_ln, post_host.data(), 0, ggml_nbytes(post_ln));
             pixel_shuffle_hf(post_host.data(), shuf_host.data(), H, grid, s);
             ggml_backend_tensor_set(t_shuf, shuf_host.data(), 0, ggml_nbytes(t_shuf));
+            graph_unique_names(gB);
             if (ggml_backend_graph_compute(m->backend, gB) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(smolvla): connector compute failed (view %d)\n", v); vok = false; break;
             }
@@ -1687,6 +1689,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         ggml_backend_tensor_set(m->in_pos_full,      pos_full_host.data(),         0, pos_full_host.size()         * sizeof(int32_t));
         ggml_backend_tensor_set(m->in_pos_rebased,   pos_rebased_host.data(),      0, pos_rebased_host.size()      * sizeof(int32_t));
 
+        graph_unique_names(m->gf_cached);
         const auto t0 = clock::now();
         if (ggml_backend_graph_compute(m->backend, m->gf_cached) != GGML_STATUS_SUCCESS) {
             std::fprintf(stderr, "vla: ggml compute (cached) failed\n");
@@ -1868,8 +1871,13 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         x_t = ggml_add(ctx, x_t, ggml_scale(ctx, v_t, dt));
     }
 
+    // Graph inputs, not weights: tag them so a backend that reads buffer usage
+    // (ggml-openvino) does not mistake the default ANY for a KV cache. gallocr
+    // tags its own arena the same way.
     ggml_backend_buffer_t compute_buf = ggml_backend_alloc_ctx_tensors(ctx, m->backend);
-    if (!compute_buf) {
+    if (compute_buf) {
+        ggml_backend_buffer_set_usage(compute_buf, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
+    } else {
         std::fprintf(stderr, "vla: ggml_backend_alloc_ctx_tensors (compute) failed\n");
         ggml_free(ctx);
         return {};
@@ -1902,6 +1910,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
             ggml_build_forward_expand(gf_pre, k_cache[i]);
             ggml_build_forward_expand(gf_pre, v_cache[i]);
         }
+        graph_unique_names(gf_pre);
         const auto t0 = clock::now();
         if (ggml_backend_graph_compute(m->backend, gf_pre) != GGML_STATUS_SUCCESS) {
             std::fprintf(stderr, "vla: ggml prefill compute failed\n");
@@ -1920,6 +1929,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     {
         ggml_cgraph * gf = ggml_new_graph_custom(ctx,  16384,  false);
         ggml_build_forward_expand(gf, x_t);
+        graph_unique_names(gf);
         const auto t0 = clock::now();
         if (ggml_backend_graph_compute(m->backend, gf) != GGML_STATUS_SUCCESS) {
             std::fprintf(stderr, "vla: ggml compute failed\n");

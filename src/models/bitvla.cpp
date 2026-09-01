@@ -24,6 +24,7 @@
 #include "ggml-cuda.h"
 #endif
 #include "gguf.h"
+#include "backend.h"
 #include "gguf_reader.h"
 #include "scratch_ctx.h"
 
@@ -220,6 +221,9 @@ ggml_tensor * build_lm_layer(ggml_context * C, const BitvlaModelArch & m, const 
     ggml_tensor * K  = ggml_cont(C, ggml_permute(C, kR, 0, 2, 1, 3));
     ggml_tensor * V  = ggml_cont(C, ggml_permute(C, v3, 1, 2, 0, 3));
     ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+    // Unmasked on purpose, same as openvla_oft: BitVLA is fine-tuned with
+    // OpenVLA-OFT's recipe, which swaps the causal mask for a bidirectional one
+    // so the action chunk decodes in a single pass.
     ggml_tensor * att= ggml_soft_max_ext(C, kq,  nullptr, scale, 0.0f);
     ggml_tensor * kqv= ggml_mul_mat(C, V, att);
     ggml_tensor * mer= ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), hq, seq);
@@ -1184,6 +1188,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
             ggml_build_forward_expand(gf, mm2);
             if (!vision_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr_alloc_graph failed (view %lld)\n", (long long) v); return {}; }
             ggml_backend_tensor_set(x_in, patches.data(), 0, ggml_nbytes(x_in));
+            graph_unique_names(gf);
             if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(bitvla): vision graph compute failed (view %lld)\n", (long long) v);
                 return {};
@@ -1224,6 +1229,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         ggml_build_forward_expand(gf, out);
         if (!proprio_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr failed (proprio)\n"); return {}; }
         ggml_backend_tensor_set(x_in, state_host.data(), 0, ggml_nbytes(x_in));
+        graph_unique_names(gf);
         if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): proprio compute failed\n"); return {}; }
         ggml_backend_tensor_get(out, proprio_embed_host.data(), 0, (size_t) hidden_l * sizeof(float));
     }
@@ -1263,6 +1269,14 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         : (n_lang_in+n_img_tok+1+n_action+1);
     if (seq > lm_max_pos) {
         std::fprintf(stderr, "vla(bitvla): seq=%lld > lm_max_pos=%lld\n", (long long) seq, (long long) lm_max_pos);
+        return {};
+    }
+    // Both LM paths index the action slots as seq-2-n_action+i and neither
+    // ggml_get_rows nor the CUDA gather bound-checks, so a short sequence would
+    // read out of bounds and come back as plausible hidden states.
+    if (seq < n_action+2) {
+        std::fprintf(stderr, "vla(bitvla): seq=%lld too short for %lld action slots\n",
+                     (long long) seq, (long long) n_action);
         return {};
     }
 
@@ -1381,6 +1395,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
             aids[i] = (int32_t) (seq-2-n_action+i);
         ggml_backend_tensor_set(action_ids, aids.data(), 0, ggml_nbytes(action_ids));
 
+        graph_unique_names(gf);
         if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): lm prefill compute failed\n"); return {}; }
         ggml_backend_tensor_get(action_hidden, last_hidden_at_actions.data(), 0, (size_t) n_action * hidden_l * sizeof(float));
     }
@@ -1430,6 +1445,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         ggml_build_forward_expand(gf, y);
         if (!head_scratch.alloc(backend, gf)) { std::fprintf(stderr, "vla(bitvla): gallocr failed (action_head)\n"); return {}; }
         ggml_backend_tensor_set(x, last_hidden_at_actions.data(), 0, ggml_nbytes(x));
+        graph_unique_names(gf);
         if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { std::fprintf(stderr, "vla(bitvla): action_head compute failed\n"); return {}; }
         ggml_backend_tensor_get(y, normalized_actions.data(), 0, (size_t) chunk * action_dim * sizeof(float));
     }

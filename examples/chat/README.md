@@ -46,7 +46,7 @@ Convert:
 SRC=/tmp/smolvlm2-500m-instruct
 OUT=~/data/$USER/smolvlm2-500m-instruct-gguf
 mkdir -p "$OUT"
-CONV="PYTHONPATH=third_party/llama.cpp/gguf-py python3 third_party/llama.cpp/convert_hf_to_gguf.py"
+CONV="PYTHONPATH=build/_deps/llama-src/gguf-py python3 build/_deps/llama-src/convert_hf_to_gguf.py"
 
 # text LM  ->  smolvlm2-500m-instruct-f16.gguf  (819 MB)
 eval $CONV "$SRC" --outtype f16 \
@@ -70,7 +70,7 @@ cmake --build build-cuda --target llama-mtmd-cli
 ./build-cuda/bin/llama-mtmd-cli \
     -m "$OUT/smolvlm2-500m-instruct-f16.gguf" \
     --mmproj "$OUT/mmproj-smolvlm2-500m-instruct-f16.gguf" \
-    --image third_party/llama.cpp/tools/mtmd/test-1.jpeg -p "Describe this image." --temp 0
+    --image build/_deps/llama-src/tools/mtmd/test-1.jpeg -p "Describe this image." --temp 0
 ```
 
 > Shortcut: `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` has **byte-identical
@@ -123,7 +123,7 @@ python examples/chat/vlm_chat_client.py --addr tcp://localhost:5567
 
 ```bash
 python examples/chat/vlm_chat_client.py --once \
-    --image third_party/llama.cpp/tools/mtmd/test-1.jpeg \
+    --image build/_deps/llama-src/tools/mtmd/test-1.jpeg \
     -p "Describe this image in detail." -n 200 --temp 0
 ```
 

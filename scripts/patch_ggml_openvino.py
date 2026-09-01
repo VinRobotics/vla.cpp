@@ -1,0 +1,881 @@
+#!/usr/bin/env python3
+# Copyright 2026 VinRobotics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Thirteen fixes to the fetched ggml OpenVINO backend.
+
+ggml-openvino is written against llama.cpp's graphs: one decoder-only
+transformer, one position input, an F16 KV cache. vla.cpp drives it with vision
+towers and action experts instead, which is legal ggml but nothing the backend
+has seen. Eight of the hunks below narrow an llama.cpp-shaped assumption back to
+the ggml contract, one fills a gap in the op table, and two are about the path
+those graphs take. Together they are what lets SmolVLA and pi0.5 run end to end
+on the CPU, GPU and NPU plugins. Numbers 4 and 5 are the ones worth upstreaming.
+
+A hunk that applies is not a hunk that runs. Whenever VLA_LLAMA_TAG moves, check
+that each patched function still has a live caller, not just that its anchor
+still matches: b10729 moved the position-input naming out of the GgmlOvDecoder
+member that fix 4 patches and into a free function, and the fix went silently
+dead while applying cleanly.
+
+See docs/backend/ov.md for the measured results and for what is still blocked.
+
+  1. ggml-openvino-extra.cpp - pick the *Intel* OpenCL platform.
+     `GGML_OPENVINO_DEVICE=GPU` builds an OpenVINO remote context on an OpenCL
+     queue and takes the first platform the ICD loader reports. With more than
+     one runtime installed (an NVIDIA card next to the Intel iGPU, POCL,
+     Rusticl) that is whichever `/etc/OpenCL/vendors/*.icd` sorted first, and
+     the GPU plugin only accepts an Intel context -- it aborts at startup with
+     "Incompatible OpenCL runtime: program is not in expected ELF format".
+     Selecting by `CL_PLATFORM_VENDOR` leaves single-runtime boxes unchanged.
+
+  2. ggml-decoder.cpp - narrow RESHAPE op_case 3.
+     Case 3 is the KV-cache flatten, `[512,1024,1,1] -> [1,524288,1,1]`, and it
+     emits a shape with `-1` in dim 2 and 1 in dim 3. Its guard only tests
+     `src->ne[0]*ne[1]*ne[2] == node->ne[1]`, which also matches the kernel
+     reshape inside `ggml_conv_2d` (`[16,16,3,768] -> [768,768]`) and mangles
+     it. The real case always has `node->ne[0] == 1`; requiring that sends the
+     conv kernel to case 6, the plain reshape.
+
+  3. openvino/op/flash_attn_ext.cpp - convert K/V to F16 with Q.
+     The translator converts Q, the mask and the scale to F16 because
+     llama.cpp's KV cache already is. vla.cpp keeps K/V in F32, and OpenVINO's
+     SDPA rejects mixed input types ("Mixed input types are not supported").
+     Converting K/V too matches the precision the translator already chose.
+
+  4. ggml-decoder.{h,cpp} - stop distinct position inputs aliasing each other.
+     Every tensor feeding a ROPE's second input is renamed to one graph
+     parameter called "inp_pos", because an llama.cpp graph has exactly one.
+     add_rope_sin_cos() then builds a single shared sin/cos table from it. Every
+     vla.cpp arch has several position tensors -- SmolVLA passes a prefill, a
+     full and a rebased one -- so they alias each other and every ROPE takes the
+     table built from whichever won, which fails shape inference:
+     "Multiply (Split[1]:f32[1,113,5,32], Multiply[0]:f32[1,50,1,32])
+      Argument shapes are inconsistent."
+     When the graph has more than one, keep each tensor's own name. Nothing is
+     then called "inp_pos", so translate_rope() falls back to building sin/cos
+     per op from its own position input. Single-position graphs are untouched.
+     This one is what carries an arch through to a full prediction.
+
+     Patch the free function get_tensor_graph_input_ov_name() in
+     ggml-decoder.cpp, not just the GgmlOvDecoder member. b10729 relocated the
+     naming into that free function and left the member behind with no callers;
+     patching only the member applies cleanly and does nothing at all. Both are
+     patched here so the fix survives whichever one upstream keeps.
+
+  5. utils.{h,cpp} - cache what the naive path compiles.
+     The dynamic and static paths keep a `graph_key`-indexed cache of the
+     decoder and the compiled infer request; the naive path has none, so it
+     rebuilt the decoder, re-converted the model and called compile_model() on
+     every single ggml_backend_graph_compute. That is the dominant cost once a
+     real graph goes through it: SmolVLA on the CPU plugin drops from 22.7 s to
+     1.4 s per prediction with the cache in place. A hit rebinds the cached
+     decoder to the new graph through the existing update_io(), which is how the
+     dynamic path already handles freshly built tensors.
+     The key is `naive_key`, not `graph_key`: the latter is n_nodes plus the
+     first and last node name, which two graphs of the same size can share, and
+     a compiled model is bound to the shapes it was built for. Reusing one
+     across a shape change returns another graph's answer with no error, so the
+     key mixes in every node's op and shape. The map is bounded; see the comment
+     on the flush.
+
+  6. openvino/op_table.cpp - get both GELU flavours right.
+     ggml has two: GGML_UNARY_OP_GELU is the tanh approximation, GGML_UNARY_OP_
+     GELU_ERF is the exact one. The table mapped GELU onto ov's Gelu, which
+     defaults to erf, and had no entry for GELU_ERF at all. So the tanh op was
+     computed as erf, and an arch using the erf op could not run at all - and
+     with no per-op CPU fallback in the core, "could not run" means the whole
+     prediction. Small per node, but a vision tower has dozens and the error
+     compounds: setting the mode explicitly moved VLA-JEPA from 5.5e-3 to 1.1e-4
+     and GR00T N1.5 from 2.7e-2 to 6.0e-4, turning both from "runs but drifts"
+     into supported. The highest-yield single fix here.
+     RELU, NEG and SQR were missing here too; upstream added all three in b10729.
+
+  7. openvino/utils.cpp - give a folded weight its full rank before slicing.
+     A ggml tensor that is 2-D folds in as a rank-2 ov constant, which is what a
+     GEMM operand wants, but process_view_input_new() indexes a viewed tensor at
+     its full ggml rank, so the slice axis lands outside it:
+     "Slice (Constant aex.blk.0.attn_in.weight[0]:bf16[2688,896], ...)
+      Axis 2 out of the tensor rank range [-2, 1]."
+     Evo-1 hits it by viewing Q, K and V out of one fused attn_in weight.
+     Left-pad the input with 1s, which is the shape ggml gave it anyway.
+
+  8. openvino/op/concat.cpp - align input ranks.
+     The same rank-2 constants reach CONCAT, which unlike the broadcasting
+     elementwise ops needs both inputs at the graph's rank or the axis falls
+     outside them. Evo-1 concatenates a CLS weight onto 4-D patch embeddings;
+     SmolVLA concatenates a precomputed time tile onto a 4-D activation. Padding
+     here is what saves each arch from working around it, e.g. by moving
+     SmolVLA's time tiles into a buffer of their own.
+
+  9. openvino/utils.cpp - bound the interleaved-mrope sector cycle by sections.
+     ggml's IMROPE cycles t/h/w by sector % 3, but only while the sector is
+     inside 3 * sections[k]; past that it falls through to the fourth position
+     stream (ggml_rope_cache_init in ggml/src/ggml-cpu/ops.cpp). The translator
+     cycled unconditionally, so with sections {24,20,20,0} and n_dims 128
+     sectors 61 and 62 took h and w instead of e. NOTE: this matches the ggml
+     reference but had no measurable effect on any arch tested here, because the
+     fourth stream happens to carry the same positions as the first. Kept
+     because it removes a real divergence from the reference, not because a
+     measurement demanded it.
+
+ 10. utils.cpp - make the naive-path graph-size threshold settable.
+     Graphs under 20 nodes bypass the LLM decoder and translate literally, with
+     static shapes and no KV-cache inference. That literal path is the one that
+     suits a vision tower, but a vision tower is ~450 nodes. The constant
+     becomes `GGML_OPENVINO_NAIVE_GRAPH_SIZE`; src/backend.h defaults it high
+     for vla.cpp and an explicit setting still wins. Parsed with strtol, because
+     atoi turns junk into 0 and that would send every graph down the LLM builder
+     with nothing said.
+
+ 11. ggml-decoder.cpp - require a ROPE before taking PERMUTE op_case 2.
+     op_case 2 rewrites the tensor as [n_seq, -1, n_heads, head_size] and only
+     then transposes, which is correct for llama.cpp's rope'd query and nothing
+     else. The classifier reached it for ANY permute whose source is a view of a
+     non-leaf, so GR00T N1.7's DiT cross-attention V - ggml_permute(view, 1,2,0,3)
+     over a fused KV projection - was reshaped into a shape unrelated to it and
+     came out with its elements rearranged: V was 139% wrong while K, which uses
+     permute(0,2,1,3) and happened to survive the same rewrite, was 0.04%. That
+     turned into a 27% error in the final actions. Walking the view/reshape/cont
+     chain and requiring a ROPE at the end sends every other permute to op_case 1,
+     the plain transpose. This is what makes GR00T N1.7 correct (27% -> 0.005%).
+
+ 12. ggml-decoder.cpp + openvino/op/add.cpp - do not stack two elementwise adds
+     on a GEMM. The GPU plugin folds elementwise ops into the preceding GEMM as
+     post-ops. Given ADD(ADD(residual, GEMM), graph_input) it folds both, and the
+     second operand is silently lost: the result equals the inner add, as though
+     the outer one never ran. Nothing is logged. An llama.cpp graph never builds
+     that chain - one residual add per sub-block - but a VLA does, wherever a
+     tower's features are added on top of an FFN residual. It cost VLA-JEPA,
+     GR00T N1.7 and pi0 their GPU support, while every other arch was unaffected.
+     Addition is associative, so re-hang the outer add on the inner one's
+     non-GEMM operand: the GEMM keeps exactly one post-op and the arithmetic is
+     unchanged. op_case 2/3 records which of the inner add's operands is the
+     GEMM, because ggml's operand order is not fixed.
+     Found by bisecting VLA-JEPA with GGML_OPENVINO_DEBUG_NODE: its ViT and DiT
+     graphs matched the CPU plugin to 0.2%, the VLM prefill was already wrong at
+     the end of layer 0, and within that layer the divergence was one node - the
+     FFN residual add under the deepstack add. The same fusion path already has a
+     known defect with broadcast DIV; see ggml_backend_openvino_supports_op.
+
+ 13. ggml-openvino-extra.cpp - expose the GPU plugin's inference precision.
+     The GPU plugin computes in f16 unless told otherwise, which is most of why
+     it is fast, and for nearly every graph that is the right trade. It is not
+     the right trade for a graph carrying a long serial chain - a flow-matching
+     denoise loop unrolled inside one graph - because the error compounds across
+     every step with nothing to reset it, and a saturating output channel can
+     then cross its threshold in the wrong place. pi0 does exactly that: on the
+     GPU its continuous action dims land 4e-2 from an F32 reference and its
+     bistable gripper flips one step early, which is a 1.7 max|delta| on a metric
+     and a late grasp on a robot. GGML_OPENVINO_GPU_PRECISION=f32 puts it at
+     6.5e-5. Exposed rather than forced: f32 costs about 3x on this plugin, so
+     src/backend.h defaults it for pi0 alone and an explicit setting still wins.
+
+Idempotent - re-running on a patched tree is a no-op, so a reconfigure that
+re-populates the FetchContent source dir is safe either way.
+
+Usage: scripts/patch_ggml_openvino.py [<llama-src-dir>]
+"""
+
+import pathlib
+import re
+import sys
+
+HELPER = """// vla.cpp: select the Intel OpenCL platform. With several OpenCL runtimes
+// installed the first platform is not always Intel's, and the OpenVINO GPU
+// plugin only accepts an Intel context. Cached: the ICD list cannot change
+// under a running process.
+static cl_platform_id ggml_openvino_get_intel_platform() {
+    static cl_platform_id platform = nullptr;
+    static bool searched = false;
+    if (searched) {
+        return platform;
+    }
+    searched = true;
+
+    cl_uint n_platforms = 0;
+    if (clGetPlatformIDs(0, nullptr, &n_platforms) != CL_SUCCESS || n_platforms == 0) {
+        return nullptr;
+    }
+    std::vector<cl_platform_id> platforms(n_platforms);
+    if (clGetPlatformIDs(n_platforms, platforms.data(), nullptr) != CL_SUCCESS) {
+        return nullptr;
+    }
+
+    for (cl_platform_id p : platforms) {
+        char vendor[256] = "";
+        if (clGetPlatformInfo(p, CL_PLATFORM_VENDOR, sizeof(vendor), vendor, nullptr) != CL_SUCCESS) {
+            continue;
+        }
+        if (strstr(vendor, "Intel") != nullptr) {
+            platform = p;
+            break;
+        }
+    }
+    return platform;
+}
+
+"""
+
+USM_LOOKUP = """        cl_platform_id platform;
+        if (clGetPlatformIDs(1, &platform, nullptr) == CL_SUCCESS) {
+            fn = (%s_fn) clGetExtensionFunctionAddressForPlatform(platform, "%s");
+"""
+
+USM_LOOKUP_NEW = """        cl_platform_id platform = ggml_openvino_get_intel_platform();
+        if (platform != nullptr) {
+            fn = (%s_fn) clGetExtensionFunctionAddressForPlatform(platform, "%s");
+"""
+
+NAIVE_COMPUTE_OLD = """enum ggml_status naive_compute(ggml_cgraph * cgraph,
+                               ov::Core & core,
+                               const std::string & device,
+                               const ov::AnyMap & config) {
+    if (cgraph->n_nodes == 1 && (cgraph->nodes[0]->op == GGML_OP_NONE || cgraph->nodes[0]->op == GGML_OP_VIEW)) {
+        return GGML_STATUS_SUCCESS;
+    }
+
+    bool naive = true;
+    auto model_weights = GgmlOvDecoder::create_weight_nodes(cgraph, naive);
+    auto decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights);
+    auto input_model = std::make_shared<ov::frontend::ggml::InputModel>(decoder);
+    auto model = ov::frontend::ggml::FrontEnd::convert(input_model, naive);
+    if (ggml_openvino_getenv_int("GGML_OPENVINO_DUMP_IR")) {
+        ov::serialize(model, "IR_naive.xml");
+    }
+
+    std::shared_ptr<ov::InferRequest> infer_request;
+    auto remote_context = ggml_openvino_get_remote_context();
+    if (cgraph->nodes[0]->op == GGML_OP_MUL_MAT) {
+        // TODO ACCURACY hint triggers a bug in GPU plugin/driver on Lunar Lake. Remove once CVS-182166 is resolved
+        core.set_property(device, ov::hint::execution_mode(ov::hint::ExecutionMode::PERFORMANCE));
+    } else {
+        core.set_property(device, ov::hint::execution_mode(ov::hint::ExecutionMode::ACCURACY));
+    }
+    if (remote_context.has_value()) {
+        infer_request = std::make_shared<ov::InferRequest>(
+            core.compile_model(model, remote_context.value(), config).create_infer_request());
+    } else {
+        infer_request =
+            std::make_shared<ov::InferRequest>(core.compile_model(model, device, config).create_infer_request());
+    }
+
+    auto ov_params = model->get_parameters();"""
+
+NAIVE_COMPUTE_NEW = """enum ggml_status naive_compute(ggml_cgraph * cgraph,
+                               ov::Core & core,
+                               const std::string & device,
+                               const ov::AnyMap & config,
+                               std::shared_ptr<ov_runtime_context> r_ctx) {
+    if (cgraph->n_nodes == 1 && (cgraph->nodes[0]->op == GGML_OP_NONE || cgraph->nodes[0]->op == GGML_OP_VIEW)) {
+        return GGML_STATUS_SUCCESS;
+    }
+
+    // vla.cpp: reuse the decoder, the converted model and the compiled infer
+    // request across calls on the same graph, the way the dynamic and static
+    // paths already do. Conversion plus compile_model dominates a naive call, so
+    // without this every graph_compute pays it again.
+    static const bool cache_enabled = !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_CACHE");
+    const naive_key key(cgraph);
+
+    std::shared_ptr<naive_runtime_ctx> entry;
+    bool cache_hit = false;
+    if (cache_enabled && r_ctx != nullptr) {
+        std::lock_guard<std::mutex> lock(r_ctx->ctx_mutex);
+        auto it = r_ctx->naive_cache.find(key);
+        if (it != r_ctx->naive_cache.end()) {
+            entry = it->second;
+            cache_hit = true;
+        } else {
+            // Each entry holds a compiled model, so this cannot grow forever.
+            // Flush rather than evict: a caller sees a handful of shapes, and an
+            // LRU is only worth its bookkeeping once that stops being true.
+            if (r_ctx->naive_cache.size() >= 32) {
+                r_ctx->naive_cache.clear();
+            }
+            entry = std::make_shared<naive_runtime_ctx>();
+            r_ctx->naive_cache[key] = entry;
+        }
+    } else {
+        entry = std::make_shared<naive_runtime_ctx>();
+    }
+
+    // One graph at a time: an ov::InferRequest is not re-entrant, and a hit
+    // rebinds the decoder to this cgraph.
+    std::lock_guard<std::mutex> entry_lock(entry->mutex);
+
+    bool naive = true;
+    std::shared_ptr<GgmlOvDecoder> decoder;
+    std::shared_ptr<ov::Model> model;
+    std::shared_ptr<ov::InferRequest> infer_request;
+
+    if (cache_hit && entry->infer_request != nullptr) {
+        decoder = entry->decoder;
+        model = entry->model;
+        infer_request = entry->infer_request;
+        // Same shapes, new tensors: point the decoder at this call's graph.
+        decoder->update_io(cgraph);
+    } else {
+        auto model_weights = GgmlOvDecoder::create_weight_nodes(cgraph, naive);
+        decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights);
+        auto input_model = std::make_shared<ov::frontend::ggml::InputModel>(decoder);
+        model = ov::frontend::ggml::FrontEnd::convert(input_model, naive);
+        if (ggml_openvino_getenv_int("GGML_OPENVINO_DUMP_IR")) {
+            ov::serialize(model, "IR_naive.xml");
+        }
+
+        auto remote_context = ggml_openvino_get_remote_context();
+        if (cgraph->nodes[0]->op == GGML_OP_MUL_MAT) {
+            // TODO ACCURACY hint triggers a bug in GPU plugin/driver on Lunar Lake. Remove once CVS-182166 is resolved
+            core.set_property(device, ov::hint::execution_mode(ov::hint::ExecutionMode::PERFORMANCE));
+        } else {
+            core.set_property(device, ov::hint::execution_mode(ov::hint::ExecutionMode::ACCURACY));
+        }
+        if (remote_context.has_value()) {
+            infer_request = std::make_shared<ov::InferRequest>(
+                core.compile_model(model, remote_context.value(), config).create_infer_request());
+        } else {
+            infer_request =
+                std::make_shared<ov::InferRequest>(core.compile_model(model, device, config).create_infer_request());
+        }
+
+        entry->decoder = decoder;
+        entry->model = model;
+        entry->infer_request = infer_request;
+    }
+
+    auto ov_params = model->get_parameters();"""
+
+# file -> [(anchor, replacement), ...]. Every anchor must match exactly once.
+EDITS = {
+    "ggml/src/ggml-openvino/ggml-openvino-extra.cpp": [
+        ("#include <optional>\n", "#include <optional>\n#include <vector>\n"),
+        ("void ggml_openvino_device_config::init() {", HELPER + "void ggml_openvino_device_config::init() {"),
+        (
+            """        cl_int err;
+        cl_platform_id platform;
+        err = clGetPlatformIDs(1, &platform, nullptr);
+        if (err != CL_SUCCESS) {
+            GGML_LOG_ERROR("Failed to get OpenCL platform: %d\\n", err);
+            return;
+        }
+""",
+            """        cl_int err;
+        cl_platform_id platform = ggml_openvino_get_intel_platform();
+        if (platform == nullptr) {
+            GGML_LOG_ERROR("Failed to find an Intel OpenCL platform\\n");
+            return;
+        }
+""",
+        ),
+        (USM_LOOKUP % (("clEnqueueMemFillINTEL",) * 2), USM_LOOKUP_NEW % (("clEnqueueMemFillINTEL",) * 2)),
+        (USM_LOOKUP % (("clEnqueueMemcpyINTEL",) * 2), USM_LOOKUP_NEW % (("clEnqueueMemcpyINTEL",) * 2)),
+        (
+            """        "GGML_OPENVINO_LOG_UNSUPPORTED_OPS",
+    };""",
+            """        "GGML_OPENVINO_LOG_UNSUPPORTED_OPS",
+        // vla.cpp: f16 (default) or f32 for the GPU plugin's inference precision.
+        "GGML_OPENVINO_GPU_PRECISION",
+    };""",
+        ),
+        (
+            """    } else if (cache_dir && strlen(cache_dir) > 0) {
+        compile_config.insert(ov::cache_dir(cache_dir));
+        compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
+    }""",
+            """    } else if (cache_dir && strlen(cache_dir) > 0) {
+        compile_config.insert(ov::cache_dir(cache_dir));
+        compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
+    }
+
+    // vla.cpp: the GPU plugin computes in f16 unless told otherwise, which is why
+    // it is fast. A model whose graph carries a long serial chain -- a denoise
+    // loop unrolled inside one graph -- compounds that across every step, and a
+    // saturating output channel can then cross its threshold in the wrong place.
+    // Exposed rather than forced: f32 costs roughly 3x on this plugin.
+    if (device_name == "GPU") {
+        const char * gpu_prec = ggml_openvino_getenv_str("GGML_OPENVINO_GPU_PRECISION", "f16");
+        if (strcmp(gpu_prec, "f32") == 0) {
+            compile_config.insert(ov::hint::inference_precision(ov::element::f32));
+        } else if (strcmp(gpu_prec, "f16") != 0) {
+            GGML_LOG_WARN("GGML OpenVINO Backend: GGML_OPENVINO_GPU_PRECISION=%s is not f16 or f32, ignoring\\n",
+                          gpu_prec);
+        }
+    }""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/op/add.cpp": [
+        (
+            """    auto input_0 = process_view_input_new(context, 0);
+    auto input_1 = process_view_input_new(context, 1);
+    auto res = std::make_shared<ov::op::v1::Add>(input_0, input_1);""",
+            """    auto input_0 = process_view_input_new(context, 0);
+    auto input_1 = process_view_input_new(context, 1);
+
+    // vla.cpp: re-hang the outer add on the inner one's non-GEMM operand so the
+    // GEMM is left with a single post-op. Addition is associative.
+    const int oc = context.get_op_case();
+    if (oc == 2 || oc == 3) {
+        auto inner = input_0.get_node_shared_ptr();
+        if (inner->get_input_size() == 2) {
+            const size_t keep = (oc == 2) ? 0 : 1;
+            const size_t fold = 1 - keep;
+            auto folded = std::make_shared<ov::op::v1::Add>(inner->input_value(fold), input_1);
+            auto res2 = std::make_shared<ov::op::v1::Add>(inner->input_value(keep), folded);
+            return rename_outputs_with_suffix({res2}, context.get_name());
+        }
+    }
+
+    auto res = std::make_shared<ov::op::v1::Add>(input_0, input_1);""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/op/concat.cpp": [
+        (
+            """#include <openvino/op/concat.hpp>
+#include <openvino/op/convert.hpp>""",
+            """#include <openvino/op/concat.hpp>
+#include <openvino/op/constant.hpp>
+#include <openvino/op/convert.hpp>
+#include <openvino/op/unsqueeze.hpp>""",
+        ),
+        ("#include <memory>", "#include <memory>\n#include <numeric>"),
+        (
+            """    const auto axis = static_cast<int64_t>(rank - 1 - ggml_dim);
+    auto res = std::make_shared<ov::op::v0::Concat>(OutputVector{input_0, input_1}, axis);""",
+            """    // vla.cpp: a weight that is 2-D in ggml is folded in as a rank-2 constant,
+    // because that is what a GEMM operand wants. Concat is the one op where that
+    // matters: it needs both inputs at the graph's rank, or the axis computed
+    // below falls outside them. Left-pad the shorter one with 1s, which is the
+    // shape ggml gave it anyway.
+    auto align_rank = [rank](ov::Output<ov::Node> in) {
+        const auto & ps = in.get_partial_shape();
+        if (ps.rank().is_dynamic() || ps.rank().get_length() >= rank) {
+            return in;
+        }
+        std::vector<int64_t> axes(rank - ps.rank().get_length());
+        std::iota(axes.begin(), axes.end(), 0);
+        auto axes_node = ov::op::v0::Constant::create(ov::element::i64, {axes.size()}, axes);
+        return ov::Output<ov::Node>(std::make_shared<ov::op::v0::Unsqueeze>(in, axes_node));
+    };
+    input_0 = align_rank(input_0);
+    input_1 = align_rank(input_1);
+
+    const auto axis = static_cast<int64_t>(rank - 1 - ggml_dim);
+    auto res = std::make_shared<ov::op::v0::Concat>(OutputVector{input_0, input_1}, axis);""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/utils.cpp": [
+        ("#include <memory>", "#include <memory>\n#include <numeric>"),
+        (
+            """        std::vector<int64_t> gather_indices(n_dims_half);
+        for (size_t j = 0; j < n_dims_half; j++) {
+            gather_indices[j] = j % 3;
+            factor[j] = std::pow(theta_scale, j);
+        }""",
+            """        // vla.cpp: ggml's interleaved mrope cycles t/h/w by sector % 3, but only
+        // while the sector is still inside 3 * sections[k]; past that it falls
+        // through to the fourth position stream. Ignoring the bound sends the
+        // tail sectors to the wrong stream -- with sections {24,20,20,0} and
+        // n_dims 128, sectors 61 and 62 take h and w instead of e. See
+        // ggml_rope_cache_init in ggml/src/ggml-cpu/ops.cpp.
+        const int32_t * sections = rope_params + 11;
+        std::vector<int64_t> gather_indices(n_dims_half);
+        for (size_t j = 0; j < n_dims_half; j++) {
+            const int sector = (int) j;
+            int64_t stream = 3;
+            if (sector % 3 == 1 && sector < 3 * sections[1]) {
+                stream = 1;
+            } else if (sector % 3 == 2 && sector < 3 * sections[2]) {
+                stream = 2;
+            } else if (sector % 3 == 0 && sector < 3 * sections[0]) {
+                stream = 0;
+            }
+            gather_indices[j] = stream;
+            factor[j] = std::pow(theta_scale, j);
+        }""",
+        ),
+        (
+            "#include <openvino/op/transpose.hpp>",
+            "#include <openvino/op/transpose.hpp>\n#include <openvino/op/unsqueeze.hpp>",
+        ),
+        (
+            """    size_t view_input_size = context.get_view_input_size(input_index);
+    if (view_input_size == 0) {
+        // No view inputs, return the input as is
+        return input;
+    }
+""",
+            """    size_t view_input_size = context.get_view_input_size(input_index);
+    if (view_input_size == 0) {
+        // No view inputs, return the input as is
+        return input;
+    }
+
+    // vla.cpp: a ggml tensor that is 2-D folds in as a rank-2 ov constant, which
+    // is what a GEMM operand wants, but every slice below indexes the tensor at
+    // its full ggml rank. Left-pad with 1s so the axes line up. Evo-1 hits this
+    // by viewing Q/K/V out of one fused attn_in weight.
+    {
+        const auto src_ggml_shape = context.get_view_input_src_ggml_shape(input_index, 0);
+        const auto & in_ps = input.get_partial_shape();
+        if (in_ps.rank().is_static() && (size_t) in_ps.rank().get_length() < src_ggml_shape.size()) {
+            std::vector<int64_t> axes(src_ggml_shape.size() - (size_t) in_ps.rank().get_length());
+            std::iota(axes.begin(), axes.end(), 0);
+            input = std::make_shared<ov::op::v0::Unsqueeze>(
+                input, ov::op::v0::Constant::create(ov::element::i64, {axes.size()}, axes));
+        }
+    }
+""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/op_table.cpp": [
+        (
+            """namespace ov {
+namespace frontend {
+namespace ggml {
+
+std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
+            """namespace ov {
+namespace frontend {
+namespace ggml {
+
+namespace op {
+// vla.cpp: ggml's GGML_UNARY_OP_GELU is the *tanh* approximation (its CPU kernel
+// additionally reads an fp16 lookup table); ov::op::v7::Gelu defaults to the
+// exact erf formulation. Mapping the tanh op onto erf is a real approximation
+// mismatch -- small per node, but a vision tower has dozens of them and the
+// error compounds through the whole encoder.
+static OutputVector translate_gelu_tanh(const NodeContext & context) {
+    num_inputs_check(context, 1, 1);
+    auto input = process_view_input_new(context, 0);
+    auto res = std::make_shared<ov::op::v7::Gelu>(input, ov::op::GeluApproximationMode::TANH);
+    return rename_outputs_with_suffix({res}, context.get_name());
+}
+}  // namespace op
+
+std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
+        ),
+        (
+            """        {"GGML_UNARY_OP_GELU",      op::translate_1to1_match_1_input<v7::Gelu>     },""",
+            """        {"GGML_UNARY_OP_GELU",      op::translate_gelu_tanh                        },
+        // vla.cpp: tanh approximation for GELU, exact erf for GELU_ERF. ov's Gelu
+        // defaults to erf, so the tanh variant must set its mode explicitly.
+        {"GGML_UNARY_OP_GELU_ERF",  op::translate_1to1_match_1_input<v7::Gelu>     },""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/op/flash_attn_ext.cpp": [
+        (
+            """    auto q = std::make_shared<ov::op::v0::Convert>(q_f32, ov::element::f16);""",
+            """    auto q = std::make_shared<ov::op::v0::Convert>(q_f32, ov::element::f16);
+    // vla.cpp: Q, the mask and the scale below are all forced to F16 because
+    // llama.cpp's KV cache already is. K/V that arrive as F32 have to come along
+    // or SDPA rejects the mix.
+    if (k.get_element_type() != ov::element::f16) {
+        k = std::make_shared<ov::op::v0::Convert>(k, ov::element::f16);
+    }
+    if (v.get_element_type() != ov::element::f16) {
+        v = std::make_shared<ov::op::v0::Convert>(v, ov::element::f16);
+    }""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/ggml-decoder.h": [
+        (
+            """    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) const {
+        if (is_inp_pos(tensor, op)) {
+            return "inp_pos";
+        }""",
+            """    // vla.cpp: only collapse ROPE position inputs onto one "inp_pos" parameter
+    // when the graph really has one. See scripts/patch_ggml_openvino.py.
+    bool has_multiple_inp_pos() const;
+
+    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) const {
+        if (is_inp_pos(tensor, op)) {
+            return has_multiple_inp_pos() ? std::string(tensor->name) : std::string("inp_pos");
+        }""",
+        ),
+        (
+            "    ggml_cgraph * m_cgraph = nullptr;",
+            "    ggml_cgraph * m_cgraph = nullptr;\n"
+            "    mutable int m_multi_inp_pos = -1;  // vla.cpp: lazily computed, -1 = unknown",
+        ),
+    ],
+    "ggml/src/ggml-openvino/ggml-decoder.cpp": [
+        (
+            """    case GGML_OP_ADD: {
+        if (is_moe_expert_sum_add(node)) {""",
+            """    case GGML_OP_ADD: {
+        // vla.cpp: ADD(ADD(.., GEMM), graph-input). Two elementwise ops chained on a
+        // GEMM; the GPU plugin folds both in as post-ops and loses the second operand.
+        // op_case 2 = the inner add's input 0 is the GEMM, 3 = its input 1 is.
+        {
+            const ggml_tensor * inner = node->src[0];
+            const ggml_tensor * other = node->src[1];
+            if (inner && other && inner->op == GGML_OP_ADD && other->op == GGML_OP_NONE) {
+                for (int k = 0; k < 2; k++) {
+                    const ggml_tensor * s = inner->src[k];
+                    while (s && s->src[0] &&
+                           (s->op == GGML_OP_VIEW || s->op == GGML_OP_RESHAPE || s->op == GGML_OP_CONT)) {
+                        s = s->src[0];
+                    }
+                    if (s && s->op == GGML_OP_MUL_MAT) {
+                        op_case = (k == 0) ? 2 : 3;
+                    }
+                }
+            }
+        }
+        if (is_moe_expert_sum_add(node)) {""",
+        ),
+        (
+            """    if (GgmlOvDecoder::is_inp_pos(tensor, op)) {
+        return "inp_pos";
+    }""",
+            """    if (GgmlOvDecoder::is_inp_pos(tensor, op)) {
+        // vla.cpp: this free function is the live naming path -- the
+        // GgmlOvDecoder member of the same intent is unreferenced at b10729.
+        // Only collapse ROPE position inputs onto one "inp_pos" parameter when
+        // the graph really has one. See scripts/patch_ggml_openvino.py.
+        return decoder->has_multiple_inp_pos() ? get_tensor_ov_name(cgraph, tensor) : std::string("inp_pos");
+    }""",
+        ),
+        (
+            """        } else {
+            // rope'ed query tensor
+            op_case = 2;""",
+            """        } else {
+            // vla.cpp: op_case 2 rewrites the tensor as [n_seq, -1, n_heads,
+            // head_size] before transposing, which is only correct for
+            // llama.cpp's rope'd query. It was reached by ANY permute whose
+            // source is a view of a non-leaf, so a DiT head split -- GR00T
+            // N1.7's cross-attention V, ggml_permute(view, 1,2,0,3) -- was
+            // reshaped into a shape that has nothing to do with it and came out
+            // with its elements rearranged. Require the rope.
+            const ggml_tensor * prod = node->src[0];
+            while (prod && prod->src[0] &&
+                   (prod->op == GGML_OP_VIEW || prod->op == GGML_OP_RESHAPE || prod->op == GGML_OP_CONT)) {
+                prod = prod->src[0];
+            }
+            op_case = (prod && prod->op == GGML_OP_ROPE) ? 2 : 1;""",
+        ),
+        (
+            """        } else if (src->ne[0] * src->ne[1] * src->ne[2] == node->ne[1]) {
+            op_case = 3;""",
+            """            // vla.cpp: case 3 is the KV-cache flatten, whose result is always
+            // [1, n, 1, 1]. Without the ne[0] test it also swallows the kernel
+            // reshape ggml_conv_2d emits and rewrites it to the wrong shape.
+        } else if (src->ne[0] * src->ne[1] * src->ne[2] == node->ne[1] && node->ne[0] == 1) {
+            op_case = 3;""",
+        ),
+        (
+            "int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {",
+            """bool GgmlOvDecoder::has_multiple_inp_pos() const {
+    if (m_cgraph == nullptr) {
+        return false;
+    }
+    if (m_multi_inp_pos < 0) {
+        std::set<const ggml_tensor *> seen;
+        for (int i = 0; i < m_cgraph->n_nodes && seen.size() < 2; i++) {
+            const ggml_tensor * node = m_cgraph->nodes[i];
+            for (int j = 0; j < GGML_MAX_SRC && node->src[j] != nullptr; j++) {
+                if (is_inp_pos(node->src[j], node)) {
+                    seen.insert(node->src[j]);
+                }
+            }
+        }
+        m_multi_inp_pos = seen.size() > 1 ? 1 : 0;
+    }
+    return m_multi_inp_pos == 1;
+}
+
+int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/utils.h": [
+        (
+            "struct decoder_runtime_ctx {",
+            """// vla.cpp: what naive_compute() reuses across calls on the same graph. Without
+// it that path rebuilt the decoder, re-converted the model and called
+// compile_model() on every ggml_backend_graph_compute, which dominated runtime.
+struct naive_runtime_ctx {
+    std::mutex mutex;
+    std::shared_ptr<GgmlOvDecoder> decoder;
+    std::shared_ptr<ov::Model> model;
+    std::shared_ptr<ov::InferRequest> infer_request;
+};
+
+// vla.cpp: graph_key is {n_nodes, first name, last name}, which two graphs of the
+// same size can share. A compiled model is bound to the shapes it was built for,
+// so reusing one across a shape change returns another graph's answer with no
+// error. Mix the ops and shapes in as well.
+inline uint64_t naive_graph_sig(const ggml_cgraph * cgraph) {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        const ggml_tensor * node = cgraph->nodes[i];
+        mix((uint64_t) node->op);
+        mix((uint64_t) node->type);
+        for (int d = 0; d < GGML_MAX_DIMS; d++) {
+            mix((uint64_t) node->ne[d]);
+        }
+        for (int s = 0; s < GGML_MAX_SRC; s++) {
+            const ggml_tensor * src = node->src[s];
+            mix(src ? (uint64_t) src->type + 1 : 0ull);
+            for (int d = 0; src && d < GGML_MAX_DIMS; d++) {
+                mix((uint64_t) src->ne[d]);
+            }
+        }
+    }
+    return h;
+}
+
+struct naive_key {
+    graph_key base;
+    uint64_t  sig;
+
+    naive_key(const ggml_cgraph * cgraph) : base(cgraph), sig(naive_graph_sig(cgraph)) {}
+
+    bool operator==(const naive_key & other) const { return sig == other.sig && base == other.base; }
+};
+
+struct naive_key_hash {
+    size_t operator()(const naive_key & key) const {
+        size_t h = graph_key_hash{}(key.base);
+        return h ^ (std::hash<uint64_t>{}(key.sig) + 0x9e3779b9 + (h << 6) + (h >> 2));
+    }
+};
+
+struct decoder_runtime_ctx {""",
+        ),
+        (
+            "    std::unordered_map<graph_key, std::shared_ptr<decoder_runtime_ctx>, graph_key_hash> decoder_cache;",
+            "    std::unordered_map<graph_key, std::shared_ptr<decoder_runtime_ctx>, graph_key_hash> decoder_cache;\n"
+            "    std::unordered_map<naive_key, std::shared_ptr<naive_runtime_ctx>, naive_key_hash> naive_cache;",
+        ),
+        (
+            """        decoder_cache.clear();
+        infer_request_cache.clear();""",
+            """        decoder_cache.clear();
+        naive_cache.clear();
+        infer_request_cache.clear();""",
+        ),
+        (
+            """enum ggml_status naive_compute(struct ggml_cgraph * cgraph,
+                               ov::Core & core,
+                               const std::string & device,
+                               const ov::AnyMap & config);""",
+            """enum ggml_status naive_compute(struct ggml_cgraph * cgraph,
+                               ov::Core & core,
+                               const std::string & device,
+                               const ov::AnyMap & config,
+                               std::shared_ptr<ov_runtime_context> r_ctx);""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/utils.cpp": [
+        (
+            """        if (!model_is_splitted) {
+            return naive_compute(cgraph, core, device, config);
+        }""",
+            """        if (!model_is_splitted) {
+            return naive_compute(cgraph, core, device, config, r_ctx);
+        }""",
+        ),
+        (
+            """    if (is_naive(cgraph)) {
+        return naive_compute(cgraph, core, device, config);
+    }""",
+            """    if (is_naive(cgraph)) {
+        return naive_compute(cgraph, core, device, config, r_ctx);
+    }""",
+        ),
+        (
+            NAIVE_COMPUTE_OLD,
+            NAIVE_COMPUTE_NEW,
+        ),
+        (
+            """bool is_naive(ggml_cgraph * cgraph) {
+    constexpr int naive_graph_size_threshold = 20;""",
+            """bool is_naive(ggml_cgraph * cgraph) {
+    // vla.cpp: the literal translation path suits any graph that is not a
+    // decoder-only LLM, so let the caller raise the bar it is chosen under.
+    // Junk parses to 0 under atoi, which would silently send every graph down
+    // the LLM builder, so reject anything that is not a whole positive number.
+    static const int naive_graph_size_threshold = [] {
+        const char * env = getenv("GGML_OPENVINO_NAIVE_GRAPH_SIZE");
+        if (env == nullptr || *env == '\\0') {
+            return 20;
+        }
+        char *     end = nullptr;
+        const long val = strtol(env, &end, 10);
+        const int  n   = (int) val;
+        if (*end != '\\0' || val <= 0 || (long) n != val) {
+            GGML_LOG_WARN("GGML OpenVINO Backend: ignoring GGML_OPENVINO_NAIVE_GRAPH_SIZE='%s'\\n", env);
+            return 20;
+        }
+        return n;
+    }();""",
+        ),
+    ],
+}
+
+
+# A duplicate key in EDITS silently drops the earlier entry's hunks -- Python keeps
+# the last one and nothing complains. That happened once and took the whole Intel
+# OpenCL fix out of the patch, so compare the literal keys against the dict.
+_keys = re.findall(r'^    "([^"]+)": \[$', pathlib.Path(__file__).read_text(), re.M)
+if len(_keys) != len(EDITS):
+    _dup = sorted({k for k in _keys if _keys.count(k) > 1})
+    sys.exit(f"patch_ggml_openvino: EDITS has {len(_keys)} literal keys but {len(EDITS)} entries; "
+             f"duplicate key(s): {_dup}")
+
+
+def main() -> int:
+    root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".")
+
+    pending = []
+    for rel, edits in EDITS.items():
+        src = root / rel
+        if not src.is_file():
+            print(f"patch_ggml_openvino: {src} not found", file=sys.stderr)
+            return 1
+        original = src.read_text()
+        text = original
+        for anchor, replacement in edits:
+            # Per hunk, not per file. The hunk list grows between commits, so a
+            # tree patched by an older checkout still needs the newer ones and a
+            # file-wide marker would skip them, leaving a build that runs and is
+            # quietly wrong.
+            if replacement in text:
+                continue
+            n = text.count(anchor)
+            if n != 1:
+                print(f"patch_ggml_openvino: anchor matched {n} times in {rel}, expected 1:\n{anchor}\n"
+                      f"A tree patched by an older checkout reads like this. Delete the fetched "
+                      f"llama.cpp (rm -rf <build>/_deps) and reconfigure. If the tree is clean, the "
+                      f"anchor no longer matches VLA_LLAMA_TAG and needs re-targeting.",
+                      file=sys.stderr)
+                return 1
+            text = text.replace(anchor, replacement, 1)
+        if text != original:
+            pending.append((src, text, rel))
+
+    # Every anchor matched, so nothing was half-written on the way here.
+    for src, text, rel in pending:
+        src.write_text(text)
+        print(f"patch_ggml_openvino: patched {rel}")
+    if not pending:
+        print("patch_ggml_openvino: already up to date")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

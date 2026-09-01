@@ -14,6 +14,8 @@
 
 #include "loader.h"
 
+#include "backend.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -134,9 +136,9 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
         return false;
     }
 
-    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx_, backend);
+    ggml_backend_buffer_t buf = alloc_weights(ctx_, backend);
     if (!buf) {
-        std::fprintf(stderr, "vla(%s): ggml_backend_alloc_ctx_tensors failed (OOM?)\n", arch_);
+        std::fprintf(stderr, "vla(%s): alloc_weights failed (OOM?)\n", arch_);
         return false;
     }
     *out_buf = buf;
@@ -160,21 +162,21 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
     }
 
     for (const Fused & f : fused_) {
-        std::vector<uint8_t> buf;
+        std::vector<uint8_t> parts;
         for (const std::string & s : f.srcs) {
             std::vector<uint8_t> b = g_.read_convert(s.c_str(), f.dst->type);
             if (b.empty()) {
                 std::fprintf(stderr, "vla(%s): fused fill: read %s failed\n", arch_, s.c_str());
                 return false;
             }
-            buf.insert(buf.end(), b.begin(), b.end());
+            parts.insert(parts.end(), b.begin(), b.end());
         }
-        if (buf.size() != ggml_nbytes(f.dst)) {
+        if (parts.size() != ggml_nbytes(f.dst)) {
             std::fprintf(stderr, "vla(%s): fused fill: %s size %zu vs %zu\n",
-                         arch_, ggml_get_name(f.dst), buf.size(), ggml_nbytes(f.dst));
+                         arch_, ggml_get_name(f.dst), parts.size(), ggml_nbytes(f.dst));
             return false;
         }
-        ggml_backend_tensor_set(f.dst, buf.data(), 0, buf.size());
+        ggml_backend_tensor_set(f.dst, parts.data(), 0, parts.size());
     }
     return true;
 }

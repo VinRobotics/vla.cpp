@@ -12,7 +12,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(_vla_accel "")
-foreach(_flag GGML_CUDA GGML_SYCL GGML_METAL)
+foreach(_flag GGML_CUDA GGML_SYCL GGML_METAL GGML_OPENVINO)
     if(${_flag})
         list(APPEND _vla_accel ${_flag})
     endif()
@@ -23,6 +23,14 @@ if(_vla_accel_n GREATER 1)
     message(FATAL_ERROR
         "Enable one accelerator backend at a time; got ${_vla_accel_str}. "
         "Configure a separate build directory per backend.")
+endif()
+# backend.h calls ggml_backend_<accel>_init directly, and GGML_BACKEND_DL builds
+# the accelerators as loadable modules that are not linked into ggml. Say so here
+# rather than at the undefined symbol.
+if(_vla_accel_n GREATER 0 AND GGML_BACKEND_DL)
+    message(FATAL_ERROR
+        "GGML_BACKEND_DL=ON is not supported with ${_vla_accel}: the backend is "
+        "built as a module and src/backend.h links its init directly.")
 endif()
 
 set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
@@ -35,11 +43,36 @@ if(GGML_CUDA)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_cuda_ext_hook.py <SOURCE_DIR>)
+elseif(GGML_OPENVINO)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_openvino.py <SOURCE_DIR>)
+
+    # Before the fetch: ggml's own ggml-openvino/CMakeLists.txt does
+    # find_package(OpenVINO REQUIRED ...) and would get there first, so this
+    # message only reaches anyone if it runs earlier. Same components it asks for.
+    find_package(OpenVINO QUIET COMPONENTS Runtime Threading)
+    if(NOT OpenVINO_FOUND)
+        message(FATAL_ERROR
+            "GGML_OPENVINO=ON but the OpenVINO runtime was not found. Install it "
+            "(scripts/install_ov.sh) and 'source /opt/intel/openvino/setupvars.sh' "
+            "in the shell that configures. See docs/backend/ov.md.")
+    endif()
 endif()
 # Overridable so a regression can be bisected against another tag in a separate
 # build dir (-DVLA_LLAMA_TAG=b10326) without editing this file. The patch
-# anchors in scripts/patch_ggml_cuda_ext_hook.py are checked against the default.
-set(VLA_LLAMA_TAG "b10331" CACHE STRING "llama.cpp tag to fetch")
+# anchors in scripts/patch_ggml_cuda_ext_hook.py and scripts/patch_ggml_openvino.py
+# are checked against the default.
+set(_vla_llama_tag_default "b10729")
+set(VLA_LLAMA_TAG "${_vla_llama_tag_default}" CACHE STRING "llama.cpp tag to fetch")
+# A cache entry survives an edit to the line above, so an existing build dir keeps
+# the tag it was first configured with and quietly builds the wrong llama.cpp.
+if(NOT VLA_LLAMA_TAG STREQUAL _vla_llama_tag_default)
+    message(WARNING
+        "VLA_LLAMA_TAG is ${VLA_LLAMA_TAG}, not the default ${_vla_llama_tag_default}. "
+        "If that was not deliberate, this build dir predates the bump: reconfigure with "
+        "-DVLA_LLAMA_TAG=${_vla_llama_tag_default} or use a fresh one.")
+endif()
 
 include(FetchContent)
 FetchContent_Declare(llama
@@ -173,6 +206,12 @@ if(GGML_METAL AND NOT GGML_CUDA AND NOT GGML_SYCL)
     target_compile_definitions(vla_core PUBLIC GGML_USE_METAL)
 endif()
 
+if(GGML_OPENVINO AND NOT GGML_CUDA AND NOT GGML_SYCL AND NOT GGML_METAL)
+    # Only tells the archs which branch of the backend.h ladder to compile; the
+    # toolkit was located before the fetch above.
+    target_compile_definitions(vla_core PUBLIC GGML_USE_OPENVINO)
+endif()
+
 add_library(vlm_core
     src/vlm/engine.cpp
 )
@@ -286,6 +325,10 @@ target_link_libraries(vla-bench PRIVATE vla_core)
 
 # Warnings and LTO for our own targets only, never the llama.cpp subtree.
 set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla vla-server vlm-server vla-cli vla-bench)
+# The CUDA targets were the only first-party code compiled without warnings.
+if(GGML_CUDA)
+    list(APPEND VLA_FIRST_PARTY_TARGETS bitvla_cuda_kernels vla_cuda_ops)
+endif()
 
 foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)
     target_compile_options(${tgt} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)

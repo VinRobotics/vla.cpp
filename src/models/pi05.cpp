@@ -26,7 +26,7 @@
 #include "gguf.h"
 #include "gguf_reader.h"
 #include "scratch_ctx.h"
-#include "models/dit_common.h"
+#include "layers/embed.h"
 #include "modules/preprocess.h"
 #include "env_flag.h"
 
@@ -337,35 +337,40 @@ bool load_stats(gguf_reader & g, Pi05ModelArch & m) {
     m.state_std  .assign(cfg.real_state_dim,  1.f);
     m.action_mean.assign(cfg.real_action_dim, 0.f);
     m.action_std .assign(cfg.real_action_dim, 1.f);
+    // Absent stats are a valid checkpoint: identity, carry on. Stats that are
+    // present but unreadable are not - falling back to identity there hands back
+    // un-denormalised actions with nothing in the log. Note stderr, not stdout:
+    // stdout is the action stream tests/predict_check.cpp diffs.
     auto read1d = [&](const char * name, std::vector<float> & dst) {
         const ggml_tensor * t = g.meta(name);
         if (!t) {
-            std::printf("vla(pi05): %s missing - identity\n", name);
-            return;
+            std::fprintf(stderr, "vla(pi05): %s missing - identity\n", name);
+            return true;
         }
         if (t->ne[0] != (int64_t) dst.size()) {
-            std::printf("vla(pi05): %s dim mismatch - identity\n", name);
-            return;
+            std::fprintf(stderr, "vla(pi05): %s is %lld wide, expected %zu\n",
+                         name, (long long) t->ne[0], dst.size());
+            return false;
         }
-        const std::vector<float> identity = dst;
         if (!g.read_raw(name, dst.data(), dst.size()*sizeof(float))) {
-            // A short read leaves dst half-overwritten.
-            dst = identity;
-            std::printf("vla(pi05): %s read failed - identity\n", name);
+            std::fprintf(stderr, "vla(pi05): %s read failed\n", name);
+            return false;
         }
+        return true;
     };
-    read1d("state_mean",  m.state_mean);
-    read1d("state_std",   m.state_std);
-    read1d("action_mean", m.action_mean);
-    read1d("action_std",  m.action_std);
+    bool ok = true;
+    ok &= read1d("state_mean",  m.state_mean);
+    ok &= read1d("state_std",   m.state_std);
+    ok &= read1d("action_mean", m.action_mean);
+    ok &= read1d("action_std",  m.action_std);
 
     if (m.quantile_norm) {
         m.action_q01.assign(cfg.real_action_dim, -1.f);
         m.action_q99.assign(cfg.real_action_dim,  1.f);
-        read1d("action_q01", m.action_q01);
-        read1d("action_q99", m.action_q99);
+        ok &= read1d("action_q01", m.action_q01);
+        ok &= read1d("action_q99", m.action_q99);
     }
-    return true;
+    return ok;
 }
 
 }
@@ -555,6 +560,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         for (int v=0; v<in.n_images; ++v) {
             if (!preprocess_image_chw("pi05", in.images[v], vit_image_size, chw)) { return {}; }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
+            graph_unique_names(vg);
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(pi05): vision compute failed (view %d)\n", v);
                 return {};
@@ -673,6 +679,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(t_time[s], tv.data(), 0, ggml_nbytes(t_time[s]));
     }
 
+    graph_unique_names(gf);
     const auto ti0 = clk::now();
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
     stats.ms_inference = std::chrono::duration<float, std::milli>(clk::now()-ti0).count();

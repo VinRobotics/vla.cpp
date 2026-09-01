@@ -27,6 +27,13 @@ target_link_libraries(test_dit_common PRIVATE ggml)
 target_compile_options(test_dit_common PRIVATE -Wall -Wextra)
 add_test(NAME dit_common COMMAND test_dit_common)
 
+# Defines GGML_USE_OPENVINO itself so the pass is exercised on any build.
+add_executable(test_graph_names test_graph_names.cpp)
+target_include_directories(test_graph_names PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_graph_names PRIVATE ggml)
+target_compile_options(test_graph_names PRIVATE -Wall -Wextra)
+add_test(NAME graph_names COMMAND test_graph_names)
+
 add_executable(test_qwen3vl_vit test_qwen3vl_vit.cpp)
 target_include_directories(test_qwen3vl_vit PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_qwen3vl_vit PRIVATE ggml)
@@ -40,9 +47,14 @@ target_link_libraries(test_config_guard PRIVATE vla_core)
 target_compile_options(test_config_guard PRIVATE -Wall -Wextra)
 add_test(NAME config_guard COMMAND test_config_guard)
 
-# The A/B harness for the two BitVLA ternary-GEMM tilings (bitvla_gemm_check.cu)
-# was never committed, so there is no target for it here. VLA_BITVLA_NARROW_GEMM=1
-# still selects the old one-tile-per-CTA kernel for a hand-run comparison.
+# A/B harness for the two BitVLA ternary-GEMM tilings. Built so it cannot rot,
+# not registered with ctest: it needs a GPU and is read by hand.
+# VLA_BITVLA_NARROW_GEMM=1 selects the old one-tile-per-CTA kernel at runtime.
+if(GGML_CUDA)
+    add_executable(bitvla_gemm_check bitvla_gemm_check.cu)
+    target_include_directories(bitvla_gemm_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(bitvla_gemm_check PRIVATE bitvla_cuda_kernels)
+endif()
 
 # Regression test for the in-tree BF16 CUDA kernels and the ggml hook they ride
 # on. Skips itself (exit 0) when no CUDA device is present.

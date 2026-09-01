@@ -79,12 +79,12 @@ echo "- repo HEAD: \`${VLA_HEAD}\` (\`${VLA_DESC}\`)"
 
 # ---- llama.cpp ----
 echo
-echo "### llama.cpp (third_party)"
+echo "### llama.cpp (fetched)"
 echo
 LLAMA_HEAD=$(git_head_or_dash "$LLAMA_DIR")
 LLAMA_DESC=$(git_describe_or_dash "$LLAMA_DIR")
 echo "- HEAD: \`${LLAMA_HEAD}\` (\`${LLAMA_DESC}\`)"
-LLAMA_TAG=$(grep -m1 'GIT_TAG' "$ROOT/CMakeLists.txt" | grep -oE 'b[0-9]+' || echo '?')
+LLAMA_TAG=$("$ROOT/scripts/llama_tag.sh" 2>/dev/null || echo '?')
 echo "- expected pinned tag (from \`CMakeLists.txt\`): \`${LLAMA_TAG}\`"
 
 # ---- GGUFs ----

@@ -272,6 +272,8 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
             return {};
         }
     }
+    // ImageNet constants as bf16 rounds them (0.485 -> 0.484375). The reference
+    // preprocesses in bf16, so these are the values it actually sees.
     static const float DMEAN[3]={0.484375f,0.455078125f,0.40625f}, DSTD[3]={0.228515625f,0.2236328125f,0.224609375f};
     static const float SMEAN[3]={0.5f,0.5f,0.5f}, SSTD[3]={0.5f,0.5f,0.5f};
 
@@ -299,6 +301,7 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
             normalize_tower(in.images[v],S,DMEAN,DSTD,dbuf); ggml_backend_tensor_set(px_d[v],dbuf.data(),0,ggml_nbytes(px_d[v]));
             normalize_tower(in.images[v],S,SMEAN,SSTD,sbuf); ggml_backend_tensor_set(px_s[v],sbuf.data(),0,ggml_nbytes(px_s[v]));
         }
+        graph_unique_names(vg);
         if(ggml_backend_graph_compute(backend,vg)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(openvla_oft): vision compute failed\n"); return {}; }
         ggml_backend_tensor_get(proj,proj_host.data(),0,proj_host.size()*sizeof(float));
         stats.ms_vision = std::chrono::duration<float,std::milli>(clock::now()-tv).count();
@@ -415,6 +418,7 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(act0,z.data(),0,ggml_nbytes(act0));
     }
 
+    graph_unique_names(gf);
     if(ggml_backend_graph_compute(backend,gf)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(openvla_oft): main compute failed\n"); return {}; }
     std::vector<float> na((size_t)action_dim*chunk);
     ggml_backend_tensor_get(norm_actions,na.data(),0,na.size()*sizeof(float));

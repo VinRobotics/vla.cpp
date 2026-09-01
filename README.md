@@ -12,7 +12,8 @@ A C++ inference engine for **Vision-Language-Action (VLA) models**, built on [`l
 It runs the open VLA policies - SmolVLA, π0, BitVLA, Evo-1, GR00T N1.5/1.6/1.7 and more -
 under one runtime, each packaged as a single self-contained GGUF that needs no Python or
 PyTorch at inference time. The binaries drive robots on **CPU**, **Apple Silicon**, **CUDA** -
-from consumer GPUs down to Jetson-class boards - or **Intel GPUs** via SYCL.
+from consumer GPUs down to Jetson-class boards - or **Intel GPUs and NPUs** via
+SYCL and OpenVINO.
 
 [**Learn vla.cpp**](https://fai-modelopt-tech.github.io/learn-vla-cpp/) walks through the engine design and how each policy is implemented on ggml.
 
@@ -27,6 +28,8 @@ from consumer GPUs down to Jetson-class boards - or **Intel GPUs** via SYCL.
 - CUDA 12.x (optional - required only for CUDA GPU builds)
 - Intel oneAPI 2025.x + GPU compute runtime (optional - only for Intel GPU
   builds, see [docs/backend/sycl.md](docs/backend/sycl.md))
+- OpenVINO 2026.x runtime (optional - only for Intel CPU/GPU/NPU builds via
+  OpenVINO, see [docs/backend/ov.md](docs/backend/ov.md))
 - `libzmq3-dev`, `cppzmq-dev`, `libprotobuf-dev`, `protobuf-compiler`
 
 ```bash
@@ -309,19 +312,19 @@ Experimental results on other platforms can be found in
 Support matrix of models (rows) against platforms (columns). Legend: `Y` =
 supported (released and benchmarked), `~` = in progress, `-` = planned.
 
-| Model | CPU (x86-64 / ARM) | CUDA | SYCL (Intel) | Metal | OpenVINO |
+| Model | CPU (x86-64 / ARM) | CUDA | [SYCL (Intel)](docs/backend/sycl.md) | [Metal](docs/backend/metal.md) | [OpenVINO](docs/backend/ov.md) |
 |---|:--:|:--:|:--:|:--:|:--:|
-| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | - | 
-| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | - | 
-| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | Y | - | 
-| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | Y | - | 
-| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | - | 
-| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | - | 
+| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | Y | 
+| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | Y | 
+| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | Y | Y | 
+| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | Y | Y | 
+| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | Y | 
+| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | Y | 
 | [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | ~ | - | 
-| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | - | 
-| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | - | 
-| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | - | 
-| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | - | 
+| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | Y | 
+| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | Y | 
+| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | ~ | 
+| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | 
 
 ---
 

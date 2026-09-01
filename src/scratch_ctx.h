@@ -41,12 +41,20 @@ public:
     }
 
     ggml_context * reset(size_t arena) {
+        // Growing matters: an arena sized from the input shape would otherwise
+        // keep the first call's smaller pool and abort in ggml_new_tensor.
+        // Every call site passes a constant today.
+        if (ctx_ && arena > arena_) {
+            ggml_free(ctx_);
+            ctx_ = nullptr;
+        }
         if (ctx_) {
             ggml_reset(ctx_);
             return ctx_;
         }
         ggml_init_params p = { arena, nullptr, true };
-        ctx_ = ggml_init(p);
+        ctx_   = ggml_init(p);
+        arena_ = arena;
         return ctx_;
     }
 
@@ -70,6 +78,7 @@ public:
 private:
     ggml_context * ctx_    = nullptr;
     ggml_gallocr_t galloc_ = nullptr;
+    size_t         arena_  = 0;
 };
 
 // Key is whatever shape the graph depends on (it needs operator==); IO holds the
