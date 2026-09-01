@@ -5,15 +5,14 @@ account of how far it currently runs. Like SYCL, OpenVINO is **not**
 auto-detected: it needs an explicit `-DGGML_OPENVINO=ON` and the OpenVINO
 runtime on the configure line.
 
-> **Status: seven architectures translate faithfully, one is wrong.** SmolVLA,
-> π0.5, Evo-1, VLA-Adapter, GR00T N1.5, GR00T N1.6 and VLA-JEPA all agree with a
-> CPU-backend reference to 1.3e-3 or better on the OpenVINO CPU plugin - Evo-1 and
-> VLA-Adapter to about 3e-6. On the Arc B390 iGPU the speedup over the native CPU
-> backend runs from 3.0x to 9.6x. GR00T N1.7 translates and returns
-> plausible-looking actions that are simply wrong; it is the one open failure.
-> Thirteen fixes were needed, eleven of them inside ggml's OpenVINO backend, which is
-> written against llama.cpp's graphs and had never seen a vision tower or an
-> action expert - see [What had to change](#what-had-to-change).
+> **Status: all eight tested architectures translate faithfully.** SmolVLA, π0.5,
+> Evo-1, VLA-Adapter, GR00T N1.5, GR00T N1.6, GR00T N1.7 and VLA-JEPA all agree
+> with a CPU-backend reference to 1.3e-3 or better on the OpenVINO CPU plugin -
+> Evo-1 and VLA-Adapter to about 3e-6. On the Arc B390 iGPU the speedup over the
+> native CPU backend runs from 3.0x to 9.6x. Fifteen fixes were needed, thirteen
+> of them inside ggml's OpenVINO backend, which is written against llama.cpp's
+> graphs and had never seen a vision tower or an action expert - see
+> [What had to change](#what-had-to-change).
 >
 > Note the baseline: OpenVINO executes the checkpoint's BF16 weights at F32, so
 > compare against `--weight-dtype f32` or you will charge the backend for a
@@ -188,10 +187,7 @@ reason in [Known issues](#known-issues).
 | SmolVLA     | 512 | 1,364 ms | 1,340 ms | **451 ms** (3.0x) | 1,162 ms |
 | Evo-1       | 448 | 3,114 ms | 4,523 ms | **563 ms** (5.5x) | not supported |
 | π0.5        | 224 | 2,802 ms | 4,285 ms | **683 ms** (4.1x) |   916 ms |
-| GR00T N1.7  | 256 | not timed | not timed | not timed | not attempted |
-
-GR00T N1.7 is not timed because it computes the wrong answer - a latency for work
-that is not the same work would be misleading.
+| GR00T N1.7  | 256 | 1,146 ms | not timed | **288 ms** (4.0x) | not attempted |
 
 The iGPU is the reason to use this backend, and it pays off most where the model
 is most vision-heavy. The OpenVINO CPU plugin is at best parity with ggml's own
@@ -224,7 +220,7 @@ both and take the smaller as the fidelity figure:
 | GR00T N1.5  | 5.5e-3 | **6.0e-4** | F32 |
 | GR00T N1.6  | 5.0e-3 | **1.0e-3** | F32 |
 | SmolVLA     | **8.9e-4** | 1.3e-3 | BF16 |
-| GR00T N1.7  | 1.5e0 | 1.5e0 | neither - it is wrong |
+| GR00T N1.7  | 1.5e0 | **4.2e-4** | F32 |
 
 Evo-1 and VLA-Adapter agree with an F32 reference to six decimal places, which is
 as close to "the translation is exact" as this harness can show - for those two,
@@ -249,9 +245,9 @@ Against the F32 reference, which is the fidelity number:
 | GR00T N1.5  | 6.0e-4 | 4.7e-3 | plugin throws |
 | GR00T N1.6  | 1.0e-3 | 2.0e-3 | plugin throws |
 | SmolVLA     | 8.9e-4 | 1.3e-3 | 1.7e-2 |
-| GR00T N1.7  | 1.5e0  | 1.5e0  | not attempted |
+| GR00T N1.7  | 4.2e-4 | 4.1e-3 | not attempted |
 
-Every arch except GR00T N1.7 is inside the 2.9e-3 bar on the CPU plugin, most by
+Every tested arch is inside the 2.9e-3 bar on the CPU plugin, most by
 one to three orders of magnitude. On the GPU the picture is looser because that
 plugin computes in F16: VLA-JEPA (8.7e-3), GR00T N1.5 (4.7e-3) and VLA-Adapter (3.2e-3) sit outside the bar there
 even though all three are far inside it on the CPU plugin. Judge translation
@@ -261,8 +257,6 @@ Two effects explain the residuals that remain. The GPU plugin's F16 arithmetic i
 one. The other is SmolVLA on the NPU (1.7e-2), whose compile config turns on
 dynamic quantization - π0.5 on the same device stays at 9.9e-4, so that is a
 property of the model on that device rather than of the backend.
-
-GR00T N1.7 is wrong outright - see [What is left](#what-is-left).
 
 ## What had to change
 
@@ -292,13 +286,14 @@ larger through a model builder that assumes a decoder-only LLM. The literal path
 is the one that fits a vision tower and an action expert. An explicit setting
 still wins.
 
-The other eleven are in ggml's OpenVINO backend itself, applied by
+The other thirteen are in ggml's OpenVINO backend itself, applied by
 `scripts/patch_ggml_openvino.py` at configure time. Its docstring carries the
 detail; in short each narrows an llama.cpp-shaped assumption that is stricter
 than the ggml contract, or fills a gap:
 
 | Fix | What it addresses |
 |---|---|
+| **PERMUTE op_case 2 requires a ROPE** | **assumes any permute of a view is a rope'd query** |
 | **GELU translated as tanh, not erf** | **assumes ggml's GELU is the exact erf form** |
 | Intel OpenCL platform selection | assumes the first OpenCL platform is Intel's |
 | RESHAPE `op_case` guard | assumes a reshape flattening dims 0-2 is the KV-cache flatten |
@@ -312,7 +307,12 @@ than the ggml contract, or fills a gap:
 | Interleaved-mrope mode passed through | the shared sin/cos table was built with the plain-rope layout |
 | Naive-path threshold settable | the 20-node constant is what picks the literal path |
 
-Four are worth expanding.
+Five are worth expanding.
+
+**The PERMUTE op_case guard** is what makes GR00T N1.7 correct, and it is the
+subtlest of the set: a classifier that sent an ordinary head-split permute down
+an LLM-specific rewrite. See [What is left](#what-is-left) for the bisect that
+found it.
 
 **The GELU mode** is the highest-yield single fix in the list. ggml's
 `GGML_UNARY_OP_GELU` is the *tanh* approximation - its CPU kernel additionally
@@ -387,7 +387,7 @@ and π0.5 run. The others do not:
 | VLA-JEPA | compiles and runs, returns all `NaN` |
 | GR00T N1.5 | NPUW partitioning throws (`partitioning.cpp:1350`) |
 | GR00T N1.6 | plugin throws (`core.cpp:117`) |
-| GR00T N1.7 | not attempted - wrong on CPU and GPU already |
+| GR00T N1.7 | not attempted |
 
 Five archs, four distinct failures, none of them vla.cpp's. The two alignment rejections are
 Intel's NPU compiler: 1025 is Evo-1's 1024
@@ -419,41 +419,24 @@ is therefore **untested**: only BitVLA emits it, and BitVLA never reaches this
 backend. It is in the table because it is a real gap in ggml-openvino, not
 because anything here exercises it.
 
-**GR00T N1.7 is the one open failure.** It translates, returns a full action
-chunk, and the values are wrong: max|delta| 1.477, rms 8.3e-2 against a peak of
-0.948, with 86% of 5280 values off by more than 1e-2. Deterministic, and
-identical on the CPU and GPU plugins. Ruled out so far, each with evidence:
+**GR00T N1.7 was the last failure and is fixed.** It used to return
+plausible-looking but wrong actions - max|delta| 1.477, 86% of values off by more
+than 1e-2. Bisecting with cut-down graphs found it: truncating the graph at a
+stage makes that stage the terminal node, which is the only way to observe an
+interior tensor under this backend. Everything through the vision tower, the LM
+and the vlsa stack was clean at 0.05-0.08%, and the error appeared entirely
+inside the DiT action expert - specifically its cross-attention `V`, 139% wrong
+while `K` from the same call was 0.04%.
 
-- *Precision.* Identical against BF16 and F32 references. OpenVINO is 1530x less
-  weight-dtype-sensitive than ggml CPU here, and the model's own bf16/f32
-  sensitivity is rms 7.2e-4 against the error's 8.3e-2.
-- *Translation-path selection.* The naive path is taken by default and
-  `is_model_splitted` returns false for every graph of this arch; forcing all
-  graphs down the decoder-only-LLM path instead changes the answer by 1e-5 while
-  both remain 1.477 from the reference.
-- *Sequence length and token composition.* Swept 3.7x (SEQ 70 to 262) by two
-  independent routes; relative error stayed within 0.2545-0.2841 and the fraction
-  off by >1e-2 within 84.7-86.6%. Nothing accumulates.
-- *Matmul precision and the compiled-model cache.* Both bitwise no-ops.
-- *The GELU mode*, which fixed VLA-JEPA and GR00T N1.5, moves N1.7 by nothing.
-- *A missing or unsupported op.* GR00T N1.6 (works) and N1.7 (broken) have the
-  same 17-op vocabulary, and LM layer 0 is node-for-node identical except that
-  N1.7's position input is `[4*SEQ]` for IMROPE where N1.6's is `[SEQ]` for NEOX.
-  VLA-JEPA also uses IMROPE and is now clean, which weakens that lead.
-
-Three earlier claims about N1.7 turned out to be **measurement artifacts** and
-should not be reused. That its first LM block is 73-95% wrong: OpenVINO's
-`lm_h_00..03` dumps are bit-exact copies of the *input* arrays and `lm_h_04..15`
-are zeros, because the main graph has exactly one real output, `action_pred`.
-That `--flash-attn 1` yields 0.948: it actually fails with "Got less inputs than
-expected" and returns no actions, and 0.948 is `max|reference|` - the number you
-get comparing against nothing. And that honouring `GGML_TENSOR_FLAG_OUTPUT`
-changes the answer: same artifact.
-
-The next step follows from the first artifact. The stage dump cannot see inside
-the graph because ggml-openvino writes back only true graph outputs, so either
-add a debug mode that materialises selected intermediates as `ov::Result`s, or
-bisect with cut-down graphs.
+The cause was `compute_op_case`: PERMUTE op_case 2 rewrites a tensor as
+`[n_seq, -1, n_heads, head_size]` before transposing, which is right for
+llama.cpp's rope'd query and nothing else, but it was reached by *any* permute
+whose source is a view of a non-leaf. GR00T N1.7's `ggml_permute(view, 1,2,0,3)`
+over a fused KV projection took that path and came out with its elements
+rearranged. `K` uses `permute(0,2,1,3)` and happened to survive the same rewrite,
+which is why only `V` broke. Requiring an actual ROPE at the end of the
+view/reshape/cont chain sends every other permute to op_case 1, the plain
+transpose: 27% -> 0.005%, with every other arch bit-identical.
 
 **Untested archs.** π0 and OpenVLA-OFT are untested here for want of a local
 checkpoint, not because anything is known to block them; both use op sets already

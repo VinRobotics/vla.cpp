@@ -319,7 +319,7 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | Y | Y | 
 | [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | Y | Y | 
 | [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | Y | 
-| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | - | 
+| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | Y | 
 | [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | ~ | - | 
 | [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | Y | 
 | [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | Y | 

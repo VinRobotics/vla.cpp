@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Eleven fixes to the fetched ggml OpenVINO backend.
+"""Thirteen fixes to the fetched ggml OpenVINO backend.
 
 ggml-openvino is written against llama.cpp's graphs: one decoder-only
 transformer, one position input, an F16 KV cache. vla.cpp drives it with vision
@@ -134,10 +134,29 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      atoi turns junk into 0 and that would send every graph down the LLM builder
      with nothing said.
 
-Idempotent per hunk, not per file: a tree patched by an older checkout is
-missing the hunks added since, and a file-wide marker would skip them and leave
-a build that runs and is quietly wrong. Nothing is written until every anchor
-has matched, so a mismatch leaves the tree untouched.
+ 12. openvino/op_table.cpp - translate GELU as the tanh approximation.
+     ggml's GGML_UNARY_OP_GELU is the *tanh* approximation (its CPU kernel also
+     reads an fp16 lookup table), but ov::op::v7::Gelu defaults to the exact erf
+     form and both ggml GELU ops were mapped onto that default. Per node the
+     difference is small; a Qwen3-VL vision tower has dozens of them and it
+     compounds. Setting the mode explicitly moved VLA-JEPA from 5.5e-3 to 1.1e-4
+     and GR00T N1.5 from 2.7e-2 to 6.0e-4, turning both from "runs but drifts"
+     into supported. The highest-yield single fix here.
+
+ 13. ggml-decoder.cpp - require a ROPE before taking PERMUTE op_case 2.
+     op_case 2 rewrites the tensor as [n_seq, -1, n_heads, head_size] and only
+     then transposes, which is correct for llama.cpp's rope'd query and nothing
+     else. The classifier reached it for ANY permute whose source is a view of a
+     non-leaf, so GR00T N1.7's DiT cross-attention V - ggml_permute(view, 1,2,0,3)
+     over a fused KV projection - was reshaped into a shape unrelated to it and
+     came out with its elements rearranged: V was 139% wrong while K, which uses
+     permute(0,2,1,3) and happened to survive the same rewrite, was 0.04%. That
+     turned into a 27% error in the final actions. Walking the view/reshape/cont
+     chain and requiring a ROPE at the end sends every other permute to op_case 1,
+     the plain transpose. This is what makes GR00T N1.7 correct (27% -> 0.005%).
+
+Idempotent - re-running on a patched tree is a no-op, so a reconfigure that
+re-populates the FetchContent source dir is safe either way.
 
 Usage: scripts/patch_ggml_openvino.py [<llama-src-dir>]
 """
@@ -506,6 +525,25 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
         ),
     ],
     "ggml/src/ggml-openvino/ggml-decoder.cpp": [
+        (
+            """        } else {
+            // rope'ed query tensor
+            op_case = 2;""",
+            """        } else {
+            // vla.cpp: op_case 2 rewrites the tensor as [n_seq, -1, n_heads,
+            // head_size] before transposing, which is only correct for
+            // llama.cpp's rope'd query. It was reached by ANY permute whose
+            // source is a view of a non-leaf, so a DiT head split -- GR00T
+            // N1.7's cross-attention V, ggml_permute(view, 1,2,0,3) -- was
+            // reshaped into a shape that has nothing to do with it and came out
+            // with its elements rearranged. Require the rope.
+            const ggml_tensor * prod = node->src[0];
+            while (prod && prod->src[0] &&
+                   (prod->op == GGML_OP_VIEW || prod->op == GGML_OP_RESHAPE || prod->op == GGML_OP_CONT)) {
+                prod = prod->src[0];
+            }
+            op_case = (prod && prod->op == GGML_OP_ROPE) ? 2 : 1;""",
+        ),
         (
             """        } else if (src->ne[0] * src->ne[1] * src->ne[2] == node->ne[1]) {
             op_case = 3;""",
