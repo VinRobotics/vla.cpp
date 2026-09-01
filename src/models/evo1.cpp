@@ -85,7 +85,7 @@ struct Evo1ModelArch : public ModelArchBase {
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_BF16;
     // Activation dtype carried between ops. F32 by default; BF16 under
-    // VLA_EVO1_BF16_ACT, which removes the per-GEMM F32<->BF16 round trip ggml
+    // --act-dtype bf16, which removes the per-GEMM F32<->BF16 round trip ggml
     // pays when BF16 weights meet F32 activations. See mm_act/as_type below.
     ggml_type             act_type    = GGML_TYPE_F32;
 

@@ -162,21 +162,21 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
     }
 
     for (const Fused & f : fused_) {
-        std::vector<uint8_t> buf;
+        std::vector<uint8_t> parts;
         for (const std::string & s : f.srcs) {
             std::vector<uint8_t> b = g_.read_convert(s.c_str(), f.dst->type);
             if (b.empty()) {
                 std::fprintf(stderr, "vla(%s): fused fill: read %s failed\n", arch_, s.c_str());
                 return false;
             }
-            buf.insert(buf.end(), b.begin(), b.end());
+            parts.insert(parts.end(), b.begin(), b.end());
         }
-        if (buf.size() != ggml_nbytes(f.dst)) {
+        if (parts.size() != ggml_nbytes(f.dst)) {
             std::fprintf(stderr, "vla(%s): fused fill: %s size %zu vs %zu\n",
-                         arch_, ggml_get_name(f.dst), buf.size(), ggml_nbytes(f.dst));
+                         arch_, ggml_get_name(f.dst), parts.size(), ggml_nbytes(f.dst));
             return false;
         }
-        ggml_backend_tensor_set(f.dst, buf.data(), 0, buf.size());
+        ggml_backend_tensor_set(f.dst, parts.data(), 0, parts.size());
     }
     return true;
 }

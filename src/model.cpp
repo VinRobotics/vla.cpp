@@ -156,7 +156,9 @@ bool detect_arch_safetensors(const std::string& path, Arch* out) {
         return false;
     uint64_t header_size = 0;
     f.read(reinterpret_cast<char *>(&header_size), sizeof(header_size));
-    if (!f || header_size == 0 || header_size > (1u << 28))
+    // The probe only substring-searches for a namespace prefix, so it never
+    // needs more than a real header: the largest in tree is a couple of MB.
+    if (!f || header_size == 0 || header_size > (1u << 24))
         return false;
     std::string header(header_size, '\0');
     f.read(header.data(), header_size);

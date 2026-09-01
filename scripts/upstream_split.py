@@ -65,13 +65,16 @@ PRS = [
   "into 0 and that would send every graph down the LLM builder with nothing said.",
   [(D+"utils.cpp",3)]),
 
- ("openvino-gelu-erf",
-  "openvino: add the GELU_ERF translator",
-  "GGML_UNARY_OP_GELU_ERF has no entry in the op table, and with no per-op CPU\n"
-  "fallback a graph that uses it cannot run. ov's Gelu defaults to the exact erf\n"
-  "formulation, which is what GELU_ERF asks for; GGML_UNARY_OP_GELU is ggml's tanh\n"
-  "approximation and keeps the mapping it already has.",
-  [(D+"openvino/op_table.cpp",0)]),
+ ("openvino-gelu-modes",
+  "openvino: map GELU to tanh and add GELU_ERF",
+  "ggml has two GELUs: GGML_UNARY_OP_GELU is the tanh approximation and\n"
+  "GGML_UNARY_OP_GELU_ERF is the exact one. The table maps GELU onto ov's Gelu,\n"
+  "which defaults to erf, and has no entry for GELU_ERF at all. So the tanh op is\n"
+  "computed as erf, and a graph using the erf op cannot run.\n\n"
+  "Small per node, but a vision tower has dozens and it compounds: on a ggml graph\n"
+  "with a ViT encoder, fixing the mode moved two models from visibly wrong output\n"
+  "to within 1.3e-3 of the CPU-backend reference.",
+  [(D+"openvino/op_table.cpp",0),(D+"openvino/op_table.cpp",1)]),
 
  ("openvino-multiple-inp-pos",
   "openvino: stop distinct position inputs aliasing each other",
@@ -145,7 +148,7 @@ PRS = [
   "a single position input and interleaved mrope got a table built with the\n"
   "plain-rope layout. Silently wrong, not an error. The per-op path in\n"
   "translate_rope() already passes the flag; this makes the shared precompute match.",
-  [(D+"openvino/translate_session.cpp",0)]),
+  [(D+"openvino/translate_session.cpp",0),(D+"openvino/translate_session.cpp",1)]),
 
  ("openvino-intel-opencl-platform",
   "openvino: select the Intel OpenCL platform for the GPU remote context",

@@ -54,7 +54,7 @@ ckpt) model, `bitvla` for a vision-baked one.
 6. `CMakeLists.txt` - add `src/models/<name>.cpp` to `vla_core`.
 
 Then write `src/models/<name>.cpp`. Before adding a helper, check
-`src/models/`: `gguf_reader.h` (tensor and KV reads), `vision_common.h`
+`src/models/`: `gguf_reader.h` (tensor and KV reads), `modules/preprocess.h`
 (preprocessing, pixel shuffle), `dual_tower.h` (DINOv2 + SigLIP),
 `qwen3vl_vit.h` (Qwen3-VL tower), `layers/embed.h` (time embeddings, causal
 mask), `scratch_ctx.h` (compute context reuse), `backend.h` (accelerator

@@ -325,6 +325,10 @@ target_link_libraries(vla-bench PRIVATE vla_core)
 
 # Warnings and LTO for our own targets only, never the llama.cpp subtree.
 set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla vla-server vlm-server vla-cli vla-bench)
+# The CUDA targets were the only first-party code compiled without warnings.
+if(GGML_CUDA)
+    list(APPEND VLA_FIRST_PARTY_TARGETS bitvla_cuda_kernels vla_cuda_ops)
+endif()
 
 foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)
     target_compile_options(${tgt} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)

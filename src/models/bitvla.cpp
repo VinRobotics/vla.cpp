@@ -1271,6 +1271,14 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         std::fprintf(stderr, "vla(bitvla): seq=%lld > lm_max_pos=%lld\n", (long long) seq, (long long) lm_max_pos);
         return {};
     }
+    // Both LM paths index the action slots as seq-2-n_action+i and neither
+    // ggml_get_rows nor the CUDA gather bound-checks, so a short sequence would
+    // read out of bounds and come back as plausible hidden states.
+    if (seq < n_action+2) {
+        std::fprintf(stderr, "vla(bitvla): seq=%lld too short for %lld action slots\n",
+                     (long long) seq, (long long) n_action);
+        return {};
+    }
 
     std::vector<float> inputs_embeds((size_t) seq * hidden_l, 0.0f);
 

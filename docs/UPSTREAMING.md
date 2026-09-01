@@ -34,7 +34,7 @@ python3 scripts/upstream_split.py
 | `openvino-reshape-op-case` | the KV-cache-flatten guard also swallows `ggml_conv_2d`'s kernel reshape | medium |
 | `openvino-sdpa-kv-f16` | K/V stay F32 while Q is converted | medium: `Mixed input types are not supported` |
 | `openvino-naive-graph-size-env` | the 20-node naive threshold is a `constexpr` | medium: exposes `GGML_OPENVINO_NAIVE_GRAPH_SIZE` |
-| `openvino-gelu-erf` | `GGML_UNARY_OP_GELU_ERF` has no table entry | low, trivial |
+| `openvino-gelu-modes` | ggml's tanh `GELU` is mapped onto ov's erf default, and `GELU_ERF` has no entry at all | **high**: wrong activation on every GELU node. Fixing it moved GR00T N1.5 and VLA-JEPA inside the accuracy bar |
 | `openvino-intel-opencl-platform` | the GPU remote context takes the first OpenCL platform | low, but a hard startup abort when it bites |
 | `openvino-imrope-sections` | the IMROPE sector cycle ignores `sections` | low, no measured output change |
 | `openvino-imrope-mode` | the shared sin/cos table is built without the imrope flag | low, untested path |
@@ -50,7 +50,7 @@ Read `CONTRIBUTING.md` in llama.cpp. The parts that bite:
 - **AI usage must be disclosed**, and using AI to write the PR text itself is
   prohibited outright. Undisclosed use risks a ban. Write the PR bodies yourself.
 - **A modified operator needs `test-backend-ops`.** That covers
-  `openvino-gelu-erf`, `openvino-sdpa-kv-f16`, `openvino-concat-rank`,
+  `openvino-gelu-modes`, `openvino-sdpa-kv-f16`, `openvino-concat-rank`,
   `openvino-view-input-rank` and `openvino-reshape-op-case`. The others touch the
   session and cache layers, which `test-backend-ops` does not reach; those need a
   before/after run on a real graph in the PR body.

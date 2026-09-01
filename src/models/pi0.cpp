@@ -303,28 +303,33 @@ bool load_stats(gguf_reader & g, Pi0ModelArch & m) {
     m.state_std  .assign(cfg.real_state_dim,  1.f);
     m.action_mean.assign(cfg.real_action_dim, 0.f);
     m.action_std .assign(cfg.real_action_dim, 1.f);
+    // Absent stats are a valid checkpoint: identity, carry on. Stats that are
+    // present but unreadable are not - falling back to identity there hands back
+    // un-denormalised actions with nothing in the log. Note stderr, not stdout:
+    // stdout is the action stream tests/predict_check.cpp diffs.
     auto read1d = [&](const char * name, std::vector<float> & dst) {
         const ggml_tensor * t = g.meta(name);
         if (!t) {
-            std::printf("vla(pi0): %s missing - identity\n", name);
-            return;
+            std::fprintf(stderr, "vla(pi0): %s missing - identity\n", name);
+            return true;
         }
         if (t->ne[0] != (int64_t) dst.size()) {
-            std::printf("vla(pi0): %s dim mismatch - identity\n", name);
-            return;
+            std::fprintf(stderr, "vla(pi0): %s is %lld wide, expected %zu\n",
+                         name, (long long) t->ne[0], dst.size());
+            return false;
         }
-        const std::vector<float> identity = dst;
         if (!g.read_raw(name, dst.data(), dst.size()*sizeof(float))) {
-            // A short read leaves dst half-overwritten.
-            dst = identity;
-            std::printf("vla(pi0): %s read failed - identity\n", name);
+            std::fprintf(stderr, "vla(pi0): %s read failed\n", name);
+            return false;
         }
+        return true;
     };
-    read1d("state_mean",  m.state_mean);
-    read1d("state_std",   m.state_std);
-    read1d("action_mean", m.action_mean);
-    read1d("action_std",  m.action_std);
-    return true;
+    bool ok = true;
+    ok &= read1d("state_mean",  m.state_mean);
+    ok &= read1d("state_std",   m.state_std);
+    ok &= read1d("action_mean", m.action_mean);
+    ok &= read1d("action_std",  m.action_std);
+    return ok;
 }
 
 }

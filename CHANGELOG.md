@@ -46,6 +46,24 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   tag moved behind `VLA_LLAMA_TAG`.
 - The OpenVINO `find_package` failure message was unreachable, sitting after the
   fetch whose own `find_package(REQUIRED)` fired first.
+- BitVLA indexed its action slots as `seq-2-n_action+i` with no check that the
+  sequence is long enough. Neither `ggml_get_rows` nor the CUDA gather
+  bound-checks, so a short prompt read out of bounds and returned it as hidden
+  states. One guard now covers both LM paths.
+- pi0 and pi0.5 fell back to identity normalisation stats on a dimension mismatch
+  or a short read, and said so on stdout. That returns un-denormalised actions
+  from a checkpoint that looked fine. Both now fail the load, and the message
+  goes to stderr - stdout is the action stream `predict_check` diffs.
+- `scratch_ctx::reset` ignored an arena larger than the first call's, which would
+  abort in `ggml_new_tensor` if any call site ever sized one from the input.
+- The safetensors arch probe would allocate up to 256 MB for a header it only
+  substring-searches. Capped at 16 MB.
+- The two CUDA targets were the only first-party code built without
+  `-Wall -Wextra`.
+- `tests/bitvla_gemm_check.cu` had no build target and a comment claiming it was
+  never committed. It builds now, under `GGML_CUDA`.
+- Stale references to `vision_common.h` (now `modules/preprocess.h`) and to the
+  retired `VLA_EVO1_BF16_ACT` switch.
 
 ### Changed
 

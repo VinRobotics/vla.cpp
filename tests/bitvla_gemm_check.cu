@@ -26,7 +26,7 @@
  * the LM and ViT actually use, plus a ragged M to exercise the row tail.
  */
 
-#include "../src/kernels/bitvla/bitnet_kernels.h"
+#include "kernels/bitvla/bitnet_kernels.h"
 
 #include <algorithm>
 #include <cstdio>
