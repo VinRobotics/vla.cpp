@@ -21,7 +21,7 @@
 #include "model.h"
 #include "modules/preprocess.h"
 #include "scratch_ctx.h"
-#include "models/dit_common.h"
+#include "layers/embed.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"

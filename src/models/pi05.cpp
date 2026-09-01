@@ -26,7 +26,7 @@
 #include "gguf.h"
 #include "gguf_reader.h"
 #include "scratch_ctx.h"
-#include "models/dit_common.h"
+#include "layers/embed.h"
 #include "modules/preprocess.h"
 #include "env_flag.h"
 

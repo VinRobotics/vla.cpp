@@ -18,11 +18,10 @@
 ggml-openvino is written against llama.cpp's graphs: one decoder-only
 transformer, one position input, an F16 KV cache. vla.cpp drives it with vision
 towers and action experts instead, which is legal ggml but nothing the backend
-has seen. Five of the hunks below are places where an llama.cpp-shaped
-assumption is narrower than the ggml contract; the sixth is a missing cache on
-the path those graphs take. Together they are what lets SmolVLA and pi0.5 run
-end to end on the CPU, GPU and NPU plugins. Number 4 is the one that matters
-most and the one worth upstreaming.
+has seen. Eight of the hunks below narrow an llama.cpp-shaped assumption back to
+the ggml contract, one fills a gap in the op table, and two are about the path
+those graphs take. Together they are what lets SmolVLA and pi0.5 run end to end
+on the CPU, GPU and NPU plugins. Numbers 4 and 5 are the ones worth upstreaming.
 
 See docs/backend/ov.md for the measured results and for what is still blocked.
 
@@ -70,9 +69,15 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      rebuilt the decoder, re-converted the model and called compile_model() on
      every single ggml_backend_graph_compute. That is the dominant cost once a
      real graph goes through it: SmolVLA on the CPU plugin drops from 22.7 s to
-     1.8 s per prediction with the cache in place. A hit rebinds the cached
+     1.4 s per prediction with the cache in place. A hit rebinds the cached
      decoder to the new graph through the existing update_io(), which is how the
      dynamic path already handles freshly built tensors.
+     The key is `naive_key`, not `graph_key`: the latter is n_nodes plus the
+     first and last node name, which two graphs of the same size can share, and
+     a compiled model is bound to the shapes it was built for. Reusing one
+     across a shape change returns another graph's answer with no error, so the
+     key mixes in every node's op and shape. The map is bounded; see the comment
+     on the flush.
 
   6. openvino/op_table.cpp - add the four missing op translators.
      RELU, GELU_ERF, NEG (a unary op) and SQR have no entry in the table, and with no per-op
@@ -96,8 +101,8 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      elementwise ops needs both inputs at the graph's rank or the axis falls
      outside them. Evo-1 concatenates a CLS weight onto 4-D patch embeddings;
      SmolVLA concatenates a precomputed time tile onto a 4-D activation. Padding
-     here is what let vla.cpp drop an arch-specific workaround that had moved
-     SmolVLA's time tiles into their own buffer.
+     here is what saves each arch from working around it, e.g. by moving
+     SmolVLA's time tiles into a buffer of their own.
 
   9. openvino/utils.cpp - bound the interleaved-mrope sector cycle by sections.
      ggml's IMROPE cycles t/h/w by sector % 3, but only while the sector is
@@ -123,18 +128,20 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      static shapes and no KV-cache inference. That literal path is the one that
      suits a vision tower, but a vision tower is ~450 nodes. The constant
      becomes `GGML_OPENVINO_NAIVE_GRAPH_SIZE`; src/backend.h defaults it high
-     for vla.cpp and an explicit setting still wins.
+     for vla.cpp and an explicit setting still wins. Parsed with strtol, because
+     atoi turns junk into 0 and that would send every graph down the LLM builder
+     with nothing said.
 
-Idempotent - re-running on a patched tree is a no-op, so a reconfigure that
-re-populates the FetchContent source dir is safe either way.
+Idempotent per hunk, not per file: a tree patched by an older checkout is
+missing the hunks added since, and a file-wide marker would skip them and leave
+a build that runs and is quietly wrong. Nothing is written until every anchor
+has matched, so a mismatch leaves the tree untouched.
 
 Usage: scripts/patch_ggml_openvino.py [<llama-src-dir>]
 """
 
 import pathlib
 import sys
-
-MARKER = "vla.cpp:"
 
 HELPER = """// vla.cpp: select the Intel OpenCL platform. With several OpenCL runtimes
 // installed the first platform is not always Intel's, and the OpenVINO GPU
@@ -231,7 +238,7 @@ NAIVE_COMPUTE_NEW = """enum ggml_status naive_compute(ggml_cgraph * cgraph,
     // paths already do. Conversion plus compile_model dominates a naive call, so
     // without this every graph_compute pays it again.
     static const bool cache_enabled = !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_CACHE");
-    const graph_key key(cgraph);
+    const naive_key key(cgraph);
 
     std::shared_ptr<naive_runtime_ctx> entry;
     bool cache_hit = false;
@@ -242,6 +249,12 @@ NAIVE_COMPUTE_NEW = """enum ggml_status naive_compute(ggml_cgraph * cgraph,
             entry = it->second;
             cache_hit = true;
         } else {
+            // Each entry holds a compiled model, so this cannot grow forever.
+            // Flush rather than evict: a caller sees a handful of shapes, and an
+            // LRU is only worth its bookkeeping once that stops being true.
+            if (r_ctx->naive_cache.size() >= 32) {
+                r_ctx->naive_cache.clear();
+            }
             entry = std::make_shared<naive_runtime_ctx>();
             r_ctx->naive_cache[key] = entry;
         }
@@ -525,6 +538,9 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
         (
             "int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {",
             """bool GgmlOvDecoder::has_multiple_inp_pos() const {
+    if (m_cgraph == nullptr) {
+        return false;
+    }
     if (m_multi_inp_pos < 0) {
         std::set<const ggml_tensor *> seen;
         for (int i = 0; i < m_cgraph->n_nodes && seen.size() < 2; i++) {
@@ -556,12 +572,53 @@ struct naive_runtime_ctx {
     std::shared_ptr<ov::InferRequest> infer_request;
 };
 
+// vla.cpp: graph_key is {n_nodes, first name, last name}, which two graphs of the
+// same size can share. A compiled model is bound to the shapes it was built for,
+// so reusing one across a shape change returns another graph's answer with no
+// error. Mix the ops and shapes in as well.
+inline uint64_t naive_graph_sig(const ggml_cgraph * cgraph) {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        const ggml_tensor * node = cgraph->nodes[i];
+        mix((uint64_t) node->op);
+        mix((uint64_t) node->type);
+        for (int d = 0; d < GGML_MAX_DIMS; d++) {
+            mix((uint64_t) node->ne[d]);
+        }
+        for (int s = 0; s < GGML_MAX_SRC; s++) {
+            const ggml_tensor * src = node->src[s];
+            mix(src ? (uint64_t) src->type + 1 : 0ull);
+            for (int d = 0; src && d < GGML_MAX_DIMS; d++) {
+                mix((uint64_t) src->ne[d]);
+            }
+        }
+    }
+    return h;
+}
+
+struct naive_key {
+    graph_key base;
+    uint64_t  sig;
+
+    naive_key(const ggml_cgraph * cgraph) : base(cgraph), sig(naive_graph_sig(cgraph)) {}
+
+    bool operator==(const naive_key & other) const { return sig == other.sig && base == other.base; }
+};
+
+struct naive_key_hash {
+    size_t operator()(const naive_key & key) const {
+        size_t h = graph_key_hash{}(key.base);
+        return h ^ (std::hash<uint64_t>{}(key.sig) + 0x9e3779b9 + (h << 6) + (h >> 2));
+    }
+};
+
 struct decoder_runtime_ctx {""",
         ),
         (
             "    std::unordered_map<graph_key, std::shared_ptr<decoder_runtime_ctx>, graph_key_hash> decoder_cache;",
             "    std::unordered_map<graph_key, std::shared_ptr<decoder_runtime_ctx>, graph_key_hash> decoder_cache;\n"
-            "    std::unordered_map<graph_key, std::shared_ptr<naive_runtime_ctx>, graph_key_hash> naive_cache;",
+            "    std::unordered_map<naive_key, std::shared_ptr<naive_runtime_ctx>, naive_key_hash> naive_cache;",
         ),
         (
             """        decoder_cache.clear();
@@ -609,9 +666,21 @@ struct decoder_runtime_ctx {""",
             """bool is_naive(ggml_cgraph * cgraph) {
     // vla.cpp: the literal translation path suits any graph that is not a
     // decoder-only LLM, so let the caller raise the bar it is chosen under.
+    // Junk parses to 0 under atoi, which would silently send every graph down
+    // the LLM builder, so reject anything that is not a whole positive number.
     static const int naive_graph_size_threshold = [] {
         const char * env = getenv("GGML_OPENVINO_NAIVE_GRAPH_SIZE");
-        return (env && *env) ? atoi(env) : 20;
+        if (env == nullptr || *env == '\\0') {
+            return 20;
+        }
+        char *     end = nullptr;
+        const long val = strtol(env, &end, 10);
+        const int  n   = (int) val;
+        if (*end != '\\0' || val <= 0 || (long) n != val) {
+            GGML_LOG_WARN("GGML OpenVINO Backend: ignoring GGML_OPENVINO_NAIVE_GRAPH_SIZE='%s'\\n", env);
+            return 20;
+        }
+        return n;
     }();""",
         ),
     ],
@@ -635,24 +704,39 @@ struct decoder_runtime_ctx {""",
 def main() -> int:
     root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".")
 
+    pending = []
     for rel, edits in EDITS.items():
         src = root / rel
         if not src.is_file():
             print(f"patch_ggml_openvino: {src} not found", file=sys.stderr)
             return 1
-        text = src.read_text()
-        if MARKER in text:
-            print(f"patch_ggml_openvino: {rel} already patched")
-            continue
+        original = src.read_text()
+        text = original
         for anchor, replacement in edits:
+            # Per hunk, not per file. The hunk list grows between commits, so a
+            # tree patched by an older checkout still needs the newer ones and a
+            # file-wide marker would skip them, leaving a build that runs and is
+            # quietly wrong.
+            if replacement in text:
+                continue
             n = text.count(anchor)
             if n != 1:
-                print(f"patch_ggml_openvino: anchor matched {n} times in {rel}, expected 1:\n{anchor}",
+                print(f"patch_ggml_openvino: anchor matched {n} times in {rel}, expected 1:\n{anchor}\n"
+                      f"A tree patched by an older checkout reads like this. Delete the fetched "
+                      f"llama.cpp (rm -rf <build>/_deps) and reconfigure. If the tree is clean, the "
+                      f"anchor no longer matches VLA_LLAMA_TAG and needs re-targeting.",
                       file=sys.stderr)
                 return 1
-            text = text.replace(anchor, replacement)
+            text = text.replace(anchor, replacement, 1)
+        if text != original:
+            pending.append((src, text, rel))
+
+    # Every anchor matched, so nothing was half-written on the way here.
+    for src, text, rel in pending:
         src.write_text(text)
         print(f"patch_ggml_openvino: patched {rel}")
+    if not pending:
+        print("patch_ggml_openvino: already up to date")
     return 0
 
 

@@ -272,6 +272,8 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
             return {};
         }
     }
+    // ImageNet constants as bf16 rounds them (0.485 -> 0.484375). The reference
+    // preprocesses in bf16, so these are the values it actually sees.
     static const float DMEAN[3]={0.484375f,0.455078125f,0.40625f}, DSTD[3]={0.228515625f,0.2236328125f,0.224609375f};
     static const float SMEAN[3]={0.5f,0.5f,0.5f}, SSTD[3]={0.5f,0.5f,0.5f};
 

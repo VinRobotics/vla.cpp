@@ -2,6 +2,51 @@
 
 Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Added
+
+- **OpenVINO backend.** `-DGGML_OPENVINO=ON` runs the archs on Intel CPUs, iGPUs
+  and NPUs through ggml's OpenVINO backend. SmolVLA, π0.5, Evo-1 and VLA-Adapter
+  match an F32 CPU reference to 1e-3; on an Arc B390 iGPU that is 3.1x to 8.2x
+  the native CPU backend. GR00T N1.5/N1.6 and VLA-JEPA run but drift, GR00T N1.7
+  is wrong, π0 and OpenVLA-OFT are untested. See `docs/backend/ov.md`.
+- `scripts/install_ov.sh` installs the OpenVINO runtime and the Intel GPU/NPU
+  driver stack on Ubuntu 22.04 and 24.04, with the runtime archive checksummed
+  against a digest pinned in the script.
+- `scripts/patch_ggml_openvino.py` applies eleven fixes to the fetched
+  ggml-openvino sources at configure time. Each hunk is checked on its own, so a
+  `build/_deps` patched by an older checkout fails loudly instead of building
+  something quietly wrong.
+- `tests/test_graph_names.cpp` pins `vla::graph_unique_names`.
+
+### Fixed
+
+- `graph_unique_names` renamed through `ggml_format_name`, which passes the
+  tensor's own name to `vsnprintf` as both destination and `%s` source. glibc
+  empties it, so every duplicate node became the bare string `#<index>`.
+- The OpenVINO naive-path compiled-model cache was keyed on node count plus the
+  first and last node name. Two graphs of the same size collided and the second
+  ran the first's compiled model. It now also keys on every node's op and shape,
+  and the map is bounded.
+- `GGML_OPENVINO_NAIVE_GRAPH_SIZE` went through `atoi`, so junk parsed to 0 and
+  sent every graph down the decoder-only-LLM path with nothing said. Empty
+  environment values no longer count as a setting either.
+- `GGML_OPENVINO_CACHE_DIR` is cleared rather than warned about: a warm cache
+  returns wrong actions, and stderr is not always read. `VLA_ALLOW_OV_CACHE=1`
+  keeps it.
+- `scripts/print_versions.sh` printed `?` for the llama.cpp pin ever since the
+  tag moved behind `VLA_LLAMA_TAG`.
+- The OpenVINO `find_package` failure message was unreachable, sitting after the
+  fetch whose own `find_package(REQUIRED)` fired first.
+
+### Changed
+
+- `src/models/dit_common.h` is gone. It redefined six `vla::` functions that
+  `src/layers/` already had, with both copies linked into `vla_core`. Every
+  includer used only `sinusoidal_time_emb` or `build_causal_mask`, so they now
+  include `layers/embed.h`. Byte-identical across all 11 archs.
+
 ## [0.3.0] - 2026-08-14
 
 Every architecture is byte-identical to 0.2.0 at matching settings.

@@ -9,7 +9,7 @@ OS_ID=""
 OS_VERSION=""
 
 log() {
-  printf '[install_openvino_runetime] %s\n' "$*"
+  printf '[install_openvino_runtime] %s\n' "$*"
 }
 
 need_cmd() {
@@ -17,6 +17,31 @@ need_cmd() {
     echo "Error: '$1' is required but not installed." >&2
     exit 1
   }
+}
+
+# Digests of the two archives the defaults below pin. These land in /opt under
+# sudo, so a bad download is a root-level problem.
+OPENVINO_SHA256_2204="d701a115d3dc18088ff75b5b8e67a51fbf780022a3d40ee8ee7f2adfbd9915e6"
+OPENVINO_SHA256_2404="6931e5a3c9b1fc9cb170137196df2c40489625703f2d184f511b7add2c110ef8"
+
+# verify_sha256 <file> <expected-or-empty> <url>. An overridden version has no
+# digest here, so fall back to the one the mirror publishes: that catches a
+# truncated or corrupted download, not a compromised mirror.
+verify_sha256() {
+  local path="$1" want="$2" url="$3"
+  if [[ -z "${want}" ]]; then
+    want="$(curl -fsSL "${url}.sha256" | awk 'NR==1 {print $1}')"
+    if [[ ! "${want}" =~ ^[0-9a-f]{64}$ ]]; then
+      echo "Error: no usable checksum published for ${url}" >&2
+      exit 1
+    fi
+    log "Version overridden, using the mirror's own checksum."
+  fi
+  if ! printf '%s  %s\n' "${want}" "${path}" | sha256sum -c - >/dev/null; then
+    echo "Error: checksum mismatch for ${path}" >&2
+    exit 1
+  fi
+  log "Checksum OK: $(basename "${path}")"
 }
 
 detect_os() {
@@ -33,6 +58,14 @@ detect_os() {
 
   if [[ "${OS_ID}" != "ubuntu" ]]; then
     echo "Error: this installer supports Ubuntu only. Detected ID='${OS_ID:-unknown}'." >&2
+    exit 1
+  fi
+
+  # Every package name below is amd64. Say so now, not after the first 404.
+  local arch
+  arch="$(uname -m)"
+  if [[ "${arch}" != "x86_64" ]]; then
+    echo "Error: Intel publishes these packages for x86_64 only. Detected '${arch}'." >&2
     exit 1
   fi
 }
@@ -73,7 +106,9 @@ prepare_common_dependencies() {
 }
 
 add_render_group() {
-  local target_user="${SUDO_USER:-$USER}"
+  # USER is unbound, not empty, in a container or a cron shell, and set -u would
+  # abort here with the drivers already installed.
+  local target_user="${SUDO_USER:-${USER:-}}"
   if [[ -z "${target_user}" ]]; then
     return
   fi
@@ -107,14 +142,15 @@ install_gpu_2204() {
   cd "${download_dir}"
 
   for url in "${packages[@]}"; do
-    wget -c "${url}"
+    wget --no-continue "${url}"
   done
-  wget -c "${crt_base_url}/${checksum_file}"
+  wget --no-continue "${crt_base_url}/${checksum_file}"
 
-  sha256sum -c "${checksum_file}"
+  sha256sum --ignore-missing -c "${checksum_file}"
 
   shopt -s nullglob
   local artifacts=( *.deb *.ddeb )
+  shopt -u nullglob
   if [[ ${#artifacts[@]} -eq 0 ]]; then
     echo "Error: no GPU package files found for Ubuntu 22.04." >&2
     exit 1
@@ -133,16 +169,13 @@ install_npu_2204() {
   local level_zero_url="https://github.com/oneapi-src/level-zero/releases/download/v1.24.2/${level_zero_deb}"
 
   log "Installing Intel NPU drivers for Ubuntu 22.04..."
-  sudo dpkg --purge --force-remove-reinstreq \
-    intel-driver-compiler-npu \
-    intel-fw-npu \
-    intel-level-zero-npu \
-    intel-level-zero-npu-dbgsym || true
-
   mkdir -p "${download_dir}"
   cd "${download_dir}"
 
-  wget -c "${npu_url}"
+  # Download before purging. The other order leaves a machine with no NPU driver
+  # at all if the fetch fails.
+  wget --no-continue "${npu_url}"
+  wget --no-continue "${level_zero_url}"
   tar -xf "${npu_tarball}"
 
   mapfile -t npu_debs < <(find . -type f -name '*.deb' ! -name 'level-zero*.deb' | sort)
@@ -151,9 +184,13 @@ install_npu_2204() {
     exit 1
   fi
 
-  sudo dpkg -i "${npu_debs[@]}" || sudo apt-get install -f -y
+  sudo dpkg --purge --force-remove-reinstreq \
+    intel-driver-compiler-npu \
+    intel-fw-npu \
+    intel-level-zero-npu \
+    intel-level-zero-npu-dbgsym || true
 
-  wget -c "${level_zero_url}"
+  sudo dpkg -i "${npu_debs[@]}" || sudo apt-get install -f -y
   sudo dpkg -i "${level_zero_deb}" || sudo apt-get install -f -y
 
   add_render_group
@@ -173,12 +210,17 @@ install_runtime_2204() {
   local install_dir="${install_root}/openvino_${openvino_version}"
   local symlink_path="${install_root}/openvino"
   local archive_path="${download_dir}/openvino_${openvino_version}.tgz"
+  local expected_sha=""
+  if [[ "${openvino_version}" == "2025.3" && "${openvino_build}" == "19807.44526285f24" ]]; then
+    expected_sha="${OPENVINO_SHA256_2204}"
+  fi
 
   log "Installing OpenVINO runtime for Ubuntu 22.04..."
   sudo mkdir -p "${install_root}"
   mkdir -p "${download_dir}"
 
   curl -fL "${openvino_url}" --output "${archive_path}"
+  verify_sha256 "${archive_path}" "${expected_sha}" "${openvino_url}"
   rm -rf "${download_dir:?}/${openvino_dirname}"
   tar -xf "${archive_path}" -C "${download_dir}"
 
@@ -216,14 +258,15 @@ install_gpu_2404() {
   cd "${download_dir}"
 
   for url in "${packages[@]}"; do
-    wget -c "${url}"
+    wget --no-continue "${url}"
   done
-  wget -c "${crt_base_url}/${checksum_file}"
+  wget --no-continue "${crt_base_url}/${checksum_file}"
 
-  sha256sum -c "${checksum_file}"
+  sha256sum --ignore-missing -c "${checksum_file}"
 
   shopt -s nullglob
   local artifacts=( *.deb *.ddeb )
+  shopt -u nullglob
   if [[ ${#artifacts[@]} -eq 0 ]]; then
     echo "Error: no GPU package files found for Ubuntu 24.04." >&2
     exit 1
@@ -247,22 +290,28 @@ install_npu_2404() {
   )
 
   log "Installing Intel NPU drivers for Ubuntu 24.04..."
-  sudo dpkg --purge --force-remove-reinstreq "${npu_packages[@]}" || true
-
   mkdir -p "${download_dir}"
   cd "${download_dir}"
 
-  wget -c "${npu_url}"
+  # Download before purging, so a failed fetch does not leave the machine with
+  # no NPU driver at all.
+  wget --no-continue "${npu_url}"
   tar -xf "${npu_archive}"
 
   shopt -s nullglob
   local debs=( *.deb )
+  shopt -u nullglob
   if [[ ${#debs[@]} -eq 0 ]]; then
     echo "Error: no Intel NPU .deb packages found for Ubuntu 24.04." >&2
     exit 1
   fi
 
+  sudo dpkg --purge --force-remove-reinstreq "${npu_packages[@]}" || true
   sudo dpkg -i "${debs[@]}" || sudo apt-get install -f -y
+
+  # The Level Zero loader the NPU plugin dlopens. 22.04 needs it from GitHub;
+  # 24.04 has it in the archive. See docs/backend/ov.md for ZE_ENABLE_ALT_DRIVERS.
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libze1
 
   add_render_group
 
@@ -281,12 +330,17 @@ install_runtime_2404() {
   local install_dir="${install_root}/openvino_${openvino_version}"
   local symlink_path="${install_root}/openvino"
   local archive_path="${download_dir}/openvino_${openvino_version}.tgz"
+  local expected_sha=""
+  if [[ "${openvino_version}" == "2026.2.1" && "${openvino_build}" == "21919.ede283a88e3" ]]; then
+    expected_sha="${OPENVINO_SHA256_2404}"
+  fi
 
   log "Installing OpenVINO runtime for Ubuntu 24.04..."
   sudo mkdir -p "${install_root}"
   mkdir -p "${download_dir}"
 
   curl -fL "${openvino_url}" --output "${archive_path}"
+  verify_sha256 "${archive_path}" "${expected_sha}" "${openvino_url}"
   rm -rf "${download_dir:?}/${openvino_dirname}"
   tar -xf "${archive_path}" -C "${download_dir}"
 

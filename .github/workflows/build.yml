@@ -16,7 +16,7 @@ jobs:
   cpp-unit:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Compiled directly: pure, no llama.cpp or protobuf/zmq needed.
       - name: pure unit tests
         run: |
@@ -29,8 +29,8 @@ jobs:
   py-tooling:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
       - name: converter remap
@@ -41,17 +41,25 @@ jobs:
   build-gate:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: deps
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates pkg-config \
             libzmq3-dev cppzmq-dev libprotobuf-dev protobuf-compiler
-      - uses: actions/cache@v4
+      # Read the pin rather than repeat it: two copies drift and the stale one
+      # silently reuses the wrong _deps.
+      - name: read llama.cpp pin
+        id: pin
+        run: |
+          tag=$(grep -m1 'set(VLA_LLAMA_TAG' CMakeLists.txt | grep -oE 'b[0-9]+')
+          test -n "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
         with:
           path: build/_deps
-          key: llama-b10331-${{ runner.os }}
+          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}
       # Everything, not a target list: ctest registers tests this job must build,
       # and a named list goes stale the next time one is added.
       - name: build + ctest (CPU, -Wall -Wextra)
@@ -59,3 +67,13 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF -DVLA_BUILD_TESTS=ON
           cmake --build build -j"$(nproc)"
           ctest --test-dir build --output-on-failure
+      # This job is the only one that fetches llama.cpp, and neither patch script
+      # runs on a CPU build, so their anchors would otherwise rot unnoticed until
+      # someone configures a CUDA or OpenVINO tree. Patch a copy: the real one is
+      # cached.
+      - name: patch anchors still apply
+        run: |
+          cp -r build/_deps/llama-src /tmp/llama-patchtest
+          python3 scripts/patch_ggml_cuda_ext_hook.py /tmp/llama-patchtest
+          python3 scripts/patch_ggml_openvino.py /tmp/llama-patchtest
+          python3 scripts/patch_ggml_openvino.py /tmp/llama-patchtest   # idempotent

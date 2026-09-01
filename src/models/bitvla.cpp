@@ -221,6 +221,9 @@ ggml_tensor * build_lm_layer(ggml_context * C, const BitvlaModelArch & m, const 
     ggml_tensor * K  = ggml_cont(C, ggml_permute(C, kR, 0, 2, 1, 3));
     ggml_tensor * V  = ggml_cont(C, ggml_permute(C, v3, 1, 2, 0, 3));
     ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+    // Unmasked on purpose, same as openvla_oft: BitVLA is fine-tuned with
+    // OpenVLA-OFT's recipe, which swaps the causal mask for a bidirectional one
+    // so the action chunk decodes in a single pass.
     ggml_tensor * att= ggml_soft_max_ext(C, kq,  nullptr, scale, 0.0f);
     ggml_tensor * kqv= ggml_mul_mat(C, V, att);
     ggml_tensor * mer= ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), hq, seq);

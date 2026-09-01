@@ -56,8 +56,9 @@ ckpt) model, `bitvla` for a vision-baked one.
 Then write `src/models/<name>.cpp`. Before adding a helper, check
 `src/models/`: `gguf_reader.h` (tensor and KV reads), `vision_common.h`
 (preprocessing, pixel shuffle), `dual_tower.h` (DINOv2 + SigLIP),
-`qwen3vl_vit.h` (Qwen3-VL tower), `dit_common.h` (DiT time embeddings),
-`scratch_ctx.h` (compute context reuse), `backend.h` (accelerator selection).
+`qwen3vl_vit.h` (Qwen3-VL tower), `layers/embed.h` (time embeddings, causal
+mask), `scratch_ctx.h` (compute context reuse), `backend.h` (accelerator
+selection).
 
 Your loader must fail rather than return a half-built model: check every tensor
 lookup, and check `real_*_dim <= max_*_dim` (`config_is_sane` in `src/model.cpp`

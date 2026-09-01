@@ -17,7 +17,7 @@
 // end-to-end sha oracle cannot do for three of the four archs. The trig orders
 // are opposite and both match the reference.
 
-#include "models/dit_common.h"
+#include "layers/embed.h"
 
 #undef NDEBUG  // keep assert() live even in Release builds
 #include <cassert>

@@ -61,14 +61,18 @@ namespace vla {
 
 #if defined(GGML_USE_SYCL) || defined(GGML_USE_OPENVINO)
 // setenv is POSIX. _putenv_s has no "do not overwrite" mode, so check first.
+// Empty counts as unset; an empty KEY= in a compose file is not a choice.
 inline void setenv_default(const char * key, const char * val) {
 #ifdef _WIN32
     size_t len = 0;
-    if (getenv_s(&len, nullptr, 0, key) == 0 && len > 0)
+    if (getenv_s(&len, nullptr, 0, key) == 0 && len > 1)  // len counts the NUL
         return;
     _putenv_s(key, val);
 #else
-    setenv(key, val, /*overwrite=*/0);
+    const char * cur = std::getenv(key);
+    if (cur && *cur)
+        return;
+    setenv(key, val, /*overwrite=*/1);
 #endif
 }
 #endif
@@ -104,13 +108,23 @@ inline void graph_unique_names([[maybe_unused]] ggml_cgraph * gf) {
     // Leafs cannot collide: ggml names an unnamed one "leaf_<i>" as it walks the
     // graph, and a named one came from the checkpoint. Only results carry a name
     // derived from their source, so only nodes are checked.
-    std::unordered_set<std::string> seen;
     const int n = ggml_graph_n_nodes(gf);
+
+    std::unordered_set<std::string> seen;
+    seen.reserve((size_t) n);
+
+    char buf[GGML_MAX_NAME];
     for (int i = 0; i < n; ++i) {
         ggml_tensor * t = ggml_graph_node(gf, i);
         if (seen.insert(ggml_get_name(t)).second) continue;
-        ggml_format_name(t, "%s#%d", ggml_get_name(t), i);
-        seen.insert(ggml_get_name(t));
+        // Local buffer: ggml_format_name would pass t->name as both destination
+        // and "%s" source, and glibc empties it. Index leads so truncation eats
+        // the tail, not the distinguisher. k steps by n to stay out of range.
+        for (int k = i; ; k += n) {
+            std::snprintf(buf, sizeof(buf), "%d#%s", k, ggml_get_name(t));
+            if (seen.insert(buf).second) break;
+        }
+        ggml_set_name(t, buf);
     }
 #endif
 }
@@ -220,36 +234,44 @@ inline Backend backend_init(const char * tag, int n_threads) {
         // and one position input. No vla.cpp graph is that shape and all of them
         // are far larger, so raise the bar the literal path is chosen under;
         // scripts/patch_ggml_openvino.py is what makes the threshold settable.
-        // Only a default: an explicit setting wins. ggml caches the value on its
-        // first OpenVINO entry point, so it has to be set before the init below,
-        // and call_once because a concurrent model_load would race on the
-        // environment.
+        // Only a default: an explicit setting wins. The patched reader latches it
+        // on the first graph_compute, so here is early enough. call_once because
+        // a concurrent model_load would race on the environment.
         static std::once_flag naive_once;
         std::call_once(naive_once, [] { setenv_default("GGML_OPENVINO_NAIVE_GRAPH_SIZE", "1000000"); });
 
         // ggml exposes OpenVINO as a single device, so VLA_DEVICE does not apply:
         // the target is chosen by name through GGML_OPENVINO_DEVICE (CPU / GPU /
-        // NPU) and resolved inside ggml, which prints the winner as "OpenVINO:
-        // using device X" and quietly falls back to CPU when the requested one is
-        // not enumerated. Echo what was asked for, so the two lines together say
-        // whether you got the device you wanted.
-        // OpenVINO's on-disk blob cache reloads a compiled graph that computes
-        // the wrong thing here: a cold run is correct, and the next run reading
-        // those blobs back is not, with no error anywhere. Silently wrong
-        // actions are the worst failure mode a policy server has, so say so
-        // loudly rather than let it look like a free speedup.
+        // NPU) and resolved inside ggml.
+        //
+        // OpenVINO's blob cache reloads a graph that computes the wrong thing:
+        // cold run correct, next run wrong, nothing logged. A warning is no use
+        // when stderr goes nowhere, so clear it and make opting back in explicit.
         if (const char * cd = std::getenv("GGML_OPENVINO_CACHE_DIR"); cd && *cd) {
+            const char * allow = std::getenv("VLA_ALLOW_OV_CACHE");
+            const bool   keep  = allow && allow[0] == '1' && allow[1] == '\0';
             std::fprintf(stderr,
                          "%s: WARNING GGML_OPENVINO_CACHE_DIR is set. Reloading cached blobs has been\n"
                          "%s:         seen to produce silently incorrect actions on the GPU plugin.\n"
-                         "%s:         Unset it unless you have verified the outputs. See docs/backend/ov.md.\n",
-                         tag, tag, tag);
+                         "%s:         %s See docs/backend/ov.md.\n",
+                         tag, tag, tag,
+                         keep ? "Kept: VLA_ALLOW_OV_CACHE=1."
+                              : "Ignoring it; set VLA_ALLOW_OV_CACHE=1 to keep it.");
+            if (!keep) {
+#ifdef _WIN32
+                _putenv_s("GGML_OPENVINO_CACHE_DIR", "");
+#else
+                unsetenv("GGML_OPENVINO_CACHE_DIR");
+#endif
+            }
         }
 
+        // ggml falls back to CPU silently when the requested device is missing,
+        // so this line is the request. ggml logs what actually ran.
         const char * want = std::getenv("GGML_OPENVINO_DEVICE");
         b.handle = ggml_backend_openvino_init(0);
         if (b.handle) {
-            std::printf("%s: backend = OPENVINO (requested device %s)\n",
+            std::printf("%s: backend = OPENVINO (asked for %s, see ggml's \"using device\" line)\n",
                         tag, (want && *want) ? want : "CPU");
         } else {
             std::fprintf(stderr, "%s: ggml_backend_openvino_init failed; falling back to CPU\n", tag);

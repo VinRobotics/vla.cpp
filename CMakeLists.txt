@@ -24,6 +24,14 @@ if(_vla_accel_n GREATER 1)
         "Enable one accelerator backend at a time; got ${_vla_accel_str}. "
         "Configure a separate build directory per backend.")
 endif()
+# backend.h calls ggml_backend_<accel>_init directly, and GGML_BACKEND_DL builds
+# the accelerators as loadable modules that are not linked into ggml. Say so here
+# rather than at the undefined symbol.
+if(_vla_accel_n GREATER 0 AND GGML_BACKEND_DL)
+    message(FATAL_ERROR
+        "GGML_BACKEND_DL=ON is not supported with ${_vla_accel}: the backend is "
+        "built as a module and src/backend.h links its init directly.")
+endif()
 
 set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS    ON  CACHE BOOL "" FORCE)
@@ -39,6 +47,17 @@ elseif(GGML_OPENVINO)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_openvino.py <SOURCE_DIR>)
+
+    # Before the fetch: ggml's own ggml-openvino/CMakeLists.txt does
+    # find_package(OpenVINO REQUIRED ...) and would get there first, so this
+    # message only reaches anyone if it runs earlier. Same components it asks for.
+    find_package(OpenVINO QUIET COMPONENTS Runtime Threading)
+    if(NOT OpenVINO_FOUND)
+        message(FATAL_ERROR
+            "GGML_OPENVINO=ON but the OpenVINO runtime was not found. Install it "
+            "(scripts/install_ov.sh) and 'source /opt/intel/openvino/setupvars.sh' "
+            "in the shell that configures. See docs/backend/ov.md.")
+    endif()
 endif()
 # Overridable so a regression can be bisected against another tag in a separate
 # build dir (-DVLA_LLAMA_TAG=b10326) without editing this file. The patch
@@ -179,16 +198,8 @@ if(GGML_METAL AND NOT GGML_CUDA AND NOT GGML_SYCL)
 endif()
 
 if(GGML_OPENVINO AND NOT GGML_CUDA AND NOT GGML_SYCL AND NOT GGML_METAL)
-    # ggml's own OpenVINO backend target finds the toolkit; this only tells the
-    # archs which branch of the backend.h ladder to compile. Fail early with a
-    # pointer to setupvars.sh rather than deep inside the fetched tree.
-    find_package(OpenVINO QUIET COMPONENTS Runtime)
-    if(NOT OpenVINO_FOUND)
-        message(FATAL_ERROR
-            "GGML_OPENVINO=ON but the OpenVINO runtime was not found. Install it "
-            "(scripts/install_ov.sh) and 'source /opt/intel/openvino/setupvars.sh' "
-            "in the shell that configures. See docs/backend/ov.md.")
-    endif()
+    # Only tells the archs which branch of the backend.h ladder to compile; the
+    # toolkit was located before the fetch above.
     target_compile_definitions(vla_core PUBLIC GGML_USE_OPENVINO)
 endif()
 
