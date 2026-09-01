@@ -22,6 +22,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 - CI now checks that both llama.cpp patch scripts still apply, on a copy of
   the fetched tree. Neither ran on a CPU build, so their anchors could rot
   unnoticed until someone configured a CUDA or OpenVINO tree.
+- `docs/UPSTREAMING.md` and `scripts/upstream_split.py` regroup the eleven
+  ggml-openvino fixes into one llama.cpp branch per PR. They are generic
+  backend defects, not vla.cpp workarounds; landing them upstream removes the
+  configure-time patch step entirely.
 
 ### Fixed
 
