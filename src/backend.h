@@ -47,6 +47,7 @@
 #endif
 
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #ifdef GGML_USE_OPENVINO
 #include <string>
@@ -239,6 +240,21 @@ inline Backend backend_init(const char * tag, int n_threads) {
         // a concurrent model_load would race on the environment.
         static std::once_flag naive_once;
         std::call_once(naive_once, [] { setenv_default("GGML_OPENVINO_NAIVE_GRAPH_SIZE", "1000000"); });
+
+        // pi0 runs its whole 10-step denoise loop inside a single graph, so the
+        // GPU plugin's F16 arithmetic compounds across every step with nothing to
+        // reset it. On the continuous action dims that shows up as ~4e-2 against
+        // an F32 reference, and it is enough to move the bistable gripper channel
+        // across its threshold a step early -- which reads as a 1.7 error on a
+        // metric, and as the gripper closing late on a robot. Asking the GPU for
+        // F32 puts it back at 6.5e-5, and costs about 3x (383 ms -> 1170 ms).
+        // Only pi0 needs it: every other arch is inside the bar on the GPU at F16.
+        // A default, so GGML_OPENVINO_GPU_PRECISION=f16 still wins.
+        // Exact match: `tag` is the log prefix, and "vla(pi05)" contains "vla(pi0)",
+        // so anything looser would drag pi0.5 in too -- it does not need this.
+        if (tag && std::strcmp(tag, "vla(pi0)") == 0) {
+            setenv_default("GGML_OPENVINO_GPU_PRECISION", "f32");
+        }
 
         // ggml exposes OpenVINO as a single device, so VLA_DEVICE does not apply:
         // the target is chosen by name through GGML_OPENVINO_DEVICE (CPU / GPU /

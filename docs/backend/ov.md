@@ -5,24 +5,28 @@ account of how far it currently runs. Like SYCL, OpenVINO is **not**
 auto-detected: it needs an explicit `-DGGML_OPENVINO=ON` and the OpenVINO
 runtime on the configure line.
 
-> **Status: all eight tested architectures translate faithfully.** SmolVLA, π0.5,
-> Evo-1, VLA-Adapter, GR00T N1.5, GR00T N1.6, GR00T N1.7 and VLA-JEPA all agree
-> with a CPU-backend reference to 1.3e-3 or better on the OpenVINO CPU plugin -
-> Evo-1 and VLA-Adapter to about 3e-6. On the Arc B390 iGPU the speedup over the
-> native CPU backend runs from 3.0x to 9.6x. Fifteen fixes were needed, thirteen
-> of them inside ggml's OpenVINO backend, which is written against llama.cpp's
-> graphs and had never seen a vision tower or an action expert - see
-> [What had to change](#what-had-to-change).
+> **Status: all nine tested architectures translate faithfully, on the CPU plugin
+> and on the iGPU.** SmolVLA, π0, π0.5, Evo-1, VLA-Adapter, GR00T N1.5, GR00T N1.6,
+> GR00T N1.7 and VLA-JEPA all agree with a CPU-backend reference to 1.4e-3 or better
+> on the OpenVINO CPU plugin - Evo-1 and VLA-Adapter to about 3e-6 - and eight of
+> the nine are inside the same bar on the Arc B390 iGPU, where the speedup over the
+> native CPU backend runs from 3.0x to 9.6x. VLA-Adapter is the one outside it
+> there, at 5.3e-3 on actions peaking at 0.62, which is the plugin's F16 arithmetic
+> rather than a translation error.
+>
+> Fifteen fixes were needed, thirteen of them inside ggml's OpenVINO backend, which
+> is written against llama.cpp's graphs and had never seen a vision tower or an
+> action expert - see [What had to change](#what-had-to-change).
 >
 > Note the baseline: OpenVINO executes the checkpoint's BF16 weights at F32, so
 > compare against `--weight-dtype f32` or you will charge the backend for a
 > precision upgrade. See [Picking the right baseline](#picking-the-right-baseline).
 
 Measured on an **Intel Core Ultra X7 358H** (Panther Lake) with the Arc B390
-iGPU and the AI Boost NPU, Ubuntu 24.04, OpenVINO 2026.2.1, llama.cpp `b10331`,
-on the checkpoints under `vrfai/` on the Hub. `CMakeLists.txt` has since moved to
-`b10729`, which is byte-identical on the CPU backend for all eleven archs; the
-OpenVINO numbers below have not been re-measured on it.
+iGPU and the AI Boost NPU, Ubuntu 24.04, OpenVINO 2026.2.1, llama.cpp `b10729`,
+on the checkpoints under `vrfai/` on the Hub. The **fidelity** numbers for the CPU
+and GPU plugins were all re-measured on that pin. The **latency** table and the
+NPU column still date from `b10331` and are marked where they appear.
 
 OpenVINO is Intel's inference toolkit; ggml's backend translates a ggml compute
 graph into an OpenVINO model and hands it to the CPU, GPU or NPU plugin, which
@@ -130,8 +134,8 @@ cmake --build build-ov -j$(nproc)
 binaries: `libopenvino.so` and its TBB live under `/opt/intel`. Configure fails
 early with a pointer back here if the runtime is not on `CMAKE_PREFIX_PATH`.
 
-`scripts/patch_ggml_openvino.py` runs as the FetchContent patch step, so the six
-ggml fixes described in its docstring are applied automatically. There is no
+`scripts/patch_ggml_openvino.py` runs as the FetchContent patch step, so the
+thirteen ggml fixes described in its docstring are applied automatically. There is no
 manual `git apply`. The step only runs when FetchContent populates the source
 dir, so a `build/_deps` left over from an older checkout keeps the hunks it was
 patched with: delete it after pulling rather than trusting a reconfigure. The
@@ -177,6 +181,11 @@ produces silently wrong actions here - see
 one camera view, best of 4-6 iterations after 3 warmups. "CPU backend" is ggml's
 own CPU backend on the same 16-core host. No `GGML_OPENVINO_CACHE_DIR`, for the
 reason in [Known issues](#known-issues).
+
+These latencies were taken at llama.cpp `b10331` and have not been re-timed on
+`b10729`; the fidelity numbers under [Full results](#full-results) have. Read the
+GPU column for VLA-JEPA and GR00T N1.7 as the cost of a wrong answer - see
+[Known issues](#known-issues).
 
 | Model | input | CPU backend | OpenVINO CPU | OpenVINO GPU | OpenVINO NPU |
 |---|---|---:|---:|---:|---:|
@@ -236,22 +245,32 @@ precision is the same size as the numbers being reported.
 
 Against the F32 reference, which is the fidelity number:
 
-| Model | OpenVINO CPU | OpenVINO GPU | OpenVINO NPU |
+| Model | OpenVINO CPU | OpenVINO GPU | OpenVINO NPU (`b10331`) |
 |---|---:|---:|---:|
-| VLA-Adapter | 2.4e-6 | 3.2e-3 | not supported |
-| Evo-1       | 3.5e-6 | 1.2e-3 | not supported |
-| π0.5        | 3.5e-5 | 4.7e-4 | 9.9e-4 |
-| VLA-JEPA    | 1.1e-4 | 8.7e-3 | returns NaN |
-| GR00T N1.5  | 6.0e-4 | 4.7e-3 | plugin throws |
-| GR00T N1.6  | 1.0e-3 | 2.0e-3 | plugin throws |
-| SmolVLA     | 8.9e-4 | 1.3e-3 | 1.7e-2 |
-| GR00T N1.7  | 4.2e-4 | 4.1e-3 | not attempted |
+| Evo-1       | 2.2e-6 | 6.0e-4 | not supported |
+| VLA-Adapter | 3.9e-6 | 6.8e-3 | not supported |
+| π0.5        | 6.1e-5 | 7.6e-4 | 9.9e-4 |
+| VLA-JEPA    | 7.7e-5 | 2.6e-3 | returns NaN |
+| GR00T N1.7  | 3.9e-4 | 2.6e-3 | not attempted |
+| π0          | 5.8e-4 | 6.6e-5 | not attempted |
+| GR00T N1.5  | 6.0e-4 | 4.6e-3 | plugin throws |
+| GR00T N1.6  | 1.1e-3 | 1.4e-3 | plugin throws |
+| SmolVLA     | 1.4e-3 | 2.6e-3 | 1.7e-2 |
 
-Every tested arch is inside the 2.9e-3 bar on the CPU plugin, most by
-one to three orders of magnitude. On the GPU the picture is looser because that
-plugin computes in F16: VLA-JEPA (8.7e-3), GR00T N1.5 (4.7e-3) and VLA-Adapter (3.2e-3) sit outside the bar there
-even though all three are far inside it on the CPU plugin. Judge translation
-fidelity on the CPU plugin; treat the GPU as a separate precision target.
+Every tested arch is inside the 2.9e-3 bar on the CPU plugin, most by one to
+three orders of magnitude, and eight of the nine are inside it on the GPU as well
+(GR00T N1.5's 4.6e-3 against F32 is 1.6e-3 against BF16, the tighter reference for
+that arch).
+
+The one that sits outside is **VLA-Adapter**, at 6.8e-3 against F32 and 5.3e-3
+against BF16 on actions peaking at 0.62. That is the GPU plugin computing in F16
+and is a precision effect, not a translation error: the same arch is 3.9e-6 on the
+CPU plugin. Judge translation fidelity on the CPU plugin and treat the GPU as a
+separate precision target.
+
+π0 is the exception in the other direction - it is *tighter* on the GPU (6.6e-5)
+than on the CPU plugin, because it is the one arch that runs the GPU at F32; see
+[Known issues](#known-issues).
 
 Two effects explain the residuals that remain. The GPU plugin's F16 arithmetic is
 one. The other is SmolVLA on the NPU (1.7e-2), whose compile config turns on
@@ -294,6 +313,8 @@ than the ggml contract, or fills a gap:
 | Fix | What it addresses |
 |---|---|
 | **PERMUTE op_case 2 requires a ROPE** | **assumes any permute of a view is a rope'd query** |
+| **Two elementwise adds never stacked on a GEMM** | **the GPU plugin folds both in as post-ops and drops the second operand** |
+| GPU inference precision exposed | the plugin's F16 default compounds through a denoise loop unrolled in one graph |
 | **GELU translated as tanh, not erf** | **assumes ggml's GELU is the exact erf form** |
 | Intel OpenCL platform selection | assumes the first OpenCL platform is Intel's |
 | RESHAPE `op_case` guard | assumes a reshape flattening dims 0-2 is the KV-cache flatten |
@@ -301,18 +322,53 @@ than the ggml contract, or fills a gap:
 | **Position inputs keyed per tensor** | **assumes a graph has exactly one position input** |
 | Folded weights padded to full rank | a 2-D weight becomes a rank-2 constant, but views index it at ggml rank |
 | CONCAT input ranks aligned | same rank-2 constants, and concat cannot broadcast rank |
-| Missing op translators | RELU, GELU_ERF, NEG, SQR had no table entry |
+| Missing `GELU_ERF` translator | the exact-erf GELU op had no table entry at all, so a graph using it could not run |
 | Naive-path graph cache | that path re-compiled the whole model on every graph_compute, and its `graph_key` is a node count plus two names, which two graphs can share |
 | Interleaved-mrope sectors bounded | the sector cycle ignored `sections`, so the last few took the wrong stream |
-| Interleaved-mrope mode passed through | the shared sin/cos table was built with the plain-rope layout |
 | Naive-path threshold settable | the 20-node constant is what picks the literal path |
 
 Five are worth expanding.
 
 **The PERMUTE op_case guard** is what makes GR00T N1.7 correct, and it is the
 subtlest of the set: a classifier that sent an ordinary head-split permute down
-an LLM-specific rewrite. See [What is left](#what-is-left) for the bisect that
-found it.
+an LLM-specific rewrite.
+
+It used to return plausible-looking but wrong actions - max|delta| 1.477, 86% of
+values off by more than 1e-2. Bisecting with cut-down graphs found it: truncating
+the graph at a stage makes that stage the terminal node, which is the only way to
+observe an interior tensor under this backend. Everything through the vision
+tower, the LM and the vlsa stack was clean at 0.05-0.08%, and the error appeared
+entirely inside the DiT action expert - specifically its cross-attention `V`, 139%
+wrong while `K` from the same call was 0.04%.
+
+op_case 2 rewrites a tensor as `[n_seq, -1, n_heads, head_size]` before
+transposing, which is right for llama.cpp's rope'd query and nothing else, but it
+was reached by *any* permute whose source is a view of a non-leaf. GR00T N1.7's
+`ggml_permute(view, 1,2,0,3)` over a fused KV projection took that path and came
+out with its elements rearranged. `K` uses `permute(0,2,1,3)` and happened to
+survive the same rewrite, which is why only `V` broke. Requiring an actual ROPE at
+the end of the view/reshape/cont chain sends every other permute to op_case 1, the
+plain transpose: 27% -> 0.005%, with every other arch bit-identical.
+
+**The double-elementwise guard** is what makes the iGPU usable for the Eagle-VLM
+archs. The GPU plugin folds elementwise ops into the preceding GEMM as post-ops.
+Given `ADD(ADD(residual, GEMM), graph_input)` it folds both, and the second
+operand is silently lost - the result equals the inner add, as though the outer
+one never ran. Nothing is logged. A llama.cpp graph never builds that chain, one
+residual add per sub-block; a VLA does, wherever a tower's features are added on
+top of an FFN residual.
+
+Found by bisecting VLA-JEPA with `GGML_OPENVINO_DEBUG_NODE`, which materialises
+an arbitrary intermediate as an extra `ov::Result` - the only way to observe an
+interior tensor here, since the backend writes back true graph outputs and
+nothing else. Its ViT and DiT graphs matched the CPU plugin to 0.2%; the VLM
+prefill was already wrong at the end of layer 0; and inside that layer a binary
+search over the nodes landed on the FFN residual add sitting under the deepstack
+add. Only the first three layers carry a deepstack add, which is why only those
+three nodes mattered. Addition is associative, so the fix re-hangs the outer add
+on the inner one's non-GEMM operand and the GEMM keeps a single post-op:
+VLA-JEPA 5.4e-1 -> 2.6e-3 and GR00T N1.7 1.9e0 -> 2.6e-3, with the CPU plugin
+unchanged. The same fusion path already had a known defect with broadcast `DIV`.
 
 **The GELU mode** is the highest-yield single fix in the list. ggml's
 `GGML_UNARY_OP_GELU` is the *tanh* approximation - its CPU kernel additionally
@@ -359,6 +415,16 @@ None of the vla.cpp-side changes alter what the other backends compute:
 build of the base commit, for every model tested.
 
 ## Known issues
+
+**π0 needs F32 on the GPU, and gets it by default.** The GPU plugin computes in
+F16, which is most of why it is fast. π0 unrolls its whole 10-step denoise loop
+inside a single graph, so that error compounds across every step with nothing to
+reset it: its continuous action dims land 4e-2 from an F32 reference, and its
+gripper - a saturating ±1 channel - crosses its threshold one step late. On a
+metric that reads as max|delta| 1.7; on a robot it is a late grasp.
+`GGML_OPENVINO_GPU_PRECISION=f32` puts it back at 6.5e-5, and `backend_init`
+defaults it for π0 alone because it costs about 3x (383 ms -> 1,170 ms). Set
+`GGML_OPENVINO_GPU_PRECISION=f16` to override. No other arch needs it.
 
 **Do not set `GGML_OPENVINO_CACHE_DIR`.** OpenVINO's on-disk blob cache reloads a
 compiled graph that computes the wrong thing. A cold run against a fresh cache
@@ -419,30 +485,11 @@ is therefore **untested**: only BitVLA emits it, and BitVLA never reaches this
 backend. It is in the table because it is a real gap in ggml-openvino, not
 because anything here exercises it.
 
-**GR00T N1.7 was the last failure and is fixed.** It used to return
-plausible-looking but wrong actions - max|delta| 1.477, 86% of values off by more
-than 1e-2. Bisecting with cut-down graphs found it: truncating the graph at a
-stage makes that stage the terminal node, which is the only way to observe an
-interior tensor under this backend. Everything through the vision tower, the LM
-and the vlsa stack was clean at 0.05-0.08%, and the error appeared entirely
-inside the DiT action expert - specifically its cross-attention `V`, 139% wrong
-while `K` from the same call was 0.04%.
-
-The cause was `compute_op_case`: PERMUTE op_case 2 rewrites a tensor as
-`[n_seq, -1, n_heads, head_size]` before transposing, which is right for
-llama.cpp's rope'd query and nothing else, but it was reached by *any* permute
-whose source is a view of a non-leaf. GR00T N1.7's `ggml_permute(view, 1,2,0,3)`
-over a fused KV projection took that path and came out with its elements
-rearranged. `K` uses `permute(0,2,1,3)` and happened to survive the same rewrite,
-which is why only `V` broke. Requiring an actual ROPE at the end of the
-view/reshape/cont chain sends every other permute to op_case 1, the plain
-transpose: 27% -> 0.005%, with every other arch bit-identical.
-
-**Untested archs.** π0 and OpenVLA-OFT are untested here for want of a local
-checkpoint, not because anything is known to block them; both use op sets already
-covered by tested archs (π0 matches π0.5, OpenVLA-OFT matches VLA-Adapter). Both
-are `~` in the README matrix; treat any untested arch that way until it has
-actually produced actions.
+**Untested archs.** OpenVLA-OFT is untested here for want of a local checkpoint,
+not because anything is known to block it; it uses an op set already covered by
+VLA-Adapter. It is `~` in the README matrix; treat any untested arch that way until
+it has actually produced actions. π0 has now been tested and translates faithfully
+on the CPU plugin - it is one of the three that are wrong on the iGPU.
 
 **Splitting across devices.** Intel's own
 [π0.5 write-up](https://docs.openedgeplatform.intel.com/2026.1/OEP-articles/publications/optimizing-pi0.5-lva-model.html)

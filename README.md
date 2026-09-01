@@ -315,7 +315,7 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | Model | CPU (x86-64 / ARM) | CUDA | [SYCL (Intel)](docs/backend/sycl.md) | [Metal](docs/backend/metal.md) | [OpenVINO](docs/backend/ov.md) |
 |---|:--:|:--:|:--:|:--:|:--:|
 | [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | Y | 
-| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | ~ | 
+| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | Y | 
 | [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | Y | Y | 
 | [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | Y | Y | 
 | [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | Y | 
@@ -325,6 +325,9 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | Y | 
 | [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | ~ | 
 | [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | 
+
+Under OpenVINO, π0 runs the Intel iGPU at F32 rather than the default F16, which
+`backend_init` sets for it - see [Known issues](docs/backend/ov.md#known-issues).
 
 ---
 

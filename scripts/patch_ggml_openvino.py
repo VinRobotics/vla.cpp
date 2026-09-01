@@ -23,6 +23,12 @@ the ggml contract, one fills a gap in the op table, and two are about the path
 those graphs take. Together they are what lets SmolVLA and pi0.5 run end to end
 on the CPU, GPU and NPU plugins. Numbers 4 and 5 are the ones worth upstreaming.
 
+A hunk that applies is not a hunk that runs. Whenever VLA_LLAMA_TAG moves, check
+that each patched function still has a live caller, not just that its anchor
+still matches: b10729 moved the position-input naming out of the GgmlOvDecoder
+member that fix 4 patches and into a free function, and the fix went silently
+dead while applying cleanly.
+
 See docs/backend/ov.md for the measured results and for what is still blocked.
 
   1. ggml-openvino-extra.cpp - pick the *Intel* OpenCL platform.
@@ -58,10 +64,15 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      "Multiply (Split[1]:f32[1,113,5,32], Multiply[0]:f32[1,50,1,32])
       Argument shapes are inconsistent."
      When the graph has more than one, keep each tensor's own name. Nothing is
-     then called "inp_pos", so add_rope_sin_cos() returns early and the existing
-     fallback in translate_rope() builds sin/cos per op from its own position
-     input. Single-position graphs are untouched and keep the shared table.
+     then called "inp_pos", so translate_rope() falls back to building sin/cos
+     per op from its own position input. Single-position graphs are untouched.
      This one is what carries an arch through to a full prediction.
+
+     Patch the free function get_tensor_graph_input_ov_name() in
+     ggml-decoder.cpp, not just the GgmlOvDecoder member. b10729 relocated the
+     naming into that free function and left the member behind with no callers;
+     patching only the member applies cleanly and does nothing at all. Both are
+     patched here so the fix survives whichever one upstream keeps.
 
   5. utils.{h,cpp} - cache what the naive path compiles.
      The dynamic and static paths keep a `graph_key`-indexed cache of the
@@ -86,7 +97,9 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      computed as erf, and an arch using the erf op could not run at all - and
      with no per-op CPU fallback in the core, "could not run" means the whole
      prediction. Small per node, but a vision tower has dozens and the error
-     compounds: fixing it is what moved GR00T N1.5 and VLA-JEPA inside the bar.
+     compounds: setting the mode explicitly moved VLA-JEPA from 5.5e-3 to 1.1e-4
+     and GR00T N1.5 from 2.7e-2 to 6.0e-4, turning both from "runs but drifts"
+     into supported. The highest-yield single fix here.
      RELU, NEG and SQR were missing here too; upstream added all three in b10729.
 
   7. openvino/utils.cpp - give a folded weight its full rank before slicing.
@@ -117,15 +130,7 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      because it removes a real divergence from the reference, not because a
      measurement demanded it.
 
- 10. openvino/translate_session.cpp - pass the mode to the shared sin/cos table.
-     add_rope_sin_cos() called make_sin_cos() without the imrope flag, so a graph
-     with a single position input and interleaved mrope got a table built with
-     the plain-rope layout - silently wrong, not an error. Same caveat as 9: every
-     mrope arch here has several position inputs, so the shared precompute is
-     skipped and this path is untested. It is strictly closer to the reference
-     than what it replaces.
-
- 11. utils.cpp - make the naive-path graph-size threshold settable.
+ 10. utils.cpp - make the naive-path graph-size threshold settable.
      Graphs under 20 nodes bypass the LLM decoder and translate literally, with
      static shapes and no KV-cache inference. That literal path is the one that
      suits a vision tower, but a vision tower is ~450 nodes. The constant
@@ -134,16 +139,7 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      atoi turns junk into 0 and that would send every graph down the LLM builder
      with nothing said.
 
- 12. openvino/op_table.cpp - translate GELU as the tanh approximation.
-     ggml's GGML_UNARY_OP_GELU is the *tanh* approximation (its CPU kernel also
-     reads an fp16 lookup table), but ov::op::v7::Gelu defaults to the exact erf
-     form and both ggml GELU ops were mapped onto that default. Per node the
-     difference is small; a Qwen3-VL vision tower has dozens of them and it
-     compounds. Setting the mode explicitly moved VLA-JEPA from 5.5e-3 to 1.1e-4
-     and GR00T N1.5 from 2.7e-2 to 6.0e-4, turning both from "runs but drifts"
-     into supported. The highest-yield single fix here.
-
- 13. ggml-decoder.cpp - require a ROPE before taking PERMUTE op_case 2.
+ 11. ggml-decoder.cpp - require a ROPE before taking PERMUTE op_case 2.
      op_case 2 rewrites the tensor as [n_seq, -1, n_heads, head_size] and only
      then transposes, which is correct for llama.cpp's rope'd query and nothing
      else. The classifier reached it for ANY permute whose source is a view of a
@@ -155,6 +151,37 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      chain and requiring a ROPE at the end sends every other permute to op_case 1,
      the plain transpose. This is what makes GR00T N1.7 correct (27% -> 0.005%).
 
+ 12. ggml-decoder.cpp + openvino/op/add.cpp - do not stack two elementwise adds
+     on a GEMM. The GPU plugin folds elementwise ops into the preceding GEMM as
+     post-ops. Given ADD(ADD(residual, GEMM), graph_input) it folds both, and the
+     second operand is silently lost: the result equals the inner add, as though
+     the outer one never ran. Nothing is logged. An llama.cpp graph never builds
+     that chain - one residual add per sub-block - but a VLA does, wherever a
+     tower's features are added on top of an FFN residual. It cost VLA-JEPA,
+     GR00T N1.7 and pi0 their GPU support, while every other arch was unaffected.
+     Addition is associative, so re-hang the outer add on the inner one's
+     non-GEMM operand: the GEMM keeps exactly one post-op and the arithmetic is
+     unchanged. op_case 2/3 records which of the inner add's operands is the
+     GEMM, because ggml's operand order is not fixed.
+     Found by bisecting VLA-JEPA with GGML_OPENVINO_DEBUG_NODE: its ViT and DiT
+     graphs matched the CPU plugin to 0.2%, the VLM prefill was already wrong at
+     the end of layer 0, and within that layer the divergence was one node - the
+     FFN residual add under the deepstack add. The same fusion path already has a
+     known defect with broadcast DIV; see ggml_backend_openvino_supports_op.
+
+ 13. ggml-openvino-extra.cpp - expose the GPU plugin's inference precision.
+     The GPU plugin computes in f16 unless told otherwise, which is most of why
+     it is fast, and for nearly every graph that is the right trade. It is not
+     the right trade for a graph carrying a long serial chain - a flow-matching
+     denoise loop unrolled inside one graph - because the error compounds across
+     every step with nothing to reset it, and a saturating output channel can
+     then cross its threshold in the wrong place. pi0 does exactly that: on the
+     GPU its continuous action dims land 4e-2 from an F32 reference and its
+     bistable gripper flips one step early, which is a 1.7 max|delta| on a metric
+     and a late grasp on a robot. GGML_OPENVINO_GPU_PRECISION=f32 puts it at
+     6.5e-5. Exposed rather than forced: f32 costs about 3x on this plugin, so
+     src/backend.h defaults it for pi0 alone and an explicit setting still wins.
+
 Idempotent - re-running on a patched tree is a no-op, so a reconfigure that
 re-populates the FetchContent source dir is safe either way.
 
@@ -162,6 +189,7 @@ Usage: scripts/patch_ggml_openvino.py [<llama-src-dir>]
 """
 
 import pathlib
+import re
 import sys
 
 HELPER = """// vla.cpp: select the Intel OpenCL platform. With several OpenCL runtimes
@@ -353,6 +381,64 @@ EDITS = {
         ),
         (USM_LOOKUP % (("clEnqueueMemFillINTEL",) * 2), USM_LOOKUP_NEW % (("clEnqueueMemFillINTEL",) * 2)),
         (USM_LOOKUP % (("clEnqueueMemcpyINTEL",) * 2), USM_LOOKUP_NEW % (("clEnqueueMemcpyINTEL",) * 2)),
+        (
+            """        "GGML_OPENVINO_LOG_UNSUPPORTED_OPS",
+    };""",
+            """        "GGML_OPENVINO_LOG_UNSUPPORTED_OPS",
+        // vla.cpp: f16 (default) or f32 for the GPU plugin's inference precision.
+        "GGML_OPENVINO_GPU_PRECISION",
+    };""",
+        ),
+        (
+            """    } else if (cache_dir && strlen(cache_dir) > 0) {
+        compile_config.insert(ov::cache_dir(cache_dir));
+        compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
+    }""",
+            """    } else if (cache_dir && strlen(cache_dir) > 0) {
+        compile_config.insert(ov::cache_dir(cache_dir));
+        compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
+    }
+
+    // vla.cpp: the GPU plugin computes in f16 unless told otherwise, which is why
+    // it is fast. A model whose graph carries a long serial chain -- a denoise
+    // loop unrolled inside one graph -- compounds that across every step, and a
+    // saturating output channel can then cross its threshold in the wrong place.
+    // Exposed rather than forced: f32 costs roughly 3x on this plugin.
+    if (device_name == "GPU") {
+        const char * gpu_prec = ggml_openvino_getenv_str("GGML_OPENVINO_GPU_PRECISION", "f16");
+        if (strcmp(gpu_prec, "f32") == 0) {
+            compile_config.insert(ov::hint::inference_precision(ov::element::f32));
+        } else if (strcmp(gpu_prec, "f16") != 0) {
+            GGML_LOG_WARN("GGML OpenVINO Backend: GGML_OPENVINO_GPU_PRECISION=%s is not f16 or f32, ignoring\\n",
+                          gpu_prec);
+        }
+    }""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/op/add.cpp": [
+        (
+            """    auto input_0 = process_view_input_new(context, 0);
+    auto input_1 = process_view_input_new(context, 1);
+    auto res = std::make_shared<ov::op::v1::Add>(input_0, input_1);""",
+            """    auto input_0 = process_view_input_new(context, 0);
+    auto input_1 = process_view_input_new(context, 1);
+
+    // vla.cpp: re-hang the outer add on the inner one's non-GEMM operand so the
+    // GEMM is left with a single post-op. Addition is associative.
+    const int oc = context.get_op_case();
+    if (oc == 2 || oc == 3) {
+        auto inner = input_0.get_node_shared_ptr();
+        if (inner->get_input_size() == 2) {
+            const size_t keep = (oc == 2) ? 0 : 1;
+            const size_t fold = 1 - keep;
+            auto folded = std::make_shared<ov::op::v1::Add>(inner->input_value(fold), input_1);
+            auto res2 = std::make_shared<ov::op::v1::Add>(inner->input_value(keep), folded);
+            return rename_outputs_with_suffix({res2}, context.get_name());
+        }
+    }
+
+    auto res = std::make_shared<ov::op::v1::Add>(input_0, input_1);""",
+        ),
     ],
     "ggml/src/ggml-openvino/openvino/op/concat.cpp": [
         (
@@ -525,6 +611,43 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
         ),
     ],
     "ggml/src/ggml-openvino/ggml-decoder.cpp": [
+        (
+            """    case GGML_OP_ADD: {
+        if (is_moe_expert_sum_add(node)) {""",
+            """    case GGML_OP_ADD: {
+        // vla.cpp: ADD(ADD(.., GEMM), graph-input). Two elementwise ops chained on a
+        // GEMM; the GPU plugin folds both in as post-ops and loses the second operand.
+        // op_case 2 = the inner add's input 0 is the GEMM, 3 = its input 1 is.
+        {
+            const ggml_tensor * inner = node->src[0];
+            const ggml_tensor * other = node->src[1];
+            if (inner && other && inner->op == GGML_OP_ADD && other->op == GGML_OP_NONE) {
+                for (int k = 0; k < 2; k++) {
+                    const ggml_tensor * s = inner->src[k];
+                    while (s && s->src[0] &&
+                           (s->op == GGML_OP_VIEW || s->op == GGML_OP_RESHAPE || s->op == GGML_OP_CONT)) {
+                        s = s->src[0];
+                    }
+                    if (s && s->op == GGML_OP_MUL_MAT) {
+                        op_case = (k == 0) ? 2 : 3;
+                    }
+                }
+            }
+        }
+        if (is_moe_expert_sum_add(node)) {""",
+        ),
+        (
+            """    if (GgmlOvDecoder::is_inp_pos(tensor, op)) {
+        return "inp_pos";
+    }""",
+            """    if (GgmlOvDecoder::is_inp_pos(tensor, op)) {
+        // vla.cpp: this free function is the live naming path -- the
+        // GgmlOvDecoder member of the same intent is unreferenced at b10729.
+        // Only collapse ROPE position inputs onto one "inp_pos" parameter when
+        // the graph really has one. See scripts/patch_ggml_openvino.py.
+        return decoder->has_multiple_inp_pos() ? get_tensor_ov_name(cgraph, tensor) : std::string("inp_pos");
+    }""",
+        ),
         (
             """        } else {
             // rope'ed query tensor
@@ -702,21 +825,17 @@ struct decoder_runtime_ctx {""",
     }();""",
         ),
     ],
-    "ggml/src/ggml-openvino/openvino/translate_session.cpp": [
-        (
-            '#include "translate_session.h"\n',
-            '#include "translate_session.h"\n\n#include "ggml.h"   // vla.cpp: GGML_ROPE_TYPE_IMROPE\n',
-        ),
-        (
-            "    auto sin_cos = make_sin_cos(rope_params, inp_pos, rope_freqs_weight);",
-            """    // vla.cpp: rope_params[2] is the mode. The shared precompute never looked at
-    // it, so a graph with one position input and interleaved mrope got a table
-    // built with the plain-rope layout -- silently wrong actions, not an error.
-    const bool imrope = rope_params[2] == GGML_ROPE_TYPE_IMROPE;
-    auto sin_cos = make_sin_cos(rope_params, inp_pos, rope_freqs_weight, imrope, false);""",
-        ),
-    ],
 }
+
+
+# A duplicate key in EDITS silently drops the earlier entry's hunks -- Python keeps
+# the last one and nothing complains. That happened once and took the whole Intel
+# OpenCL fix out of the patch, so compare the literal keys against the dict.
+_keys = re.findall(r'^    "([^"]+)": \[$', pathlib.Path(__file__).read_text(), re.M)
+if len(_keys) != len(EDITS):
+    _dup = sorted({k for k in _keys if _keys.count(k) > 1})
+    sys.exit(f"patch_ggml_openvino: EDITS has {len(_keys)} literal keys but {len(EDITS)} entries; "
+             f"duplicate key(s): {_dup}")
 
 
 def main() -> int:

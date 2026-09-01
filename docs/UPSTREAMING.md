@@ -37,7 +37,9 @@ python3 scripts/upstream_split.py
 | `openvino-gelu-modes` | ggml's tanh `GELU` is mapped onto ov's erf default, and `GELU_ERF` has no entry at all | **high**: wrong activation on every GELU node. Fixing it moved GR00T N1.5 and VLA-JEPA inside the accuracy bar |
 | `openvino-intel-opencl-platform` | the GPU remote context takes the first OpenCL platform | low, but a hard startup abort when it bites |
 | `openvino-imrope-sections` | the IMROPE sector cycle ignores `sections` | low, no measured output change |
-| `openvino-imrope-mode` | the shared sin/cos table is built without the imrope flag | low, untested path |
+| `openvino-gemm-double-eltwise` | the GPU plugin folds two chained elementwise adds into the preceding GEMM and silently drops the second operand | **highest**: wrong output on GPU with nothing logged, on any graph that adds a tower's features on top of an FFN residual |
+| `openvino-gpu-precision-env` | the GPU plugin's f16 default compounds through a long serial chain in one graph | medium: exposes `GGML_OPENVINO_GPU_PRECISION`, default unchanged |
+| `openvino-permute-op-case` | PERMUTE `op_case` 2 is reached by any permute over a view of a non-leaf, not just llama.cpp's rope'd query | **high**: a DiT cross-attention V comes out with its elements rearranged and nothing is reported |
 
 `RELU`, `NEG` and `SQR` were in the patch too. Upstream added all three in
 `b10729`, so they are not in the series.
@@ -76,7 +78,7 @@ already proven on hardware.
 
 ## Status
 
-The eleven branches carry code that has run on an Intel Core Ultra X7 358H (Arc
+The thirteen branches carry code that has run on an Intel Core Ultra X7 358H (Arc
 B390 iGPU, AI Boost NPU) through vla.cpp's own OpenVINO builds - see
 `docs/backend/ov.md` for what that covered. They have **not** been compiled from
 these branches: no OpenVINO runtime is installed on the machine that split them,
