@@ -63,7 +63,7 @@ endif()
 # build dir (-DVLA_LLAMA_TAG=b10326) without editing this file. The patch
 # anchors in scripts/patch_ggml_cuda_ext_hook.py and scripts/patch_ggml_openvino.py
 # are checked against the default.
-set(VLA_LLAMA_TAG "b10331" CACHE STRING "llama.cpp tag to fetch")
+set(VLA_LLAMA_TAG "b10729" CACHE STRING "llama.cpp tag to fetch")
 
 include(FetchContent)
 FetchContent_Declare(llama

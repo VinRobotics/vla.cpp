@@ -20,8 +20,10 @@ runtime on the configure line.
 > precision upgrade. See [Picking the right baseline](#picking-the-right-baseline).
 
 Measured on an **Intel Core Ultra X7 358H** (Panther Lake) with the Arc B390
-iGPU and the AI Boost NPU, Ubuntu 24.04, OpenVINO 2026.2.1, llama.cpp `b10331`
-(the tag `CMakeLists.txt` pins), on the checkpoints under `vrfai/` on the Hub.
+iGPU and the AI Boost NPU, Ubuntu 24.04, OpenVINO 2026.2.1, llama.cpp `b10331`,
+on the checkpoints under `vrfai/` on the Hub. `CMakeLists.txt` has since moved to
+`b10729`, which is byte-identical on the CPU backend for all eleven archs; the
+OpenVINO numbers below have not been re-measured on it.
 
 OpenVINO is Intel's inference toolkit; ggml's backend translates a ggml compute
 graph into an OpenVINO model and hands it to the CPU, GPU or NPU plugin, which

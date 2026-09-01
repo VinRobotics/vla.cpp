@@ -19,6 +19,9 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   `build/_deps` patched by an older checkout fails loudly instead of building
   something quietly wrong.
 - `tests/test_graph_names.cpp` pins `vla::graph_unique_names`.
+- CI now checks that both llama.cpp patch scripts still apply, on a copy of
+  the fetched tree. Neither ran on a CPU build, so their anchors could rot
+  unnoticed until someone configured a CUDA or OpenVINO tree.
 
 ### Fixed
 
@@ -42,6 +45,11 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Changed
 
+- llama.cpp pinned at `b10729`, up from `b10331`. Brings OpenVINO 2026.3.1, the
+  IM2COL+MatMul to native-convolution fusion, and the `RELU`/`NEG`/`SQR`
+  translators, which the local patch no longer has to add. Byte-identical on the
+  CPU backend for all eleven archs. The build.yml cache key now reads the tag out
+  of `CMakeLists.txt` instead of repeating it.
 - `src/models/dit_common.h` is gone. It redefined six `vla::` functions that
   `src/layers/` already had, with both copies linked into `vla_core`. Every
   includer used only `sinusoidal_time_emb` or `build_causal_mask`, so they now

@@ -79,13 +79,15 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      key mixes in every node's op and shape. The map is bounded; see the comment
      on the flush.
 
-  6. openvino/op_table.cpp - add the four missing op translators.
-     RELU, GELU_ERF, NEG (a unary op) and SQR have no entry in the table, and with no per-op
-     CPU fallback in the core an arch that uses one cannot run at all. Between
-     them they block every arch except SmolVLA, pi0 and pi0.5. All four map
-     onto ov ops directly: Relu, Gelu (whose default is the exact erf form
-     GELU_ERF asks for), Negative, and -- since no single-input ov op squares --
-     Multiply with the input on both sides.
+  6. openvino/op_table.cpp - get both GELU flavours right.
+     ggml has two: GGML_UNARY_OP_GELU is the tanh approximation, GGML_UNARY_OP_
+     GELU_ERF is the exact one. The table mapped GELU onto ov's Gelu, which
+     defaults to erf, and had no entry for GELU_ERF at all. So the tanh op was
+     computed as erf, and an arch using the erf op could not run at all - and
+     with no per-op CPU fallback in the core, "could not run" means the whole
+     prediction. Small per node, but a vision tower has dozens and the error
+     compounds: fixing it is what moved GR00T N1.5 and VLA-JEPA inside the bar.
+     RELU, NEG and SQR were missing here too; upstream added all three in b10729.
 
   7. openvino/utils.cpp - give a folded weight its full rank before slicing.
      A ggml tensor that is 2-D folds in as a rank-2 ov constant, which is what a
@@ -434,22 +436,12 @@ EDITS = {
     ],
     "ggml/src/ggml-openvino/openvino/op_table.cpp": [
         (
-            """#include <openvino/op/multiply.hpp>
-#include <openvino/op/subtract.hpp>
-#include <openvino/op/tanh.hpp>
-
-namespace ov {
+            """namespace ov {
 namespace frontend {
 namespace ggml {
 
 std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
-            """#include <openvino/op/multiply.hpp>
-#include <openvino/op/negative.hpp>
-#include <openvino/op/relu.hpp>
-#include <openvino/op/subtract.hpp>
-#include <openvino/op/tanh.hpp>
-
-namespace ov {
+            """namespace ov {
 namespace frontend {
 namespace ggml {
 
@@ -465,15 +457,6 @@ static OutputVector translate_gelu_tanh(const NodeContext & context) {
     auto res = std::make_shared<ov::op::v7::Gelu>(input, ov::op::GeluApproximationMode::TANH);
     return rename_outputs_with_suffix({res}, context.get_name());
 }
-
-// vla.cpp: no ov op takes one input and squares it, so pair the input with
-// itself rather than route it through Power and a constant exponent.
-static OutputVector translate_sqr(const NodeContext & context) {
-    num_inputs_check(context, 1, 1);
-    auto input = process_view_input_new(context, 0);
-    auto res = std::make_shared<ov::op::v1::Multiply>(input, input);
-    return rename_outputs_with_suffix({res}, context.get_name());
-}
 }  // namespace op
 
 std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
@@ -483,10 +466,7 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
             """        {"GGML_UNARY_OP_GELU",      op::translate_gelu_tanh                        },
         // vla.cpp: tanh approximation for GELU, exact erf for GELU_ERF. ov's Gelu
         // defaults to erf, so the tanh variant must set its mode explicitly.
-        {"GGML_UNARY_OP_GELU_ERF",  op::translate_1to1_match_1_input<v7::Gelu>     },
-        {"GGML_UNARY_OP_RELU",      op::translate_1to1_match_1_input<v0::Relu>     },
-        {"GGML_UNARY_OP_NEG",       op::translate_1to1_match_1_input<v0::Negative> },
-        {"GGML_OP_SQR",             op::translate_sqr                              },""",
+        {"GGML_UNARY_OP_GELU_ERF",  op::translate_1to1_match_1_input<v7::Gelu>     },""",
         ),
     ],
     "ggml/src/ggml-openvino/openvino/op/flash_attn_ext.cpp": [
@@ -506,7 +486,7 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
     ],
     "ggml/src/ggml-openvino/ggml-decoder.h": [
         (
-            """    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) {
+            """    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) const {
         if (is_inp_pos(tensor, op)) {
             return "inp_pos";
         }""",
@@ -514,7 +494,7 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
     // when the graph really has one. See scripts/patch_ggml_openvino.py.
     bool has_multiple_inp_pos() const;
 
-    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) {
+    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) const {
         if (is_inp_pos(tensor, op)) {
             return has_multiple_inp_pos() ? std::string(tensor->name) : std::string("inp_pos");
         }""",
@@ -641,10 +621,10 @@ struct decoder_runtime_ctx {""",
     ],
     "ggml/src/ggml-openvino/utils.cpp": [
         (
-            """        if (!is_model_splitted(cgraph)) {
+            """        if (!model_is_splitted) {
             return naive_compute(cgraph, core, device, config);
         }""",
-            """        if (!is_model_splitted(cgraph)) {
+            """        if (!model_is_splitted) {
             return naive_compute(cgraph, core, device, config, r_ctx);
         }""",
         ),
