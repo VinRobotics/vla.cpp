@@ -84,8 +84,7 @@ echo
 LLAMA_HEAD=$(git_head_or_dash "$LLAMA_DIR")
 LLAMA_DESC=$(git_describe_or_dash "$LLAMA_DIR")
 echo "- HEAD: \`${LLAMA_HEAD}\` (\`${LLAMA_DESC}\`)"
-# GIT_TAG is ${VLA_LLAMA_TAG}, so read the cache variable, not the fetch call.
-LLAMA_TAG=$(grep -m1 'set(VLA_LLAMA_TAG' "$ROOT/CMakeLists.txt" | grep -oE 'b[0-9]+' || echo '?')
+LLAMA_TAG=$("$ROOT/scripts/llama_tag.sh" 2>/dev/null || echo '?')
 echo "- expected pinned tag (from \`CMakeLists.txt\`): \`${LLAMA_TAG}\`"
 
 # ---- GGUFs ----

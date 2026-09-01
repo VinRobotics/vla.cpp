@@ -52,10 +52,7 @@ jobs:
       # silently reuses the wrong _deps.
       - name: read llama.cpp pin
         id: pin
-        run: |
-          tag=$(grep -m1 'set(VLA_LLAMA_TAG' CMakeLists.txt | grep -oE 'b[0-9]+')
-          test -n "$tag"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+        run: echo "tag=$(bash scripts/llama_tag.sh)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v6
         with:
           path: build/_deps
