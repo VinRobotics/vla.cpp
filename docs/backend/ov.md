@@ -11,7 +11,7 @@ runtime on the configure line.
 > VLA-Adapter to about 3e-6. On the Arc B390 iGPU the speedup over the native CPU
 > backend runs from 3.0x to 9.6x. GR00T N1.7 translates and returns
 > plausible-looking actions that are simply wrong; it is the one open failure.
-> Twelve fixes were needed, ten of them inside ggml's OpenVINO backend, which is
+> Thirteen fixes were needed, eleven of them inside ggml's OpenVINO backend, which is
 > written against llama.cpp's graphs and had never seen a vision tower or an
 > action expert - see [What had to change](#what-had-to-change).
 >
@@ -132,8 +132,12 @@ binaries: `libopenvino.so` and its TBB live under `/opt/intel`. Configure fails
 early with a pointer back here if the runtime is not on `CMAKE_PREFIX_PATH`.
 
 `scripts/patch_ggml_openvino.py` runs as the FetchContent patch step, so the six
-ggml fixes described in its docstring are applied automatically and re-applied on
-a clean reconfigure. There is no manual `git apply`.
+ggml fixes described in its docstring are applied automatically. There is no
+manual `git apply`. The step only runs when FetchContent populates the source
+dir, so a `build/_deps` left over from an older checkout keeps the hunks it was
+patched with: delete it after pulling rather than trusting a reconfigure. The
+script checks each hunk on its own and fails loudly on a tree it cannot bring up
+to date.
 
 ## Run
 
@@ -148,7 +152,7 @@ Two lines identify the selection at startup:
 
 ```text
 OpenVINO: using device GPU
-vla: backend = OPENVINO (requested device GPU)
+vla: backend = OPENVINO (asked for GPU, see ggml's "using device" line)
 ```
 
 The first comes from ggml and is authoritative: an unavailable device logs a
@@ -165,7 +169,8 @@ timeout well above the first request.
 
 Do **not** set `GGML_OPENVINO_CACHE_DIR` to carry them across restarts. It
 produces silently wrong actions here - see
-[Known issues](#known-issues). The backend warns at startup if it is set.
+[Known issues](#known-issues). `backend_init` clears it and says so;
+`VLA_ALLOW_OV_CACHE=1` keeps it if you have verified the outputs yourself.
 
 ## Results
 
@@ -287,7 +292,7 @@ larger through a model builder that assumes a decoder-only LLM. The literal path
 is the one that fits a vision tower and an action expert. An explicit setting
 still wins.
 
-The other ten are in ggml's OpenVINO backend itself, applied by
+The other eleven are in ggml's OpenVINO backend itself, applied by
 `scripts/patch_ggml_openvino.py` at configure time. Its docstring carries the
 detail; in short each narrows an llama.cpp-shaped assumption that is stricter
 than the ggml contract, or fills a gap:
@@ -302,7 +307,10 @@ than the ggml contract, or fills a gap:
 | Folded weights padded to full rank | a 2-D weight becomes a rank-2 constant, but views index it at ggml rank |
 | CONCAT input ranks aligned | same rank-2 constants, and concat cannot broadcast rank |
 | Missing op translators | RELU, GELU_ERF, NEG, SQR had no table entry |
-| Naive-path graph cache | that path re-compiled the whole model on every graph_compute |
+| Naive-path graph cache | that path re-compiled the whole model on every graph_compute, and its `graph_key` is a node count plus two names, which two graphs can share |
+| Interleaved-mrope sectors bounded | the sector cycle ignored `sections`, so the last few took the wrong stream |
+| Interleaved-mrope mode passed through | the shared sin/cos table was built with the plain-rope layout |
+| Naive-path threshold settable | the 20-node constant is what picks the literal path |
 
 Four are worth expanding.
 
@@ -337,8 +345,8 @@ as a rank-2 constant, which is what a GEMM operand wants, but the graph indexes
 it at full ggml rank. Evo-1 views Q, K and V out of one fused `attn_in` weight
 and got `Axis 2 out of the tensor rank range [-2, 1]`. Padding in
 `process_view_input_new` fixed that class generally, and padding in the concat
-translator let vla.cpp **delete** an arch-specific workaround that had moved
-SmolVLA's time tiles into their own buffer.
+translator is what saves each arch from working around it - SmolVLA would
+otherwise need its time tiles moved into a buffer of their own.
 
 **The naive-path cache** is about speed, not correctness. The dynamic and static
 paths keep a `graph_key`-indexed cache; the naive path had none, so it rebuilt
@@ -363,10 +371,11 @@ GGML_OPENVINO_DEVICE=GPU GGML_OPENVINO_CACHE_DIR=$dir   # warm: max |delta| 2.9e
 ```
 
 Nothing is logged - the actions are simply wrong, which for a policy server is
-the worst possible failure mode. `backend_init` warns at startup when the
-variable is set. Unverified guess at the cause: the blob key does not capture
-something that differs between vla.cpp's several graphs, so one graph gets
-another's blob. In practice, pay the compile once per process and leave it unset.
+the worst possible failure mode. `backend_init` therefore clears the variable and
+says so; set `VLA_ALLOW_OV_CACHE=1` alongside it to keep it. Unverified guess at
+the cause: the blob key does not capture something that differs between
+vla.cpp's several graphs, so one graph gets another's blob - the same class of
+bug as the in-process `graph_key` above, which is now keyed on shapes. In practice, pay the compile once per process and leave it unset.
 
 **The NPU takes two of the eight archs, and fails four different ways.** SmolVLA
 and π0.5 run. The others do not:
@@ -409,17 +418,6 @@ CUDA kernels, so an OpenVINO build leaves it on the CPU regardless. `GGML_OP_SQR
 is therefore **untested**: only BitVLA emits it, and BitVLA never reaches this
 backend. It is in the table because it is a real gap in ggml-openvino, not
 because anything here exercises it.
-
-**GR00T N1.7 translates but computes the wrong answer.** It runs to completion
-and returns a full action chunk, so nothing errors, but 86% of the 5,280 values
-are off by more than 1e-2 and the worst is 1.48 against a peak of 0.948. The
-result is deterministic and identical on the CPU and GPU plugins, so this is a
-translation bug rather than a device or precision effect. It is **not** the mrope
-handling: fixes 9 and 10 in `scripts/patch_ggml_openvino.py` both target that
-path and neither moved the number by a digit. VLA-JEPA shares the same Qwen3-VL
-vision tower and the same interleaved mrope and is only ~1% off, which points at
-GR00T N1.7's own action expert rather than anything shared. Not yet diagnosed;
-the arch stays `-` in the README matrix.
 
 **GR00T N1.7 is the one open failure.** It translates, returns a full action
 chunk, and the values are wrong: max|delta| 1.477, rms 8.3e-2 against a peak of
