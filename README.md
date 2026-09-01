@@ -326,9 +326,6 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | ~ | 
 | [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | 
 
-Under OpenVINO, π0 runs the Intel iGPU at F32 rather than the default F16, which
-`backend_init` sets for it - see [Known issues](docs/backend/ov.md#known-issues).
-
 ---
 
 ## Contributing
