@@ -5,12 +5,14 @@ account of how far it currently runs. Like SYCL, OpenVINO is **not**
 auto-detected: it needs an explicit `-DGGML_OPENVINO=ON` and the OpenVINO
 runtime on the configure line.
 
-> **Status: all nine tested architectures translate faithfully, on the CPU plugin
-> and on the iGPU.** SmolVLA, π0, π0.5, Evo-1, VLA-Adapter, GR00T N1.5, GR00T N1.6,
-> GR00T N1.7 and VLA-JEPA all agree with a CPU-backend reference to 1.4e-3 or
-> better on the OpenVINO CPU plugin, and eight of the nine are inside the same bar
-> on the Arc B390 iGPU, where the speedup over the native CPU backend runs from
-> 3.0x to 9.6x.
+> **Status: every architecture that can reach this backend translates faithfully,
+> on the CPU plugin and on the iGPU.** That is ten of the eleven in the tree -
+> SmolVLA, π0, π0.5, Evo-1, VLA-Adapter, GR00T N1.5, GR00T N1.6, GR00T N1.7,
+> VLA-JEPA and OpenVLA-OFT - all agreeing with a CPU-backend reference to 1.4e-3 or
+> better on the OpenVINO CPU plugin, and nine of the ten are inside the same bar on
+> the Arc B390 iGPU, where the speedup over the native CPU backend runs from 3.0x
+> to 9.6x. The eleventh, BitVLA, pins its ggml graph to the CPU backend by design
+> and never reaches this backend at all.
 >
 > Fifteen fixes were needed, thirteen of them inside ggml's OpenVINO backend, which
 > is written against llama.cpp's graphs and had never seen a vision tower or an
@@ -198,6 +200,7 @@ Against the F32 reference, which is the fidelity number:
 |---|---:|---:|---:|
 | Evo-1       | 2.2e-6 | 6.0e-4 | compiler rejects |
 | VLA-Adapter | 3.9e-6 | 6.8e-3 | compiler rejects |
+| OpenVLA-OFT | 3.9e-6 | 2.2e-3 | compiler rejects |
 | π0.5        | 6.1e-5 | 7.6e-4 | 1.6e-3 |
 | VLA-JEPA    | 7.7e-5 | 2.6e-3 | returns NaN |
 | GR00T N1.7  | 3.9e-4 | 2.6e-3 | NPUW throws |
@@ -207,7 +210,7 @@ Against the F32 reference, which is the fidelity number:
 | SmolVLA     | 1.4e-3 | 2.6e-3 | 1.1e-2 |
 
 Every tested arch is inside the 2.9e-3 bar on the CPU plugin, most by one to
-three orders of magnitude, and eight of the nine are inside it on the GPU as well
+three orders of magnitude, and nine of the ten are inside it on the GPU as well
 (GR00T N1.5's 4.6e-3 against F32 is 1.6e-3 against BF16, the tighter reference for
 that arch). The one outside is **VLA-Adapter**, at 6.8e-3 against F32 on actions
 peaking at 0.62 - the GPU plugin computing in F16, a precision effect rather than
@@ -305,7 +308,7 @@ several graphs, so one graph gets another's blob - the same class of bug as the
 in-process `graph_key` above, which is now keyed on shapes. In practice, pay the
 compile once per process and leave it unset.
 
-**The NPU accepts three of the nine archs, and only two of those are correct.**
+**The NPU accepts three of the ten archs, and only two of those are correct.**
 Check every NPU run against the startup banner: an unavailable NPU falls back to
 the CPU plugin silently and would otherwise report excellent numbers that are not
 NPU numbers at all. A partially-failing run still reports a wall-clock time, so
@@ -320,10 +323,12 @@ do not read a latency off a run whose actions did not come out.
 | GR00T N1.5 / N1.6 / N1.7 | `NPUW: Assertion all_ok failed`, `partitioning.cpp:1350` |
 | Evo-1 | compiler rejects: `Input channels '1025' is not aligned by '16'` |
 | VLA-Adapter | compiler rejects: `Input channels '261' is not aligned by '16'` |
+| OpenVLA-OFT | compiler rejects: `Input channels '261' is not aligned by '16'` |
 
-The two alignment rejections are Intel's NPU compiler: 1025 is Evo-1's 1024
-patches plus a CLS token, 261 is VLA-Adapter's 256 plus 5. SmolVLA and π0.5
-happen to have 16-aligned sequence lengths. None of these are vla.cpp's doing.
+The three alignment rejections are Intel's NPU compiler: 1025 is Evo-1's 1024
+patches plus a CLS token, and 261 is 256 plus 5 - VLA-Adapter and OpenVLA-OFT hit
+the identical number for the identical reason. SmolVLA and π0.5 happen to have
+16-aligned sequence lengths. None of these are vla.cpp's doing.
 
 **π0 on the NPU is the same bug as π0 on the GPU, and here there is no remedy.**
 Continuous dims 0-5 land at 4.0e-2 and the gripper flips at step 44, exactly as
@@ -343,20 +348,10 @@ graph; one hypothesis - that the split-graph guard sends it down the LLM path -
 was tested and is wrong. Per-stage timings for SmolVLA are omitted from the
 tables above.
 
-## What is left
+## TODO
 
-**Op coverage is no longer the blocker.** With RELU, GELU_ERF, NEG and SQR added
-to the table, every ggml op the eleven in-tree archs build is translatable. The
-one exception is `ggml_map_custom1`, used only by BitVLA, which pins its ggml
-graph to the CPU backend by design - so an OpenVINO build leaves it there
-regardless. That also makes `GGML_OP_SQR` **untested**: only BitVLA emits it. It
-is in the table because it is a real gap in ggml-openvino, not because anything
-here exercises it.
-
-**Untested archs.** OpenVLA-OFT is untested for want of a local checkpoint, not
-because anything is known to block it; it uses an op set already covered by
-VLA-Adapter. It is `~` in the README matrix; treat any untested arch that way
-until it has actually produced actions.
+**Fixing issue channel not aligned by 16.** Feasible solution is padding dummy
+channel so that number of channels is a multiple of 16.
 
 **Splitting across devices.** Intel's own
 [π0.5 write-up](https://docs.openedgeplatform.intel.com/2026.1/OEP-articles/publications/optimizing-pi0.5-lva-model.html)

@@ -9,8 +9,9 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 - **OpenVINO backend.** `-DGGML_OPENVINO=ON` runs the archs on Intel CPUs, iGPUs
   and NPUs through ggml's OpenVINO backend. SmolVLA, π0.5, Evo-1 and VLA-Adapter
   match an F32 CPU reference to 1e-3; on an Arc B390 iGPU that is 3.0x to 9.6x
-  the native CPU backend. All nine tested archs are inside the accuracy bar on the
-  OpenVINO CPU plugin and on the iGPU. OpenVLA-OFT is untested.
+  the native CPU backend. Every arch that can reach this backend - ten of the
+  eleven - is inside the accuracy bar on the OpenVINO CPU plugin, and nine of the
+  ten on the iGPU. BitVLA is the eleventh and pins to the CPU backend by design.
   See `docs/backend/ov.md`.
 - `scripts/install_ov.sh` installs the OpenVINO runtime and the Intel GPU/NPU
   driver stack on Ubuntu 22.04 and 24.04, with the runtime archive checksummed
