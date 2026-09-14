@@ -156,8 +156,13 @@ if(GGML_CUDA)
         src/kernels/bitvla/bitvla_vit_cuda.cu
         src/kernels/bitvla/bitvla_fp32head_cuda.cu
     )
+    # Device-link each archive on its own. Without this, vla_core nvlinks the
+    # relocatable device code of both CUDA libraries together, and CUDA 12.x
+    # rejects the mix because only bitvla compiles with --use_fast_math:
+    # "nvlink fatal: Cicc option values for '-ftz' do not match".
     set_target_properties(bitvla_cuda_kernels PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
         POSITION_INDEPENDENT_CODE ON
     )
     target_include_directories(bitvla_cuda_kernels PRIVATE
@@ -180,6 +185,7 @@ if(GGML_CUDA)
     )
     set_target_properties(vla_cuda_ops PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
         POSITION_INDEPENDENT_CODE ON
     )
     target_compile_features(vla_cuda_ops PRIVATE cxx_std_17)
