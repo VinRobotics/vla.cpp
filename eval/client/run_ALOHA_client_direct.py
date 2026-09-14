@@ -287,8 +287,12 @@ def build_obs(arch, front_rgb, wrist_rgb, left_state, task,
         return {
             "video.image":       _hwc_u8(front_rgb, image_size)[None, None],
             "video.wrist_image": _hwc_u8(wrist_rgb, image_size)[None, None],
+            # Both namings of the same numbers: EEF-style checkpoints read the
+            # six scalars, joint-space ones read the grouped "single_arm" vector.
+            # The client picks whichever its statistics file declares.
             "state.x":     _s(j[0]), "state.y":    _s(j[1]), "state.z":    _s(j[2]),
             "state.roll":  _s(j[3]), "state.pitch": _s(j[4]), "state.yaw":  _s(j[5]),
+            "state.single_arm": j[:ARM_DOF].reshape(1, 1, -1),
             "state.gripper": gripper.reshape(1, 1, -1),
             "task": task,
         }
@@ -322,19 +326,31 @@ class AlohaInferenceNode(Node):
         )
         self.bridge = CvBridge()
 
+        # Which follower a single-arm policy drives. Dual-arm always uses both,
+        # left first, so --arm-side only matters for the single-arm case.
+        side = args.arm_side
+        front_topic = args.front_topic
+        wrist_topic = args.wrist_topic or f"/camera_wrist_{side}/camera/color/image_rect_raw"
+        state_topic = args.state_topic or f"/follower_{side}/joint_states"
+
         # Publishers
         self.left_arm_pub  = self.create_publisher(JointGroupCommand,  "/follower_left/commands/joint_group",  10)
         self.left_hand_pub = self.create_publisher(JointSingleCommand, "/follower_left/commands/joint_single", 10)
-        if self.dual_arm:
+        if self.dual_arm or side == "right":
             self.right_arm_pub  = self.create_publisher(JointGroupCommand,  "/follower_right/commands/joint_group",  10)
             self.right_hand_pub = self.create_publisher(JointSingleCommand, "/follower_right/commands/joint_single", 10)
+        # Single-arm chunks go out on the chosen follower; the observation
+        # buffer stays the "left" one either way so build_obs is unchanged.
+        self._pub_single = self._pub_right if (side == "right" and not self.dual_arm) else self._pub_left
 
         # Subscribers
-        self.create_subscription(Image,      "/camera_high/camera/color/image_raw",       self._cb_front,      qos)
-        self.create_subscription(Image,      "/camera_wrist_left/camera/color/image_raw", self._cb_wrist_left, qos)
-        self.create_subscription(JointState, "/follower_left/joint_states",                self._cb_left_state, 10)
+        self.create_subscription(Image,      front_topic, self._cb_front,      qos)
+        self.create_subscription(Image,      wrist_topic, self._cb_wrist_left, qos)
+        self.create_subscription(JointState, state_topic, self._cb_left_state, 10)
         if self.dual_arm:
             self.create_subscription(JointState, "/follower_right/joint_states", self._cb_right_state, 10)
+        self.log.info(f"topics  front={front_topic}  wrist={wrist_topic}  "
+                      f"state={state_topic}  commands=/follower_{side if not self.dual_arm else 'left+right'}")
 
         # Sensor buffers
         self.lock             = Lock()
@@ -386,6 +402,7 @@ class AlohaInferenceNode(Node):
                 n_action_steps    = args.n_action_steps,
                 stats_json        = args.stats_json,
                 bitvla_unnorm_key = args.bitvla_unnorm_key,
+                rel_stats_json    = args.rel_stats_json,
             )
         self.client.reset()
         self.log.info(f"client ready  arch={self.arch}  addr={args.vla_addr}")
@@ -578,11 +595,7 @@ class AlohaInferenceNode(Node):
             prev_right  = self.prev_right_state if self.dual_arm else None  # noqa: F841  snapshot for downstream consumers
 
         if front is None or wrist is None or left_state is None:
-            self.log.info(
-                f"Waiting for data  front={front is not None}"
-                f"  wrist={wrist is not None}"
-                f"  left_state={left_state is not None}"
-            )
+            self._log_waiting(front is not None, wrist is not None, left_state is not None)
             self._end_action = True
             return
 
@@ -624,11 +637,9 @@ class AlohaInferenceNode(Node):
             # First call or after a timeout fallback: trigger and wait.
             with self.lock:
                 if self.front_rgb is None or self.wrist_left_rgb is None or self.left_state is None:
-                    self.log.info(
-                        f"Waiting for data  front={self.front_rgb is not None}"
-                        f"  wrist={self.wrist_left_rgb is not None}"
-                        f"  left_state={self.left_state is not None}"
-                    )
+                    self._log_waiting(self.front_rgb is not None,
+                                      self.wrist_left_rgb is not None,
+                                      self.left_state is not None)
                     self._end_action = True
                     return
                 if self.dual_arm and self.right_state is None:
@@ -692,7 +703,7 @@ class AlohaInferenceNode(Node):
         for i in range(n_steps):
             t_step = time.time()
             row = chunk[i]
-            self._pub_left(row[:ARM_DOF], row[ARM_DOF])
+            self._pub_single(row[:ARM_DOF], row[ARM_DOF])
             if self.dual_arm and row.size >= JOINT_DOF * 2:
                 self._pub_right(row[JOINT_DOF:JOINT_DOF + ARM_DOF], row[JOINT_DOF + ARM_DOF])
             time.sleep(max(0.0, 1.0 / 200.0 - (time.time() - t_step)))
@@ -725,6 +736,19 @@ class AlohaInferenceNode(Node):
     # ------------------------------------------------------------------
     # Publishers
     # ------------------------------------------------------------------
+
+    def _log_waiting(self, front_ok: bool, wrist_ok: bool, state_ok: bool) -> None:
+        """One line per second while a sensor stream is still missing.
+
+        The control loop retries at its full rate, so an unthrottled log here
+        buries every other message under thousands of identical lines.
+        """
+        now = time.time()
+        if now - getattr(self, "_last_wait_log", 0.0) < 1.0:
+            return
+        self._last_wait_log = now
+        self.log.info(
+            f"Waiting for data  front={front_ok}  wrist={wrist_ok}  state={state_ok}")
 
     def _pub_left(self, arm: np.ndarray, gripper: float):
         arm_msg = JointGroupCommand()
@@ -794,7 +818,20 @@ def main():
     parser.add_argument("--smooth-step", type=int, default=20,
         help="Interpolation sub-steps between actions (1 = no smoothing).")
     parser.add_argument("--dual-arm", action="store_true")
+    parser.add_argument("--arm-side", choices=("left", "right"), default="left",
+                        help="follower a single-arm policy reads and drives (default: left)")
+    parser.add_argument("--front-topic", type=str,
+                        default="/camera_high/camera/color/image_rect_raw",
+                        help="overhead camera topic")
+    parser.add_argument("--wrist-topic", type=str, default=None,
+                        help="wrist camera topic (default: /camera_wrist_<arm-side>/camera/color/image_rect_raw)")
+    parser.add_argument("--state-topic", type=str, default=None,
+                        help="joint state topic (default: /follower_<arm-side>/joint_states)")
     parser.add_argument("--stats-json",       type=str, default=None)
+    parser.add_argument("--rel-stats-json",   type=str, default=None,
+                        help="GR00T meta/relative_stats.json. Required for checkpoints whose "
+                             "action modalities are RELATIVE: the chunk is then an offset from "
+                             "the observed state and is added back onto it.")
     parser.add_argument("--bitvla-unnorm-key", type=str, default=None)
     parser.add_argument("--embodiment", type=str, default="new_embodiment",
         help="Embodiment key in statistics.json (default: new_embodiment).")
