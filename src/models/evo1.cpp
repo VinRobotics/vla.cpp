@@ -40,6 +40,8 @@
 #include <string>
 #include <vector>
 
+#include "/opt/nvidia/nsight-systems/2024.5.4/target-linux-tegra-armv8/nvtx/include/nvtx3/nvToolsExt.h"
+
 namespace vla {
 namespace {
 
@@ -146,10 +148,43 @@ ggml_tensor * build_qwen2_layer(ggml_context * C, const Evo1ModelArch & m, const
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, q_rope, 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, k_rope, 0, 2, 1, 3));
     ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, vp, hd, n_kv, seq), 1, 2, 0, 3));
-    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-    ggml_tensor * aw = ggml_soft_max_ext(C, kq, mask, scale, 0.0f);
-    ggml_tensor * kqv = ggml_mul_mat(C, V, aw);
-    ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), hq, seq);
+
+    ggml_tensor * att = nullptr;
+    const bool lm_fa =
+        std::getenv("VLA_EVO1_LM_FLASH_ATTN") != nullptr;
+
+    if (lm_fa) {
+        // Flash attention expects V in [hd, seq, n_kv, batch],
+        // unlike the explicit V*softmax path above, whose V is
+        // laid out [seq, hd, n_kv, batch].
+        //
+        // Keep vp F32: only the attention algorithm changes.
+        ggml_tensor * V_fa = ggml_cont(
+            C,
+            ggml_permute(
+                C,
+                ggml_reshape_3d(C, vp, hd, n_kv, seq),
+                0, 2, 1, 3));
+
+        ggml_tensor * fa =
+            ggml_flash_attn_ext(
+                C, Q, K, V_fa, mask, scale, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+
+        // FA result is [hd, n_q, seq, batch], contiguous in
+        // head dimension then head index, so flatten to [hq, seq].
+        att = ggml_reshape_2d(C, fa, hq, seq);
+    } else {
+        ggml_tensor * kq = ggml_mul_mat(C, K, Q);
+        ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        ggml_tensor * aw =
+            ggml_soft_max_ext(C, kq, mask, scale, 0.0f);
+        ggml_tensor * kqv = ggml_mul_mat(C, V, aw);
+        att = ggml_reshape_2d(
+            C,
+            ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)),
+            hq, seq);
+    }
     ggml_tensor * attn_out = mm_act(C, w.Wo, as_type(C, att, at), at);
     if (qmask)
         attn_out = ggml_mul(C, attn_out, qmask);
@@ -227,14 +262,91 @@ ggml_tensor * build_internvit_layer(ggml_context * C, const Evo1ModelArch & m, c
     ggml_tensor * qkv = ggml_add(C, mm_act(C, w.Wqkv, x_n1, at), w.bqkv);
     // one cast of the packed QKV rather than three of its slices
     qkv = as_type(C, qkv, GGML_TYPE_F32);
-    ggml_tensor * q = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 0*H * ggml_element_size(qkv)));
-    ggml_tensor * k = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 1*H * ggml_element_size(qkv)));
-    ggml_tensor * v = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 2*H * ggml_element_size(qkv)));
-    ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, hd, n_heads, N), 0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, hd, n_heads, N), 0, 2, 1, 3));
+
+    // Profiling-only: dump GGML QKV tensor layout while constructing the graph.
+    if (std::getenv("VLA_EVO1_DUMP_QKV_LAYOUT")) {
+        std::fprintf(stderr,
+            "EVO1 QKV: type=%s ne=[%lld,%lld,%lld,%lld] "
+            "nb=[%zu,%zu,%zu,%zu] contiguous=%d H=%lld heads=%lld hd=%lld N=%lld\\n",
+            ggml_type_name(qkv->type),
+            (long long) qkv->ne[0],
+            (long long) qkv->ne[1],
+            (long long) qkv->ne[2],
+            (long long) qkv->ne[3],
+            qkv->nb[0], qkv->nb[1], qkv->nb[2], qkv->nb[3],
+            ggml_is_contiguous(qkv) ? 1 : 0,
+            (long long) H,
+            (long long) n_heads,
+            (long long) hd,
+            (long long) N);
+    }
+    // Profiling experiment: optionally consume packed-QKV slices directly.
+    // Default behavior is unchanged.  The downstream reshape->permute->cont
+    // still materializes Q/K/V into the layout required by attention.
+    const bool direct_qkv_views =
+        std::getenv("VLA_EVO1_DIRECT_QKV_VIEWS") != nullptr;
+
+    ggml_tensor * Q = nullptr;
+    ggml_tensor * K = nullptr;
+    ggml_tensor * v = nullptr;
+
+    if (direct_qkv_views) {
+        // Packed qkv is [3*H, N], with each token laid out as
+        // [Q(H), K(H), V(H)].  Describe each H slice directly as
+        // [hd, n_heads, N], preserving the packed-QKV token stride.
+        //
+        // This avoids:
+        //   strided view_2d -> cont -> reshape_3d
+        // and lets the final permute->cont perform the only materialization.
+        const size_t es  = ggml_element_size(qkv);
+        const size_t nb1 = (size_t) hd * es;
+        const size_t nb2 = qkv->nb[1];
+
+        ggml_tensor * q3 = ggml_view_3d(
+            C, qkv, hd, n_heads, N,
+            nb1, nb2,
+            0*H * es);
+
+        ggml_tensor * k3 = ggml_view_3d(
+            C, qkv, hd, n_heads, N,
+            nb1, nb2,
+            1*H * es);
+
+        ggml_tensor * v3 = ggml_view_3d(
+            C, qkv, hd, n_heads, N,
+            nb1, nb2,
+            2*H * es);
+
+        Q = ggml_cont(C, ggml_permute(C, q3, 0, 2, 1, 3));
+        K = ggml_cont(C, ggml_permute(C, k3, 0, 2, 1, 3));
+        v = v3;
+    } else {
+        ggml_tensor * q = ggml_cont(C, ggml_view_2d(
+            C, qkv, H, N, qkv->nb[1],
+            0*H * ggml_element_size(qkv)));
+
+        ggml_tensor * k = ggml_cont(C, ggml_view_2d(
+            C, qkv, H, N, qkv->nb[1],
+            1*H * ggml_element_size(qkv)));
+
+        v = ggml_cont(C, ggml_view_2d(
+            C, qkv, H, N, qkv->nb[1],
+            2*H * ggml_element_size(qkv)));
+
+        Q = ggml_cont(C, ggml_permute(
+            C, ggml_reshape_3d(C, q, hd, n_heads, N),
+            0, 2, 1, 3));
+
+        K = ggml_cont(C, ggml_permute(
+            C, ggml_reshape_3d(C, k, hd, n_heads, N),
+            0, 2, 1, 3));
+    }
     ggml_tensor * att;
     if (vla::flash_attn_enabled()) {
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, n_heads, N), 0, 2, 1, 3));
+        ggml_tensor * v3 = direct_qkv_views
+            ? v
+            : ggml_reshape_3d(C, v, hd, n_heads, N);
+        ggml_tensor * V = ggml_cont(C, ggml_permute(C, v3, 0, 2, 1, 3));
         att = evo1_flash_attn(C, Q, K, V, scale, H, N);
     } else {
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, n_heads, N), 1, 2, 0, 3));
@@ -335,6 +447,19 @@ bool load_config(const gguf_reader & g, Evo1ModelArch & m, Config & cfg) {
     cfg.real_action_dim= m.real_action_dim;
     cfg.norm_eps       = m.norm_eps_denom;
     cfg.num_steps      = (int) m.num_steps;
+
+    // Profiling-only override for measuring Evo-1 flow-step scaling.
+    // Normal behavior is unchanged when VLA_EVO1_PROFILE_STEPS is unset.
+    if (const char * s = std::getenv("VLA_EVO1_PROFILE_STEPS")) {
+        const long n = std::strtol(s, nullptr, 10);
+        if (n >= 1 && n <= 32) {
+            m.num_steps = n;
+            cfg.num_steps = (int) n;
+            std::fprintf(stderr,
+                         "vla(evo1): PROFILE ONLY - overriding inference steps to %ld\n",
+                         n);
+        }
+    }
     cfg.rms_eps        = m.lm_rms_eps;
     cfg.rope_n_dims    = (int) m.lm_head_dim;
     cfg.rope_mode      = GGML_ROPE_TYPE_NEOX;
@@ -567,7 +692,10 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             ggml_backend_tensor_set(t_px[v], chw.data(), 0, ggml_nbytes(t_px[v]));
         }
         graph_unique_names(vg);
-        if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
+        nvtxRangePushA("evo1.vision");
+        const ggml_status vision_st = ggml_backend_graph_compute(backend, vg);
+        nvtxRangePop();
+        if (vision_st != GGML_STATUS_SUCCESS) {
             std::fprintf(stderr, "vla(evo1): vision graph compute failed (%lld views)\n", (long long) n_views);
             return {};
         }
@@ -687,7 +815,11 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
 
     ggml_tensor * t_embeds   = ggml_new_tensor_2d(C, GGML_TYPE_F32, lm_hidden, SEQ);     ggml_set_input(t_embeds);
     ggml_tensor * t_pos      = ggml_new_tensor_1d(C, GGML_TYPE_I32, SEQ);                ggml_set_input(t_pos);
-    ggml_tensor * t_lmmask   = ggml_new_tensor_2d(C, GGML_TYPE_F32, SEQ, SEQ);           ggml_set_input(t_lmmask);
+    const bool lm_fa =
+        std::getenv("VLA_EVO1_LM_FLASH_ATTN") != nullptr;
+    ggml_tensor * t_lmmask = ggml_new_tensor_2d(
+        C, lm_fa ? GGML_TYPE_F16 : GGML_TYPE_F32, SEQ, SEQ);
+    ggml_set_input(t_lmmask);
 
     ggml_tensor * t_qmask    = ggml_new_tensor_2d(C, GGML_TYPE_F32, 1, SEQ);              ggml_set_input(t_qmask);
     ggml_tensor * t_state    = ggml_new_tensor_1d(C, GGML_TYPE_F32, per_a);              ggml_set_input(t_state);
@@ -790,9 +922,27 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             pp[i] = (int32_t) i;
         ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos));
     }
-    { std::vector<float> mk((size_t) SEQ * SEQ); const float NEG = -std::numeric_limits<float>::infinity();
-      for (int64_t q=0; q<SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) mk[q * SEQ+kv] = (kv <= q && attn_ok[kv]) ? 0.0f : NEG;
-      ggml_backend_tensor_set(t_lmmask, mk.data(), 0, ggml_nbytes(t_lmmask)); }
+    {
+        std::vector<float> mk((size_t) SEQ * SEQ);
+        const float NEG = -std::numeric_limits<float>::infinity();
+        for (int64_t q = 0; q < SEQ; ++q)
+            for (int64_t kv = 0; kv < SEQ; ++kv)
+                mk[q * SEQ + kv] =
+                    (kv <= q && attn_ok[kv]) ? 0.0f : NEG;
+
+        if (t_lmmask->type == GGML_TYPE_F16) {
+            std::vector<ggml_fp16_t> mk16(mk.size());
+            ggml_fp32_to_fp16_row(
+                mk.data(), mk16.data(), (int64_t) mk.size());
+            ggml_backend_tensor_set(
+                t_lmmask, mk16.data(), 0,
+                mk16.size() * sizeof(ggml_fp16_t));
+        } else {
+            ggml_backend_tensor_set(
+                t_lmmask, mk.data(), 0,
+                mk.size() * sizeof(float));
+        }
+    }
     ggml_backend_tensor_set(t_state, state_norm.data(), 0, ggml_nbytes(t_state));
     ggml_backend_tensor_set(t_x, x_init.data(), 0, ggml_nbytes(t_x));
     { std::vector<float> am(per_a, 0.0f); for (int64_t i=0; i<real_action_dim && i<per_a; ++i) am[i] = 1.0f;
@@ -802,7 +952,9 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
 
     graph_unique_names(gf);
     const auto tc0 = std::chrono::steady_clock::now();
+    nvtxRangePushA("evo1.inference");
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
+    nvtxRangePop();
     const auto tc1 = std::chrono::steady_clock::now();
     if (st != GGML_STATUS_SUCCESS) {
         std::fprintf(stderr, "vla(evo1): ggml_backend_graph_compute failed (%d)\n", (int) st);

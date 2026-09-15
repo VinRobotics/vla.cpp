@@ -336,7 +336,7 @@ endforeach()
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT VLA_IPO_OK OUTPUT VLA_IPO_MSG)
-if(VLA_IPO_OK AND CMAKE_BUILD_TYPE STREQUAL "Release")
+if(VLA_IPO_OK AND CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT GGML_CUDA)
     foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)
         set_property(TARGET ${tgt} PROPERTY INTERPROCEDURAL_OPTIMIZATION ON)
     endforeach()

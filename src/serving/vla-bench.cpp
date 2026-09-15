@@ -179,6 +179,8 @@ int main(int argc, char ** argv) {
     std::vector<double> ms;
     ms.reserve((size_t) reps);
     double vision_sum = 0.0;
+    double inference_sum = 0.0;
+    double internal_total_sum = 0.0;
     for (int i=0; i<reps; ++i) {
         const auto t0 = std::chrono::steady_clock::now();
         const std::vector<float> out = vla::predict(m, in);
@@ -188,8 +190,33 @@ int main(int argc, char ** argv) {
             vla::model_free(m);
             return 1;
         }
+
+        // Optional deterministic action dump for numerical A/B tests.
+        // Dumps only the first measured prediction, outside the timed region.
+        if (i == 0) {
+            if (const char * path = std::getenv("VLA_BENCH_DUMP_ACTIONS")) {
+                FILE * f = std::fopen(path, "w");
+                if (!f) {
+                    std::fprintf(stderr,
+                                 "vla-bench: failed to open action dump: %s\n",
+                                 path);
+                    vla::model_free(m);
+                    return 1;
+                }
+                for (size_t j = 0; j < out.size(); ++j)
+                    std::fprintf(f, "%zu %.9g\n", j, out[j]);
+                std::fclose(f);
+                std::fprintf(stderr,
+                             "vla-bench: dumped %zu actions to %s\n",
+                             out.size(), path);
+            }
+        }
+
         ms.push_back(std::chrono::duration<double, std::milli>(t1-t0).count());
-        vision_sum += vla::last_stats(m).ms_vision;
+        const auto & stats = vla::last_stats(m);
+        vision_sum += stats.ms_vision;
+	inference_sum += stats.ms_inference;
+	internal_total_sum += stats.ms_total;
     }
 
     std::sort(ms.begin(), ms.end());
@@ -198,6 +225,13 @@ int main(int argc, char ** argv) {
     const double p90    = percentile(ms, 0.90);
     const double mean   = std::accumulate(ms.begin(), ms.end(), 0.0)/(double) ms.size();
     const double vision = vision_sum/(double) reps;
+    const double inference = inference_sum/(double) reps;
+    const double internal_total = internal_total_sum/(double) reps;
+    const double other = internal_total - vision - inference;
+
+    std::fprintf(stderr,
+             "phase: total %.1f ms  vision %.1f ms  inference %.1f ms  other %.1f ms\n",
+             internal_total, vision, inference, other);
 
     if (markdown) {
         std::printf("| %s | %d | %d | %d | %.1f | %.1f | %.1f | %.1f | %.1f |\n",
