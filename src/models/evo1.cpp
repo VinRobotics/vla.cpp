@@ -230,11 +230,30 @@ ggml_tensor * build_internvit_layer(ggml_context * C, const Evo1ModelArch & m, c
     ggml_tensor * q = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 0*H * ggml_element_size(qkv)));
     ggml_tensor * k = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 1*H * ggml_element_size(qkv)));
     ggml_tensor * v = ggml_cont(C, ggml_view_2d(C, qkv, H, N, qkv->nb[1], 2*H * ggml_element_size(qkv)));
-    ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, hd, n_heads, N), 0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, hd, n_heads, N), 0, 2, 1, 3));
+    ggml_tensor * Q_perm = ggml_permute(
+        C, ggml_reshape_3d(C, q, hd, n_heads, N),
+        0, 2, 1, 3);
+
+    ggml_tensor * K_perm = ggml_permute(
+        C, ggml_reshape_3d(C, k, hd, n_heads, N),
+        0, 2, 1, 3);
+
+    // CUDA flash attention accepts these strided Q/K/V layouts directly,
+    // avoiding three redundant F32 materializations per InternViT layer.
+    // Keep the contiguous path as the default for compatibility.
+    const bool strided_qkv =
+        vla::flash_attn_enabled() &&
+        std::getenv("VLA_EVO1_VISION_STRIDED_QKV") != nullptr;
+
+    ggml_tensor * Q = strided_qkv ? Q_perm : ggml_cont(C, Q_perm);
+    ggml_tensor * K = strided_qkv ? K_perm : ggml_cont(C, K_perm);
+
     ggml_tensor * att;
     if (vla::flash_attn_enabled()) {
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, n_heads, N), 0, 2, 1, 3));
+        ggml_tensor * V_perm = ggml_permute(
+            C, ggml_reshape_3d(C, v, hd, n_heads, N),
+            0, 2, 1, 3);
+        ggml_tensor * V = strided_qkv ? V_perm : ggml_cont(C, V_perm);
         att = evo1_flash_attn(C, Q, K, V, scale, H, N);
     } else {
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, n_heads, N), 1, 2, 0, 3));
