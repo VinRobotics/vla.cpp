@@ -100,6 +100,29 @@ function(vla_exclude_fetched_targets dir)
 endfunction()
 vla_exclude_fetched_targets(${llama_SOURCE_DIR})
 
+# Octo is the one arch that tokenizes in-process, so it is also the one that
+# needs SentencePiece and, through it, a protobuf. Optional so a build that does
+# not want Octo does not inherit that dependency.
+option(VLA_OCTO "Build the Octo arch (fetches SentencePiece, needs system protobuf)" ON)
+if(VLA_OCTO)
+    # The system protobuf, not sentencepiece's vendored protobuf-lite: vla-server
+    # aborts at static-init if two protobuf runtimes reach the same binary.
+    set(SPM_ENABLE_SHARED    OFF        CACHE BOOL   "" FORCE)
+    set(SPM_BUILD_TEST       OFF        CACHE BOOL   "" FORCE)
+    set(SPM_ENABLE_TCMALLOC  OFF        CACHE BOOL   "" FORCE)
+    set(SPM_PROTOBUF_PROVIDER "package" CACHE STRING "" FORCE)
+    FetchContent_Declare(sentencepiece
+        GIT_REPOSITORY https://github.com/google/sentencepiece
+        GIT_TAG        v0.2.0
+        GIT_SHALLOW    TRUE
+    )
+    # sentencepiece v0.2.0 still asks for cmake_minimum_required(VERSION 3.1),
+    # which CMake 4 refuses outright.
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+    FetchContent_MakeAvailable(sentencepiece)
+    unset(CMAKE_POLICY_VERSION_MINIMUM)
+endif()
+
 add_library(vla_core
     src/model.cpp
     src/loader.cpp
@@ -129,6 +152,12 @@ target_include_directories(vla_core
 )
 # The VLA archs call no llama_* API; only vlm_core needs llama.
 target_link_libraries(vla_core PUBLIC ggml)
+if(VLA_OCTO)
+    target_sources(vla_core PRIVATE src/models/octo.cpp)
+    target_include_directories(vla_core PRIVATE ${sentencepiece_SOURCE_DIR}/src)
+    target_link_libraries(vla_core PRIVATE sentencepiece-static)
+    target_compile_definitions(vla_core PUBLIC VLA_USE_OCTO)
+endif()
 
 if(GGML_CUDA)
     target_compile_definitions(vla_core PUBLIC GGML_USE_CUDA)

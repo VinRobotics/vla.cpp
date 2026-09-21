@@ -29,6 +29,7 @@ from client.adapters import (
     Evo1PipelineAdapter,
     Gr00tPipelineAdapter,
     Gr00tN15PipelineAdapter,
+    OctoPipelineAdapter,
 )
 
 ARCH_CHOICES = sorted(ARCH_PRESETS)
@@ -127,6 +128,8 @@ if __name__ == "__main__":
     elif args.arch in ("gr00t_n1_6", "gr00t_n1_7"):
 
         client = Gr00tPipelineAdapter(client=client)
+    elif args.arch == "octo":
+        client = OctoPipelineAdapter(client=client)
     else:
         client = LeRobotPipelineAdapter(client=client)
 

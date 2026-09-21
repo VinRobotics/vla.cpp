@@ -66,6 +66,7 @@ enum class Arch {
     GR00T_N1_5, // NVIDIA Isaac GR00T N1.5 (Eagle VLM + DiT action head).
     GR00T_N1_6, // NVIDIA Isaac GR00T N1.6 (Eagle Block-2A + DiT).
     GR00T_N1_7, // NVIDIA Isaac GR00T N1.7 (Qwen3 backbone + DiT).
+    OCTO,       // UC Berkeley Octo small 1.5 (SmallStem16 + T5 + diffusion/L1 head).
     BITVLA,     // Microsoft BitVLA (1.58-bit ternary LM/ViT).
     VLA_ADAPTER,// OpenHelix VLA-Adapter DINOv2 + SigLIP + Bridge-Attention.
     OPENVLA_OFT,// DINOv2-L/14-reg4 + SigLIP-so400m/14 +Llama-2-7B + MLPResNet.
@@ -168,6 +169,17 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
                                                  const std::string& ckpt_path,
                                                  const std::string& config_path,
                                               const Options& opts);
+
+/**
+ * @brief Build an Octo model. Vision, T5 text encoder and tokenizer vocab are
+ *        all baked into @p ckpt_path. Only compiled when VLA_OCTO is on.
+ * @copydetails smolvla_create
+ */
+#ifdef VLA_USE_OCTO
+std::unique_ptr<ModelArchBase> octo_create(const std::string& mmproj_path,
+                                           const std::string& ckpt_path,
+                                           const std::string& config_path);
+#endif
 
 /**
  * @brief Build a BitVLA model. Vision is baked into @p ckpt_path.

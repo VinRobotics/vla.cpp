@@ -72,6 +72,7 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
         try_str("gr00t_n1_5.architecture", arch_str) ||
         try_str("gr00t_n1_6.architecture", arch_str) ||
         try_str("gr00t_n1_7.architecture", arch_str) ||
+        try_str("octo.architecture",       arch_str) ||
         try_str("bitvla.architecture",     arch_str) ||
         try_str("openvla_oft.architecture", arch_str) ||
         try_str("vla_jepa.architecture",   arch_str) ||
@@ -104,6 +105,12 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
             *out = Arch::GR00T_N1_7;
             ok = true;
         }
+#ifdef VLA_USE_OCTO
+        else if (arch_str == "octo" || arch_str == "octo-small-1.5") {
+            *out = Arch::OCTO;
+            ok = true;
+        }
+#endif
         else if (arch_str == "bitvla")     {
             *out = Arch::BITVLA;
             ok = true;
@@ -251,6 +258,12 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
             std::printf("vla: arch = gr00t_n1_7\n");
             impl = gr00t_n1_7_create(mmproj_path, ckpt_path, config_path, opts);
             break;
+#ifdef VLA_USE_OCTO
+        case Arch::OCTO:
+            std::printf("vla: arch = octo\n");
+            impl = octo_create(mmproj_path, ckpt_path, config_path);
+            break;
+#endif
         case Arch::BITVLA:
             std::printf("vla: arch = bitvla\n");
             impl = bitvla_create(mmproj_path, ckpt_path, config_path, opts);

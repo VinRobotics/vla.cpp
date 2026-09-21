@@ -16,12 +16,24 @@ import math
 from typing import Any
 import numpy as np
 import torch
+from PIL import Image
 from tree import map_structure
 
 from lerobot.envs.utils import preprocess_observation
 from lerobot.processor.env_processor import LiberoProcessorStep
 from lerobot.processor.pipeline import PolicyProcessorPipeline
 from lerobot.utils.constants import ACTION
+
+def octo_preprocess_image(frame: np.ndarray, image_size: int = 256) -> np.ndarray:
+    # Rotate 180 like every other LIBERO adapter here (the off-screen render comes
+    # out upside-down), then resize. LIBERO renders at 256 and Octo's primary
+    # tokenizer wants 256, so the resize only bites if the camera is reconfigured.
+    rotated = np.ascontiguousarray(frame[::-1, ::-1])
+    if rotated.shape[0] == image_size and rotated.shape[1] == image_size:
+        return rotated
+    resized = Image.fromarray(rotated).resize((image_size, image_size), resample=Image.LANCZOS)
+    return np.asarray(resized, dtype=np.uint8)
+
 
 class BasePipelineAdapter:
     def __init__(self, client: Any = None):
@@ -153,3 +165,21 @@ class Gr00tN15PipelineAdapter(Gr00tPipelineAdapter):
 
     def parse_action(self, action: np.ndarray) -> np.ndarray:
         return np.asarray(action[:7], dtype=np.float32).copy()
+
+# The LIBERO finetunes are single-camera: their image_obs_keys never held a wrist
+# key, so sending the primary view alone is what the checkpoint trained on. Octo's
+# observation tokenizers are image-only, so there is no state to send either.
+class OctoPipelineAdapter(BasePipelineAdapter):
+
+    def parse_observation(self, obs: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "observation.images.image": octo_preprocess_image(obs["pixels"]["image"], image_size=256),
+            "task": obs.get("task_description", ""),
+        }
+
+    def parse_action(self, action: np.ndarray) -> np.ndarray:
+        # The server already returned world units. Only the gripper needs Octo's
+        # +1=open/0=close turned into LIBERO's -1=open/+1=close.
+        action = np.asarray(action[:7], dtype=np.float32).copy()
+        action[6] = -1.0 if action[6] > 0.5 else 1.0
+        return action

@@ -14,8 +14,11 @@
 
 // One-shot action prediction from the command line. Loads a model, decodes an
 // image plus an instruction, runs one predict(), and prints the action chunk.
-// No server, no simulator. There is no tokenizer in the C++ core, so --text
-// shells out to scripts/tokenize_prompt.py; --tokens takes ids directly.
+// No server, no simulator. Most archs have no tokenizer in the C++ core, so
+// --text shells out to scripts/tokenize_prompt.py; --tokens takes ids directly.
+// Octo is the exception: its T5 SentencePiece vocab is baked into the GGUF, so
+// --text is tokenized in-process (no Python) and also yields the attention mask
+// that Octo's predict() requires.
 //
 //   vla-cli [--mmproj m.gguf] --ckpt c.gguf --image img.jpg [--image img2.jpg]
 //           (--text "pick up the bowl" | --tokens id,id,...) [--state f,f,...] [--pretty]
@@ -23,6 +26,9 @@
 #include "arch.h"
 #include "model.h"
 #include "serving/hf_fetch.h"
+#ifdef VLA_USE_OCTO
+#include "models/octo.h"
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
@@ -123,9 +129,35 @@ const char * arch_slug(Arch a) {
         case Arch::VLA_ADAPTER: return "vla_adapter";
         case Arch::OPENVLA_OFT: return "openvla_oft";
         case Arch::VLA_JEPA:    return "vla_jepa";
+        case Arch::OCTO:        return "octo";
     }
     return "";
 }
+
+#ifdef VLA_USE_OCTO
+bool octo_ckpt(const std::string & ckpt) {
+    Arch a;
+    return detect_arch_from_ckpt(ckpt, &a) && a == Arch::OCTO;
+}
+
+// Octo's tokenizer ships inside the checkpoint, so --text needs no Python here
+// and yields the attention mask its T5 encoder wants alongside the ids.
+bool octo_tokens(const std::string & ckpt, const std::string & text,
+                 std::vector<int32_t> & lang, std::vector<int32_t> & attn) {
+    if (octo_tokenize_text(ckpt, text, lang, attn))
+        return true;
+    std::fprintf(stderr, "vla-cli: octo tokenization failed\n");
+    return false;
+}
+#else
+bool octo_ckpt(const std::string &) {
+    return false;
+}
+
+bool octo_tokens(const std::string &, const std::string &, std::vector<int32_t> &, std::vector<int32_t> &) {
+    return false;
+}
+#endif
 
 // The instruction reaches a shell command, so keep it to plain prose.
 bool text_ok(const std::string & s) {
@@ -198,7 +230,8 @@ void usage(const char * prog) {
         "  --ckpt     model checkpoint GGUF\n"
         "  -hf        HuggingFace repo, user/repo[:file.gguf], cached under $VLA_CACHE\n"
         "  --image    image file, repeat for multi-view (decoded via stb_image)\n"
-        "  --text     instruction, tokenized by scripts/tokenize_prompt.py (needs transformers)\n"
+        "  --text     instruction; tokenized by scripts/tokenize_prompt.py (needs\n"
+        "             transformers), or in-process for Octo, whose vocab is in the GGUF\n"
         "  --tokens   language token ids, comma-separated, if you tokenized already\n"
         "  --state    proprioception floats, comma-separated (default zeros)\n"
         "  --pretty   print one action row (max_action_dim values) per line\n",
@@ -257,17 +290,25 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "vla-cli: pass --text or --tokens, not both\n");
         return 1;
     }
-    if (!text_s.empty()) {
-        tokens_s = tokenize_text(ckpt, text_s);
-        if (tokens_s.empty())
-            return 1;
-        std::fprintf(stderr, "vla-cli: --text tokenized to %s\n", tokens_s.c_str());
-    }
-
     // Validate the cheap args before loading the model.
     std::vector<int32_t> lang;
+    std::vector<int32_t> attn;   // Octo only; empty leaves Inputs::attention_mask null.
     std::vector<float>   state;
-    if (!parse_ints(tokens_s, lang) || !parse_floats(state_s, state))
+
+    if (octo_ckpt(ckpt) && !text_s.empty()) {
+        if (!octo_tokens(ckpt, text_s, lang, attn))
+            return 1;
+    } else {
+        if (!text_s.empty()) {
+            tokens_s = tokenize_text(ckpt, text_s);
+            if (tokens_s.empty())
+                return 1;
+            std::fprintf(stderr, "vla-cli: --text tokenized to %s\n", tokens_s.c_str());
+        }
+        if (!parse_ints(tokens_s, lang))
+            return 1;
+    }
+    if (!parse_floats(state_s, state))
         return 1;
     if (lang.empty()) {
         std::fprintf(stderr, "vla-cli: --tokens parsed to nothing\n");
@@ -302,6 +343,10 @@ int main(int argc, char ** argv) {
     in.n_images    = (int) views.size();
     in.lang_tokens = lang.data();
     in.n_lang      = (int) lang.size();
+    if (!attn.empty()) {
+        in.attention_mask   = attn.data();
+        in.attention_mask_n = (int) attn.size();
+    }
     in.state       = state.data();
     in.noise       = nullptr;  // predict() samples N(0,1) when omitted
 

@@ -325,6 +325,7 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | Y | - | 
 | [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | Y | - | 
 | [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | - | 
+| [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | - | - | 
 
 ---
 
@@ -362,6 +363,7 @@ Supported VLA models:
 - [OpenVLA-OFT](https://github.com/moojink/openvla-oft) - Moo Jin Kim et al.
 - [GR00T N1.x](https://github.com/NVIDIA/Isaac-GR00T) - NVIDIA Isaac.
 - [VLA-JEPA](https://github.com/ginwind/VLA-JEPA) - Jingwen Sun et al.
+- [Octo](https://github.com/octo-models/octo) - Octo Model Team, UC Berkeley RAIL.
 
 Built on:
 

@@ -16,6 +16,7 @@ _deps/
 
 # Models / data
 *.gguf
+*.gguf.tensor_map.json
 *.bin
 *.safetensors
 *.pt
