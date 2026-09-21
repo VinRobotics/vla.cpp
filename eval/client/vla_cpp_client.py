@@ -145,6 +145,7 @@ class VlaCppClient:
 
         stats_json: str | Path | None = None,
         bitvla_unnorm_key: str | None = None,
+        rel_stats_json: str | Path | None = None,
     ):
         if arch not in ARCH_PRESETS:
             raise ValueError(f"unknown arch {arch!r}; expected one of {sorted(ARCH_PRESETS)}")
@@ -287,6 +288,9 @@ class VlaCppClient:
 
         self._gr00t_action_unnorm = None
         self._gr00t_state_norm = None
+        self._gr00t_state_keys = None
+        self._gr00t_state_dims = None
+        self._gr00t_last_state_raw = None
         if arch == "gr00t_n1_7" and stats_json is not None:
             stats_path = Path(stats_json)
             if not stats_path.exists():
@@ -306,38 +310,92 @@ class VlaCppClient:
                         f"--bitvla-unnorm-key explicitly for arch=gr00t_n1_7.")
             if key not in blob:
                 raise KeyError(f"embodiment {key!r} not in {stats_path}; have {list(blob)}")
-            modalities = ["x", "y", "z", "roll", "pitch", "yaw", "gripper"]
             action_stats = blob[key]["action"]
-            q01 = np.array([action_stats[m]["q01"][0] for m in modalities], dtype=np.float32)
-            q99 = np.array([action_stats[m]["q99"][0] for m in modalities], dtype=np.float32)
-            rng = (q99 - q01).astype(np.float32)
-            def _unnorm(chunk_132: np.ndarray, q01=q01, q99=q99, rng=rng) -> np.ndarray:
+            modalities, mod_dims = self._gr00t_modality_layout(action_stats)
+            q01 = self._gr00t_quantile(action_stats, modalities, "q01")
+            q99 = self._gr00t_quantile(action_stats, modalities, "q99")
+            act_dim = int(q01.size)
 
-                norm = chunk_132[..., :7].astype(np.float32)
+            # Checkpoints trained with use_relative_action predict, for the
+            # modalities listed in meta/relative_stats.json, the offset from the
+            # observed state rather than an absolute target - and those offsets
+            # carry their own per-chunk-step statistics. GR00T builds them in
+            # data/stats.py::load_relative_actions and undoes them with
+            # JointActionChunk.to_absolute_chunking, i.e. reference + offset,
+            # every step of the chunk sharing the one reference state.
+            rel_stats = {}
+            if rel_stats_json is not None:
+                rel_path = Path(rel_stats_json)
+                if not rel_path.exists():
+                    raise FileNotFoundError(f"relative stats JSON not found at {rel_path}")
+                rel_stats = json.loads(rel_path.read_text())
+            rel_names = [m for m in modalities if m in rel_stats]
 
-                norm = np.clip(norm, -1.0, 1.0)
+            if rel_names:
+                horizon = min(len(rel_stats[m]["min"]) for m in rel_names)
+                q01_t = np.tile(q01, (horizon, 1)).astype(np.float32)
+                q99_t = np.tile(q99, (horizon, 1)).astype(np.float32)
+                is_rel = np.zeros(act_dim, dtype=bool)
+                off = 0
+                for m, dim in zip(modalities, mod_dims):
+                    if m in rel_stats:
+                        r = rel_stats[m]
+                        # min/max, never q01/q99, even when the checkpoint sets
+                        # use_percentiles. GR00T swaps the whole norm_params entry
+                        # for a relative key with the raw relative_stats dict
+                        # (state_action_processor.py), which bypasses the branch
+                        # that would otherwise substitute the percentiles. Using
+                        # q01/q99 here scales every offset down by ~2x and the arm
+                        # never reaches the pose the policy is steering to.
+                        a = np.asarray(r["min"], dtype=np.float32)[:horizon]
+                        b = np.asarray(r["max"], dtype=np.float32)[:horizon]
+                        if a.shape[1] != dim:
+                            raise ValueError(
+                                f"relative stats for {m!r} are {a.shape[1]}-wide, "
+                                f"statistics say {dim}")
+                        q01_t[:, off:off + dim] = a
+                        q99_t[:, off:off + dim] = b
+                        is_rel[off:off + dim] = True
+                    off += dim
+                rng_t = (q99_t - q01_t).astype(np.float32)
 
-                raw = (norm + 1.0) * 0.5 * rng[None, :] + q01[None, :]
+                def _unnorm(chunk_132, q01_t=q01_t, rng_t=rng_t, is_rel=is_rel,
+                            act_dim=act_dim, horizon=horizon):
+                    n = min(len(chunk_132), horizon)
+                    norm = np.clip(chunk_132[:n, :act_dim].astype(np.float32), -1.0, 1.0)
+                    raw = (norm + 1.0) * 0.5 * rng_t[:n] + q01_t[:n]
+                    ref = self._gr00t_last_state_raw
+                    if ref is None:
+                        raise RuntimeError("relative actions need the observation state; "
+                                           "none was recorded for this request")
+                    raw[:, is_rel] += np.asarray(ref, dtype=np.float32)[:act_dim][is_rel]
+                    return raw.astype(np.float32)
+            else:
+                rng = (q99 - q01).astype(np.float32)
 
-                return raw.astype(np.float32)
+                def _unnorm(chunk_132: np.ndarray, q01=q01, q99=q99, rng=rng,
+                            act_dim=act_dim) -> np.ndarray:
+
+                    norm = chunk_132[..., :act_dim].astype(np.float32)
+
+                    norm = np.clip(norm, -1.0, 1.0)
+
+                    raw = (norm + 1.0) * 0.5 * rng[None, :] + q01[None, :]
+
+                    return raw.astype(np.float32)
             self._gr00t_action_unnorm = _unnorm
             print(f"vla-cpp-direct[arch=gr00t_n1_7]: action unnormalizer "
-                  f"(q01/q99 + clip + gripper flip) via {stats_path}::{key}.action "
-                  f"[modalities={modalities}, q01={q01.tolist()}, q99={q99.tolist()}]",
+                  f"(q01/q99 + clip) via {stats_path}::{key}.action "
+                  f"[modalities={list(zip(modalities, mod_dims))} -> {act_dim}-D, "
+                  f"relative={rel_names or 'none'}]",
                   flush=True)
 
             state_stats = blob[key]["state"]
-            s_q01_parts, s_q99_parts = [], []
-            for m, dim in zip(self._GR00T_STATE_KEYS, self._GR00T_STATE_DIMS):
-                if m not in state_stats:
-                    raise KeyError(f"state modality {m!r} not in {stats_path}::{key}.state")
-                q01_m = np.asarray(state_stats[m]["q01"], dtype=np.float32)
-                q99_m = np.asarray(state_stats[m]["q99"], dtype=np.float32)
-                if q01_m.size != dim or q99_m.size != dim:
-                    raise ValueError(f"state.{m}: stats dim {q01_m.size}/{q99_m.size} != expected {dim}")
-                s_q01_parts.append(q01_m); s_q99_parts.append(q99_m)
-            s_q01 = np.concatenate(s_q01_parts)
-            s_q99 = np.concatenate(s_q99_parts)
+            state_keys, state_dims = self._gr00t_modality_layout(state_stats)
+            self._gr00t_state_keys = tuple(state_keys)
+            self._gr00t_state_dims = tuple(state_dims)
+            s_q01 = self._gr00t_quantile(state_stats, state_keys, "q01")
+            s_q99 = self._gr00t_quantile(state_stats, state_keys, "q99")
             s_rng = (s_q99 - s_q01).astype(np.float32)
             def _state_norm(state_8d: np.ndarray, q01=s_q01, q99=s_q99, rng=s_rng) -> np.ndarray:
 
@@ -346,7 +404,8 @@ class VlaCppClient:
             self._gr00t_state_norm = _state_norm
             print(f"vla-cpp-direct[arch=gr00t_n1_7]: state normalizer "
                   f"(q01/q99 + clip) via {stats_path}::{key}.state "
-                  f"[q01={s_q01.tolist()}, q99={s_q99.tolist()}]", flush=True)
+                  f"[modalities={list(zip(state_keys, state_dims))} -> {s_q01.size}-D, "
+                  f"q01={s_q01.tolist()}, q99={s_q99.tolist()}]", flush=True)
 
         if arch == "gr00t_n1_6" and stats_json is not None:
             stats_path = Path(stats_json)
@@ -1143,8 +1202,41 @@ class VlaCppClient:
             img = cv2.resize(img, (target_size, target_size), interpolation=cv2.INTER_AREA)
         return np.ascontiguousarray(img, dtype=np.uint8)
 
+    # Fallback layout: the EEF-style embodiments (x/y/z/rpy + 2-finger gripper)
+    # the GR00T paths were first written against. Checkpoints trained on a joint
+    # space name their modalities differently ("single_arm", "gripper", ...), so
+    # the real layout is read out of the checkpoint's statistics JSON instead -
+    # see _gr00t_modality_layout.
     _GR00T_STATE_KEYS = ("x", "y", "z", "roll", "pitch", "yaw", "gripper")
     _GR00T_STATE_DIMS = (1,   1,   1,   1,      1,       1,    2)
+
+    @classmethod
+    def _gr00t_modality_layout(cls, group_stats: dict) -> tuple[list[str], list[int]]:
+        """Ordered modality names and their widths for one statistics group.
+
+        Keeps the historical EEF order when the checkpoint has every one of
+        those modalities; otherwise follows the order the checkpoint itself
+        declares, which is the order GR00T's processor concatenates them in.
+        """
+        if all(k in group_stats for k in cls._GR00T_STATE_KEYS):
+            keys = list(cls._GR00T_STATE_KEYS)
+        else:
+            keys = list(group_stats.keys())
+        dims = [int(np.asarray(group_stats[k]["q01"], dtype=np.float32).reshape(-1).size)
+                for k in keys]
+        return keys, dims
+
+    @staticmethod
+    def _gr00t_quantile(group_stats: dict, keys: list[str], field: str) -> np.ndarray:
+        """Concatenate one quantile field across modalities, in the given order."""
+        parts = []
+        for k in keys:
+            if k not in group_stats:
+                raise KeyError(f"modality {k!r} not in statistics group; have {list(group_stats)}")
+            if field not in group_stats[k]:
+                raise KeyError(f"modality {k!r} lacks {field!r}; GR00T N1.7 needs q01/q99")
+            parts.append(np.asarray(group_stats[k][field], dtype=np.float32).reshape(-1))
+        return np.concatenate(parts).astype(np.float32)
 
     def _predict_chunk_gr00t_n1_7(self, observations: dict[str, Any]) -> np.ndarray:
 
@@ -1171,10 +1263,14 @@ class VlaCppClient:
             images_f32.append(img_f32)
 
         state_chunks = []
-        for key, dim in zip(self._GR00T_STATE_KEYS, self._GR00T_STATE_DIMS):
+        state_keys = getattr(self, "_gr00t_state_keys", None) or self._GR00T_STATE_KEYS
+        state_dims = getattr(self, "_gr00t_state_dims", None) or self._GR00T_STATE_DIMS
+        for key, dim in zip(state_keys, state_dims):
             mk = f"state.{key}"
             if mk not in observations:
-                raise KeyError(f"gr00t_n1_7 state key '{mk}' missing; got {list(observations.keys())}")
+                raise KeyError(
+                    f"gr00t_n1_7 state key '{mk}' missing; this checkpoint's statistics "
+                    f"declare {list(state_keys)}; got {list(observations.keys())}")
             v = observations[mk]
             if isinstance(v, torch.Tensor):
                 v = v.numpy()
@@ -1184,6 +1280,9 @@ class VlaCppClient:
                 raise ValueError(f"gr00t_n1_7 state '{mk}': expected {dim}-d, got {v.size}-d")
             state_chunks.append(v)
         state_raw = np.concatenate(state_chunks, axis=0).astype(np.float32)
+        # Reference frame for relative actions: the raw, un-normalised state of
+        # this observation. Every step of the chunk is an offset from it.
+        self._gr00t_last_state_raw = state_raw.copy()
         if self._gr00t_state_norm is not None:
             state_raw = self._gr00t_state_norm(state_raw)
         state_padded = np.zeros(self.max_state_dim, dtype=np.float32)

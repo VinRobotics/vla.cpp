@@ -43,6 +43,49 @@ from gguf_common import (
     resolve_out
 )
 
+def _uses_relative_actions(ckpt, processor_json: str) -> bool:
+    """Whether any action modality of a shipped embodiment is RELATIVE.
+
+    The per-modality `rep` in processor_config.json is the signal that matters:
+    the global `use_relative_action` in experiment_cfg/ is a training switch that
+    is set on checkpoints whose modalities are all ABSOLUTE too, so reading it
+    alone mislabels them. Falls back to that flag only when the processor config
+    carries no action_configs at all.
+    """
+    import re
+    try:
+        mods = json.loads(processor_json).get("processor_kwargs", {}).get("modality_configs", {})
+    except (ValueError, TypeError):
+        mods = {}
+    # Only the embodiment this checkpoint was finetuned for counts. statistics.json
+    # carries every stock embodiment, plenty of which are relative, so keying off it
+    # marks every checkpoint relative. experiment_cfg/dataset_statistics.json holds
+    # just the finetuned one.
+    finetuned = ckpt / "experiment_cfg" / "dataset_statistics.json"
+    try:
+        shipped = set(json.loads(finetuned.read_text())) if finetuned.exists() else set()
+    except ValueError:
+        shipped = set()
+    saw_action_configs = False
+    for emb, cfg in mods.items():
+        cfgs = (cfg.get("action") or {}).get("action_configs") or []
+        if cfgs:
+            saw_action_configs = True
+        if emb not in shipped:
+            continue
+        if any(str(c.get("rep", "")).upper() == "RELATIVE" for c in cfgs):
+            return True
+    if saw_action_configs:
+        return False
+    for name in ("config.yaml", "conf.yaml"):
+        path = ckpt / "experiment_cfg" / name
+        if path.exists():
+            m = re.search(r"^\s*use_relative_action:\s*(true|false)\s*$",
+                          path.read_text(errors="replace"), re.IGNORECASE | re.MULTILINE)
+            if m:
+                return m.group(1).lower() == "true"
+    return False
+
 ARCH = "gr00t_n1_7"
 KV = kv_prefix(ARCH)
 
@@ -137,7 +180,7 @@ def main() -> int:
     CROP_FRACTION       = float(cfg_json.get("crop_fraction", 0.95) or 0.95)
     ICS                 = cfg_json.get("image_crop_size", [230, 230]) or [230, 230]
     ITS                 = cfg_json.get("image_target_size", [256, 256]) or [256, 256]
-    USE_RELATIVE_ACTION = bool(cfg_json.get("use_relative_action", False))
+    USE_RELATIVE_ACTION = False   # resolved from the sidecars once they are read
     APPLY_SINCOS_STATE  = bool(cfg_json.get("apply_sincos_state_encoding", False))
 
     print(f"loading sharded safetensors from {ckpt} ...")
@@ -173,6 +216,13 @@ def main() -> int:
     proc_kwargs = json.loads(processor_json).get("processor_kwargs", {}) if processor_json != "{}" else {}
     USE_PERCENTILES = bool(proc_kwargs.get("use_percentiles", True))
     CLIP_OUTLIERS   = bool(proc_kwargs.get("clip_outliers", True))
+    USE_RELATIVE_ACTION = bool(cfg_json.get(
+        "use_relative_action",
+        _uses_relative_actions(ckpt, processor_json)))
+    if USE_RELATIVE_ACTION:
+        print("  NOTE: this checkpoint predicts RELATIVE actions. The engine returns them "
+              "as-is; the caller must add the observation state back (eval/client does this "
+              "given --rel-stats-json).")
 
     print(f"resolved cfg: vit=Qwen3-VL {VIT['vit_hidden']}d×{VIT['vit_layers']}L×{VIT['vit_heads']}h (Conv3d patch {VIT['patch_size']}², temporal {VIT['temporal_patch_size']}, "
           f"learned pos {VIT['vit_num_position_embeddings']}=48² + 2D rope; deepstack@{DEEPSTACK_IDXS}; merger LN={VIT['vit_hidden']} pre-merge / deepstack LN={c_merged} post-merge ⇒ "
