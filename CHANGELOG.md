@@ -6,6 +6,29 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 
+- **FoldQuant INT8 checkpoints.** A GGUF exported by VLA-OPT (`vla-opt build
+  --target vlacpp`) carries the GR00T N1.6 / N1.7 language backbone and DiT as
+  INT8 codes in a block-Hadamard, SmoothQuant-folded frame with per-row scales;
+  vla.cpp quantizes activations per token and runs the projections on the
+  integer tensor cores. The file format and arithmetic are the contract in
+  `docs/QUANTIZATION.md`. Each site is two `GGML_OP_CUSTOM` nodes
+  (`src/layers/fq_linear.h`): the CPU backend runs the reference in
+  `src/foldquant_ref.cpp`, CUDA claims the same nodes through the ggml extension
+  hook with `src/kernels/foldquant/` (wmma INT8 GEMM, fused RMSNorm + butterfly
+  + quant prologue), bit-identical to the CPU path. `scripts/foldquant_fake_export.py`
+  produces an uncalibrated file for bring-up, `scripts/inspect_gguf_quant.py`
+  checks one against the contract, `scripts/foldquant_ref.py` is the numpy
+  reference. Other backends refuse a FoldQuant file at load.
+- The ggml CUDA extension hook now goes through one dispatcher
+  (`src/cuda/vla_cuda_ext.cu`) so the BF16 activation ops and the FoldQuant
+  handler compose.
+- `WeightLoader::opt_typed`, `fuse_typed`, `reader()` and `fail()`; `fuse()`
+  refuses sources of differing type or row shape, and a float `gemm()` declare
+  of an INT8 tensor fails with a message naming the FoldQuant site.
+- `scripts/convert_gr00t_n1_7_to_gguf.py` exposes `convert(ckpt, out,
+  writer_factory=...)` so VLA-OPT's exporter reuses the converter instead of
+  re-implementing the file.
+
 - **OpenVINO backend.** `-DGGML_OPENVINO=ON` runs the archs on Intel CPUs, iGPUs
   and NPUs through ggml's OpenVINO backend. SmolVLA, π0.5, Evo-1 and VLA-Adapter
   match an F32 CPU reference to 1e-3; on an Arc B390 iGPU that is 3.0x to 9.6x

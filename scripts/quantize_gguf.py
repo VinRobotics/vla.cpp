@@ -21,6 +21,13 @@ patch embeddings and position tables stay float (row-fetch and small tensors do
 not benefit and can lose accuracy).
 
     python scripts/quantize_gguf.py --in model-bf16.gguf --out model-q8_0.gguf --type Q8_0
+
+This is the stock ggml repack: block-32 absmax weights, float activations,
+dequantized inside ggml_mul_mat, runs on every backend. It is not FoldQuant.
+A FoldQuant GGUF (docs/QUANTIZATION.md: INT8 codes + sidecar scales executed by
+the in-tree integer kernels, CUDA/CPU only) is produced by VLA-OPT
+(`vla-opt build --target vlacpp`) or, uncalibrated, by
+scripts/foldquant_fake_export.py; this script refuses such a file.
 """
 
 import argparse
@@ -87,6 +94,9 @@ def main() -> None:
 
     r = gguf.GGUFReader(args.src)
     arch = r.fields["general.architecture"].contents()
+    if f"{arch}.quant.method" in r.fields:
+        raise SystemExit(f"{args.src} is a FoldQuant GGUF; its INT8 sites are not ggml block types "
+                         "and cannot be repacked (see docs/QUANTIZATION.md)")
     w = gguf.GGUFWriter(args.dst, arch)
 
     meta = {"GGUF.version", "GGUF.tensor_count", "GGUF.kv_count", "general.architecture"}

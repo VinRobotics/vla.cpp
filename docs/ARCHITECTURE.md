@@ -20,6 +20,8 @@ source is the detail.
 - `src/serving/` - `vla-server` (ZeroMQ + protobuf, action prediction), `vlm-server`
   (chat), and `vla-cli` (one-shot inference).
 - `src/kernels/bitvla/` - custom 1.58-bit ternary CUDA kernels for BitVLA.
+- `src/foldquant.h`, `src/kernels/foldquant/`, `src/cuda/` - FoldQuant INT8 linears
+  and the in-tree CUDA kernels behind the ggml extension hook.
 
 ## The prediction path
 
@@ -57,7 +59,14 @@ Two patterns, chosen per architecture:
 llama.cpp is fetched and pinned by CMake `FetchContent`; a bump is a one-line
 `GIT_TAG` change. Weights are bf16 by default and can be repacked to Q8_0/Q4_0 with
 `scripts/quantize_gguf.py`; the loader runs quantized GGUFs directly and lets
-`ggml_mul_mat` dequantize at compute. CPU thread count scales to the machine core
+`ggml_mul_mat` dequantize at compute.
+
+A FoldQuant GGUF (exported by VLA-OPT, see [QUANTIZATION.md](QUANTIZATION.md))
+carries INT8 codes plus sidecar scales instead. `src/foldquant.h` declares those
+sites, `src/layers/fq_linear.h` turns each into two `GGML_OP_CUSTOM` nodes, the
+CPU backend runs the reference in `src/foldquant_ref.cpp`, and on CUDA the
+`src/kernels/foldquant/` integer kernels claim the same nodes through the ggml
+extension hook (`src/cuda/`). CPU thread count scales to the machine core
 count; CUDA and Metal run the towers and the transformer on the GPU.
 
 ## Adding an architecture

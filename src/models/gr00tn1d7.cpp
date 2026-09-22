@@ -256,6 +256,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
     }
     if (!load_config(g, *m, m->cfg))
         return nullptr;
+    const FoldQuantSpec fq = foldquant_parse(g, "gr00t_n1_7");
     std::printf("vla(gr00tn1d7): vit=Qwen3-VL %lldd×%lldL×%lldh (Conv3d patch %lld², temporal %lld; learned pos %lld + 2D rope; deepstack@{%lld,%lld,%lld}; merge÷%lld)  "
                 "lm=Qwen3-VL %lldd×%lldL (%lldq/%lldkv×%lld, θ=%g)  vlsa=%lldL×%lldh×%lld  dit=AlternateVLDiT %lldL×%lldh×%lld(inner %lld) attend_text_every_n=%lld  "
                 "in_emb=%lld  horizon=%lld action_dim=%lld max_state=%lld N_steps=%lld  embodiment=%lld  resident=%s\n",
@@ -273,6 +274,8 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
             return nullptr;
         }
         m->backend = b.handle;
+        if (!foldquant_check_backend("vla(gr00tn1d7)", b, fq, opts.weight_dtype.has_value()))
+            return nullptr;
     }
 
     ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };
@@ -285,14 +288,14 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
     WeightLoader L("gr00tn1d7", g, m->ctx_weights, m->matmul_type);
 
     m->vit.declare(L, "vit", m->vit_layers);
-    m->lm.declare(L, "vlm");
+    m->lm.declare(L, "vlm", fq.present ? &fq.llm : nullptr);
 
     m->vlln_w = L.f32("aex.vlln.weight");
     m->vlln_b = L.f32("aex.vlln.bias");
     m->vlsa.declare(L, "aex.vlsa", m->vlsa_layers, EncNames{"norm1", "norm3", "ff0", "ff2"});
 
     m->aex.declare(L, "aex");
-    m->dit.declare(L, "aex.dit", true, m->dit_interleave != 0);
+    m->dit.declare(L, "aex.dit", true, m->dit_interleave != 0, nullptr, fq.present ? &fq.action : nullptr);
 
     if (!L.upload(m->backend, &m->weight_buf))
         return nullptr;

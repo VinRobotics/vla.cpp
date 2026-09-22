@@ -127,6 +127,8 @@ add_library(vla_core
     src/model.cpp
     src/loader.cpp
     src/options.cpp
+    src/foldquant.cpp
+    src/foldquant_ref.cpp
     src/modules/action_expert.cpp
     src/modules/dit_head.cpp
     src/modules/encoder.cpp
@@ -152,6 +154,9 @@ target_include_directories(vla_core
 )
 # The VLA archs call no llama_* API; only vlm_core needs llama.
 target_link_libraries(vla_core PUBLIC ggml)
+# The FoldQuant CPU reference must match the CUDA kernels bit for bit, so no
+# FMA contraction on either side (aarch64 GCC contracts by default).
+set_source_files_properties(src/foldquant.cpp src/foldquant_ref.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 if(VLA_OCTO)
     target_sources(vla_core PRIVATE src/models/octo.cpp)
     target_include_directories(vla_core PRIVATE ${sentencepiece_SOURCE_DIR}/src)
@@ -206,8 +211,35 @@ if(GGML_CUDA)
     target_compile_definitions(vla_core PUBLIC VLA_BITVLA_CUDA_KERNELS)
     target_include_directories(vla_core PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
 
+    # FoldQuant kernels: their own archive, device-linked on its own like bitvla
+    # above, because they compile with -fmad=false (bit-exact against the CPU
+    # reference in src/foldquant_ref.h) and no other archive does.
+    add_library(vla_fq_kernels STATIC
+        src/kernels/foldquant/fq_prologue.cu
+        src/kernels/foldquant/fq_gemm_i8.cu
+    )
+    set_target_properties(vla_fq_kernels PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_include_directories(vla_fq_kernels PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_features(vla_fq_kernels PRIVATE cxx_std_17)
+    target_compile_options(vla_fq_kernels PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3 -Xptxas=-O3 -fmad=false>
+    )
+    target_link_libraries(vla_fq_kernels PUBLIC CUDA::cudart)
+
     # ggml-cuda link: the hook resolves ggml_cuda_ext_forward out of it.
-    add_library(vla_cuda_ops STATIC src/cuda/vla_cuda_bf16.cu)
+    add_library(vla_cuda_ops STATIC
+        src/cuda/vla_cuda_ext.cu
+        src/cuda/vla_cuda_bf16.cu
+        src/cuda/vla_cuda_foldquant.cu
+    )
+    # The staging shim in vla_cuda_foldquant.cu runs the CPU reference on the
+    # host; it must round exactly like vla_core's copy.
+    set_source_files_properties(src/cuda/vla_cuda_foldquant.cu PROPERTIES
+        COMPILE_OPTIONS "-Xcompiler=-ffp-contract=off")
     target_include_directories(vla_cuda_ops PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${llama_SOURCE_DIR}/ggml/include
@@ -221,7 +253,7 @@ if(GGML_CUDA)
     target_compile_options(vla_cuda_ops PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-O3 -Xptxas=-O3>
     )
-    target_link_libraries(vla_cuda_ops PUBLIC CUDA::cublas CUDA::cudart ggml-cuda)
+    target_link_libraries(vla_cuda_ops PUBLIC CUDA::cublas CUDA::cudart ggml-cuda vla_fq_kernels)
     target_link_libraries(vla_core PRIVATE vla_cuda_ops)
 endif()
 
@@ -362,7 +394,7 @@ target_link_libraries(vla-bench PRIVATE vla_core)
 set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla vla-server vlm-server vla-cli vla-bench)
 # The CUDA targets were the only first-party code compiled without warnings.
 if(GGML_CUDA)
-    list(APPEND VLA_FIRST_PARTY_TARGETS bitvla_cuda_kernels vla_cuda_ops)
+    list(APPEND VLA_FIRST_PARTY_TARGETS bitvla_cuda_kernels vla_cuda_ops vla_fq_kernels)
 endif()
 
 foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)

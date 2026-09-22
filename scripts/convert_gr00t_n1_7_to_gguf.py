@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from gguf_blocks import (
     write_dit_blocks,
@@ -143,12 +144,15 @@ VIT_ROOT = "backbone.model.model.visual"
 LM_ROOT  = "backbone.model.model.language_model"
 AHK      = "action_head"
 
-def main() -> int:
-    ap = arg_parser(ARCH, "GR00T-N1.7-3B snapshot dir")
-    args = ap.parse_args()
+def convert(ckpt: Path, out: Path, *, writer_factory=open_writer) -> Path:
+    """Write the GGUF for the checkpoint at `ckpt` to `out` and return `out`.
 
-    ckpt = args.ckpt.resolve()
-    out  = resolve_out(args, ckpt, ARCH)
+    `writer_factory(out, arch)` supplies the gguf.GGUFWriter; VLA-OPT passes one
+    that rewrites the FoldQuant sites (docs/QUANTIZATION.md) as they are added,
+    so the exported file is this converter's file with INT8 sites, not a
+    re-implementation of it."""
+    ckpt = ckpt.resolve()
+    out  = out.resolve()
     require(ckpt / "model.safetensors.index.json")
     cfg_json = read_json(ckpt / "config.json")
     if str(cfg_json.get("model_type", "")) != "Gr00tN1d7":
@@ -233,7 +237,7 @@ def main() -> int:
           f"embodiments={AH['max_num_embodiments']}  relative={USE_RELATIVE_ACTION} percentiles={USE_PERCENTILES} clip={CLIP_OUTLIERS} sincos={APPLY_SINCOS_STATE}  "
           f"img: shortest_edge={SHORTEST_EDGE} crop_frac={CROP_FRACTION} crop_size={ICS} target_size={ITS}  stats={len(statistics_json)}c proc={len(processor_json)}c emb_id={embodiment_id_json.strip()}")
 
-    writer = open_writer(out, ARCH)
+    writer = writer_factory(out, ARCH)
     kv_u32(
         writer,
         KV,
@@ -330,12 +334,20 @@ def main() -> int:
     write_dit_blocks(writer, g, f"{AHK}.model.transformer_blocks", "aex.dit", AH["dit_layers"])
     write_gr00t_proj_out(writer, g, AHK, "aex.dit")
 
-    return finish(
+    finish(
         writer,
         out,
         "  - combined GGUF (Qwen3-VL backbone + deepstack + vl_self_attention "
         "+ AlternateVLDiT action head + cfg + sidecars)"
     )
+    return out
+
+def main() -> int:
+    ap = arg_parser(ARCH, "GR00T-N1.7-3B snapshot dir")
+    args = ap.parse_args()
+    ckpt = args.ckpt.resolve()
+    convert(ckpt, resolve_out(args, ckpt, ARCH))
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

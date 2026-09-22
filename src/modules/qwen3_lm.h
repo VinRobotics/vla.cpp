@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "foldquant.h"
 #include "layers/rope.h"
 #include "loader.h"
 
@@ -27,7 +28,14 @@
 namespace vla {
 
 struct Qwen3LayerW {
-    ggml_tensor *attn_norm, *Wq, *Wk, *Wv, *Wo, *q_norm, *k_norm, *ffn_norm, *Wgate, *Wup, *Wdown;
+    ggml_tensor *attn_norm = nullptr, *Wq = nullptr, *Wk = nullptr, *Wv = nullptr, *Wo = nullptr;
+    ggml_tensor *q_norm = nullptr, *k_norm = nullptr, *ffn_norm = nullptr;
+    ggml_tensor *Wgate = nullptr, *Wup = nullptr, *Wdown = nullptr;
+
+    // FoldQuant sites (docs/QUANTIZATION.md); empty when the file ships the
+    // projection as a float GEMM. q/k/v share one activation node with the
+    // RMSNorm fused in, as do gate/up.
+    FqLinear fq_q, fq_k, fq_v, fq_o, fq_gate, fq_up, fq_down;
 };
 
 struct Qwen3Cfg {
@@ -47,7 +55,9 @@ struct Qwen3LM {
     std::vector<Qwen3LayerW> blk;
     ggml_tensor *            output_norm = nullptr;
 
-    void declare(WeightLoader & L, const char * prefix);
+    // fq: the LLM module's FoldQuant parameters when the GGUF carries them,
+    // null otherwise (every site is then a float GEMM and the graph is unchanged).
+    void declare(WeightLoader & L, const char * prefix, const FqModuleSpec * fq = nullptr);
 
     ggml_tensor * block(ggml_context * C, const Qwen3LayerW & w, ggml_tensor * h,
                         ggml_tensor * pos, ggml_tensor * mask, int64_t seq) const;

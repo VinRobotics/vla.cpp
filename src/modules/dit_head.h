@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include "foldquant.h"
 #include "loader.h"
 
 #include "ggml.h"
@@ -33,6 +34,10 @@ struct DitLayerW {
     ggml_tensor *Wff0, *bff0, *Wff2, *bff2;
 
     ggml_tensor *Wqkv = nullptr, *bqkv = nullptr, *Wkv = nullptr, *bkv = nullptr;
+
+    // FoldQuant sites (docs/QUANTIZATION.md); empty where the file ships a float
+    // GEMM. fq_qkv / fq_kv are the fused forms of fq_q/fq_k/fq_v.
+    FqLinear fq_q, fq_k, fq_v, fq_o, fq_ff0, fq_ff2, fq_qkv, fq_kv;
 };
 
 struct DitCfg {
@@ -52,11 +57,13 @@ struct DitHead {
 
     // outer names time_emb and proj_out when they do not sit under the block
     // prefix; null means they do.
+    // fq: the action module's FoldQuant parameters when the GGUF carries them.
     void declare(WeightLoader & L, const char * prefix, bool fuse_qkv = false, bool interleave = false,
-                 const char * outer = nullptr);
+                 const char * outer = nullptr, const FqModuleSpec * fq = nullptr);
 
+    // xq_pre: an activation blob already computed from src (shared with q).
     void kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
-            ggml_tensor ** K_out, ggml_tensor ** V_out) const;
+            ggml_tensor ** K_out, ggml_tensor ** V_out, ggml_tensor * xq_pre = nullptr) const;
 
     ggml_tensor * block(ggml_context * C, const DitLayerW & w, ggml_tensor * h, ggml_tensor * temb,
                         ggml_tensor * enc, ggml_tensor * K_pre = nullptr, ggml_tensor * V_pre = nullptr) const;
