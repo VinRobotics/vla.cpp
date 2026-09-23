@@ -224,6 +224,11 @@ static cudaError_t launch_forced(int t, const GemmArgs & g, cudaStream_t stream)
         case 9:  return launch_tile<64,  64,  128, 3, 2, 2>(g, stream);
         case 10: return launch_tile<32,  64,  128, 4, 1, 2>(g, stream);
         case 11: return launch_tile<64,  64,  64,  6, 2, 2>(g, stream);
+        case 12: return launch_tile<64,  32,  128, 6, 2, 2>(g, stream);
+        case 13: return launch_tile<64,  32,  256, 4, 2, 2>(g, stream);
+        case 14: return launch_tile<64,  64,  128, 6, 2, 2>(g, stream);
+        case 15: return launch_tile<64,  32,  128, 8, 2, 2>(g, stream);
+        case 16: return launch_tile<64,  32,  256, 6, 2, 2>(g, stream);
         default: return cudaErrorInvalidValue;
     }
 }
@@ -233,10 +238,13 @@ cudaError_t launch_gemm(const GemmArgs & g, cudaStream_t stream) {
     if (g.wbits != 8 || g.abits != 8) return cudaErrorNotSupported;   // W4/A4: phase 2/3
     if (g.K % 128 != 0 && g.K % 64 != 0) return cudaErrorNotSupported;
     if (g.N % 64 != 0) return cudaErrorNotSupported;
-    if (forced_tile() >= 0) {
-        if (g.K % 128 != 0 && (forced_tile() == 1 || forced_tile() == 8 || forced_tile() == 9 || forced_tile() == 10))
-            return cudaErrorNotSupported;
-        return launch_forced(forced_tile(), g, stream);
+    // VLA_FQ_TILE_SMALL_M=1 restricts the override to the M <= 64 shapes (the
+    // DiT sites), so a model run times one DiT tiling with the LLM dispatch intact.
+    if (forced_tile() >= 0 && !(std::getenv("VLA_FQ_TILE_SMALL_M") && g.M > 64)) {
+        const int t = forced_tile();
+        if (g.K % 128 != 0 && (t == 1 || t == 8 || t == 9 || t == 10 || t == 12 || t == 14 || t == 15)) return cudaErrorNotSupported;
+        if (g.K % 256 != 0 && (t == 13 || t == 16)) return cudaErrorNotSupported;
+        return launch_forced(t, g, stream);
     }
     // LLM prefill (M > 64, ~160 tokens on GR00T): measured on Orin (VLA_FQ_TILE
     // sweep, tests/foldquant_gemm_check). The wide gate+up site (N = 12288) and

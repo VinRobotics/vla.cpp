@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -97,7 +98,16 @@ int main(int argc, char ** argv) {
         cudaStream_t st; CK(cudaStreamCreate(&st));
         return stress(st, argc > 2 ? std::atoi(argv[2]) : 200);
     }
-    const int reps = argc > 1 ? std::atoi(argv[1]) : 50;
+    // --cold: rotate every kernel over enough weight copies that no site stays
+    // in the 4 MB L2 between reps - what a model run sees, where each site's
+    // weights are streamed from DRAM once per request. Without it the loop
+    // re-runs one L2-hot site and overstates the achievable bandwidth.
+    bool cold = false;
+    int  reps = 50;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--cold") cold = true;
+        else reps = std::atoi(argv[i]);
+    }
     const Shape shapes[] = {
         { "dit qkv  M=41",     41,   4608, 1536, false },
         { "dit o    M=41",     41,   1536, 1536, false },
@@ -129,17 +139,23 @@ int main(int argc, char ** argv) {
         for (int64_t i = 0; i < K; ++i) hg[i] = 1.0f;
         for (int64_t i = 0; i < N; ++i) hws[i] = 0.01f;
 
-        float *x, *g, *ws, *y; int8_t *w, *blob;
+        const int copies = cold ? (int) std::max<int64_t>(2, (48ll << 20) / ((int64_t) N * K) + 1) : 1;
+        float *x, *g, *ws, *y; int8_t *blob;
+        std::vector<int8_t *> w(copies);
         CK(cudaMalloc(&x, hx.size() * 4)); CK(cudaMalloc(&g, K * 4)); CK(cudaMalloc(&ws, N * 4));
-        CK(cudaMalloc(&y, (size_t) M * N * 4)); CK(cudaMalloc(&w, hw.size())); CK(cudaMalloc(&blob, (size_t) M * rb));
+        CK(cudaMalloc(&y, (size_t) M * N * 4)); CK(cudaMalloc(&blob, (size_t) M * rb));
+        for (int c = 0; c < copies; ++c) {
+            CK(cudaMalloc(&w[c], hw.size()));
+            CK(cudaMemcpy(w[c], hw.data(), hw.size(), cudaMemcpyHostToDevice));
+        }
+        int rot = 0;
         CK(cudaMemcpy(x, hx.data(), hx.size() * 4, cudaMemcpyHostToDevice));
-        CK(cudaMemcpy(w, hw.data(), hw.size(), cudaMemcpyHostToDevice));
         CK(cudaMemcpy(g, hg.data(), K * 4, cudaMemcpyHostToDevice));
         CK(cudaMemcpy(ws, hws.data(), N * 4, cudaMemcpyHostToDevice));
 
         vla::fq::ActArgs a{}; a.x = x; a.ascale = nullptr; a.gamma = s.gamma ? g : nullptr; a.blob = blob; a.row_bytes = rb;
         a.M = M; a.K = K; a.abits = 8; a.rot_block = 64; a.fold_before = false; a.clip = 1.0f; a.eps = 1e-6f; a.inv_sqrt_bs = 0.125f;
-        vla::fq::GemmArgs gm{}; gm.w = w; gm.blob = blob; gm.wscale = ws; gm.bias = nullptr; gm.y = y; gm.M = M; gm.N = N; gm.K = K;
+        vla::fq::GemmArgs gm{}; gm.w = w[0]; gm.blob = blob; gm.wscale = ws; gm.bias = nullptr; gm.y = y; gm.M = M; gm.N = N; gm.K = K;
         gm.row_bytes = rb; gm.wbits = 8; gm.abits = 8;
 
         // DVFS: the governor ramps the clock with sustained load, so the three
@@ -152,25 +168,27 @@ int main(int argc, char ** argv) {
             CK(cudaEventRecord(e1, st)); CK(cudaEventSynchronize(e1));
             float ms; cudaEventElapsedTime(&ms, e0, e1); return ms * 1000.0f / reps;
         };
-        __nv_bfloat16 *wb, *xb; float * yb;
-        CK(cudaMalloc(&wb, (size_t) N * K * 2)); CK(cudaMalloc(&xb, (size_t) M * K * 2)); CK(cudaMalloc(&yb, (size_t) M * N * 4));
+        std::vector<__nv_bfloat16 *> wb(copies); __nv_bfloat16 * xb; float * yb;
+        for (int c = 0; c < copies; ++c) CK(cudaMalloc(&wb[c], (size_t) N * K * 2));
+        CK(cudaMalloc(&xb, (size_t) M * K * 2)); CK(cudaMalloc(&yb, (size_t) M * N * 4));
         const float one = 1.0f, zero = 0.0f;
         auto bf16 = [&] {
             // cuBLAS BF16 GEMM with F32 accumulate, the shape vla.cpp's bf16 path runs (weights [N,K], x [M,K]).
-            cublasGemmEx(cublas, CUBLAS_OP_T, CUBLAS_OP_N, (int) N, (int) M, (int) K, &one, wb, CUDA_R_16BF, (int) K,
+            cublasGemmEx(cublas, CUBLAS_OP_T, CUBLAS_OP_N, (int) N, (int) M, (int) K, &one, wb[rot++ % copies], CUDA_R_16BF, (int) K,
                          xb, CUDA_R_16BF, (int) K, &zero, yb, CUDA_R_32F, (int) N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
         };
         float t_pro = 1e30f, t_gemm = 1e30f, t_bf16 = 1e30f;
         for (int round = 0; round < 4; ++round) {
             t_bf16 = std::min(t_bf16, time(bf16));
             t_pro  = std::min(t_pro,  time([&] { vla::fq::launch_act(a, st); }));
-            t_gemm = std::min(t_gemm, time([&] { vla::fq::launch_gemm(gm, st); }));
+            t_gemm = std::min(t_gemm, time([&] { gm.w = w[rot++ % copies]; vla::fq::launch_gemm(gm, st); }));
         }
         if (cudaGetLastError() != cudaSuccess) { std::printf("launch error\n"); return 1; }
         const double gbps = (double) N * K / ((t_gemm) * 1e-6) / 1e9;
         std::printf("%-20s %8.1f %8.1f %8.1f %9.1f %9.1f %8.2fx\n", s.name, t_pro, t_gemm, t_pro + t_gemm, gbps, t_bf16,
                     t_bf16 / (t_pro + t_gemm));
-        cudaFree(x); cudaFree(g); cudaFree(ws); cudaFree(y); cudaFree(w); cudaFree(blob); cudaFree(wb); cudaFree(xb); cudaFree(yb);
+        cudaFree(x); cudaFree(g); cudaFree(ws); cudaFree(y); cudaFree(blob); cudaFree(xb); cudaFree(yb);
+        for (int c = 0; c < copies; ++c) { cudaFree(w[c]); cudaFree(wb[c]); }
     }
     return 0;
 }

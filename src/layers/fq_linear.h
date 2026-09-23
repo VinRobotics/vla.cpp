@@ -31,7 +31,11 @@ namespace vla {
 // pre-norm hidden state and the RMSNorm is fused into this node.
 inline ggml_tensor * fq_act(ggml_context * C, const FqLinear & s, ggml_tensor * x) {
     GGML_ASSERT(x->type == GGML_TYPE_F32 && x->ne[0] == s.act.K);
-    ggml_tensor * xin = ggml_is_contiguous(x) ? x : ggml_cont(C, x);
+    // Rows contiguous and 16-byte aligned with the higher dims packed is enough
+    // (the prologue takes a row stride); anything else is made contiguous.
+    const bool rows_ok = x->nb[0] == sizeof(float) && x->nb[1] % 16 == 0 &&
+                         x->nb[2] == x->nb[1] * (size_t) x->ne[1] && x->nb[3] == x->nb[2] * (size_t) x->ne[2];
+    ggml_tensor * xin = rows_ok ? x : ggml_cont(C, x);
     const int64_t rows = ggml_nelements(xin) / s.act.K;
 
     // Sources are packed without holes: src[1] is the gamma when the norm is

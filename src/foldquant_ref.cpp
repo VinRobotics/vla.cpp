@@ -211,7 +211,7 @@ void fq_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     float partial[fqref::NT];
     for (int64_t t = t0; t < t1; ++t) {
         uint8_t * row = (uint8_t *) dst->data + (size_t) t * rb;
-        fqref::act_row(xp + (size_t) t * K, ap, gp, s, tmp.data(), partial,
+        fqref::act_row((const float *) ((const char *) xp + (size_t) t * x->nb[1]), ap, gp, s, tmp.data(), partial,
                        (int8_t *) row, (float *) (row + kp));
     }
 }

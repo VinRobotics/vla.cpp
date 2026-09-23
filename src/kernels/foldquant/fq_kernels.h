@@ -32,7 +32,8 @@ namespace vla {
 namespace fq {
 
 struct ActArgs {
-    const float * x;          // [M][K] F32, contiguous
+    const float * x;          // [M][K] F32; rows contiguous, x_stride floats apart (0 = K)
+    int64_t       x_stride = 0;
     const float * ascale;     // [K] or null
     const float * gamma;      // [K] or null (fused RMSNorm)
     int8_t *      blob;       // [M][row_bytes]: codes then the float scale at K_pack

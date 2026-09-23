@@ -26,6 +26,8 @@
 
 #include "fq_kernels.h"
 
+#include <cstdlib>
+
 namespace vla {
 namespace fq {
 
@@ -112,7 +114,7 @@ __global__ void __launch_bounds__(THREADS) act_kernel(const ActArgs a) {
     if (m >= a.M) return;
     const int64_t K       = a.K;
     const int     nchunks = (int) (K / CHUNK);
-    const float * x       = a.x + m * K;
+    const float * x       = a.x + m * (a.x_stride ? a.x_stride : K);
 
     float rstd = 0.0f;
     if (a.gamma) {
@@ -182,7 +184,142 @@ __global__ void __launch_bounds__(THREADS) act_kernel(const ActArgs a) {
     if (lane == 0) *(float *) (row + (ABITS == 8 ? K : K / 2)) = scale;
 }
 
+// CTA-per-row variant for the short rows a VLA quantizes (41 action tokens,
+// a few hundred LLM tokens): one warp per row leaves a 16-SM GPU nearly idle
+// and each launch latency-bound at ~50 us. Here RW warps share a row; a warp
+// takes chunks c = warp, warp + RW, ... and its lanes own the element pair
+// (2*lane, 2*lane + 1) of each chunk, so loads and stores are coalesced and
+// the per-row chain is a handful of shuffles. The 64-wide butterfly runs
+// stage h = 1 inside the lane and the other stages across lanes: every stage
+// forms exactly the (a + b, a - b) pairs fwht_row forms, so the values are
+// bit-identical to the reference. The RMSNorm sum of squares keeps the
+// reference's lane-partial order (warp 0 runs the warp-per-row loop).
+constexpr int RW   = 8;          // warps per row
+constexpr int RT   = RW * 32;
+constexpr int MAXC = 16;         // chunks per warp held in registers: K <= RW * MAXC * 64
+
+template <int ROT>
+__device__ __forceinline__ void rot_pair(float & v0, float & v1, int lane, float inv_sqrt_bs) {
+    if (ROT > 1) {
+        { const float u = v0, w = v1; v0 = u + w; v1 = u - w; }   // h = 1: pair (2l, 2l+1)
+        #pragma unroll
+        for (int h = 2; h < ROT; h <<= 1) {
+            const int   half  = h >> 1;                               // partner lane distance
+            const float o0    = __shfl_xor_sync(0xffffffffu, v0, half);
+            const float o1    = __shfl_xor_sync(0xffffffffu, v1, half);
+            const bool  upper = (lane & half) != 0;                   // this lane holds j + h
+            v0 = upper ? (o0 - v0) : (v0 + o0);
+            v1 = upper ? (o1 - v1) : (v1 + o1);
+        }
+        v0 = v0 * inv_sqrt_bs;
+        v1 = v1 * inv_sqrt_bs;
+    }
+}
+
+template <int ABITS, int ROT>
+__global__ void __launch_bounds__(RT) act_row_kernel(const ActArgs a) {
+    __shared__ float red[RW];
+    __shared__ float s_rstd;
+    const int     tid     = threadIdx.x;
+    const int     warp    = tid >> 5, lane = tid & 31;
+    const int64_t m       = blockIdx.x;
+    const int64_t K       = a.K;
+    const int     nchunks = (int) (K / CHUNK);
+    const float * x       = a.x + m * (a.x_stride ? a.x_stride : K);
+
+    if (a.gamma) {
+        if (warp == 0) {
+            float p = 0.0f;
+            for (int c = lane; c < nchunks; c += 32) {
+                const float4 * src = (const float4 *) (x + (int64_t) c * CHUNK);
+                #pragma unroll
+                for (int i = 0; i < CHUNK / 4; ++i) {
+                    const float4 q = src[i];
+                    p = p + q.x * q.x; p = p + q.y * q.y; p = p + q.z * q.z; p = p + q.w * q.w;
+                }
+            }
+            const float sumsq = warp_sum(p);
+            if (lane == 0) s_rstd = 1.0f / sqrtf(sumsq / (float) K + a.eps);
+        }
+        __syncthreads();
+    }
+    const float rstd = a.gamma ? s_rstd : 0.0f;
+
+    float v0[MAXC], v1[MAXC];
+    float mx = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < MAXC; ++i) {
+        const int c = warp + i * RW;
+        if (c < nchunks) {
+            const int64_t k0 = (int64_t) c * CHUNK + 2 * lane;
+            const float2  q  = *(const float2 *) (x + k0);
+            float e0 = q.x, e1 = q.y;
+            if (a.gamma) {
+                const float2 g = *(const float2 *) (a.gamma + k0);
+                e0 = (e0 * rstd) * g.x;
+                e1 = (e1 * rstd) * g.y;
+            }
+            if (a.ascale && a.fold_before) {
+                const float2 s = *(const float2 *) (a.ascale + k0);
+                e0 = e0 / s.x; e1 = e1 / s.y;
+            }
+            rot_pair<ROT>(e0, e1, lane, a.inv_sqrt_bs);
+            if (a.ascale && !a.fold_before) {
+                const float2 s = *(const float2 *) (a.ascale + k0);
+                e0 = e0 / s.x; e1 = e1 / s.y;
+            }
+            v0[i] = e0; v1[i] = e1;
+            mx = fmaxf(mx, fmaxf(fabsf(e0), fabsf(e1)));
+        }
+    }
+    mx = warp_max(mx);
+    if (lane == 0) red[warp] = mx;
+    __syncthreads();
+    mx = red[0];
+    #pragma unroll
+    for (int w = 1; w < RW; ++w) mx = fmaxf(mx, red[w]);
+
+    const float qmax  = ABITS == 4 ? 7.0f : 127.0f;
+    float       scale = (a.clip * mx) / qmax;
+    if (scale < 1e-12f) scale = 1e-12f;
+    const float inv = 1.0f / scale;
+    int8_t * row = a.blob + m * a.row_bytes;
+    #pragma unroll
+    for (int i = 0; i < MAXC; ++i) {
+        const int c = warp + i * RW;
+        if (c < nchunks) {
+            float q0 = rintf(v0[i] * inv), q1 = rintf(v1[i] * inv);
+            q0 = fminf(qmax, fmaxf(-qmax, q0));
+            q1 = fminf(qmax, fmaxf(-qmax, q1));
+            if (ABITS == 8) {
+                const uint16_t packed = (uint16_t) (((uint32_t) (int) q0 & 0xFFu) | (((uint32_t) (int) q1 & 0xFFu) << 8));
+                *(uint16_t *) (row + (int64_t) c * CHUNK + 2 * lane) = packed;
+            } else {
+                row[(int64_t) c * (CHUNK / 2) + lane] = (int8_t) (((uint32_t) (int) q0 & 0xFu) | (((uint32_t) (int) q1 & 0xFu) << 4));
+            }
+        }
+    }
+    if (tid == 0) *(float *) (row + (ABITS == 8 ? K : K / 2)) = scale;
+}
+
 }  // namespace
+
+template <int ABITS>
+static cudaError_t launch_rot_row(const ActArgs & a, cudaStream_t stream) {
+    const unsigned grid = (unsigned) a.M;
+    switch (a.rot_block) {
+        case 64: act_row_kernel<ABITS, 64><<<grid, RT, 0, stream>>>(a); break;
+        case 32: act_row_kernel<ABITS, 32><<<grid, RT, 0, stream>>>(a); break;
+        case 16: act_row_kernel<ABITS, 16><<<grid, RT, 0, stream>>>(a); break;
+        case 8:  act_row_kernel<ABITS, 8 ><<<grid, RT, 0, stream>>>(a); break;
+        case 4:  act_row_kernel<ABITS, 4 ><<<grid, RT, 0, stream>>>(a); break;
+        case 2:  act_row_kernel<ABITS, 2 ><<<grid, RT, 0, stream>>>(a); break;
+        case 1:
+        case 0:  act_row_kernel<ABITS, 1 ><<<grid, RT, 0, stream>>>(a); break;
+        default: return cudaErrorNotSupported;
+    }
+    return cudaGetLastError();
+}
 
 template <int ABITS>
 static cudaError_t launch_rot(const ActArgs & a, unsigned grid, cudaStream_t stream) {
@@ -203,6 +340,13 @@ static cudaError_t launch_rot(const ActArgs & a, unsigned grid, cudaStream_t str
 cudaError_t launch_act(const ActArgs & a, cudaStream_t stream) {
     if (a.M <= 0) return cudaSuccess;
     if (a.K % CHUNK != 0 || a.rot_block > CHUNK) return cudaErrorNotSupported;
+    if (a.x_stride && (a.x_stride % 4 != 0)) return cudaErrorNotSupported;   // float4 loads need 16-byte rows
+    // VLA_FQ_ACT_WARP=1 keeps the warp-per-row kernel (A/B and fallback).
+    static const bool warp_only = [] { const char * e = std::getenv("VLA_FQ_ACT_WARP"); return e && *e && *e != '0'; }();
+    if (!warp_only && a.K / CHUNK <= RW * MAXC) {
+        if (a.abits == 8) return launch_rot_row<8>(a, stream);
+        if (a.abits == 4) return launch_rot_row<4>(a, stream);
+    }
     const unsigned grid = (unsigned) ((a.M + WARPS - 1) / WARPS);
     if (a.abits == 8) return launch_rot<8>(a, grid, stream);
     if (a.abits == 4) return launch_rot<4>(a, grid, stream);

@@ -155,8 +155,11 @@ void check_against_host(ggml_tensor * dst, int n_src, Fn fn, cudaStream_t stream
         std::printf("vla(fq) CHECK %-40s ne=[%lld,%lld] ok\n", ggml_get_name(dst), (long long) dst->ne[0], (long long) dst->ne[1]);
 }
 
+// Rows contiguous and 16-byte aligned, any row stride, higher dims packed: what
+// the prologue reads without a ggml_cont in front of it.
 bool contiguous_f32_rows(const ggml_tensor * t, int64_t K) {
-    return t && t->type == GGML_TYPE_F32 && t->ne[0] == K && ggml_is_contiguous(t);
+    return t && t->type == GGML_TYPE_F32 && t->ne[0] == K && t->nb[0] == sizeof(float) &&
+           t->nb[1] % 16 == 0 && t->nb[2] == t->nb[1] * (size_t) t->ne[1] && t->nb[3] == t->nb[2] * (size_t) t->ne[2];
 }
 
 // --- the two nodes ----------------------------------------------------------
@@ -186,6 +189,7 @@ bool forward_act(ggml_tensor * dst, const vla::FqActSpec & s, cudaStream_t strea
 
     vla::fq::ActArgs a;
     a.x = (const float *) x->data;
+    a.x_stride = (int64_t) (x->nb[1] / sizeof(float));
     a.ascale = as ? (const float *) as->data : nullptr;
     a.gamma  = (s.has_gamma && g) ? (const float *) g->data : nullptr;
     a.blob = (int8_t *) dst->data;
