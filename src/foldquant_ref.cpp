@@ -16,13 +16,22 @@
 // -ffp-contract=off (CMakeLists.txt); see foldquant_ref.h for why that matters.
 
 #include "foldquant_ref.h"
+#include "env_flag.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
 namespace vla {
+
+static bool fq_stats_enabled() {
+    static const bool on = env_flag("VLA_FQ_STATS");
+    return on;
+}
+
 namespace fqref {
 
 // The kernel runs one warp per row: lane l owns the 64-element chunks
@@ -162,6 +171,35 @@ void fq_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     const int64_t rb  = fq_act_row_bytes(K, s.abits);
     const int64_t kp  = fq_act_kpack(K, s.abits);
     const int64_t per = (T + nth - 1) / nth;
+
+    // VLA_FQ_STATS=1: one line per node with checksums of every input, so two
+    // backends running this same reference can be diffed node by node.
+    if (ith == 0 && fq_stats_enabled()) {
+        double sum = 0.0, sumsq = 0.0, mx = 0.0;
+        for (int64_t t = 0; t < T; ++t) {
+            const float * xr = (const float *) ((const char *) x->data + t * x->nb[1]);
+            for (int64_t k = 0; k < K; ++k) { const double v = xr[k]; sum += v; sumsq += v*v; mx = std::fmax(mx, std::fabs(v)); }
+        }
+        double gs = 0.0, as_ = 0.0;
+        if (g)  for (int64_t k = 0; k < K; ++k) gs  += ((const float *) g->data)[k];
+        if (as) for (int64_t k = 0; k < K; ++k) as_ += ((const float *) as->data)[k];
+        std::fprintf(stderr, "FQSTAT act  %-44s T=%lld x sum=%.9g sumsq=%.9g max=%.9g gamma=%.9g ascale=%.9g\n",
+                     ggml_get_name(dst), (long long) T, sum, sumsq, mx, gs, as_);
+        // VLA_FQ_DUMP=<dir>: also write this node's input rows as raw F32 so two
+        // backends can be compared element by element (first occurrence only).
+        if (const char * dir = std::getenv("VLA_FQ_DUMP")) {
+            static int n_dumped = 0;
+            if (n_dumped < 64) {
+                char path[1024];
+                std::snprintf(path, sizeof path, "%s/%s.%d.f32", dir, ggml_get_name(dst), n_dumped++);
+                if (FILE * f = std::fopen(path, "wb")) {
+                    for (int64_t t = 0; t < T; ++t)
+                        std::fwrite((const char *) x->data + t * x->nb[1], sizeof(float), (size_t) K, f);
+                    std::fclose(f);
+                }
+            }
+        }
+    }
     const int64_t t0  = (int64_t) ith * per;
     const int64_t t1  = std::min(T, t0 + per);
 
@@ -194,6 +232,22 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     const int64_t rb    = fq_act_row_bytes(K, abits);
     const int64_t kp_a  = fq_act_kpack(K, abits);
     const int64_t kp_w  = fq_w_kpack(K, s.wbits);
+
+    if (ith == 0 && fq_stats_enabled()) {
+        long long csum = 0; double ssum = 0.0;
+        for (int64_t t = 0; t < T; ++t) {
+            const int8_t * row = (const int8_t *) xq->data + t * rb;
+            for (int64_t k = 0; k < kp_a; ++k) csum += row[k];
+            float sc; std::memcpy(&sc, row + kp_a, sizeof sc); ssum += sc;
+        }
+        long long wsum = 0;
+        for (int64_t i = 0; i < (int64_t) N * kp_w; ++i) wsum += ((const int8_t *) w->data)[i];
+        double wss = 0.0, bs = 0.0;
+        for (int64_t n = 0; n < N; ++n) wss += ((const float *) ws->data)[n];
+        if (b) for (int64_t n = 0; n < N; ++n) bs += ((const float *) b->data)[n];
+        std::fprintf(stderr, "FQSTAT gemm %-44s T=%lld codes=%lld scales=%.9g w=%lld wscale=%.9g bias=%.9g\n",
+                     ggml_get_name(dst), (long long) T, csum, ssum, wsum, wss, bs);
+    }
 
     const int8_t * wp = (const int8_t *) w->data;
     const uint8_t * xp = (const uint8_t *) xq->data;
