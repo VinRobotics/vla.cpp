@@ -41,11 +41,15 @@ Sites of GR00T N1.6 / N1.7:
 - LLM: `vlm.blk.{i}.{attn_q, attn_k, attn_v, attn_o, ffn_gate, ffn_up, ffn_down}`
 - DiT: `aex.dit.{i}.{attn_q, attn_k, attn_v, attn_o, ff0, ff2}`
 
-q/k/v (and gate/up) are separate tensors with their own `wscale`. They share
-one input transform, so where the loader fuses them (the DiT's `Wqkv` / `Wkv`)
-the codes and `wscale` concatenate along `N` and any `ascale` must be identical
-across the group - the exporter writes the same vector under each name, the
-loader asserts equality and keeps one. ViT, VLSA, adaLN, the state/action
+q/k/v (and gate/up) are separate tensors with their own `wscale`. Projections
+that read the same input share one input transform, so where the loader fuses
+them the codes and `wscale` concatenate along `N` and any `ascale` must be
+identical across the group - the exporter writes the same vector under each
+name, the loader asserts equality and keeps one. The fused groups are the DiT's
+`Wqkv` on self-attention blocks and `Wkv` on cross-attention blocks; on a
+cross block `attn_q` reads the hidden state while `attn_k`/`attn_v` read the
+VL encoder, so `q` carries its own `ascale` (and a different `K`) there.
+`scripts/inspect_gguf_quant.py` infers the split from `K`. ViT, VLSA, adaLN, the state/action
 encoders and decoders stay float in every scheme.
 
 `K` and `N` must be multiples of 64 at every site. A site whose shape does not

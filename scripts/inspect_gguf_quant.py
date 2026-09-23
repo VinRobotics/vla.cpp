@@ -89,22 +89,31 @@ def main() -> int:
         if not args.quiet:
             print(f"  site {base:40s} W{wbits} K={k_in:<5d} N={n_out:<5d} rot={bs:<3d} ascale={'yes' if asc is not None else 'no'}")
 
-    # Fused groups share one activation transform.
+    # Fused groups share one activation transform. Which projections are fused
+    # follows the input they read: k and v always read the same tensor, and q
+    # joins them only on a self-attention site. The file carries no self/cross
+    # flag, so the split is inferred from K: on a cross-attention block q reads
+    # the hidden state and k/v the encoder, and their K differ (GR00T: 1536 vs
+    # 2048); when q's K equals k's, all three must agree, as vla.cpp's loader
+    # (fq_declare_fused) then fuses them.
     groups = defaultdict(dict)
-    for base, *_ in sites:
+    for base, _mod, k_in, *_ in sites:
         m = GROUP.match(base)
         if m:
-            groups[m.group(1)][m.group(2)] = tensors.get(base + ".ascale")
+            groups[m.group(1)][m.group(2)] = (k_in, tensors.get(base + ".ascale"))
     for g, members in groups.items():
-        vals = [v for v in members.values()]
-        have = [v is not None for v in vals]
+        have = [v is not None for _, v in members.values()]
         if any(have) and not all(have):
             print(f"VIOLATION: {g}: .ascale present on some of q/k/v but not all"); problems += 1
-        elif all(have) and len(vals) > 1:
-            ref = np.asarray(vals[0].data, dtype=np.float32)
-            for v in vals[1:]:
-                if not np.array_equal(ref, np.asarray(v.data, dtype=np.float32)):
-                    print(f"VIOLATION: {g}: q/k/v .ascale vectors differ"); problems += 1; break
+            continue
+        if not all(have) or len(members) < 2:
+            continue
+        kq = members["q"][0] if "q" in members else None
+        fused = [n for n in ("q", "k", "v") if n in members and (n != "q" or kq == members.get("k", (kq,))[0])]
+        ref = np.asarray(members[fused[0]][1].data, dtype=np.float32)
+        for n in fused[1:]:
+            if not np.array_equal(ref, np.asarray(members[n][1].data, dtype=np.float32)):
+                print(f"VIOLATION: {g}: fused {'/'.join(fused)} .ascale vectors differ"); problems += 1; break
 
     n_llm = sum(1 for s in sites if s[1] == "llm")
     n_act = len(sites) - n_llm
