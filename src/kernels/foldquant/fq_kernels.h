@@ -55,6 +55,10 @@ struct GemmArgs {
     int64_t        M, N, K;
     int64_t        row_bytes;
     int            wbits, abits;
+    // Split-K only (set by launch_gemm): int32 [M][N] partial-sum workspace and
+    // one arrival counter per output tile, both zero between launches.
+    int *          ws       = nullptr;
+    int *          counters = nullptr;
 };
 
 // Both return cudaSuccess or the launch error. Shapes the kernels do not cover

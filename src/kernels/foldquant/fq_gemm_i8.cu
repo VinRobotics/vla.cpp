@@ -70,7 +70,14 @@ struct Tile {
     static_assert(BM % (WM * 16) == 0 && BN % (WN * 16) == 0, "warp tile must be a multiple of 16");
 };
 
-template <int BM, int BN, int BK, int STAGES, int WM, int WN, bool HAS_BIAS>
+// SPLITK > 1: gridDim.z CTAs each accumulate one K slice of the tile into
+// registers, add their int32 partials into a zeroed workspace with integer
+// atomics (exact and associative, so the sum does not depend on arrival
+// order) and the last CTA to arrive - counted per tile - applies the float
+// epilogue and re-zeroes the workspace for the next launch. Streams each
+// weight byte once, like SPLITK == 1, but with gridDim.z times the CTAs in
+// flight, which is what a DRAM-bound M <= 64 site needs.
+template <int BM, int BN, int BK, int STAGES, int WM, int WN, bool HAS_BIAS, int SPLITK>
 __global__ void __launch_bounds__(WM * WN * 32) gemm_i8_kernel(const GemmArgs g) {
     using T = Tile<BM, BN, BK, STAGES, WM, WN>;
     // Dynamic: the wide tiles need more than the 48 KB static limit (Orin
@@ -85,7 +92,9 @@ __global__ void __launch_bounds__(WM * WN * 32) gemm_i8_kernel(const GemmArgs g)
     // run back to back and the stripe is served from L2 after the first.
     const int64_t m0   = (int64_t) blockIdx.x * BM;
     const int64_t n0   = (int64_t) blockIdx.y * BN;
-    const int     KT   = (int) (g.K / BK);
+    const int     KT_all = (int) (g.K / BK);
+    const int     KT     = SPLITK > 1 ? KT_all / SPLITK : KT_all;   // this CTA's k-steps
+    const int     kt_base = SPLITK > 1 ? (int) blockIdx.z * KT : 0;
 
     // Per-thread copy list for one stage: global source (at k0 = 0), smem
     // offset and the zero-fill predicate for A rows past M.
@@ -110,7 +119,7 @@ __global__ void __launch_bounds__(WM * WN * 32) gemm_i8_kernel(const GemmArgs g)
     }
     auto load_tile = [&](int stage, int kt) {
         int8_t * base = smem + stage * T::STAGE_BYTES;
-        const int64_t k0 = (int64_t) kt * BK;
+        const int64_t k0 = (int64_t) (kt_base + kt) * BK;
         #pragma unroll
         for (int i = 0; i < T::PER_THR; ++i) cp_async16(base + dst[i], src[i] + k0, pred[i]);
     };
@@ -166,6 +175,40 @@ __global__ void __launch_bounds__(WM * WN * 32) gemm_i8_kernel(const GemmArgs g)
                                     T::LDC, wmma::mem_row_major);
     __syncthreads();
 
+    if (SPLITK > 1) {
+        // Partial tile -> workspace (int32 [M][N]); the last CTA of this tile finishes.
+        __shared__ int s_last;
+        for (int idx = tid; idx < BM * BN; idx += T::THREADS) {
+            const int r = idx / BN, c = idx - r * BN;
+            const int64_t m = m0 + r, n = n0 + c;
+            if (m >= g.M) continue;
+            atomicAdd(g.ws + m * g.N + n, Cs[r * T::LDC + c]);
+        }
+        __threadfence();
+        __syncthreads();
+        if (tid == 0) {
+            const int tile = (int) (blockIdx.y * gridDim.x + blockIdx.x);
+            s_last = (atomicAdd(g.counters + tile, 1) == SPLITK - 1);
+        }
+        __syncthreads();
+        if (!s_last) return;
+        __threadfence();
+        for (int idx = tid; idx < BM * BN; idx += T::THREADS) {
+            const int r = idx / BN, c = idx - r * BN;
+            const int64_t m = m0 + r, n = n0 + c;
+            if (m >= g.M) continue;
+            int * wp = g.ws + m * g.N + n;
+            const int acc = __ldcg(wp);
+            *wp = 0;                                            // ready for the next launch
+            const float xs = *(const float *) (g.blob + m * g.row_bytes + g.K);
+            float v = ((float) acc * xs) * g.wscale[n];
+            if (HAS_BIAS) v = v + g.bias[n];
+            g.y[m * g.N + n] = v;
+        }
+        if (tid == 0) g.counters[(int) (blockIdx.y * gridDim.x + blockIdx.x)] = 0;
+        return;
+    }
+
     for (int idx = tid; idx < BM * BN; idx += T::THREADS) {
         const int r = idx / BN, c = idx - r * BN;
         const int64_t m = m0 + r, n = n0 + c;
@@ -177,24 +220,65 @@ __global__ void __launch_bounds__(WM * WN * 32) gemm_i8_kernel(const GemmArgs g)
     }
 }
 
-template <int BM, int BN, int BK, int STAGES, int WM, int WN>
-cudaError_t launch_tile(const GemmArgs & g, cudaStream_t stream) {
+// Split-K workspace: one int32 [M][N] accumulator plus one counter per tile,
+// zero between launches (the finishing CTA re-zeroes what it used). GEMMs on a
+// stream run in order, so one buffer serves them all; it grows on demand,
+// never inside CUDA-graph capture (the caller then gets cudaErrorNotSupported
+// and falls back to the unsplit tile).
+struct SplitWs {
+    int *  ws       = nullptr;
+    int *  counters = nullptr;
+    size_t ws_elems = 0, n_counters = 0;
+};
+static SplitWs & split_ws() { static SplitWs w; return w; }
+
+static cudaError_t ensure_split_ws(size_t elems, size_t counters, cudaStream_t stream) {
+    SplitWs & w = split_ws();
+    if (w.ws_elems >= elems && w.n_counters >= counters) return cudaSuccess;
+    cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &cap) == cudaSuccess && cap != cudaStreamCaptureStatusNone)
+        return cudaErrorNotSupported;
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return cudaErrorUnknown;   // old buffer may be in use
+    if (w.ws)       cudaFree(w.ws);
+    if (w.counters) cudaFree(w.counters);
+    w.ws = nullptr; w.counters = nullptr; w.ws_elems = 0; w.n_counters = 0;
+    const size_t e = elems > w.ws_elems ? elems : w.ws_elems, c = counters > 4096 ? counters : 4096;
+    if (cudaMalloc(&w.ws, e * sizeof(int)) != cudaSuccess) return cudaErrorMemoryAllocation;
+    if (cudaMalloc(&w.counters, c * sizeof(int)) != cudaSuccess) return cudaErrorMemoryAllocation;
+    // Zeroed on the caller's stream: ggml's streams are non-blocking, so a
+    // legacy-stream memset would not be ordered before the first split launch.
+    if (cudaMemsetAsync(w.ws, 0, e * sizeof(int), stream) != cudaSuccess ||
+        cudaMemsetAsync(w.counters, 0, c * sizeof(int), stream) != cudaSuccess)
+        return cudaErrorUnknown;
+    w.ws_elems = e; w.n_counters = c;
+    return cudaSuccess;
+}
+
+template <int BM, int BN, int BK, int STAGES, int WM, int WN, int SPLITK = 1>
+cudaError_t launch_tile(const GemmArgs & g_in, cudaStream_t stream) {
     using T = Tile<BM, BN, BK, STAGES, WM, WN>;
     // Opt into the dynamic shared memory once per instantiation. Not a stream
     // operation, so it is safe under CUDA-graph capture.
     static bool attr_set = false;
     if (!attr_set) {
-        cudaError_t e = cudaFuncSetAttribute(gemm_i8_kernel<BM, BN, BK, STAGES, WM, WN, true>,
+        cudaError_t e = cudaFuncSetAttribute(gemm_i8_kernel<BM, BN, BK, STAGES, WM, WN, true, SPLITK>,
                                              cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM_BYTES);
         if (e == cudaSuccess)
-            e = cudaFuncSetAttribute(gemm_i8_kernel<BM, BN, BK, STAGES, WM, WN, false>,
+            e = cudaFuncSetAttribute(gemm_i8_kernel<BM, BN, BK, STAGES, WM, WN, false, SPLITK>,
                                      cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM_BYTES);
         if (e != cudaSuccess) return e;
         attr_set = true;
     }
-    const dim3 grid((unsigned) ((g.M + BM - 1) / BM), (unsigned) (g.N / BN));
-    if (g.bias) gemm_i8_kernel<BM, BN, BK, STAGES, WM, WN, true ><<<grid, T::THREADS, T::SMEM_BYTES, stream>>>(g);
-    else        gemm_i8_kernel<BM, BN, BK, STAGES, WM, WN, false><<<grid, T::THREADS, T::SMEM_BYTES, stream>>>(g);
+    GemmArgs g = g_in;
+    const dim3 grid((unsigned) ((g.M + BM - 1) / BM), (unsigned) (g.N / BN), (unsigned) SPLITK);
+    if (SPLITK > 1) {
+        if ((g.K / BK) % SPLITK != 0) return cudaErrorNotSupported;
+        const cudaError_t e = ensure_split_ws((size_t) g.M * (size_t) g.N, (size_t) grid.x * grid.y, stream);
+        if (e != cudaSuccess) return e;
+        g.ws = split_ws().ws; g.counters = split_ws().counters;
+    }
+    if (g.bias) gemm_i8_kernel<BM, BN, BK, STAGES, WM, WN, true,  SPLITK><<<grid, T::THREADS, T::SMEM_BYTES, stream>>>(g);
+    else        gemm_i8_kernel<BM, BN, BK, STAGES, WM, WN, false, SPLITK><<<grid, T::THREADS, T::SMEM_BYTES, stream>>>(g);
     return cudaGetLastError();
 }
 
@@ -229,6 +313,12 @@ static cudaError_t launch_forced(int t, const GemmArgs & g, cudaStream_t stream)
         case 14: return launch_tile<64,  64,  128, 6, 2, 2>(g, stream);
         case 15: return launch_tile<64,  32,  128, 8, 2, 2>(g, stream);
         case 16: return launch_tile<64,  32,  256, 6, 2, 2>(g, stream);
+        case 20: return launch_tile<64,  32,  128, 3, 2, 2, 2>(g, stream);
+        case 21: return launch_tile<64,  32,  128, 3, 2, 2, 3>(g, stream);
+        case 22: return launch_tile<64,  32,  128, 3, 2, 2, 4>(g, stream);
+        case 23: return launch_tile<64,  64,  64,  4, 2, 2, 2>(g, stream);
+        case 24: return launch_tile<64,  64,  64,  4, 2, 2, 4>(g, stream);
+        case 25: return launch_tile<64,  32,  128, 3, 2, 2, 6>(g, stream);
         default: return cudaErrorInvalidValue;
     }
 }
@@ -257,8 +347,11 @@ cudaError_t launch_gemm(const GemmArgs & g, cudaStream_t stream) {
             return launch_tile<128, 64, 128, 2, 4, 2>(g, stream);
         return launch_tile<192, 64, 64, 3, 4, 2>(g, stream);
     }
-    // Narrow N (o_proj, down, ff2): a 32-wide N tile doubles the CTA count,
-    // which is what keeps 16 SMs' worth of loads in flight.
+    // M <= 64 (the DiT's 41 action tokens): narrow N (o_proj, ff2, cross kv)
+    // gets a 32-wide N tile for the CTA count. Split-K over the same tiles
+    // (VLA_FQ_TILE=20..25, exact int32 atomics) was measured 5-8% slower end
+    // to end on Orin - the atomics and the extra L2 round trip cost more than
+    // the added CTAs buy - so it stays an opt-in candidate for other GPUs.
     if (g.N <= 3072 && g.K % 128 == 0)
         return launch_tile<64, 32, 128, 3, 2, 2>(g, stream);
     return launch_tile<64, 64, 64, 4, 2, 2>(g, stream);
