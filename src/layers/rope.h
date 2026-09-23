@@ -59,6 +59,25 @@ inline ggml_tensor * rope_2d(ggml_context * C, ggml_tensor * x, ggml_tensor * co
     return ggml_add(C, ggml_mul(C, x, cos_t), ggml_mul(C, rot, sin_t));
 }
 
+// DINOv3 uses axial RoPE. x is [head_dim, patches, heads]; cos/sin are
+// [head_dim, patches] generated from the official patch-centre coordinates.
+inline ggml_tensor * rope_dinov3_axial(ggml_context * C, ggml_tensor * x,
+                                       ggml_tensor * cos_t, ggml_tensor * sin_t) {
+    GGML_ASSERT(x->ne[0] == cos_t->ne[0]);
+    GGML_ASSERT(x->ne[1] == cos_t->ne[1]);
+    ggml_tensor * cos = ggml_reshape_3d(C, cos_t, cos_t->ne[0], cos_t->ne[1], 1);
+    ggml_tensor * sin = ggml_reshape_3d(C, sin_t, sin_t->ne[0], sin_t->ne[1], 1);
+    cos = ggml_repeat(C, cos, x);
+    sin = ggml_repeat(C, sin, x);
+    const int64_t half = x->ne[0] / 2;
+    ggml_tensor * x0 = ggml_cont(C, ggml_view_3d(C, x, half, x->ne[1], x->ne[2],
+                                                   x->nb[1], x->nb[2], 0));
+    ggml_tensor * x1 = ggml_cont(C, ggml_view_3d(C, x, half, x->ne[1], x->ne[2],
+                                                   x->nb[1], x->nb[2], half * x->nb[0]));
+    ggml_tensor * rotated = ggml_concat(C, ggml_neg(C, x1), x0, 0);
+    return ggml_add(C, ggml_mul(C, x, cos), ggml_mul(C, rotated, sin));
+}
+
 inline ggml_tensor * rope_pairwise_rot(ggml_context * C, ggml_tensor * x, int64_t HD) {
     const int64_t L = x->ne[1];
     const int64_t H = x->ne[2];

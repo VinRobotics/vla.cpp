@@ -71,6 +71,7 @@ enum class Arch {
     VLA_ADAPTER,// OpenHelix VLA-Adapter DINOv2 + SigLIP + Bridge-Attention.
     OPENVLA_OFT,// DINOv2-L/14-reg4 + SigLIP-so400m/14 +Llama-2-7B + MLPResNet.
     VLA_JEPA,   // LeRobot Qwen3-VL-2B-Instruct+V-JEPÀ+DiT-B FM.
+    TURBOVLA,   // TurboVLA (DINOv3 + BERT + VL Fusion + ACT decoder).
 };
 
 /**
@@ -213,6 +214,15 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
  * @copydetails smolvla_create
  */
 std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
+                                                  const std::string& ckpt_path,
+                                                  const std::string& config_path,
+                                              const Options& opts);
+
+/**
+ * @brief Build a TurboVLA model. Vision is baked into @p ckpt_path.
+ * @copydetails smolvla_create
+ */
+std::unique_ptr<ModelArchBase> turbovla_create(const std::string& mmproj_path,
                                                   const std::string& ckpt_path,
                                                   const std::string& config_path,
                                               const Options& opts);

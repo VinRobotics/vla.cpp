@@ -154,8 +154,9 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
 
         std::vector<uint8_t> bytes = g_.read_convert(name, t->type, gn);
         if (bytes.empty() || bytes.size() != ggml_nbytes(t)) {
-            std::fprintf(stderr, "vla(%s): failed to load %s (%zu vs %zu bytes)\n",
-                         arch_, name, bytes.size(), ggml_nbytes(t));
+            std::fprintf(stderr,
+                         "vla(%s): failed to load %s (got %zu bytes, expected %zu, type=%d)\n",
+                         arch_, name, bytes.size(), ggml_nbytes(t), (int) t->type);
             return false;
         }
         ggml_backend_tensor_set(t, bytes.data(), 0, bytes.size());

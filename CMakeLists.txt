@@ -144,6 +144,7 @@ add_library(vla_core
     src/models/vla_adapter.cpp
     src/models/openvla_oft.cpp
     src/models/vla_jepa.cpp
+    src/models/turbovla.cpp
 )
 target_include_directories(vla_core
     PUBLIC

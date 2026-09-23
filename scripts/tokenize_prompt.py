@@ -37,6 +37,7 @@ TOKENIZERS = {
     "vla_jepa":    "Qwen/Qwen3-VL-2B-Instruct",
     "gr00t_n1_5":  "lerobot/eagle2hg-processor-groot-n1p5",
     "gr00t_n1_7":  "nvidia/Cosmos-Reason2-2B",
+    "turbovla":    "bert-base-uncased",
 }
 TRUST_REMOTE_CODE = {"evo1", "gr00t_n1_5"}
 
