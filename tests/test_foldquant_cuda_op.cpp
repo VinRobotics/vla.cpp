@@ -210,6 +210,9 @@ int main() {
         { 2048, 2048, 130 },  // o_proj, M above one tile with a tail
         { 6144, 2048, 130 },  // ffn_down
         { 1536, 4608, 41  },  // DiT fused qkv
+        { 2048, 12288, 160 }, // fused gate+up at the N1.7 prefill: the 128x64x128 tile
+        { 2048, 2048, 193 },  // 192-row tile with a one-row second M tile
+        { 2048, 4096, 300 },  // prefix past 256 tokens: 128-row tile, three M tiles
     };
 
     int n = 0;

@@ -18,10 +18,11 @@
 // the small M a VLA runs (a few hundred tokens, 41 action tokens) the GEMM is
 // bound by streaming W, and the pipeline is what keeps the DRAM busy.
 //
-// Three tilings, picked per shape by launch_gemm (see there): the CTA count
-// is what decides the achieved bandwidth on a 16-SM Orin, so narrow-N sites
-// get a 32-wide N tile and large-M sites a 128-row M tile that halves how
-// often each weight stripe is re-read.
+// Four tilings, picked per shape by launch_gemm (see there) from a measured
+// sweep on a 16-SM Orin: narrow-N sites at M <= 64 get a 32-wide N tile (CTA
+// count), the LLM prefill a 192-row M tile that holds ~160 tokens in one tile,
+// and the widest / longest sites a 128-row BK=128 tile. VLA_FQ_TILE=<n>
+// forces one of the twelve candidates for re-tuning on another GPU.
 //
 // A = the activation blob (row m at m*row_bytes, codes then the float scale),
 // B = W[N][K] with K contiguous, which is exactly a col_major K x N operand.
@@ -34,6 +35,8 @@
 #include "fq_kernels.h"
 
 #include <mma.h>
+
+#include <cstdlib>
 
 namespace vla {
 namespace fq {
@@ -197,15 +200,55 @@ cudaError_t launch_tile(const GemmArgs & g, cudaStream_t stream) {
 
 }  // namespace
 
+// VLA_FQ_TILE=<n>: force one tiling for every shape (tuning aid; see the
+// table in foldquant_gemm_check). Unset or -1 = the per-shape dispatch below.
+static int forced_tile() {
+    static const int v = [] {
+        const char * e = std::getenv("VLA_FQ_TILE");
+        return e && *e ? std::atoi(e) : -1;
+    }();
+    return v;
+}
+
+static cudaError_t launch_forced(int t, const GemmArgs & g, cudaStream_t stream) {
+    switch (t) {
+        case 0:  return launch_tile<256, 64,  64,  3, 4, 2>(g, stream);
+        case 1:  return launch_tile<64,  32,  128, 3, 2, 2>(g, stream);
+        case 2:  return launch_tile<64,  64,  64,  4, 2, 2>(g, stream);
+        case 3:  return launch_tile<128, 64,  64,  4, 4, 2>(g, stream);
+        case 4:  return launch_tile<128, 64,  64,  3, 2, 2>(g, stream);
+        case 5:  return launch_tile<128, 128, 64,  3, 4, 2>(g, stream);
+        case 6:  return launch_tile<192, 64,  64,  3, 4, 2>(g, stream);
+        case 7:  return launch_tile<64,  128, 64,  4, 2, 4>(g, stream);
+        case 8:  return launch_tile<128, 64,  128, 2, 4, 2>(g, stream);
+        case 9:  return launch_tile<64,  64,  128, 3, 2, 2>(g, stream);
+        case 10: return launch_tile<32,  64,  128, 4, 1, 2>(g, stream);
+        case 11: return launch_tile<64,  64,  64,  6, 2, 2>(g, stream);
+        default: return cudaErrorInvalidValue;
+    }
+}
+
 cudaError_t launch_gemm(const GemmArgs & g, cudaStream_t stream) {
     if (g.M <= 0) return cudaSuccess;
     if (g.wbits != 8 || g.abits != 8) return cudaErrorNotSupported;   // W4/A4: phase 2/3
     if (g.K % 128 != 0 && g.K % 64 != 0) return cudaErrorNotSupported;
     if (g.N % 64 != 0) return cudaErrorNotSupported;
-    // More than one 64-row tile: a 256-row tile streams each weight stripe
-    // once for a prefix of up to 256 tokens (four times, not sixteen, at 1024).
-    if (g.M > 64)
-        return launch_tile<256, 64, 64, 3, 4, 2>(g, stream);
+    if (forced_tile() >= 0) {
+        if (g.K % 128 != 0 && (forced_tile() == 1 || forced_tile() == 8 || forced_tile() == 9 || forced_tile() == 10))
+            return cudaErrorNotSupported;
+        return launch_forced(forced_tile(), g, stream);
+    }
+    // LLM prefill (M > 64, ~160 tokens on GR00T): measured on Orin (VLA_FQ_TILE
+    // sweep, tests/foldquant_gemm_check). The wide gate+up site (N = 12288) and
+    // long prefixes want the 128-row, BK=128 two-stage tile (M=160: 719 -> 426
+    // us; M=1024 qkv 1081 -> 689 us); the other sites a 192-row tile that holds
+    // 160 tokens in one M tile with 17% zero rows instead of 256's 37%
+    // (qkv 173 -> 131, o 122 -> 69, down 339 -> 207 us).
+    if (g.M > 64) {
+        if ((g.N >= 8192 || g.M > 256) && g.K % 128 == 0)
+            return launch_tile<128, 64, 128, 2, 4, 2>(g, stream);
+        return launch_tile<192, 64, 64, 3, 4, 2>(g, stream);
+    }
     // Narrow N (o_proj, down, ff2): a 32-wide N tile doubles the CTA count,
     // which is what keeps 16 SMs' worth of loads in flight.
     if (g.N <= 3072 && g.K % 128 == 0)
