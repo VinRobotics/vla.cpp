@@ -65,13 +65,23 @@ struct DitHead {
     void kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
             ggml_tensor ** K_out, ggml_tensor ** V_out, ggml_tensor * xq_pre = nullptr) const;
 
+    // cond: this layer's adaLN condition (scale, shift) [2*hidden] already
+    // computed from temb (see adaln_cond); temb is then unused.
     ggml_tensor * block(ggml_context * C, const DitLayerW & w, ggml_tensor * h, ggml_tensor * temb,
-                        ggml_tensor * enc, ggml_tensor * K_pre = nullptr, ggml_tensor * V_pre = nullptr) const;
+                        ggml_tensor * enc, ggml_tensor * K_pre = nullptr, ggml_tensor * V_pre = nullptr,
+                        ggml_tensor * cond = nullptr) const;
 
     ggml_tensor * time_emb(ggml_context * C, ggml_tensor * tproj) const;
+    // The adaLN condition of one layer, adaln_w . silu(temb) + adaln_b: it depends
+    // on the timestep embedding only, so a model whose temb is fixed per
+    // denoising step computes it once at load and passes it to block() as cond,
+    // saving one 2*hidden x hidden GEMV per layer per step per request.
+    ggml_tensor * adaln_cond(ggml_context * C, const DitLayerW & w, ggml_tensor * temb) const;
+    // po1 . silu(temb) + po1_b, the (shift, scale) of proj_out; same reuse as adaln_cond.
+    ggml_tensor * proj_out_cond(ggml_context * C, ggml_tensor * temb) const;
 
-    // (shift, scale) adaLN, opposite to layers/norm.h adaln.
-    ggml_tensor * proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * temb) const;
+    // (shift, scale) adaLN, opposite to layers/norm.h adaln. po: a precomputed proj_out_cond.
+    ggml_tensor * proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * temb, ggml_tensor * po = nullptr) const;
 };
 
 }

@@ -154,15 +154,32 @@ void DitHead::kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
     *V_out = to_heads_v(C, linear(C, w.Wv, w.bv, src), hd, heads, Tkv);
 }
 
+// adaLN from a precomputed condition: the tail of layers/norm.h adaln, same ops.
+static ggml_tensor * adaln_from_cond(ggml_context * C, ggml_tensor * x, ggml_tensor * cond, int64_t dim, float eps) {
+    ggml_tensor * sc = ggml_view_1d(C, cond, dim, 0);
+    ggml_tensor * sh = ggml_view_1d(C, cond, dim, (size_t) dim * sizeof(float));
+    ggml_tensor * xn = ggml_norm(C, x, eps);
+    return ggml_add(C, ggml_add(C, xn, ggml_mul(C, xn, sc)), sh);
+}
+
+ggml_tensor * DitHead::adaln_cond(ggml_context * C, const DitLayerW & w, ggml_tensor * temb) const {
+    return linear(C, w.adaln_w, w.adaln_b, ggml_silu(C, temb));
+}
+
+ggml_tensor * DitHead::proj_out_cond(ggml_context * C, ggml_tensor * temb) const {
+    return linear(C, po1W, po1b, ggml_silu(C, temb));
+}
+
 ggml_tensor * DitHead::block(ggml_context * C, const DitLayerW & w, ggml_tensor * h, ggml_tensor * temb,
-                             ggml_tensor * enc, ggml_tensor * K_pre, ggml_tensor * V_pre) const {
+                             ggml_tensor * enc, ggml_tensor * K_pre, ggml_tensor * V_pre, ggml_tensor * cond) const {
     const int64_t hd    = cfg.head_dim;
     const int64_t heads = cfg.heads;
     const int64_t dim   = cfg.hidden;
     const int64_t Tk    = h->ne[1];
     const float   scale = 1.0f/std::sqrt((float)hd);
 
-    ggml_tensor * n = adaln(C, h, temb, w.adaln_w, w.adaln_b, dim, cfg.ln_eps);
+    ggml_tensor * n = cond ? adaln_from_cond(C, h, cond, dim, cfg.ln_eps)
+                           : adaln(C, h, temb, w.adaln_w, w.adaln_b, dim, cfg.ln_eps);
     ggml_tensor *Q, *K, *V;
     if (!enc && (w.Wqkv || w.fq_qkv)) {
         ggml_tensor * qkv = w.fq_qkv ? fq_linear(C, w.fq_qkv, n) : linear(C, w.Wqkv, w.bqkv, n);
@@ -197,8 +214,8 @@ ggml_tensor * DitHead::time_emb(ggml_context * C, ggml_tensor * tproj) const {
     return linear(C, te_l2W, te_l2b, ggml_silu(C, linear(C, te_l1W, te_l1b, tproj)));
 }
 
-ggml_tensor * DitHead::proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * temb) const {
-    ggml_tensor * po = linear(C, po1W, po1b, ggml_silu(C, temb));
+ggml_tensor * DitHead::proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * temb, ggml_tensor * po) const {
+    if (!po) po = proj_out_cond(C, temb);
     ggml_tensor * sh = ggml_view_1d(C, po, cfg.hidden, 0);
     ggml_tensor * sc = ggml_view_1d(C, po, cfg.hidden, (size_t)cfg.hidden*sizeof(float));
 
