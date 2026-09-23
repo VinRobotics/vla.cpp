@@ -782,6 +782,38 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     }
 
     graph_unique_names(gf);
+    // VLA_GRAPH_DEBUG=1: report what changes between two computes of the cached
+    // graph, mirroring ggml-cuda's graph-reuse test (whole node struct + source
+    // data pointers / shapes); any change there defeats CUDA-graph replay.
+    if (env_flag("VLA_GRAPH_DEBUG")) {
+        struct Prop { ggml_tensor t; const void * sp[GGML_MAX_SRC]; };
+        static std::vector<Prop> prev;
+        const int n = ggml_graph_n_nodes(gf);
+        std::vector<Prop> cur((size_t) n);
+        for (int i = 0; i < n; ++i) {
+            ggml_tensor * t = ggml_graph_node(gf, i);
+            std::memcpy(&cur[(size_t) i].t, t, sizeof(ggml_tensor));
+            for (int j = 0; j < GGML_MAX_SRC; ++j) cur[(size_t) i].sp[j] = t->src[j] ? t->src[j]->data : nullptr;
+        }
+        if (prev.size() == cur.size()) {
+            int changed = 0;
+            for (int i = 0; i < n; ++i) {
+                const ggml_tensor & a = prev[(size_t) i].t, & b = cur[(size_t) i].t;
+                if (std::memcmp(&a, &b, sizeof(ggml_tensor)) != 0 || std::memcmp(prev[(size_t) i].sp, cur[(size_t) i].sp, sizeof(cur[(size_t) i].sp)) != 0) {
+                    if (changed < 5)
+                        std::printf("vla(graph-debug): node %d %s changed: data %p->%p op_params %d name %d flags %d extra %p->%p srcdata %d\n",
+                                    i, ggml_get_name(&b), a.data, b.data, std::memcmp(a.op_params, b.op_params, sizeof(a.op_params)) != 0,
+                                    std::strcmp(a.name, b.name) != 0, a.flags != b.flags, a.extra, b.extra,
+                                    std::memcmp(prev[(size_t) i].sp, cur[(size_t) i].sp, sizeof(cur[(size_t) i].sp)) != 0);
+                    ++changed;
+                }
+            }
+            std::printf("vla(graph-debug): %d of %d nodes changed since the previous compute\n", changed, n);
+        } else if (!prev.empty()) {
+            std::printf("vla(graph-debug): graph size changed %zu -> %zu\n", prev.size(), cur.size());
+        }
+        prev = std::move(cur);
+    }
     const auto tc0 = std::chrono::steady_clock::now();
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
     const auto tc1 = std::chrono::steady_clock::now();

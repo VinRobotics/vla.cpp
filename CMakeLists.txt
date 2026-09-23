@@ -217,6 +217,7 @@ if(GGML_CUDA)
     add_library(vla_fq_kernels STATIC
         src/kernels/foldquant/fq_prologue.cu
         src/kernels/foldquant/fq_gemm_i8.cu
+        src/kernels/foldquant/fq_gemm_mma.cu
     )
     set_target_properties(vla_fq_kernels PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON

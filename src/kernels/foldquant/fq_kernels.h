@@ -65,6 +65,8 @@ struct GemmArgs {
 // (W4/A4 until phase 2/3) return cudaErrorNotSupported without launching.
 cudaError_t launch_act (const ActArgs & a, cudaStream_t stream);
 cudaError_t launch_gemm(const GemmArgs & g, cudaStream_t stream);
+// mma.sync/ldmatrix kernel (fq_gemm_mma.cu); W8A8 and W4A4. variant -1 = default.
+cudaError_t launch_gemm_mma(const GemmArgs & g, int variant, cudaStream_t stream);
 
 }  // namespace fq
 }  // namespace vla

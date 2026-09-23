@@ -37,6 +37,7 @@
 #include <mma.h>
 
 #include <cstdlib>
+#include <string>
 
 namespace vla {
 namespace fq {
@@ -323,9 +324,27 @@ static cudaError_t launch_forced(int t, const GemmArgs & g, cudaStream_t stream)
     }
 }
 
+static int mma_variant() {
+    static const int v = [] {
+        const char * e = std::getenv("VLA_FQ_MMA");
+        return e && *e ? std::atoi(e) : -1;
+    }();
+    return v;
+}
+static bool use_wmma() {
+    static const bool w = [] { const char * e = std::getenv("VLA_FQ_GEMM"); return e && std::string(e) == "wmma"; }();
+    return w;
+}
+
 cudaError_t launch_gemm(const GemmArgs & g, cudaStream_t stream) {
     if (g.M <= 0) return cudaSuccess;
-    if (g.wbits != 8 || g.abits != 8) return cudaErrorNotSupported;   // W4/A4: phase 2/3
+    // The mma.sync kernel serves W8A8 and W4A4 (fq_gemm_mma.cu); the wmma
+    // tiles below stay as the VLA_FQ_GEMM=wmma fallback and for the tile sweep.
+    if (!use_wmma() && forced_tile() < 0) {
+        const cudaError_t e = launch_gemm_mma(g, mma_variant(), stream);
+        if (e != cudaErrorNotSupported) return e;
+    }
+    if (g.wbits != 8 || g.abits != 8) return cudaErrorNotSupported;   // W4A8 / mixed: CPU reference
     if (g.K % 128 != 0 && g.K % 64 != 0) return cudaErrorNotSupported;
     if (g.N % 64 != 0) return cudaErrorNotSupported;
     // VLA_FQ_TILE_SMALL_M=1 restricts the override to the M <= 64 shapes (the
