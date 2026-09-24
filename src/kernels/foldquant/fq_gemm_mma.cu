@@ -191,6 +191,15 @@ __global__ void __launch_bounds__(WM * WN * 32) gemm_mma_kernel(const GemmArgs g
     // Fragment layout of a m16n8 int32 tile: c0,c1 at (row g, cols 2q, 2q+1),
     // c2,c3 at (row g+8, same cols), g = lane/4, q = lane%4.
     const int grp = lane >> 2, q = lane & 3;
+    // The per-column factors are shared by every row this thread writes: load
+    // them once per n8 tile instead of once per (row, tile).
+    float2 ws[T::NT], bs2[T::NT];
+    #pragma unroll
+    for (int j = 0; j < T::NT; ++j) {
+        const int64_t n = n0 + wn * (T::NT * 8) + j * 8 + 2 * q;
+        ws[j] = *(const float2 *) (g.wscale + n);
+        if (HAS_BIAS) bs2[j] = *(const float2 *) (g.bias + n);
+    }
     #pragma unroll
     for (int i = 0; i < T::MT; ++i) {
         #pragma unroll
@@ -201,9 +210,9 @@ __global__ void __launch_bounds__(WM * WN * 32) gemm_mma_kernel(const GemmArgs g
             #pragma unroll
             for (int j = 0; j < T::NT; ++j) {
                 const int64_t n = n0 + wn * (T::NT * 8) + j * 8 + 2 * q;
-                float v0 = ((float) acc[i][j][2 * h]     * xs) * g.wscale[n];
-                float v1 = ((float) acc[i][j][2 * h + 1] * xs) * g.wscale[n + 1];
-                if (HAS_BIAS) { v0 = v0 + g.bias[n]; v1 = v1 + g.bias[n + 1]; }
+                float v0 = ((float) acc[i][j][2 * h]     * xs) * ws[j].x;
+                float v1 = ((float) acc[i][j][2 * h + 1] * xs) * ws[j].y;
+                if (HAS_BIAS) { v0 = v0 + bs2[j].x; v1 = v1 + bs2[j].y; }
                 *(float2 *) (g.y + m * g.N + n) = make_float2(v0, v1);
             }
         }
@@ -239,8 +248,9 @@ cudaError_t launch_gemm_mma(const GemmArgs & g, int variant, cudaStream_t stream
     if ((g.wbits != 8 && g.wbits != 4) || g.abits != g.wbits) return cudaErrorNotSupported;   // W8A8 or W4A4
     if (variant < 0) {
         if (g.M > 64) {
-            if (g.N >= 8192 || g.M > 256) variant = 3;
-            else                          variant = 2;
+            // 128x64x128, 3 stages (72 KB smem, 2 CTAs/SM) for every prefill site: on
+            // Orin it beat the 192-row tile end to end (ALOHA shape p50 174 vs 205 ms).
+            variant = 3;
         } else {
             variant = g.N <= 3072 ? 0 : 1;
         }
@@ -255,6 +265,9 @@ cudaError_t launch_gemm_mma(const GemmArgs & g, int variant, cudaStream_t stream
             case 5: return launch_mma<128, 32,  128, 3, 4, 2, 1>(g, stream);
             case 6: return launch_mma<64,  64,  128, 4, 2, 2, 1>(g, stream);
             case 7: return launch_mma<256, 64,  128, 3, 4, 2, 1>(g, stream);
+            case 8: return launch_mma<192, 64,  128, 2, 4, 2, 1>(g, stream);   // 64 KB smem: 2 CTAs/SM
+            case 9: return launch_mma<128, 64,  128, 2, 4, 2, 1>(g, stream);
+            case 10: return launch_mma<96, 64,  128, 3, 2, 2, 1>(g, stream);   // 3 m16 tiles per warp
             default: return cudaErrorInvalidValue;
         }
     }
