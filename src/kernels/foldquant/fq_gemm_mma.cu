@@ -293,6 +293,15 @@ cudaError_t launch_gemm_mma(const GemmArgs & g, int variant, cudaStream_t stream
             case 8: return launch_mma<192, 64,  128, 2, 4, 2, 1>(g, stream);   // 64 KB smem: 2 CTAs/SM
             case 9: return launch_mma<128, 64,  128, 2, 4, 2, 1>(g, stream);
             case 10: return launch_mma<96, 64,  128, 3, 2, 2, 1>(g, stream);   // 3 m16 tiles per warp
+            // Small-M candidates (DiT, M = 41): fewer padded rows, more CTAs, deeper
+            // pipeline. Cold micro-bench on Orin: 11/13 within 2% of the default, the
+            // rest 5-45% slower (the sites run at 130-145 GB/s, near the DRAM ceiling).
+            case 11: return launch_mma<48,  32,  128, 3, 1, 2, 1>(g, stream);   // 2 warps, 30 KB smem
+            case 12: return launch_mma<48,  32,  128, 6, 1, 2, 1>(g, stream);
+            case 13: return launch_mma<48,  64,  128, 3, 1, 4, 1>(g, stream);
+            case 14: return launch_mma<32,  32,  128, 3, 1, 2, 1>(g, stream);   // two m-tiles per site
+            case 15: return launch_mma<64,  32,  128, 6, 2, 2, 1>(g, stream);
+            case 16: return launch_mma<48,  32,  256, 3, 1, 2, 1>(g, stream);
             default: return cudaErrorInvalidValue;
         }
     }
@@ -300,6 +309,12 @@ cudaError_t launch_gemm_mma(const GemmArgs & g, int variant, cudaStream_t stream
         case 0: return launch_mma<64,  32,  128, 3, 2, 2, 2>(g, stream);
         case 1: return launch_mma<64,  64,  128, 3, 2, 2, 2>(g, stream);
         case 2: return launch_mma<192, 64,  128, 3, 4, 2, 2>(g, stream);
+        case 11: return launch_mma<48,  32,  128, 3, 1, 2, 2>(g, stream);
+        case 12: return launch_mma<48,  32,  128, 6, 1, 2, 2>(g, stream);
+        case 13: return launch_mma<48,  64,  128, 3, 1, 4, 2>(g, stream);
+        case 14: return launch_mma<32,  32,  128, 3, 1, 2, 2>(g, stream);
+        case 15: return launch_mma<64,  32,  128, 6, 2, 2, 2>(g, stream);
+        case 16: return launch_mma<48,  32,  256, 3, 1, 2, 2>(g, stream);
         case 3: return launch_mma<128, 64,  128, 3, 4, 2, 2>(g, stream);
         default: return launch_mma<64,  32,  128, 3, 2, 2, 2>(g, stream);
     }

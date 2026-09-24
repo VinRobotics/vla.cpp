@@ -333,6 +333,15 @@ static int mma_variant() {
     }();
     return v;
 }
+// VLA_FQ_MMA_SMALL_M=<n>: mma variant for the M <= 64 shapes only (the DiT
+// sites), leaving the prefill dispatch alone.
+static int mma_variant_small_m() {
+    static const int v = [] {
+        const char * e = std::getenv("VLA_FQ_MMA_SMALL_M");
+        return e && *e ? std::atoi(e) : -1;
+    }();
+    return v;
+}
 static bool use_wmma() {
     static const bool w = [] { const char * e = std::getenv("VLA_FQ_GEMM"); return e && std::string(e) == "wmma"; }();
     return w;
@@ -343,7 +352,8 @@ cudaError_t launch_gemm(const GemmArgs & g, cudaStream_t stream) {
     // The mma.sync kernel serves W8A8 and W4A4 (fq_gemm_mma.cu); the wmma
     // tiles below stay as the VLA_FQ_GEMM=wmma fallback and for the tile sweep.
     if (!use_wmma() && forced_tile() < 0) {
-        const cudaError_t e = launch_gemm_mma(g, mma_variant(), stream);
+        const int v = (g.M <= 64 && mma_variant_small_m() >= 0) ? mma_variant_small_m() : mma_variant();
+        const cudaError_t e = launch_gemm_mma(g, v, stream);
         if (e != cudaErrorNotSupported) return e;
     }
     if (g.wbits != 8 || g.abits != 8) return cudaErrorNotSupported;   // W4A8 / mixed: CPU reference
