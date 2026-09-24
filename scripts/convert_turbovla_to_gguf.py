@@ -39,11 +39,7 @@ BF16 = gguf.GGMLQuantizationType.BF16
 ARCH = "turbovla"
 
 
-# =============================================================================
-# TENSOR KEY PREFIXES
-# =============================================================================
-
-# Prefixes for official TurboVLA checkpoint (no "model." prefix)
+# Prefixes used by official TurboVLA checkpoints (without a "model." prefix).
 PREFIX_VIT = "vision_encoder.backbone"
 PREFIX_TEXT = "text_encoder.bert"
 PREFIX_VIT_PROJ = "vision_projection"
@@ -54,10 +50,6 @@ PREFIX_STATE_PROJ = "action_head.state_projection"
 KEY_VIEW_EMB = "view_embedding"
 KEY_TEXT_PROJ = "text_encoder.text_projection"
 
-
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
 
 def kv_prefix(name: str) -> str:
     return f"{ARCH}.{name}"
@@ -104,10 +96,6 @@ def load_safetensors(ckpt: Path) -> dict[str, torch.Tensor]:
     return tensors
 
 
-# =============================================================================
-# DIMENSION INFERENCE
-# =============================================================================
-
 class TurboVLADims:
     """Auto-detect all TurboVLA dimensions from checkpoint tensor shapes."""
 
@@ -118,17 +106,14 @@ class TurboVLADims:
         self.cfg = cfg_json or {}
         self.dinov3_cfg = dinov3_cfg or {}
 
-        # Vision encoder (DINOv3 ViT)
         q0 = self._get(f"{PREFIX_VIT}.layer.0.attention.q_proj.weight")
         self.vit_dim = int(q0.shape[0])
         self.vit_layers = max_layer(keys, f"{PREFIX_VIT}.layer.")
 
-        # Text encoder (BERT)
         q0 = self._get(f"{PREFIX_TEXT}.encoder.layer.0.attention.self.query.weight")
         self.text_dim = int(q0.shape[0])
         self.text_layers = max_layer(keys, f"{PREFIX_TEXT}.encoder.layer.")
 
-        # VL Fusion layers
         self.num_fusion_layers = max_layer(keys, f"{PREFIX_FUSION}.")
         self.num_text_layers = max_layer(keys, f"{PREFIX_VL_TEXT}.")
 
@@ -143,29 +128,24 @@ class TurboVLADims:
             raise SystemExit("interaction.enhancer_inner_dim must be divisible by fusion_heads")
         self.fusion_head_dim = self.fusion_dim // self.fusion_heads
 
-        # Text enhancer heads: same split as fusion
-        self.text_enhancer_heads = max(1, raw_nheads // 2)  # = 4
-        self.text_enhancer_head_dim = self.hidden_dim // self.text_enhancer_heads  # = 64
+        self.text_enhancer_heads = max(1, raw_nheads // 2)
+        self.text_enhancer_head_dim = self.hidden_dim // self.text_enhancer_heads
 
         # TurboVLA constructs the ACT decoder with interaction.nheads.
         self.action_heads = raw_nheads
-        self.action_head_dim = self.hidden_dim // self.action_heads  # = 32
+        self.action_head_dim = self.hidden_dim // self.action_heads
 
-        # State projection config
         self.num_state_tokens = int(self.cfg.get("action", {}).get("num_state_tokens", 2))
 
-        # Action decoder
         self.num_action_decoder_layers = max_layer(keys, f"{PREFIX_ACT_DEC}.decoder.layers.")
         action_q = self._get(f"{PREFIX_ACT_DEC}.action_queries.weight")
         self.action_horizon = int(action_q.shape[0])
         act_proj_2 = self._get(f"{PREFIX_ACT_DEC}.action_projection.layers.2.weight")
         self.action_dim = int(act_proj_2.shape[0])
 
-        # State projection
         state_weight = self._get(f"{PREFIX_STATE_PROJ}.net.1.weight")
         self.state_dim = int(state_weight.shape[1])
 
-        # Image specs - infer from config or tensor shapes
         view_emb = self._get(KEY_VIEW_EMB)
         if view_emb.ndim == 3:
             if view_emb.shape[0] != 1:
@@ -176,7 +156,6 @@ class TurboVLADims:
         else:
             raise SystemExit(f"Unexpected view_embedding shape: {tuple(view_emb.shape)}")
 
-        # image_size: config first, then infer
         cfg_image_size = self.cfg.get("vision", {}).get("image_size", self.cfg.get("image_size"))
         if cfg_image_size is not None:
             if isinstance(cfg_image_size, (list, tuple)):
@@ -195,14 +174,12 @@ class TurboVLADims:
                 )
             self.image_size = inferred
 
-        # Patch size from vision encoder
         patch_weight = self._get(f"{PREFIX_VIT}.embeddings.patch_embeddings.weight")
         if len(patch_weight.shape) == 4:
             self.patch_size = patch_weight.shape[2]
         else:
             raise SystemExit("Cannot determine patch_size from patch_embeddings")
 
-        # Register tokens (optional)
         reg_key = f"{PREFIX_VIT}.embeddings.register_tokens"
         if reg_key in tensors:
             reg = tensors[reg_key]
@@ -224,11 +201,9 @@ class TurboVLADims:
         if int(self.dinov3_cfg.get("num_register_tokens", self.num_register_tokens)) != self.num_register_tokens:
             raise SystemExit("DINOv3 config num_register_tokens disagrees with checkpoint weights")
 
-        # Infer vocab_size from word embeddings
         word_emb = self._get(f"{PREFIX_TEXT}.embeddings.word_embeddings.weight")
         self.vocab_size = int(word_emb.shape[0])
 
-        # dropout: only from config, no fallback
         self.dropout = float(self.cfg.get("vision", {}).get("dropout", 0.0))
 
     def _get(self, key: str) -> torch.Tensor:
@@ -243,20 +218,16 @@ class TurboVLADims:
         position embeddings, so position_embeddings.weight may not exist or may
         have different semantics. Use patch_size * grid_size from config instead.
         """
-        # Try the validated DINOv3 config first.
         if self.dinov3_cfg:
             image_size = self.dinov3_cfg.get("image_size")
             if image_size:
                 return int(image_size)
 
-        # Fallback: try to infer from position embeddings
-        # DINOv2 with position embeddings
         pos_key = f"{PREFIX_VIT}.embeddings.position_embeddings.weight"
         if pos_key in self.tensors:
             pos = self.tensors[pos_key]
-            # Position embeddings format: [seq_len, dim] or [1, seq_len, dim]
             seq_len = pos.shape[0] if pos.ndim == 2 else pos.shape[1]
-            num_patches = seq_len - 1  # exclude CLS token
+            num_patches = seq_len - 1
             patch = self.tensors.get(f"{PREFIX_VIT}.embeddings.patch_embeddings.weight")
             if patch is not None and len(patch.shape) == 4:
                 patch_size = patch.shape[2]
@@ -278,10 +249,6 @@ class TurboVLADims:
         )
 
 
-# =============================================================================
-# TENSOR WRITERS
-# =============================================================================
-
 def write_vision_encoder(writer: gguf.GGUFWriter, tensors: dict, dims: TurboVLADims) -> None:
     """Write DINOv3 ViT vision encoder.
 
@@ -290,29 +257,24 @@ def write_vision_encoder(writer: gguf.GGUFWriter, tensors: dict, dims: TurboVLAD
     """
     root = PREFIX_VIT
 
-    # embeddings
     # PyTorch patch_embedding weight: [H, IC, KH, KW] = [768, 3, 16, 16]
     # For matmul-based patch embedding: flatten weight to [H, IC*KH*KW] = [768, 768]
     patch_weight = tensors[f"{root}.embeddings.patch_embeddings.weight"]
-    patch_weight = patch_weight.reshape(dims.vit_dim, -1)  # [768, 768]
+    patch_weight = patch_weight.reshape(dims.vit_dim, -1)
     add_tensor(writer, "vit.cls_token", tensors[f"{root}.embeddings.cls_token"].squeeze(0))
     add_tensor(writer, "vit.patch_embed.weight", patch_weight)
     add_tensor(writer, "vit.patch_embed.bias", tensors[f"{root}.embeddings.patch_embeddings.bias"])
 
-    # register tokens (optional - DINOv3 uses them)
     reg_key = f"{root}.embeddings.register_tokens"
     if reg_key in tensors:
         add_tensor(writer, "vit.register_tokens", tensors[reg_key].squeeze(0))
 
-    # transformer layers
     for i in range(dims.vit_layers):
         lr = f"{root}.layer.{i}"
 
-        # Get LayerScale values for baking into weights
         ls1 = tensors[f"{lr}.layer_scale1.lambda1"].clone()
         ls2 = tensors[f"{lr}.layer_scale2.lambda1"].clone()
 
-        # attention projections - bake LayerScale into o_proj
         w_q = tensors[f"{lr}.attention.q_proj.weight"]
         b_q = tensors[f"{lr}.attention.q_proj.bias"]
         w_k = tensors[f"{lr}.attention.k_proj.weight"]
@@ -320,7 +282,6 @@ def write_vision_encoder(writer: gguf.GGUFWriter, tensors: dict, dims: TurboVLAD
         b_k = tensors[k_bias_key] if k_bias_key in tensors else torch.zeros(dims.vit_dim, dtype=torch.float32)
         w_v = tensors[f"{lr}.attention.v_proj.weight"]
         b_v = tensors[f"{lr}.attention.v_proj.bias"]
-        # Bake ls1 into o_proj
         w_o = tensors[f"{lr}.attention.o_proj.weight"] * ls1.view(-1, 1)
         b_o = tensors[f"{lr}.attention.o_proj.bias"] * ls1
 
@@ -333,13 +294,11 @@ def write_vision_encoder(writer: gguf.GGUFWriter, tensors: dict, dims: TurboVLAD
         add_tensor(writer, f"vit.blk.{i}.attn_o.weight", w_o)
         add_tensor(writer, f"vit.blk.{i}.attn_o.bias", b_o)
 
-        # layer norms
         add_tensor(writer, f"vit.blk.{i}.ln1.weight", tensors[f"{lr}.norm1.weight"])
         add_tensor(writer, f"vit.blk.{i}.ln1.bias", tensors[f"{lr}.norm1.bias"])
         add_tensor(writer, f"vit.blk.{i}.ln2.weight", tensors[f"{lr}.norm2.weight"])
         add_tensor(writer, f"vit.blk.{i}.ln2.bias", tensors[f"{lr}.norm2.bias"])
 
-        # MLP - bake ls2 into down_proj
         w_fc1 = tensors[f"{lr}.mlp.up_proj.weight"]
         b_fc1 = tensors[f"{lr}.mlp.up_proj.bias"]
         w_fc2 = tensors[f"{lr}.mlp.down_proj.weight"] * ls2.view(-1, 1)
@@ -350,7 +309,6 @@ def write_vision_encoder(writer: gguf.GGUFWriter, tensors: dict, dims: TurboVLAD
         add_tensor(writer, f"vit.blk.{i}.fc2.weight", w_fc2)
         add_tensor(writer, f"vit.blk.{i}.fc2.bias", b_fc2)
 
-    # final norm
     add_tensor(writer, "vit.final_norm.weight", tensors[f"{root}.norm.weight"])
     add_tensor(writer, "vit.final_norm.bias", tensors[f"{root}.norm.bias"])
 
@@ -359,14 +317,12 @@ def write_text_encoder(writer: gguf.GGUFWriter, tensors: dict, dims: TurboVLADim
     """Write BERT text encoder."""
     root = PREFIX_TEXT
 
-    # embeddings
     add_tensor(writer, "text.embed.word_embeddings", tensors[f"{root}.embeddings.word_embeddings.weight"])
     add_tensor(writer, "text.embed.position_embeddings", tensors[f"{root}.embeddings.position_embeddings.weight"])
     add_tensor(writer, "text.embed.token_type_embeddings", tensors[f"{root}.embeddings.token_type_embeddings.weight"])
     add_tensor(writer, "text.embed.LayerNorm.weight", tensors[f"{root}.embeddings.LayerNorm.weight"])
     add_tensor(writer, "text.embed.LayerNorm.bias", tensors[f"{root}.embeddings.LayerNorm.bias"])
 
-    # encoder layers
     for i in range(dims.text_layers):
         lr = f"{root}.encoder.layer.{i}"
 
@@ -387,11 +343,9 @@ def write_text_encoder(writer: gguf.GGUFWriter, tensors: dict, dims: TurboVLADim
         add_tensor(writer, f"text.encoder.layer.{i}.output.LayerNorm.weight", tensors[f"{lr}.output.LayerNorm.weight"])
         add_tensor(writer, f"text.encoder.layer.{i}.output.LayerNorm.bias", tensors[f"{lr}.output.LayerNorm.bias"])
 
-    # pooler
     add_tensor(writer, "text.pooler.dense.weight", tensors[f"{root}.pooler.dense.weight"])
     add_tensor(writer, "text.pooler.dense.bias", tensors[f"{root}.pooler.dense.bias"])
 
-    # text projection
     add_tensor(writer, "text_proj.weight", tensors[KEY_TEXT_PROJ + ".weight"])
     add_tensor(writer, "text_proj.bias", tensors[KEY_TEXT_PROJ + ".bias"])
 
@@ -416,7 +370,6 @@ def write_vision_language_interaction(writer: gguf.GGUFWriter, tensors: dict, di
     fusion_root = PREFIX_FUSION
     text_root = PREFIX_VL_TEXT
 
-    # VL Fusion layers
     for i in range(dims.num_fusion_layers):
         lr = f"{fusion_root}.{i}"
 
@@ -441,7 +394,6 @@ def write_vision_language_interaction(writer: gguf.GGUFWriter, tensors: dict, di
         add_tensor(writer, f"vl_fusion.{i}.gamma_v", tensors[f"{lr}.gamma_v"])
         add_tensor(writer, f"vl_fusion.{i}.gamma_l", tensors[f"{lr}.gamma_l"])
 
-    # VL Text self-attention layers
     for i in range(dims.num_text_layers):
         lr = f"{text_root}.{i}"
 
@@ -521,10 +473,6 @@ def write_view_embeddings(writer: gguf.GGUFWriter, tensors: dict) -> None:
     """Write view embeddings."""
     add_tensor(writer, "view_emb", tensors[KEY_VIEW_EMB])
 
-
-# =============================================================================
-# VERIFICATION
-# =============================================================================
 
 def verify_consumed_tensors(source_keys: set[str], dims: TurboVLADims) -> None:
     """Verify all source tensors are consumed by the converter."""
@@ -703,10 +651,6 @@ def verify_consumed_tensors(source_keys: set[str], dims: TurboVLADims) -> None:
         print(f"\n  All {len(consumed)} keys consumed successfully!")
 
 
-# =============================================================================
-# MAIN
-# =============================================================================
-
 def main() -> int:
     import argparse
     parser = argparse.ArgumentParser(
@@ -762,15 +706,12 @@ def main() -> int:
     writer.add_uint32(kv("text_head_dim"), 64)
     writer.add_uint32(kv("text_heads"), 12)
     writer.add_uint32(kv("num_fusion_layers"), dims.num_fusion_layers)
-    # CORRECT: fusion_heads = nheads // 2, NOT nheads
+    # Fusion attention splits the configured head count in half.
     writer.add_uint32(kv("fusion_heads"), dims.fusion_heads)
-    # CORRECT: fusion_head_dim = hidden / fusion_heads
     writer.add_uint32(kv("fusion_head_dim"), dims.fusion_head_dim)
     writer.add_uint32(kv("num_text_layers"), dims.num_text_layers)
-    # Text enhancer: same split as fusion
     writer.add_uint32(kv("text_enhancer_heads"), dims.text_enhancer_heads)
     writer.add_uint32(kv("text_enhancer_head_dim"), dims.text_enhancer_head_dim)
-    # Action transformer config
     writer.add_uint32(kv("action_heads"), dims.action_heads)
     writer.add_uint32(kv("action_head_dim"), dims.action_head_dim)
     writer.add_uint32(kv("num_action_decoder_layers"), dims.num_action_decoder_layers)

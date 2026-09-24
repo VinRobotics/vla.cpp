@@ -326,6 +326,7 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | Y | - | 
 | [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | - | 
 | [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | - | - | 
+| [TurboVLA](https://github.com/H-EmbodVis/TurboVLA)             | ~ | ~ | - | - | - | - |
 
 ---
 
@@ -364,6 +365,7 @@ Supported VLA models:
 - [GR00T N1.x](https://github.com/NVIDIA/Isaac-GR00T) - NVIDIA Isaac.
 - [VLA-JEPA](https://github.com/ginwind/VLA-JEPA) - Jingwen Sun et al.
 - [Octo](https://github.com/octo-models/octo) - Octo Model Team, UC Berkeley RAIL.
+- [TurboVLA](https://github.com/H-EmbodVis/TurboVLA) - Hengyi Xie et al.
 
 Built on:
 

@@ -48,10 +48,6 @@
 
     namespace vla {
 
-    // =============================================================================
-    // CONFIG
-    // =============================================================================
-
     struct TurboVLAConfig {
         int64_t hidden = 256;
         int64_t vit_dim = 768;
@@ -65,8 +61,8 @@
         int64_t vocab_size = 30522;
         int64_t max_text_length = 256;
         int64_t num_fusion_layers = 6;
-        int64_t fusion_heads = 4;     // TurboVLA uses 4 fusion heads
-        int64_t fusion_head_dim = 256;  // 256 dim per fusion head
+        int64_t fusion_heads = 4;
+        int64_t fusion_head_dim = 256;
         int64_t text_enhancer_heads = 4;
         int64_t text_enhancer_head_dim = 64;
         int64_t action_heads = 8;
@@ -81,7 +77,7 @@
         int64_t patch_size = 16;
         int64_t num_views = 2;
         int64_t num_register_tokens = 0;
-        float rope_theta = 10000.0f;  // DINOv3 2D RoPE base frequency
+        float rope_theta = 10000.0f;
         float dropout = 0.1f;
         int64_t pad_token_id = 0;
         int64_t cls_token_id = 101;
@@ -89,10 +85,6 @@
         int64_t period_token_id = 1012;
         int64_t question_token_id = 1029;
     };
-
-    // =============================================================================
-    // WEIGHT STRUCTURES
-    // =============================================================================
 
     namespace {
 
@@ -111,11 +103,11 @@
         ggml_tensor* cls_token;
         ggml_tensor* patch_embed_w;
         ggml_tensor* patch_embed_b;
-        ggml_tensor* register_tokens;  ///< DINOv3 register tokens (num_register_tokens x vit_dim)
+        ggml_tensor* register_tokens;
         std::vector<VitBlockW> layers;
         ggml_tensor* final_ln_w;
         ggml_tensor* final_ln_b;
-        // Precomputed 2D RoPE frequencies for patch tokens: [n_patches, head_dim/2]
+        // One frequency tensor per patch-grid position.
         std::vector<ggml_tensor*> rope_freqs;
     };
 
@@ -207,10 +199,6 @@
 
     }  // anonymous namespace
 
-    // =============================================================================
-    // MODEL
-    // =============================================================================
-
     struct TurboVLA : public ModelArchBase {
         TurboVLA() : ModelArchBase(Arch::TURBOVLA) {}
         ~TurboVLA() override;
@@ -260,20 +248,6 @@
         if (ctx_weights) ggml_free(ctx_weights);
         if (backend) ggml_backend_free(backend);
     }
-
-    // =============================================================================
-    // DINOv3 ViT LAYER with 2D RoPE
-    // =============================================================================
-    // DINOv3 2D RoPE is applied in vit_layer() - see implementation below.
-    // The 2D positions are handled via ggml_rope which computes:
-    //   x'[2i]   = x[2i]   * cos(pos * freq_i) - x[2i+1] * sin(pos * freq_i)
-    //   x'[2i+1] = x[2i]   * sin(pos * freq_i) + x[2i+1] * cos(pos * freq_i)
-    // where freq_i = rope_theta^(-2i/head_dim)
-    // Position IDs are patch indices (0, 1, 2, ..., n_patches-1)
-
-    // =============================================================================
-    // FORWARD FUNCTIONS
-    // =============================================================================
 
     ggml_tensor* TurboVLA::vit_layer(ggml_context* C, const VitBlockW& w, ggml_tensor* x,
                                     ggml_tensor* rope_cos, ggml_tensor* rope_sin,
@@ -357,20 +331,16 @@
                                             int64_t n_heads, int64_t head_dim) const {
         const float scale = 1.0f / std::sqrt((float)head_dim);
 
-        // TurboVLA fusion: 4 heads × 64 dim = 256 att_dim
         const int64_t att_dim = n_heads * head_dim;
 
-        // FIXED (Point 5): Official uses residual_style="normalized"
-        // v_norm = LayerNorm(v), l_norm = LayerNorm(l)
-        // delta_v, delta_l = bi_attention(v_norm, l_norm)
-        // v_new = v_norm + gamma_v * delta_v
-        // l_new = l_norm + gamma_l * delta_l
+        // TurboVLA's normalized residual style adds the deltas to normalized
+        // tokens, not the pre-normalization residuals. See
+        // H-EmbodVis/TurboVLA@b29ab142, models/components/fusion.py:336-347.
         ggml_tensor* v_norm = layer_norm(C, v, w.norm_v_w, w.norm_v_b, 1e-5f);
         ggml_tensor* l_norm = layer_norm(C, l, w.norm_l_w, w.norm_l_b, 1e-5f);
 
-        // V attends to L. Keep this as explicit QK^T + masked softmax rather than
-        // flash attention: the official implementation masks padded language keys
-        // on this branch only.
+        // Only vision-to-language attention masks language keys. See
+        // H-EmbodVis/TurboVLA@b29ab142, models/components/fusion.py:246-267.
         ggml_tensor* q_v = linear(C, w.v_proj_w, w.v_proj_b, v_norm);
         ggml_tensor* k_l = linear(C, w.l_proj_w, w.l_proj_b, l_norm);
         ggml_tensor* v_l = linear(C, w.values_l_w, w.values_l_b, l_norm);
@@ -381,13 +351,9 @@
         ggml_tensor* o = attention(C, Q, K, V, language_key_mask, scale, att_dim, v_seq);
         ggml_tensor* o_proj = linear(C, w.out_v_w, w.out_v_b, o);
 
-        // FIXED (Point 5): Apply gamma_v LayerScale with proper broadcasting
-        // gamma_v is [hidden], delta is [hidden, v_seq]
-        // Use ggml_repeat to broadcast gamma_v across sequence dimension
         ggml_tensor* gamma_v_scaled = ggml_repeat(C, w.gamma_v, o_proj);
         ggml_tensor* delta_v = ggml_mul(C, gamma_v_scaled, o_proj);
 
-        // FIXED (Point 5): v_new = v_norm + gamma_v * delta_v
         ggml_tensor* v_out = ggml_add(C, v_norm, delta_v);
 
         // L attends to V. There is no visual padding, hence no mask on this branch.
@@ -401,11 +367,9 @@
         ggml_tensor* o_l = attention(C, Q_l, K_v, V_v, nullptr, scale, att_dim, l_seq);
         ggml_tensor* o_proj_l = linear(C, w.out_l_w, w.out_l_b, o_l);
 
-        // FIXED (Point 5): Apply gamma_l LayerScale with proper broadcasting
         ggml_tensor* gamma_l_scaled = ggml_repeat(C, w.gamma_l, o_proj_l);
         ggml_tensor* delta_l = ggml_mul(C, gamma_l_scaled, o_proj_l);
 
-        // FIXED (Point 5): l_new = l_norm + gamma_l * delta_l
         l = ggml_add(C, l_norm, delta_l);
 
         return v_out;
@@ -414,16 +378,7 @@
     ggml_tensor* TurboVLA::vl_text_layer(ggml_context* C, const VlTextLayerW& w, ggml_tensor* x,
                                         ggml_tensor* self_mask,
                                         int64_t seq, int64_t n_heads, int64_t head_dim) const {
-        // FIXED (Point 7): Official TurboVLA VL text enhancer uses POST-NORM and ReLU
-        // Structure:
-        //   qkv = self_attn(x)
-        //   h = x + attention_output
-        //   h = LayerNorm(h)  <- ln1
-        //   ff = Linear1(h)
-        //   ff = ReLU(ff)
-        //   ff = Linear2(ff)
-        //   out = h + ff
-        //   out = LayerNorm(out)  <- ln2
+        // TurboVLA's text enhancer uses post-norm residuals and ReLU.
         const float scale = 1.0f / std::sqrt((float)head_dim);
         const int64_t att_dim = n_heads * head_dim;
         const int64_t n = n_heads;
@@ -458,22 +413,15 @@
         ggml_tensor* o = linear(C, w.attn_o_w, w.attn_o_b, att);
         ggml_tensor* h = ggml_add(C, x, o);
 
-        // POST-NORM after attention: LayerNorm(h)
         h = layer_norm(C, h, w.ln1_w, w.ln1_b, 1e-5f);
 
-        // FFN with ReLU (not GELU!)
         ggml_tensor* ff = linear(C, w.fc1_w, w.fc1_b, h);
         ff = ggml_relu(C, ff);
         ggml_tensor* ff_out = linear(C, w.fc2_w, w.fc2_b, ff);
 
-        // Add residual and final POST-NORM: LayerNorm(h + ff)
         ggml_tensor* out = ggml_add(C, h, ff_out);
         return layer_norm(C, out, w.ln2_w, w.ln2_b, 1e-5f);
     }
-
-    // =============================================================================
-    // ACT DECODER LAYER
-    // =============================================================================
 
     ggml_tensor* TurboVLA::act_decoder_layer(ggml_context* C, const ActDecoderLayerW& w,
                                             ggml_tensor* queries, ggml_tensor* memory,
@@ -482,7 +430,6 @@
         const float scale = 1.0f / std::sqrt((float)head_dim);
         const int64_t hidden = n_heads * head_dim;
 
-        // Self-attention on queries.
         ggml_tensor* normed = layer_norm(C, queries, w.ln1_w, w.ln1_b, 1e-5f);
         ggml_tensor* self_qkv = linear(C, w.self_qkv_w, w.self_qkv_b, normed);
 
@@ -541,30 +488,26 @@
         ggml_tensor* K_c = to_heads(C, cross_k, head_dim, n_heads, m_seq);
         ggml_tensor* V_c = to_heads_v(C, cross_v, head_dim, n_heads, m_seq);
 
-        // Cross-attention output length is q_seq, not m_seq.
         ggml_tensor* att_c = attention(C, Q_c, K_c, V_c, nullptr, scale, hidden, q_seq);
         ggml_tensor* o_c = linear(C, w.cross_out_w, w.cross_out_b, att_c);
         h = ggml_add(C, h, o_c);
 
-        // FIXED (Point 10): Official PyTorch TransformerDecoderLayer uses ReLU, not GELU
+        // The upstream TransformerDecoderLayer keeps PyTorch's default ReLU
+        // activation. See H-EmbodVis/TurboVLA@b29ab142,
+        // models/action_head.py:39-47.
         normed = layer_norm(C, h, w.ln3_w, w.ln3_b, 1e-5f);
         ggml_tensor* ffn_out = ffn_relu(C, w.fc1_w, w.fc1_b, w.fc2_w, w.fc2_b, normed);
 
         return ggml_add(C, h, ffn_out);
     }
 
-    // =============================================================================
-    // INFERENCE
-    // =============================================================================
-
     namespace {
 
     static const float IMAGENET_MEAN[3] = {0.485f, 0.456f, 0.406f};
     static const float IMAGENET_STD[3] = {0.229f, 0.224f, 0.225f};
 
-    // CHW planar layout matching ggml_conv_2d expectation
-    // Build the exact flattened Conv2D patch layout expected by a patch-embedding
-    // weight flattened from [out, C, patch_h, patch_w] to [out, C*patch_h*patch_w].
+    // Build the flattened patch matrix expected by a patch-embedding weight
+    // flattened from [out, C, patch_h, patch_w] to [out, C*patch_h*patch_w].
     // Output is GGML matrix layout [patch_dim, n_patches], i.e. each column is one
     // normalized Cxpatchxpatch image patch.
     void normalize_imagenet_patches(const ImageView& v,
@@ -693,8 +636,10 @@
             for (int64_t k = 0; k < seq; ++k) {
                 const bool is_allowed = allowed[(size_t)q * seq + k] != 0;
                 result.bert_self_mask[(size_t)q * seq + k] = is_allowed ? 0.0f : -FLT_MAX;
-                // The post-BERT enhancer receives both the inverse source mask and
-                // BERT's key-padding mask.
+                // The BERT wrapper creates block masks from special tokens; the
+                // enhancer additionally masks padded keys. See
+                // H-EmbodVis/TurboVLA@b29ab142, text/bert.py:177-212 and
+                // models/text_encoder.py:80-94.
                 result.enhancer_self_mask[(size_t)q * seq + k] =
                     is_allowed && valid[(size_t)k] ? 0.0f : -FLT_MAX;
             }
@@ -719,14 +664,13 @@
         const int64_t img_size = cfg.image_size;
         const int64_t n_patches_per_side = img_size / patch_size;
         const int64_t n_patches = n_patches_per_side * n_patches_per_side;
-        const int64_t n_reg = cfg.num_register_tokens;      // DINOv3 register tokens
-        const int64_t n_cls = 1;                             // CLS token
-        const int64_t internal_vit_seq = n_cls + n_reg + n_patches;  // Full internal ViT sequence
+        const int64_t n_reg = cfg.num_register_tokens;
+        const int64_t n_cls = 1;
+        const int64_t internal_vit_seq = n_cls + n_reg + n_patches;
         const int64_t n_views = cfg.num_views;
-        // vision_seq is n_patches per view (CLS + register tokens are sliced away)
         const int64_t vision_seq = n_views * n_patches;
-        const int64_t hidden = cfg.hidden;                   // VLA hidden dim (256)
-        const int64_t vit_dim = cfg.vit_dim;                 // ViT hidden dim (768)
+        const int64_t hidden = cfg.hidden;
+        const int64_t vit_dim = cfg.vit_dim;
 
         // Basic shape sanity checks.  These fail early with a useful message instead
         // of failing later inside ggml_reshape_*.
@@ -749,10 +693,7 @@
             return {};
         }
 
-        // DINOv3 ViT processes internal sequence: [CLS, register_0..register_N-1, patch_0..patch_255]
-        // After final DINO norm, we slice away CLS and ALL register tokens
-        // Only n_patches per view go to vision_projection
-        // Output per view: [vit_dim, n_patches] (not internal_vit_seq)
+        // Project only patch tokens; DINOv3's CLS and register tokens stay internal.
         const int64_t vision_out_size = n_patches * vit_dim;
         std::vector<float> vision_outputs((size_t)n_views * vision_out_size, 0.0f);
 
@@ -808,22 +749,16 @@
             build_dinov3_rope(n_patches_per_side, cfg.vit_head_dim, cfg.rope_theta,
                                rope_cos_host, rope_sin_host);
 
-            // =========================================================================
-            // DINOv3 Token Flow: Build [CLS, register_tokens..., patches...]
-            // =========================================================================
-            // Concatenate: [vit_dim, 1] + [vit_dim, n_reg] + [vit_dim, n_patches]
+            // Assemble DINOv3's internal sequence: CLS, register tokens, then patches.
             ggml_tensor* cls_2d = ggml_reshape_2d(VC, vision_encoder.cls_token, vit_dim, 1);
 
             ggml_tensor* vit_out = cls_2d;
             if (n_reg > 0 && vision_encoder.register_tokens) {
-                // Add register tokens
                 ggml_tensor* reg_2d = ggml_reshape_2d(VC, vision_encoder.register_tokens, vit_dim, n_reg);
                 vit_out = ggml_concat(VC, vit_out, reg_2d, 1);
             }
-            // Add patches
             vit_out = ggml_concat(VC, vit_out, patches_with_bias, 1);
 
-            // Run all DINO layers over FULL internal sequence [CLS, reg, patches]
             for (int64_t i = 0; i < cfg.vit_layers; ++i) {
                 vit_out = vit_layer(VC,
                                     vision_encoder.layers[i],
@@ -834,16 +769,10 @@
                                     cfg.vit_heads,
                                     cfg.vit_head_dim);
             }
-            // =========================================================================
-            // DINOv3: Slice away CLS and ALL register tokens
-            // Only patch tokens (n_patches) go to vision_projection
-            // =========================================================================
-            // The reference TurboVLA encoder uses DINOv3's final hidden state
-            // (`outputs.hidden_states[-1]`), before the model's final LayerNorm.
-            // Its shape is [vit_dim, internal_vit_seq].
-            // We need to extract only the patch tokens: positions [n_cls + n_reg, internal_vit_seq)
-            // For ViT-B with 256 patches and 4 register tokens: extract positions [5, 261)
-            const int64_t patch_token_start = n_cls + n_reg;  // First patch position
+            // TurboVLA selects DINOv3's final hidden-state entry, then removes
+            // its prefix tokens. See H-EmbodVis/TurboVLA@b29ab142,
+            // models/vision_encoder.py:109-114.
+            const int64_t patch_token_start = n_cls + n_reg;
 
             ggml_tensor* vit_patches_only = ggml_view_2d(VC,
                                                          vit_out,
@@ -863,7 +792,6 @@
                 return {};
             }
 
-            // Only now should patch_input have a backend buffer.
             if (!patch_input->buffer) {
                 fprintf(stderr,
                         "ERROR: patch_input has no backend buffer after vision graph allocation; "
@@ -903,9 +831,7 @@
             return {};
         }
 
-        // Create one graph input per view. Do NOT copy data yet: context is
-        // no_alloc=true and buffers are created by scratch.alloc(gf) below.
-        // NOTE: vision_seq = n_views * n_patches (CLS and register tokens were sliced away)
+        // Buffers are allocated after graph construction because the context uses no_alloc.
         std::vector<ggml_tensor*> view_tokens((size_t)n_views, nullptr);
         for (int64_t view_idx = 0; view_idx < n_views; ++view_idx) {
             view_tokens[view_idx] =
@@ -1037,24 +963,17 @@
         ggml_tensor* vl_features = proj;
         ggml_tensor* text_features = text_tokens;
 
-        // TurboVLA fusion: 4 heads × 256 dim (hidden=256, v_proj outputs 4*256=1024)
         const int64_t vl_heads = cfg.fusion_heads;
         const int64_t vl_head_dim = cfg.fusion_head_dim;
 
-        // TurboVLA text enhancer: 4 heads × 64 dim (hidden=256)
         const int64_t text_enh_heads = cfg.text_enhancer_heads;
         const int64_t text_enh_head_dim = cfg.text_enhancer_head_dim;
 
-        // FIXED (Point 4): VL interaction is interleaved
-        // Official forward:
-        //   for i in 0..num_layers-1:
-        //     visual_tokens, text_tokens = fusion_layer[i](visual_tokens, text_tokens)
-        //     text_tokens = text_layer[i](text_tokens)
+        // Each fusion layer is immediately followed by its paired text enhancer.
         GGML_ASSERT(cfg.num_fusion_layers == cfg.num_text_layers &&
                    "VL fusion and text layers must have same count for interleaved execution");
 
         for (int64_t i = 0; i < cfg.num_fusion_layers; ++i) {
-            // Fusion layer
             vl_features = vl_fusion_layer(C,
                                         fusion_layers[i],
                                         vl_features,
@@ -1064,7 +983,6 @@
                                         text_seq,
                                         vl_heads,
                                         vl_head_dim);
-            // Text enhancer layer (operates on text_features in-place)
             text_features = vl_text_layer(C,
                                         text_layers[i],
                                         text_features,
@@ -1089,15 +1007,6 @@
             ggml_new_tensor_2d(C, GGML_TYPE_F32, state_dim, 1);
         ggml_set_input(state_tensor);
 
-        // FIXED (Point 9): State projection order - output_norm AFTER position add
-        // Official order:
-        //   s = LayerNorm(state)
-        //   s = Linear(...)
-        //   s = GELU(s)
-        //   s = Linear(...)
-        //   tokens = reshape(s, num_state_tokens, hidden)
-        //   tokens = tokens + learned_position
-        //   tokens = output_norm(tokens)  <- MOVED HERE
         ggml_tensor* s =
             layer_norm(C,
                     state_tensor,
@@ -1126,16 +1035,15 @@
                             cfg.num_state_tokens);
         state_tokens = ggml_add(C, state_tokens, pos_emb_state);
 
-        // FIXED: output_norm AFTER position add
+        // The projection normalizes only after adding learned positions. See
+        // H-EmbodVis/TurboVLA@b29ab142, models/action_head.py:25-31.
         state_tokens = layer_norm(C,
                                 state_tokens,
                                 state_proj.output_norm_w,
                                 state_proj.output_norm_b,
                                 1e-5f);
 
-        // IMPORTANT: previous code computed state_tokens and then discarded them.
-        // That made state_tensor a dead graph input and also meant robot state never
-        // influenced the action decoder. Include state tokens in decoder memory.
+        // State tokens must be part of the decoder memory.
         ggml_tensor* condition =
             ggml_concat(C, vl_condition, state_tokens, 1);
         const int64_t cond_seq = vl_cond_seq + cfg.num_state_tokens;
@@ -1146,7 +1054,6 @@
                             hidden,
                             cfg.action_horizon);
 
-        // TurboVLA ACT decoder: 8 heads × 32 dim
         const int64_t act_heads = cfg.action_heads;
 
         if (hidden % act_heads != 0) {
@@ -1275,15 +1182,10 @@
         return output;
     }
 
-    // =============================================================================
-    // MODEL LOADING
-    // =============================================================================
-
     std::unique_ptr<ModelArchBase> turbovla_create(const std::string& /*mmproj_path*/,
                                                 const std::string& ckpt_path,
                                                 const std::string& /*config_path*/,
                                                 const Options& /*opts*/) {
-        // Open GGUF
         gguf_reader g("turbovla");
         if (!g.open(ckpt_path)) {
             std::fprintf(stderr, "vla(turbovla): failed to open %s\n", ckpt_path.c_str());
@@ -1292,7 +1194,6 @@
 
         auto* m = new vla::TurboVLA;
 
-        // Load config from GGUF
         m->cfg_.hidden = (int64_t)g.u32("turbovla.hidden");
         m->cfg_.vit_dim = (int64_t)g.u32("turbovla.vit_dim");
         m->cfg_.vit_layers = (int64_t)g.u32("turbovla.vit_layers");
@@ -1370,7 +1271,6 @@
         m->cfg.rope_freq_base = m->cfg_.rope_theta;
         m->cfg.num_steps = m->cfg_.action_horizon;
 
-        // Init backend
         const Backend b = backend_init("vla(turbovla)", m->n_threads);
         if (!b.handle) {
             std::fprintf(stderr, "vla(turbovla): backend_init failed\n");
@@ -1381,10 +1281,8 @@
         ggml_init_params wp = { (size_t)16*1024*1024, nullptr, true };
         m->ctx_weights = ggml_init(wp);
 
-        // Load weights
         WeightLoader L("turbovla", g, m->ctx_weights, GGML_TYPE_F32);
 
-        // Vision encoder
         m->vision_encoder.cls_token = L.f32("vit.cls_token");
         m->vision_encoder.patch_embed_w = L.gemm("vit.patch_embed.weight");
         m->vision_encoder.patch_embed_b = L.gemm("vit.patch_embed.bias");
@@ -1421,10 +1319,7 @@
         m->vision_encoder.final_ln_w = L.f32("vit.final_norm.weight");
         m->vision_encoder.final_ln_b = L.f32("vit.final_norm.bias");
 
-        // Precompute DINOv3 2D RoPE frequencies
-        // This is done in predict() since we need n_patches_per_side which depends on image_size
 
-        // Vision projection
         m->vision_proj.input_norm_w = L.f32("vit_proj.input_norm.weight");
         m->vision_proj.input_norm_b = L.f32("vit_proj.input_norm.bias");
         m->vision_proj.mlp_0_w = L.f32("vit_proj.mlp.0.weight");
@@ -1435,7 +1330,6 @@
         m->vision_proj.output_norm_w = L.f32("vit_proj.output_norm.weight");
         m->vision_proj.output_norm_b = L.f32("vit_proj.output_norm.bias");
 
-        // Text encoder
         m->text_encoder.word_embed = L.f32("text.embed.word_embeddings");
         m->text_encoder.pos_embed = L.f32("text.embed.position_embeddings");
         m->text_encoder.tok_type_embed = L.f32("text.embed.token_type_embeddings");
@@ -1467,7 +1361,6 @@
             w.ln2_b = L.f32("text.encoder.layer.%lld.output.LayerNorm.bias", (long long) i);
         }
 
-        // VL Fusion layers
         m->fusion_layers.resize(m->cfg_.num_fusion_layers);
         for (int64_t i = 0; i < m->cfg_.num_fusion_layers; ++i) {
             auto& w = m->fusion_layers[i];
@@ -1491,7 +1384,6 @@
             w.gamma_l = L.f32("vl_fusion.%lld.gamma_l", (long long) i);
         }
 
-        // VL Text layers
         m->text_layers.resize(m->cfg_.num_text_layers);
         for (int64_t i = 0; i < m->cfg_.num_text_layers; ++i) {
             auto& w = m->text_layers[i];
@@ -1509,7 +1401,6 @@
             w.ln2_b = L.f32("vl_text.%lld.ln2.bias", (long long) i);
         }
 
-        // Action decoder
         m->action_decoder.action_q = L.f32("act.q.weight");
         m->action_decoder.layers.resize(m->cfg_.num_action_decoder_layers);
         for (int64_t i = 0; i < m->cfg_.num_action_decoder_layers; ++i) {
@@ -1540,7 +1431,6 @@
         m->action_decoder.proj_2_w = L.f32("act.proj.2.weight");
         m->action_decoder.proj_2_b = L.f32("act.proj.2.bias");
 
-        // State projection
         m->state_proj.net_0_w = L.f32("state.proj.0.weight");
         m->state_proj.net_0_b = L.f32("state.proj.0.bias");
         m->state_proj.net_1_w = L.f32("state.proj.1.weight");
@@ -1551,7 +1441,6 @@
         m->state_proj.output_norm_b = L.f32("state.proj.output_norm.bias");
         m->state_proj.position = L.f32("state.proj.position");
 
-        // View embeddings
         m->view_emb = L.f32("view_emb");
 
         if (!L.upload(m->backend, &m->weight_buf)) {
@@ -1559,7 +1448,6 @@
             return nullptr;
         }
 
-        // Print DINOv3 config
         std::printf("vla(turbovla): hidden=%lld vit_layers=%lld text_layers=%lld fusion=%lld action_horizon=%lld action_dim=%lld\n",
                     (long long)m->cfg_.hidden,
                     (long long)m->cfg_.vit_layers,

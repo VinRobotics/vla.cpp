@@ -338,8 +338,9 @@ class VlaCppClient:
                 action = normalized.copy()
                 action[..., :6] = ((normalized[..., :6] + 1.0) * 0.5
                                    * (mx[:6] - mn[:6]) + mn[:6])
-                # The released LIBERO policy thresholds its normalized gripper
-                # output instead of min/max denormalizing it as a continuous axis.
+                # TurboVLA thresholds the normalized gripper instead of applying
+                # continuous min/max denormalization. See H-EmbodVis/TurboVLA@
+                # b29ab142, turbovla/evaluation/policy.py:213-221.
                 action[..., 6] = np.where(normalized[..., 6] > 0.0, 1.0, -1.0)
                 return action.astype(np.float32)
 

@@ -61,6 +61,9 @@ class _Tensor:
     def float(self): return _F32Tensor()
     def to(self, *a): return self
     def reshape(self, *a): return self
+    def squeeze(self, *a): return self
+    def clone(self): return self
+    def __mul__(self, other): return self
 
 
 class _F32Tensor(_Tensor):
@@ -257,6 +260,93 @@ def test_prismatic_tower_and_lm():
         "lm.blk.0.attn_v.weight", "lm.blk.0.attn_v.bias",
     ]
     assert qsrcs[2] == "language_model.model.layers.0.self_attn.q_proj.weight"
+
+
+class _SourceTensors(dict):
+    """Return a tensor stub while recording every converter source lookup."""
+
+    def __init__(self):
+        self.keys_read = []
+
+    def __getitem__(self, key):
+        self.keys_read.append(key)
+        return _Tensor()
+
+    def __contains__(self, key):
+        return True
+
+
+def test_turbovla_converter_remap():
+    import importlib
+
+    T = importlib.import_module("convert_turbovla_to_gguf")
+    tensors = _SourceTensors()
+    dims = types.SimpleNamespace(
+        vit_dim=1,
+        vit_layers=1,
+        text_layers=1,
+        num_fusion_layers=1,
+        num_text_layers=1,
+        num_action_decoder_layers=1,
+    )
+    writer = _Writer()
+
+    T.write_vision_encoder(writer, tensors, dims)
+    T.write_text_encoder(writer, tensors, dims)
+    T.write_vision_projection(writer, tensors)
+    T.write_vision_language_interaction(writer, tensors, dims)
+    T.write_action_decoder(writer, tensors, dims)
+    T.write_state_projection(writer, tensors)
+    T.write_view_embeddings(writer, tensors)
+
+    assert writer.names == [
+        "vit.cls_token", "vit.patch_embed.weight", "vit.patch_embed.bias", "vit.register_tokens",
+        "vit.blk.0.attn_q.weight", "vit.blk.0.attn_q.bias", "vit.blk.0.attn_k.weight", "vit.blk.0.attn_k.bias",
+        "vit.blk.0.attn_v.weight", "vit.blk.0.attn_v.bias", "vit.blk.0.attn_o.weight", "vit.blk.0.attn_o.bias",
+        "vit.blk.0.ln1.weight", "vit.blk.0.ln1.bias", "vit.blk.0.ln2.weight", "vit.blk.0.ln2.bias",
+        "vit.blk.0.fc1.weight", "vit.blk.0.fc1.bias", "vit.blk.0.fc2.weight", "vit.blk.0.fc2.bias",
+        "vit.final_norm.weight", "vit.final_norm.bias",
+        "text.embed.word_embeddings", "text.embed.position_embeddings", "text.embed.token_type_embeddings",
+        "text.embed.LayerNorm.weight", "text.embed.LayerNorm.bias",
+        "text.encoder.layer.0.attention.self.query.weight", "text.encoder.layer.0.attention.self.query.bias",
+        "text.encoder.layer.0.attention.self.key.weight", "text.encoder.layer.0.attention.self.key.bias",
+        "text.encoder.layer.0.attention.self.value.weight", "text.encoder.layer.0.attention.self.value.bias",
+        "text.encoder.layer.0.attention.output.dense.weight", "text.encoder.layer.0.attention.output.dense.bias",
+        "text.encoder.layer.0.attention.output.LayerNorm.weight", "text.encoder.layer.0.attention.output.LayerNorm.bias",
+        "text.encoder.layer.0.intermediate.dense.weight", "text.encoder.layer.0.intermediate.dense.bias",
+        "text.encoder.layer.0.output.dense.weight", "text.encoder.layer.0.output.dense.bias",
+        "text.encoder.layer.0.output.LayerNorm.weight", "text.encoder.layer.0.output.LayerNorm.bias",
+        "text.pooler.dense.weight", "text.pooler.dense.bias", "text_proj.weight", "text_proj.bias",
+        "vit_proj.input_norm.weight", "vit_proj.input_norm.bias", "vit_proj.mlp.0.weight", "vit_proj.mlp.0.bias",
+        "vit_proj.mlp.3.weight", "vit_proj.mlp.3.bias", "vit_proj.skip.weight", "vit_proj.output_norm.weight",
+        "vit_proj.output_norm.bias",
+        "vl_fusion.0.v_proj.weight", "vl_fusion.0.v_proj.bias", "vl_fusion.0.l_proj.weight", "vl_fusion.0.l_proj.bias",
+        "vl_fusion.0.values_v.weight", "vl_fusion.0.values_v.bias", "vl_fusion.0.values_l.weight", "vl_fusion.0.values_l.bias",
+        "vl_fusion.0.out_v.weight", "vl_fusion.0.out_v.bias", "vl_fusion.0.out_l.weight", "vl_fusion.0.out_l.bias",
+        "vl_fusion.0.norm_v.weight", "vl_fusion.0.norm_v.bias", "vl_fusion.0.norm_l.weight", "vl_fusion.0.norm_l.bias",
+        "vl_fusion.0.gamma_v", "vl_fusion.0.gamma_l",
+        "vl_text.0.attn_qkv.weight", "vl_text.0.attn_qkv.bias", "vl_text.0.attn_o.weight", "vl_text.0.attn_o.bias",
+        "vl_text.0.ln1.weight", "vl_text.0.ln1.bias", "vl_text.0.fc1.weight", "vl_text.0.fc1.bias",
+        "vl_text.0.fc2.weight", "vl_text.0.fc2.bias", "vl_text.0.ln2.weight", "vl_text.0.ln2.bias",
+        "act.q.weight", "act.dec.0.self_qkv.weight", "act.dec.0.self_qkv.bias", "act.dec.0.self_out.weight",
+        "act.dec.0.self_out.bias", "act.dec.0.cross_qkv.weight", "act.dec.0.cross_qkv.bias",
+        "act.dec.0.cross_out.weight", "act.dec.0.cross_out.bias", "act.dec.0.ln1.weight", "act.dec.0.ln1.bias",
+        "act.dec.0.ln2.weight", "act.dec.0.ln2.bias", "act.dec.0.ln3.weight", "act.dec.0.ln3.bias",
+        "act.dec.0.fc1.weight", "act.dec.0.fc1.bias", "act.dec.0.fc2.weight", "act.dec.0.fc2.bias",
+        "act.proj.0.weight", "act.proj.0.bias", "act.proj.1.weight", "act.proj.1.bias", "act.proj.2.weight",
+        "act.proj.2.bias", "state.proj.0.weight", "state.proj.0.bias", "state.proj.1.weight", "state.proj.1.bias",
+        "state.proj.4.weight", "state.proj.4.bias", "state.proj.output_norm.weight", "state.proj.output_norm.bias",
+        "state.proj.position", "view_emb",
+    ]
+    assert {
+        "vision_encoder.backbone.embeddings.patch_embeddings.weight",
+        "text_encoder.bert.encoder.layer.0.attention.self.query.weight",
+        "vision_language_interaction.fusion_layers.0.attn.v_proj.weight",
+        "vision_language_interaction.text_layers.0.self_attn.in_proj_weight",
+        "action_head.decoder.decoder.layers.0.multihead_attn.in_proj_weight",
+        "action_head.state_projection.net.4.weight",
+        "view_embedding",
+    } <= set(tensors.keys_read)
 
 
 def test_every_converter_imports():
