@@ -87,6 +87,18 @@ struct FqGemmSpec {
     int64_t  K     = 0;
     int64_t  N     = 0;
     int      wbits = 8;
+    // The weight tensor the next FoldQuant GEMM in execution order reads; the
+    // CUDA kernel prefetches its head into L2 once its own loads are issued
+    // (fq_link_prefetch; opt-in via VLA_FQ_PREFETCH_MB, measured slower on Orin).
+    const ggml_tensor * next_w = nullptr;
+    // Head layout of the output (fq_set_heads): the N columns are nparts
+    // consecutive [heads][head_dim] projections and the epilogue writes each
+    // part directly in the layout attention consumes, [head_dim][T][heads]
+    // (Q/K) or [T][head_dim][heads] (parts whose bit is set in vmask), so the
+    // permute copies after the GEMM disappear. 0 = plain [N][T].
+    int      head_dim = 0;
+    int      heads    = 0;
+    uint32_t vmask    = 0;
 };
 
 struct FqLinear {
@@ -130,6 +142,14 @@ FqLinear fq_declare_linear(WeightLoader & L, const FqModuleSpec & mod, const cha
 
 // Several sites sharing one input transform (DiT q/k/v, k/v) fused into one
 // weight: codes and wscale concatenate along N; ascale must agree and is kept once.
+// Marks a site's output as head-laid-out (see FqGemmSpec). No-op when the
+// site is float or VLA_FQ_NO_HEADS=1 (A/B switch: identical numbers either way).
+void fq_set_heads(FqLinear & s, int head_dim, int heads, uint32_t vmask);
+
+// Chains sites in execution order so each GEMM knows the next site's weights
+// (null entries and absent sites are skipped).
+void fq_link_prefetch(const std::vector<FqLinear *> & order);
+
 FqLinear fq_declare_fused(WeightLoader & L, const FqModuleSpec & mod, const char * site_key,
                           bool has_bias, const std::string & out_base, const std::vector<std::string> & sites);
 

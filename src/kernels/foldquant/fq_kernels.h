@@ -52,6 +52,12 @@ struct GemmArgs {
     const float *  wscale;    // [N]
     const float *  bias;      // [N] or null
     float *        y;         // [M][N] F32
+    const float *  res = nullptr;   // [M][N] F32 residual added in the epilogue (y = ... + res), or null
+    const int8_t * pf = nullptr;    // next site's weights to prefetch into L2 (pf_bytes of them), or null
+    int64_t        pf_bytes = 0;
+    // Head layout of y (0 = plain [M][N]); see FqGemmSpec / fq_out_index.
+    int            head_dim = 0, heads = 0;
+    uint32_t       vmask = 0;
     int64_t        M, N, K;
     int64_t        row_bytes;
     int            wbits, abits;
@@ -60,6 +66,25 @@ struct GemmArgs {
     int *          ws       = nullptr;
     int *          counters = nullptr;
 };
+
+#ifdef __CUDACC__
+// Column n of a head-laid-out output maps to y[off + m * stride]: this splits
+// the column part so the epilogue can hoist it out of its row loop. 32-bit
+// math: M * N < 2^31 for every site.
+__device__ __forceinline__ void fq_out_column(const GemmArgs & g, int n, int & off, int & stride) {
+    const int M = (int) g.M, dim = g.head_dim * g.heads;
+    const int p = n / dim, r = n - p * dim, h = r / g.head_dim, d = r - h * g.head_dim;
+    const int base = p * dim * M;
+    if ((g.vmask >> p) & 1) { off = base + (h * g.head_dim + d) * M; stride = 1; }
+    else                    { off = base + h * M * g.head_dim + d;   stride = g.head_dim; }
+}
+__device__ __forceinline__ int64_t fq_out_index(const GemmArgs & g, int64_t m, int64_t n) {
+    if (!g.heads) return m * g.N + n;
+    int off, stride;
+    fq_out_column(g, (int) n, off, stride);
+    return (int64_t) off + m * (int64_t) stride;
+}
+#endif
 
 // Both return cudaSuccess or the launch error. Shapes the kernels do not cover
 // (W4/A4 until phase 2/3) return cudaErrorNotSupported without launching.

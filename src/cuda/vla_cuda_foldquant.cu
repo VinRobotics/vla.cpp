@@ -24,6 +24,8 @@
 // of the device tensors: slow, but a byte-exact A/B against the kernels.
 
 #include "foldquant.h"
+#include <cstdlib>
+#include <algorithm>
 #include "foldquant_ref.h"
 #include "env_flag.h"
 #include "kernels/foldquant/fq_kernels.h"
@@ -95,7 +97,7 @@ bool run_on_host(ggml_tensor * dst, int n_src, Fn fn, cudaStream_t stream) {
                              "set GGML_CUDA_DISABLE_GRAPHS=1 (foldquant_check_backend does so at load)\n");
         return false;
     }
-    HostCopy srcs[4];
+    HostCopy srcs[GGML_MAX_SRC];
     ggml_tensor d = *dst;
     for (int i = 0; i < n_src; ++i) {
         if (!dst->src[i]) { d.src[i] = nullptr; continue; }
@@ -119,7 +121,7 @@ bool check_mode() {
 
 template <typename Fn>
 void check_against_host(ggml_tensor * dst, int n_src, Fn fn, cudaStream_t stream, size_t cmp_bytes_per_row, size_t row_bytes) {
-    HostCopy srcs[4];
+    HostCopy srcs[GGML_MAX_SRC];
     ggml_tensor d = *dst;
     for (int i = 0; i < n_src; ++i) {
         if (!dst->src[i]) { d.src[i] = nullptr; continue; }
@@ -157,6 +159,17 @@ void check_against_host(ggml_tensor * dst, int n_src, Fn fn, cudaStream_t stream
 
 // Rows contiguous and 16-byte aligned, any row stride, higher dims packed: what
 // the prologue reads without a ggml_cont in front of it.
+// VLA_FQ_PREFETCH_MB: how much of the next site's weights a GEMM prefetches
+// into L2. Off by default: on Orin (4 MB L2) a 2 MB prefetch made the GEMMs
+// 12% slower in the model (extra DRAM traffic, no hit-rate gain).
+int64_t prefetch_bytes() {
+    static const int64_t b = [] {
+        const char * e = std::getenv("VLA_FQ_PREFETCH_MB");
+        return (e && *e) ? (int64_t) (std::atof(e) * 1024.0 * 1024.0) : (int64_t) 0;
+    }();
+    return b;
+}
+
 bool contiguous_f32_rows(const ggml_tensor * t, int64_t K) {
     return t && t->type == GGML_TYPE_F32 && t->ne[0] == K && t->nb[0] == sizeof(float) &&
            t->nb[1] % 16 == 0 && t->nb[2] == t->nb[1] * (size_t) t->ne[1] && t->nb[3] == t->nb[2] * (size_t) t->ne[2];
@@ -216,12 +229,14 @@ bool forward_gemm(ggml_tensor * dst, const vla::FqGemmSpec & s, cudaStream_t str
     const ggml_tensor * xq = dst->src[1];
     const ggml_tensor * ws = dst->src[2];
     const ggml_tensor * b  = dst->src[3];
+    const ggml_tensor * r  = dst->src[4];
     const int64_t K = s.K, N = s.N;
     const int64_t kpw = vla::fq_w_kpack(K, s.wbits);
     if (!w || w->type != GGML_TYPE_I8 || w->ne[0] != kpw || w->ne[1] != N || !ggml_is_contiguous(w) ||
         !xq || xq->type != GGML_TYPE_I8 || !ggml_is_contiguous(xq) ||
         !ws || ws->type != GGML_TYPE_F32 || ws->ne[0] != N ||
         (b && !(b->type == GGML_TYPE_F32 && b->ne[0] == N)) ||
+        (r && !(r->type == GGML_TYPE_F32 && ggml_is_contiguous(r) && ggml_nelements(r) == ggml_nelements(dst) && r->ne[0] == N)) ||
         dst->type != GGML_TYPE_F32 || dst->ne[0] != N || !ggml_is_contiguous(dst)) {
         std::fprintf(stderr, "vla(fq): gemm node %s violates the contract\n", ggml_get_name(dst));
         return false;
@@ -238,14 +253,20 @@ bool forward_gemm(ggml_tensor * dst, const vla::FqGemmSpec & s, cudaStream_t str
                     (long long) N, (long long) K, s.wbits, abits, b ? " +bias" : "");
 
     if (cpu_ref())
-        return run_on_host(dst, 4, [&](ggml_tensor * d) { vla::fq_gemm_cpu(d, 0, 1, (void *) &s); }, stream);
+        return run_on_host(dst, 5, [&](ggml_tensor * d) { vla::fq_gemm_cpu(d, 0, 1, (void *) &s); }, stream);
 
     vla::fq::GemmArgs g;
     g.w = (const int8_t *) w->data;
     g.blob = (const int8_t *) xq->data;
     g.wscale = (const float *) ws->data;
     g.bias = b ? (const float *) b->data : nullptr;
+    g.res  = r ? (const float *) r->data : nullptr;
+    if (s.next_w && s.next_w->data && prefetch_bytes() > 0) {
+        g.pf = (const int8_t *) s.next_w->data;
+        g.pf_bytes = std::min<int64_t>((int64_t) ggml_nbytes(s.next_w), prefetch_bytes());
+    }
     g.y = (float *) dst->data;
+    g.head_dim = s.head_dim; g.heads = s.heads; g.vmask = s.vmask;
     g.M = M; g.N = N; g.K = K;
     g.row_bytes = xq->ne[0];
     g.wbits = s.wbits; g.abits = abits;
@@ -257,14 +278,14 @@ bool forward_gemm(ggml_tensor * dst, const vla::FqGemmSpec & s, cudaStream_t str
                         s.wbits, abits);
             warned = true;
         }
-        return run_on_host(dst, 4, [&](ggml_tensor * d) { vla::fq_gemm_cpu(d, 0, 1, (void *) &s); }, stream);
+        return run_on_host(dst, 5, [&](ggml_tensor * d) { vla::fq_gemm_cpu(d, 0, 1, (void *) &s); }, stream);
     }
     if (e != cudaSuccess) {
         std::fprintf(stderr, "vla(fq): gemm launch failed: %s\n", cudaGetErrorString(e));
         return false;
     }
     if (check_mode())
-        check_against_host(dst, 4, [&](ggml_tensor * d) { vla::fq_gemm_cpu(d, 0, 1, (void *) &s); }, stream,
+        check_against_host(dst, 5, [&](ggml_tensor * d) { vla::fq_gemm_cpu(d, 0, 1, (void *) &s); }, stream,
                            (size_t) N * sizeof(float), (size_t) N * sizeof(float));
     return true;
 }

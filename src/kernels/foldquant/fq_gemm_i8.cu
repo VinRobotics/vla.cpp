@@ -204,7 +204,8 @@ __global__ void __launch_bounds__(WM * WN * 32) gemm_i8_kernel(const GemmArgs g)
             const float xs = *(const float *) (g.blob + m * g.row_bytes + g.K);
             float v = ((float) acc * xs) * g.wscale[n];
             if (HAS_BIAS) v = v + g.bias[n];
-            g.y[m * g.N + n] = v;
+            if (g.res) v = v + g.res[m * g.N + n];
+            g.y[fq_out_index(g, m, n)] = v;
         }
         if (tid == 0) g.counters[(int) (blockIdx.y * gridDim.x + blockIdx.x)] = 0;
         return;
@@ -217,7 +218,8 @@ __global__ void __launch_bounds__(WM * WN * 32) gemm_i8_kernel(const GemmArgs g)
         const float xs = *(const float *) (g.blob + m * g.row_bytes + g.K);
         float v = ((float) Cs[r * T::LDC + c] * xs) * g.wscale[n];
         if (HAS_BIAS) v = v + g.bias[n];
-        g.y[m * g.N + n] = v;
+        if (g.res) v = v + g.res[m * g.N + n];
+        g.y[fq_out_index(g, m, n)] = v;
     }
 }
 

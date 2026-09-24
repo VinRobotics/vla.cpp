@@ -188,17 +188,32 @@ __global__ void __launch_bounds__(WM * WN * 32) gemm_mma_kernel(const GemmArgs g
     }
     cp_async_wait<0>();
 
+    // Next site's weights: every CTA prefetches an equal slice of the head of
+    // that matrix into L2 now that its own loads are in, so the next GEMM's
+    // first stages hit L2 instead of DRAM. Fire-and-forget; no data dependence.
+    if (g.pf) {
+        const int64_t lines  = g.pf_bytes >> 7;
+        const int64_t ctas   = (int64_t) gridDim.x * gridDim.y;
+        const int64_t cta    = (int64_t) blockIdx.y * gridDim.x + blockIdx.x;
+        const int64_t per    = (lines + ctas - 1) / ctas;
+        const int64_t l0     = cta * per, l1 = l0 + per < lines ? l0 + per : lines;
+        for (int64_t l = l0 + tid; l < l1; l += T::THREADS)
+            asm volatile("prefetch.global.L2 [%0];" :: "l"(g.pf + (l << 7)));
+    }
+
     // Fragment layout of a m16n8 int32 tile: c0,c1 at (row g, cols 2q, 2q+1),
     // c2,c3 at (row g+8, same cols), g = lane/4, q = lane%4.
     const int grp = lane >> 2, q = lane & 3;
     // The per-column factors are shared by every row this thread writes: load
     // them once per n8 tile instead of once per (row, tile).
     float2 ws[T::NT], bs2[T::NT];
+    int ho[T::NT], hs[T::NT];   // head layout: y[ho + m*hs] for column n, column n+1 at +1 (Q/K) or +M (V)
     #pragma unroll
     for (int j = 0; j < T::NT; ++j) {
         const int64_t n = n0 + wn * (T::NT * 8) + j * 8 + 2 * q;
         ws[j] = *(const float2 *) (g.wscale + n);
         if (HAS_BIAS) bs2[j] = *(const float2 *) (g.bias + n);
+        if (g.heads) fq_out_column(g, (int) n, ho[j], hs[j]);
     }
     #pragma unroll
     for (int i = 0; i < T::MT; ++i) {
@@ -213,7 +228,17 @@ __global__ void __launch_bounds__(WM * WN * 32) gemm_mma_kernel(const GemmArgs g
                 float v0 = ((float) acc[i][j][2 * h]     * xs) * ws[j].x;
                 float v1 = ((float) acc[i][j][2 * h + 1] * xs) * ws[j].y;
                 if (HAS_BIAS) { v0 = v0 + bs2[j].x; v1 = v1 + bs2[j].y; }
-                *(float2 *) (g.y + m * g.N + n) = make_float2(v0, v1);
+                if (g.res) {   // the residual add that followed the GEMM: one float add, same result
+                    const float2 r = *(const float2 *) (g.res + m * g.N + n);
+                    v0 = v0 + r.x; v1 = v1 + r.y;
+                }
+                if (g.heads) {   // head layout (hd even, n even: a Q/K pair stays adjacent and 8-B aligned)
+                    float * yp = g.y + ho[j] + m * hs[j];
+                    if (hs[j] == 1) { yp[0] = v0; yp[(int) g.M] = v1; }
+                    else            { *(float2 *) yp = make_float2(v0, v1); }
+                } else {
+                    *(float2 *) (g.y + m * g.N + n) = make_float2(v0, v1);
+                }
             }
         }
     }

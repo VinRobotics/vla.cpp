@@ -155,8 +155,8 @@ float gemm_dot(const int8_t * w_row, const int8_t * x_row, int64_t K, float xs, 
 // GGML_OP_CUSTOM entry points. Sources are packed without holes:
 //   fq_act : src[0]=x F32 [K, T...] contiguous, then gamma F32[K] if has_gamma,
 //            then ascale F32[K] if has_ascale; dst I8 [row_bytes, T]
-//   fq_gemm: src[0]=w I8 [K_pack, N], src[1]=xq blob, src[2]=wscale F32[N], src[3]=bias F32[N] or null
-//            dst F32 [N, T]
+//   fq_gemm: src[0]=w I8 [K_pack, N], src[1]=xq blob, src[2]=wscale F32[N], src[3]=bias F32[N] or null,
+//            src[4]=residual F32 [N, T] or absent (the residual add fused into the epilogue); dst F32 [N, T]
 
 void fq_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     const FqActSpec & s = *(const FqActSpec *) userdata;
@@ -216,6 +216,17 @@ void fq_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     }
 }
 
+// Where output element (row t, column n) lands: plain row-major, or the head
+// layout described in FqGemmSpec (same rule as the CUDA epilogues).
+static inline size_t fq_out_index(const FqGemmSpec & s, int64_t T, int64_t t, int64_t n) {
+    if (!s.heads) return (size_t) t * s.N + n;
+    const int64_t dim = (int64_t) s.head_dim * s.heads;
+    const int64_t p = n / dim, r = n - p * dim, h = r / s.head_dim, d = r - h * s.head_dim;
+    const int64_t base = p * dim * T;
+    return (size_t) (((s.vmask >> p) & 1) ? base + (h * s.head_dim + d) * T + t
+                                          : base + (h * T + t) * s.head_dim + d);
+}
+
 void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     const FqGemmSpec & s = *(const FqGemmSpec *) userdata;
     if (s.magic != FQ_GEMM_MAGIC) return;
@@ -224,6 +235,7 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     const ggml_tensor * xq = dst->src[1];
     const ggml_tensor * ws = dst->src[2];
     const ggml_tensor * b  = dst->src[3];
+    const ggml_tensor * r  = dst->src[4];          // optional residual [N, T]
 
     const int64_t K     = s.K;
     const int64_t N     = s.N;
@@ -253,6 +265,7 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     const uint8_t * xp = (const uint8_t *) xq->data;
     const float * wsp = (const float *) ws->data;
     const float * bp  = b ? (const float *) b->data : nullptr;
+    const float * rp  = r ? (const float *) r->data : nullptr;
     float * y = (float *) dst->data;
 
     // Activations unpacked once per thread when they are nibbles.
@@ -280,7 +293,9 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
             const int8_t * xrow = (abits == 4) ? xa.data() + (size_t) t * K : (const int8_t *) row;
             float xs;
             std::memcpy(&xs, row + kp_a, sizeof(float));
-            y[(size_t) t * N + n] = fqref::gemm_dot(wrow, xrow, K, xs, wsn, bn);
+            float v = fqref::gemm_dot(wrow, xrow, K, xs, wsn, bn);
+            if (rp) v = v + rp[(size_t) t * N + n];
+            y[fq_out_index(s, T, t, n)] = v;
         }
     }
 }

@@ -310,6 +310,17 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
 
     m->aex.declare(L, "aex");
     m->dit.declare(L, "aex.dit", true, m->dit_interleave != 0, nullptr, fq.present ? &fq.action : nullptr);
+    if (fq.present) {
+        // Execution order of the FoldQuant GEMMs, so each one can prefetch the
+        // next site's weights (cross-attention K/V run before the step loop and
+        // are left out of the chain).
+        std::vector<FqLinear *> order;
+        for (auto & b : m->lm.blk)
+            for (FqLinear * s : {&b.fq_q, &b.fq_k, &b.fq_v, &b.fq_o, &b.fq_gate, &b.fq_up, &b.fq_down}) order.push_back(s);
+        for (auto & b : m->dit.blk)
+            for (FqLinear * s : {&b.fq_qkv, &b.fq_q, &b.fq_o, &b.fq_ff0, &b.fq_ff2}) order.push_back(s);
+        fq_link_prefetch(order);
+    }
 
     if (!L.upload(m->backend, &m->weight_buf))
         return nullptr;

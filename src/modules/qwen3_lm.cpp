@@ -43,6 +43,9 @@ void Qwen3LM::declare(WeightLoader & L, const char * prefix, const FqModuleSpec 
             w.fq_o    = fq_declare_linear(L, *fq, "o",      false, nullptr,     0.0f,        "%s.blk.%lld.attn_o",   prefix, ii);
             w.fq_gate = fq_declare_linear(L, *fq, "gateup", false, w.ffn_norm,  cfg.rms_eps, "%s.blk.%lld.ffn_gate", prefix, ii);
             w.fq_up   = fq_declare_linear(L, *fq, "gateup", false, w.ffn_norm,  cfg.rms_eps, "%s.blk.%lld.ffn_up",   prefix, ii);
+            // V goes straight to the attention: flash wants [hd, seq, n_kv], the
+            // mul_mat path the transposed [seq, hd, n_kv].
+            fq_set_heads(w.fq_v, (int) cfg.head_dim, (int) cfg.n_kv, cfg.flash_attn ? 0u : 1u);
             w.fq_down = fq_declare_linear(L, *fq, "down",   false, nullptr,     0.0f,        "%s.blk.%lld.ffn_down", prefix, ii);
             // Sites that share an activation node must be quantized together.
             if ((bool) w.fq_q != (bool) w.fq_k || (bool) w.fq_q != (bool) w.fq_v || (bool) w.fq_gate != (bool) w.fq_up)
@@ -75,7 +78,9 @@ ggml_tensor * Qwen3LM::block(ggml_context * C, const Qwen3LayerW & w, ggml_tenso
     };
     ggml_tensor * qh = ggml_reshape_3d(C, proj(w.fq_q, w.Wq), hd, n_q,  seq);
     ggml_tensor * kh = ggml_reshape_3d(C, proj(w.fq_k, w.Wk), hd, n_kv, seq);
-    ggml_tensor * vh = ggml_reshape_3d(C, proj(w.fq_v, w.Wv), hd, n_kv, seq);
+    ggml_tensor * vp = proj(w.fq_v, w.Wv);
+    const bool v_heads = w.fq_v && w.fq_v.gemm.heads;   // epilogue wrote the attention layout
+    ggml_tensor * vh = v_heads ? nullptr : ggml_reshape_3d(C, vp, hd, n_kv, seq);
 
     ggml_tensor * qr = rope(C, cfg.rope, rms_norm(C, qh, w.q_norm, cfg.rms_eps), pos);
     ggml_tensor * kr = rope(C, cfg.rope, rms_norm(C, kh, w.k_norm, cfg.rms_eps), pos);
@@ -84,16 +89,16 @@ ggml_tensor * Qwen3LM::block(ggml_context * C, const Qwen3LayerW & w, ggml_tenso
 
     ggml_tensor * att;
     if (cfg.flash_attn) {
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, vh, 0, 2, 1, 3));
+        ggml_tensor * V = v_heads ? fq_head_view(C, vp, w.fq_v, 0, seq) : ggml_cont(C, ggml_permute(C, vh, 0, 2, 1, 3));
         att = flash_attention(C, Q, K, V, ggml_cast(C, mask, GGML_TYPE_F16), scale);
     } else {
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, vh, 1, 2, 0, 3));
+        ggml_tensor * V = v_heads ? fq_head_view(C, vp, w.fq_v, 0, seq) : ggml_cont(C, ggml_permute(C, vh, 1, 2, 0, 3));
         att = attention(C, Q, K, V, mask, scale, hq, seq);
     }
 
     // o_proj takes the raw attention output (no norm) and is still rotated.
-    ggml_tensor * o      = w.fq_o ? fq_linear(C, w.fq_o, att) : ggml_mul_mat(C, w.Wo, att);
-    ggml_tensor * h_attn = ggml_add(C, h, o);
+    // FoldQuant: the residual add rides in the GEMM epilogue.
+    ggml_tensor * h_attn = w.fq_o ? fq_linear(C, w.fq_o, att, h) : ggml_add(C, h, ggml_mul_mat(C, w.Wo, att));
     // gate/up (one activation node, ffn_norm fused) and down are independent
     // sites; the float form is ffn_swiglu's op sequence exactly.
     ggml_tensor * gate, * up;
@@ -107,8 +112,7 @@ ggml_tensor * Qwen3LM::block(ggml_context * C, const Qwen3LayerW & w, ggml_tenso
         up   = ggml_mul_mat(C, w.Wup, hn2);
     }
     ggml_tensor * mid = ggml_mul(C, gate, up);
-    ggml_tensor * ffn = w.fq_down ? fq_linear(C, w.fq_down, mid) : ggml_mul_mat(C, w.Wdown, mid);
-    return ggml_add(C, h_attn, ffn);
+    return w.fq_down ? fq_linear(C, w.fq_down, mid, h_attn) : ggml_add(C, h_attn, ggml_mul_mat(C, w.Wdown, mid));
 }
 
 ggml_tensor * Qwen3LM::build(ggml_context * C, ggml_tensor * h,

@@ -129,7 +129,14 @@ Each site is two `GGML_OP_CUSTOM` nodes (`src/layers/fq_linear.h`):
   byte `K_pack`. Sources are packed without holes (the spec's `has_gamma` /
   `has_ascale` say which follow `x`). It is an ordinary gallocr intermediate,
   shared by every projection that reads the same input (q/k/v, gate/up).
-- `fq_gemm(w, blob, wscale[, bias]) -> F32 [N, T]`.
+- `fq_gemm(w, blob, wscale[, bias][, residual]) -> F32 [N, T]`. The fifth
+  source is the F32 tensor the model would add right after the GEMM (o_proj and
+  down/ff2 residuals); the epilogue adds it, one float add, so the result is
+  what `ggml_add` would give. When the spec carries a head layout
+  (`fq_set_heads`: DiT q/k/v, cross-attention k/v, LLM v) the epilogue writes
+  each projection straight in the layout the attention reads, `[hd, T, heads]`
+  for Q/K or `[T, hd, heads]` for V, and the model takes views instead of
+  permute copies; the numbers are the same, only their addresses move.
 
 The CPU backend executes the custom function. On CUDA the same nodes are
 claimed by the extension hook (`src/cuda/vla_cuda_foldquant.cu`, registered by
@@ -142,7 +149,11 @@ Environment switches: `VLA_FQ_CHECK=1` recomputes every node with the CPU
 reference after its kernel and reports mismatches; `VLA_FQ_CPU_REF=1` runs the CPU reference on host copies
 of every node (a byte-exact A/B against the kernels; it disables ggml's CUDA
 graphs, whose capture cannot contain the host round trip); `VLA_FQ_TRACE=1`
-prints each node's shape once per graph build.
+prints each node's shape once per graph build. A/B switches for the graph-level
+optimisations, all bit-identical either way: `VLA_FQ_NO_FUSE=1` keeps the
+residual add as a separate node, `VLA_FQ_NO_HEADS=1` keeps the permute copies,
+`VLA_FQ_PREFETCH_MB=<mb>` makes each GEMM prefetch that much of the next site's
+weights into L2 (opt-in; measured slower on Orin).
 
 ## Producing a file
 

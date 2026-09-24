@@ -25,6 +25,8 @@
 
 #include "ggml.h"
 
+#include <cstdlib>
+
 namespace vla {
 
 // x: F32 [K, T, ...] -> I8 blob [row_bytes, T*...]. With s.gamma set, x is the
@@ -51,17 +53,43 @@ inline ggml_tensor * fq_act(ggml_context * C, const FqLinear & s, ggml_tensor * 
 }
 
 // xq: blob from fq_act (any site sharing the same input transform) -> F32 [N, T].
-inline ggml_tensor * fq_gemm(ggml_context * C, const FqLinear & s, ggml_tensor * xq) {
-    GGML_ASSERT(xq->type == GGML_TYPE_I8 && xq->ne[0] == fq_act_row_bytes(s.act.K, s.act.abits));
-    ggml_tensor * args[4] = { s.w, xq, s.wscale, s.bias };
-    ggml_tensor * y = ggml_custom_4d(C, GGML_TYPE_F32, s.gemm.N, xq->ne[1], 1, 1,
-                                     args, 4, fq_gemm_cpu, GGML_N_TASKS_MAX, (void *) &s.gemm);
-    ggml_format_name(y, "%s.fq_gemm", ggml_get_name(s.w));
-    return y;
+// residual: an F32 tensor shaped like the output that the model would add
+// right after the GEMM; folded into the epilogue (one float add, so the
+// result is the same as ggml_add would produce). VLA_FQ_NO_FUSE=1 keeps the
+// separate add for A/B runs.
+inline bool fq_fuse_residual() {
+    static const bool off = [] { const char * e = std::getenv("VLA_FQ_NO_FUSE"); return e && *e && *e != '0'; }();
+    return !off;
 }
 
-inline ggml_tensor * fq_linear(ggml_context * C, const FqLinear & s, ggml_tensor * x) {
-    return fq_gemm(C, s, fq_act(C, s, x));
+inline ggml_tensor * fq_gemm(ggml_context * C, const FqLinear & s, ggml_tensor * xq, ggml_tensor * residual = nullptr) {
+    GGML_ASSERT(xq->type == GGML_TYPE_I8 && xq->ne[0] == fq_act_row_bytes(s.act.K, s.act.abits));
+    const int64_t T = xq->ne[1];
+    const bool fuse = residual && fq_fuse_residual() && !s.gemm.heads && residual->type == GGML_TYPE_F32 &&
+                      ggml_is_contiguous(residual) && residual->ne[0] == s.gemm.N && ggml_nelements(residual) == s.gemm.N * T;
+    ggml_tensor * args[5] = { s.w, xq, s.wscale, s.bias, fuse ? residual : nullptr };
+    ggml_tensor * y = ggml_custom_4d(C, GGML_TYPE_F32, s.gemm.N, T, 1, 1,
+                                     args, fuse ? 5 : 4, fq_gemm_cpu, GGML_N_TASKS_MAX, (void *) &s.gemm);
+    ggml_format_name(y, "%s.fq_gemm", ggml_get_name(s.w));
+    return (residual && !fuse) ? ggml_add(C, residual, y) : y;
+}
+
+// Part `part` of a head-laid-out GEMM output (fq_set_heads), as the tensor the
+// attention takes: [hd, T, heads] for Q/K, [T, hd, heads] for a V part.
+inline ggml_tensor * fq_head_view(ggml_context * C, ggml_tensor * y, const FqLinear & s, int part, int64_t T) {
+    GGML_ASSERT(s.gemm.heads && y->ne[1] == T);
+    const int64_t hd = s.gemm.head_dim, heads = s.gemm.heads;
+    const size_t  off = (size_t) part * heads * hd * T * sizeof(float);
+    ggml_tensor * v = ((s.gemm.vmask >> part) & 1)
+        ? ggml_view_3d(C, y, T,  hd, heads, T  * sizeof(float), T * hd * sizeof(float), off)
+        : ggml_view_3d(C, y, hd, T,  heads, hd * sizeof(float), hd * T * sizeof(float), off);
+    ggml_format_name(v, "%s.part%d", ggml_get_name(y), part);
+    return v;
+}
+
+// y = W x (+ bias) (+ residual)
+inline ggml_tensor * fq_linear(ggml_context * C, const FqLinear & s, ggml_tensor * x, ggml_tensor * residual = nullptr) {
+    return fq_gemm(C, s, fq_act(C, s, x), residual);
 }
 
 }  // namespace vla

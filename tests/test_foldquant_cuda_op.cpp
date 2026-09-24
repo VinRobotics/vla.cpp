@@ -54,10 +54,12 @@ struct Case {
     const char * name;
     int  wbits, abits, rot;
     bool gamma, ascale, fold_before, bias;
+    bool res = false;   // residual fused into the GEMM epilogue
+    int  heads = 0;     // >0: head-layout epilogue (hd = 64, 1-3 parts, last part V)
 };
 
 struct Inputs {
-    std::vector<float>  x, ws, b, as, ga;
+    std::vector<float>  x, ws, b, as, ga, res;
     std::vector<int8_t> w;   // packed
 };
 
@@ -68,6 +70,8 @@ Inputs make_inputs(const Shape & sh, const Case & c, uint32_t seed) {
     for (auto & v : in.x)  v = rng.next() * 4.0f;
     for (auto & v : in.ws) v = 0.01f + 0.02f * std::fabs(rng.next());
     for (auto & v : in.b)  v = rng.next() * 0.5f;
+    in.res.resize((size_t) sh.N * sh.T);
+    for (auto & v : in.res) v = rng.next() * 3.0f;
     for (auto & v : in.as) v = 0.5f + std::fabs(rng.next());
     for (auto & v : in.ga) v = 0.75f + 0.5f * std::fabs(rng.next());
     const int64_t kpw = vla::fq_w_kpack(sh.K, c.wbits);
@@ -101,10 +105,11 @@ Result run(ggml_backend_t backend, const Shape & sh, const Case & c, const Input
     ggml_tensor * w  = ggml_new_tensor_2d(C, GGML_TYPE_I8, kpw, sh.N);
     ggml_tensor * ws = ggml_new_tensor_1d(C, GGML_TYPE_F32, sh.N);
     ggml_tensor * b  = c.bias   ? ggml_new_tensor_1d(C, GGML_TYPE_F32, sh.N) : nullptr;
+    ggml_tensor * rs = c.res    ? ggml_new_tensor_2d(C, GGML_TYPE_F32, sh.N, sh.T) : nullptr;
     ggml_tensor * as = c.ascale ? ggml_new_tensor_1d(C, GGML_TYPE_F32, sh.K) : nullptr;
     ggml_tensor * ga = c.gamma  ? ggml_new_tensor_1d(C, GGML_TYPE_F32, sh.K) : nullptr;
     ggml_tensor * Wb = with_bf16_probe ? ggml_new_tensor_2d(C, GGML_TYPE_BF16, sh.K, 64) : nullptr;
-    for (ggml_tensor * t : {x, w, ws, b, as, ga, Wb}) if (t) ggml_set_input(t);
+    for (ggml_tensor * t : {x, w, ws, b, as, ga, Wb, rs}) if (t) ggml_set_input(t);
     ggml_set_name(w, "site");
 
     vla::FqLinear s;
@@ -112,9 +117,14 @@ Result run(ggml_backend_t backend, const Shape & sh, const Case & c, const Input
     s.act.K = sh.K; s.act.abits = c.abits; s.act.rot_block = c.rot; s.act.fold_before = c.fold_before;
     s.act.has_gamma = c.gamma; s.act.has_ascale = c.ascale; s.act.clip = c.abits == 4 ? 0.9f : 1.0f; s.act.eps = 1e-6f;
     s.gemm.K = sh.K; s.gemm.N = sh.N; s.gemm.wbits = c.wbits;
+    if (c.heads) {   // hd = 64; as many parts as the model uses (q/k/v = 3, k/v = 2, one), last part V
+        const int parts = sh.N % 192 == 0 ? 3 : sh.N % 128 == 0 ? 2 : 1;
+        if (sh.N % (64 * parts) == 0)
+            vla::fq_set_heads(s, 64, (int) (sh.N / (64 * parts)), 1u << (parts - 1));
+    }
 
     ggml_tensor * xq = vla::fq_act(C, s, x);
-    ggml_tensor * y  = vla::fq_gemm(C, s, xq);
+    ggml_tensor * y  = vla::fq_gemm(C, s, xq, rs);
     ggml_set_output(xq); ggml_set_output(y);
     ggml_tensor * probe = nullptr;
     if (Wb) {
@@ -135,6 +145,7 @@ Result run(ggml_backend_t backend, const Shape & sh, const Case & c, const Input
     ggml_backend_tensor_set(w,  in.w.data(),  0, ggml_nbytes(w));
     ggml_backend_tensor_set(ws, in.ws.data(), 0, ggml_nbytes(ws));
     if (b)  ggml_backend_tensor_set(b,  in.b.data(),  0, ggml_nbytes(b));
+    if (rs) ggml_backend_tensor_set(rs, in.res.data(), 0, ggml_nbytes(rs));
     if (as) ggml_backend_tensor_set(as, in.as.data(), 0, ggml_nbytes(as));
     if (ga) ggml_backend_tensor_set(ga, in.ga.data(), 0, ggml_nbytes(ga));
     if (Wb) {
@@ -197,6 +208,10 @@ int main() {
 
     const Case cases[] = {
         { "w8a8_rot64_bias",     8, 8, 64, false, false, false, true  },
+        { "w8a8_rot64_bias_res", 8, 8, 64, false, false, false, true, true },
+        { "w4a4_rot64_res",      4, 4, 64, false, true,  true,  false, true },
+        { "w8a8_rot64_heads",    8, 8, 64, false, false, false, true,  false, 4 },
+        { "w4a4_rot64_heads",    4, 4, 64, false, true,  true,  true,  false, 2 },
         { "w8a8_rot64_gamma",    8, 8, 64, true,  false, false, false },
         { "w8a8_rot32_pre",      8, 8, 32, false, true,  true,  true  },
         { "w8a8_rot64_post",     8, 8, 64, false, true,  false, false },

@@ -22,6 +22,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
 
@@ -237,6 +238,25 @@ FqLinear fq_declare_linear(WeightLoader & L, const FqModuleSpec & mod, const cha
     if (!fill_specs(L, mod, site_key, site, gamma, eps, r))
         r.w = nullptr;
     return r;
+}
+
+void fq_set_heads(FqLinear & s, int head_dim, int heads, uint32_t vmask) {
+    static const bool off = [] { const char * e = std::getenv("VLA_FQ_NO_HEADS"); return e && *e && *e != '0'; }();
+    if (!s.w || off) return;
+    const int64_t parts = s.gemm.N / ((int64_t) head_dim * heads);
+    if (parts < 1 || parts > 32 || s.gemm.N % ((int64_t) head_dim * heads) != 0) return;
+    s.gemm.head_dim = head_dim;
+    s.gemm.heads    = heads;
+    s.gemm.vmask    = vmask;
+}
+
+void fq_link_prefetch(const std::vector<FqLinear *> & order) {
+    FqLinear * prev = nullptr;
+    for (FqLinear * s : order) {
+        if (!s || !s->w) continue;
+        if (prev) prev->gemm.next_w = s->w;
+        prev = s;
+    }
 }
 
 FqLinear fq_declare_fused(WeightLoader & L, const FqModuleSpec & mod, const char * site_key,

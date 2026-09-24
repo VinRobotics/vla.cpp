@@ -68,6 +68,9 @@ void DitHead::declare(WeightLoader & L, const char * prefix, bool fuse_qkv, bool
                 w.fq_v = fq_declare_linear(L, *fq, "qkv", true, nullptr, 0.0f, "%s.%lld.attn_v", prefix, ii);
                 if ((bool) w.fq_k != (bool) w.fq_v)
                     L.fail("FoldQuant: DiT k/v must both be INT8 or both float in a layer");
+                fq_set_heads(w.fq_q, (int) cfg.head_dim, (int) cfg.heads, 0u);
+                fq_set_heads(w.fq_k, (int) cfg.head_dim, (int) cfg.heads, 0u);
+                fq_set_heads(w.fq_v, (int) cfg.head_dim, (int) cfg.heads, 1u);
             }
             if (!w.fq_q) {
                 w.Wq = L.gemm("%s.%lld.attn_q.weight", prefix, ii);
@@ -101,6 +104,7 @@ void DitHead::declare(WeightLoader & L, const char * prefix, bool fuse_qkv, bool
             std::snprintf(out, sizeof(out), "%s.%lld.attn_qkv.fused", prefix, ii);
             if (fq)
                 w.fq_qkv = fq_declare_fused(L, *fq, "qkv", true, out, {sq, sk, sv});
+                fq_set_heads(w.fq_qkv, (int) cfg.head_dim, (int) cfg.heads, 4u);   // parts Q, K, V
             if (!w.fq_qkv) {
                 std::snprintf(out, sizeof(out), "%s.%lld.attn_qkv.fused.w", prefix, ii);
                 w.Wqkv = L.fuse_gemm(out, {q, k, v});
@@ -117,6 +121,7 @@ void DitHead::declare(WeightLoader & L, const char * prefix, bool fuse_qkv, bool
             std::snprintf(out, sizeof(out), "%s.%lld.attn_kv.fused", prefix, ii);
             if (fq)
                 w.fq_kv = fq_declare_fused(L, *fq, "enc", true, out, {sk, sv});
+                fq_set_heads(w.fq_kv, (int) cfg.head_dim, (int) cfg.heads, 2u);    // parts K, V
             if (!w.fq_kv) {
                 std::snprintf(out, sizeof(out), "%s.%lld.attn_kv.fused.w", prefix, ii);
                 w.Wkv = L.fuse_gemm(out, {k, v});
@@ -140,14 +145,20 @@ void DitHead::kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
 
     if (w.Wkv || w.fq_kv) {
         ggml_tensor * kvp = w.fq_kv ? fq_linear(C, w.fq_kv, src) : linear(C, w.Wkv, w.bkv, src);
+        if (w.fq_kv && w.fq_kv.gemm.heads) {   // written in head layout by the epilogue
+            *K_out = fq_head_view(C, kvp, w.fq_kv, 0, Tkv);
+            *V_out = fq_head_view(C, kvp, w.fq_kv, 1, Tkv);
+            return;
+        }
         *K_out = ggml_cont(C, ggml_permute(C, head_view(C, kvp, hd, heads, Tkv, cfg.hidden, 2, 0), 0, 2, 1, 3));
         *V_out = ggml_cont(C, ggml_permute(C, head_view(C, kvp, hd, heads, Tkv, cfg.hidden, 2, 1), 1, 2, 0, 3));
         return;
     }
     if (w.fq_k) {
         ggml_tensor * xq = xq_pre ? xq_pre : fq_act(C, w.fq_k, src);
-        *K_out = to_heads  (C, fq_gemm(C, w.fq_k, xq), hd, heads, Tkv);
-        *V_out = to_heads_v(C, fq_gemm(C, w.fq_v, xq), hd, heads, Tkv);
+        ggml_tensor * kp = fq_gemm(C, w.fq_k, xq), * vp = fq_gemm(C, w.fq_v, xq);
+        *K_out = w.fq_k.gemm.heads ? fq_head_view(C, kp, w.fq_k, 0, Tkv) : to_heads  (C, kp, hd, heads, Tkv);
+        *V_out = w.fq_v.gemm.heads ? fq_head_view(C, vp, w.fq_v, 0, Tkv) : to_heads_v(C, vp, hd, heads, Tkv);
         return;
     }
     *K_out = to_heads  (C, linear(C, w.Wk, w.bk, src), hd, heads, Tkv);
@@ -183,15 +194,25 @@ ggml_tensor * DitHead::block(ggml_context * C, const DitLayerW & w, ggml_tensor 
     ggml_tensor *Q, *K, *V;
     if (!enc && (w.Wqkv || w.fq_qkv)) {
         ggml_tensor * qkv = w.fq_qkv ? fq_linear(C, w.fq_qkv, n) : linear(C, w.Wqkv, w.bqkv, n);
+        if (w.fq_qkv && w.fq_qkv.gemm.heads) {
+            Q = fq_head_view(C, qkv, w.fq_qkv, 0, Tk);
+            K = fq_head_view(C, qkv, w.fq_qkv, 1, Tk);
+            V = fq_head_view(C, qkv, w.fq_qkv, 2, Tk);
+        } else {
         Q = ggml_cont(C, ggml_permute(C, head_view(C, qkv, hd, heads, Tk, dim, 3, 0), 0, 2, 1, 3));
         K = ggml_cont(C, ggml_permute(C, head_view(C, qkv, hd, heads, Tk, dim, 3, 1), 0, 2, 1, 3));
         V = ggml_cont(C, ggml_permute(C, head_view(C, qkv, hd, heads, Tk, dim, 3, 2), 1, 2, 0, 3));
+        }
     } else {
         // Self-attention with separate FoldQuant q/k/v: one activation blob of n
         // serves all three projections.
         ggml_tensor * xq = (w.fq_q && !enc && !K_pre && w.fq_k) ? fq_act(C, w.fq_q, n) : nullptr;
-        Q = to_heads(C, w.fq_q ? (xq ? fq_gemm(C, w.fq_q, xq) : fq_linear(C, w.fq_q, n))
-                                : linear(C, w.Wq, w.bq, n), hd, heads, Tk);
+        if (w.fq_q) {
+            ggml_tensor * qp = xq ? fq_gemm(C, w.fq_q, xq) : fq_linear(C, w.fq_q, n);
+            Q = w.fq_q.gemm.heads ? fq_head_view(C, qp, w.fq_q, 0, Tk) : to_heads(C, qp, hd, heads, Tk);
+        } else {
+            Q = to_heads(C, linear(C, w.Wq, w.bq, n), hd, heads, Tk);
+        }
         if (K_pre) {
             K = K_pre;
             V = V_pre;
@@ -202,12 +223,12 @@ ggml_tensor * DitHead::block(ggml_context * C, const DitLayerW & w, ggml_tensor 
     }
 
     ggml_tensor * att = attention(C, Q, K, V, nullptr, scale, dim, Tk);
-    ggml_tensor * o   = w.fq_o ? fq_linear(C, w.fq_o, att) : linear(C, w.Wo, w.bo, att);
-    ggml_tensor * h1  = ggml_add(C, h, o);
+    // FoldQuant: both residual adds ride in the GEMM epilogues.
+    ggml_tensor * h1  = w.fq_o ? fq_linear(C, w.fq_o, att, h) : ggml_add(C, h, linear(C, w.Wo, w.bo, att));
     ggml_tensor * n3  = ggml_norm(C, h1, cfg.ln_eps);
-    ggml_tensor * ff  = w.fq_ff0 ? fq_linear(C, w.fq_ff2, ggml_gelu(C, fq_linear(C, w.fq_ff0, n3)))
-                                 : ffn_gelu(C, w.Wff0, w.bff0, w.Wff2, w.bff2, n3);
-    return ggml_add(C, h1, ff);
+    if (w.fq_ff0)
+        return fq_linear(C, w.fq_ff2, ggml_gelu(C, fq_linear(C, w.fq_ff0, n3)), h1);
+    return ggml_add(C, h1, ffn_gelu(C, w.Wff0, w.bff0, w.Wff2, w.bff2, n3));
 }
 
 ggml_tensor * DitHead::time_emb(ggml_context * C, ggml_tensor * tproj) const {
