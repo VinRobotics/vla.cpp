@@ -13,13 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Convert TurboVLA (LeRobot format) checkpoint to GGUF.
+"""Convert a TurboVLA checkpoint (H-EmbodVis/TurboVLA) to GGUF.
 
-Supports any TurboVLA variant with auto-detection of dimensions from checkpoint.
-Architecture must be compatible with the LeRobot TurboVLA format.
+Reads the released .pth ({model_state_dict, model_config}, e.g.
+checkpoints/libero/turbovla_libero.pth) or a directory holding
+model.safetensors and config.json. Dimensions come from tensor shapes.
 
 Usage:
-    python convert_turbovla_to_gguf.py /path/to/checkpoint [--out output.gguf] [--verify]
+    python convert_turbovla_to_gguf.py turbovla_libero.pth -o turbovla-libero.gguf [--verify]
 """
 
 from __future__ import annotations
@@ -83,17 +84,45 @@ def max_layer(keys: set[str], pfx: str) -> int:
     return m + 1
 
 
-def load_safetensors(ckpt: Path) -> dict[str, torch.Tensor]:
-    """Load all tensors from safetensors file."""
-    tensors = {}
-    safetensors_path = ckpt / "model.safetensors"
-    if not safetensors_path.exists():
-        raise SystemExit(f"model.safetensors not found in {ckpt}")
+# facebook/dinov3-vitb16-pretrain-lvd1689m is gated, but only these architecture
+# values are needed: the fine-tuned weights ship inside the TurboVLA checkpoint.
+DINOV3_VITB16 = {"rope_theta": 100.0, "num_register_tokens": 4}
 
-    with safe_open(str(safetensors_path), framework="pt", device="cpu") as f:
-        for key in f:
-            tensors[key] = f.get_tensor(key)
-    return tensors
+# Tensors the runtime never reads: DINOv3's final norm (TurboVLA taps
+# hidden_states[-1], before it), BERT's pooler, and the MAE mask token.
+UNUSED = (f"{PREFIX_VIT}.norm.", f"{PREFIX_TEXT}.pooler.", f"{PREFIX_VIT}.embeddings.mask_token")
+
+
+class TrackedTensors(dict):
+    """A state dict that records which keys the writers read."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.read = set()
+
+    def __getitem__(self, key):
+        self.read.add(key)
+        return super().__getitem__(key)
+
+
+def load_checkpoint(ckpt: Path) -> tuple[TrackedTensors, dict]:
+    """Return (state dict, TurboVLA model_config) from a .pth or a directory."""
+    if ckpt.is_file():
+        blob = torch.load(str(ckpt), map_location="cpu", weights_only=False)
+        if not isinstance(blob, dict) or "model_state_dict" not in blob:
+            raise SystemExit(f"{ckpt} is not a TurboVLA checkpoint (no model_state_dict)")
+        state = blob["model_state_dict"]
+        cfg = blob.get("model_config") or {}
+    else:
+        st_path = ckpt / "model.safetensors"
+        if not st_path.exists():
+            raise SystemExit(f"model.safetensors not found in {ckpt}")
+        with safe_open(str(st_path), framework="pt", device="cpu") as f:
+            state = {k: f.get_tensor(k) for k in f.keys()}
+        cfg_path = ckpt / "config.json"
+        cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+    state = {k.removeprefix("module."): v for k, v in state.items()}
+    return TrackedTensors(state), cfg
 
 
 class TurboVLADims:
@@ -191,7 +220,10 @@ class TurboVLADims:
         # checkpoint's TurboVLA config names the backbone, while the matching
         # DINO config supplies rope_theta and coordinate normalization.
         if "rope_theta" not in self.dinov3_cfg:
-            raise SystemExit("DINOv3 config with rope_theta is required; pass --dinov3-config")
+            backbone = self.cfg.get("vision", {}).get("model_name_or_path", "")
+            if "dinov3-vitb16" not in backbone:
+                raise SystemExit(f"unknown DINOv3 backbone {backbone!r}; pass --dinov3-config")
+            self.dinov3_cfg = DINOV3_VITB16
         self.rope_theta = float(self.dinov3_cfg["rope_theta"])
         self.rope_normalize_coords = str(self.dinov3_cfg.get("rope_normalize_coords", "separate"))
         if self.rope_normalize_coords != "separate":
@@ -204,7 +236,6 @@ class TurboVLADims:
         word_emb = self._get(f"{PREFIX_TEXT}.embeddings.word_embeddings.weight")
         self.vocab_size = int(word_emb.shape[0])
 
-        self.dropout = float(self.cfg.get("vision", {}).get("dropout", 0.0))
 
     def _get(self, key: str) -> torch.Tensor:
         if key not in self.tensors:
@@ -309,9 +340,6 @@ def write_vision_encoder(writer: gguf.GGUFWriter, tensors: dict, dims: TurboVLAD
         add_tensor(writer, f"vit.blk.{i}.fc2.weight", w_fc2)
         add_tensor(writer, f"vit.blk.{i}.fc2.bias", b_fc2)
 
-    add_tensor(writer, "vit.final_norm.weight", tensors[f"{root}.norm.weight"])
-    add_tensor(writer, "vit.final_norm.bias", tensors[f"{root}.norm.bias"])
-
 
 def write_text_encoder(writer: gguf.GGUFWriter, tensors: dict, dims: TurboVLADims) -> None:
     """Write BERT text encoder."""
@@ -342,9 +370,6 @@ def write_text_encoder(writer: gguf.GGUFWriter, tensors: dict, dims: TurboVLADim
         add_tensor(writer, f"text.encoder.layer.{i}.output.dense.bias", tensors[f"{lr}.output.dense.bias"])
         add_tensor(writer, f"text.encoder.layer.{i}.output.LayerNorm.weight", tensors[f"{lr}.output.LayerNorm.weight"])
         add_tensor(writer, f"text.encoder.layer.{i}.output.LayerNorm.bias", tensors[f"{lr}.output.LayerNorm.bias"])
-
-    add_tensor(writer, "text.pooler.dense.weight", tensors[f"{root}.pooler.dense.weight"])
-    add_tensor(writer, "text.pooler.dense.bias", tensors[f"{root}.pooler.dense.bias"])
 
     add_tensor(writer, "text_proj.weight", tensors[KEY_TEXT_PROJ + ".weight"])
     add_tensor(writer, "text_proj.bias", tensors[KEY_TEXT_PROJ + ".bias"])
@@ -474,181 +499,38 @@ def write_view_embeddings(writer: gguf.GGUFWriter, tensors: dict) -> None:
     add_tensor(writer, "view_emb", tensors[KEY_VIEW_EMB])
 
 
-def verify_consumed_tensors(source_keys: set[str], dims: TurboVLADims) -> None:
-    """Verify all source tensors are consumed by the converter."""
-    consumed = set()
+def write_text_groups(writer: gguf.GGUFWriter, text_cfg: dict) -> None:
+    """Store each training instruction's BERT tokens and padded length.
 
-    root_vit = PREFIX_VIT
-    consumed.add(f"{root_vit}.embeddings.cls_token")
-    consumed.add(f"{root_vit}.embeddings.patch_embeddings.weight")
-    consumed.add(f"{root_vit}.embeddings.patch_embeddings.bias")
-    reg_key = f"{root_vit}.embeddings.register_tokens"
-    if reg_key in source_keys:
-        consumed.add(reg_key)
+    The ACT decoder attends the padded text rows too, so the padded length is
+    part of the model's output. TurboVLA pads each instruction to the length
+    its training batch used (padding_length_by_instruction); the runtime only
+    sees token ids, so the table is keyed by them.
+    """
+    groups = text_cfg.get("padding_length_by_instruction") or {}
+    writer.add_uint32(kv_prefix("text_groups.count"), len(groups))
+    if not groups:
+        return
+    from transformers import AutoTokenizer
 
-    for i in range(dims.vit_layers):
-        lr = f"{root_vit}.layer.{i}"
-        consumed.add(f"{lr}.attention.q_proj.weight")
-        consumed.add(f"{lr}.attention.q_proj.bias")
-        consumed.add(f"{lr}.attention.k_proj.weight")
-        kb = f"{lr}.attention.k_proj.bias"
-        if kb in source_keys:
-            consumed.add(kb)
-        consumed.add(f"{lr}.attention.v_proj.weight")
-        consumed.add(f"{lr}.attention.v_proj.bias")
-        consumed.add(f"{lr}.attention.o_proj.weight")
-        consumed.add(f"{lr}.attention.o_proj.bias")
-        consumed.add(f"{lr}.norm1.weight")
-        consumed.add(f"{lr}.norm1.bias")
-        consumed.add(f"{lr}.norm2.weight")
-        consumed.add(f"{lr}.norm2.bias")
-        consumed.add(f"{lr}.mlp.up_proj.weight")
-        consumed.add(f"{lr}.mlp.up_proj.bias")
-        consumed.add(f"{lr}.mlp.down_proj.weight")
-        consumed.add(f"{lr}.mlp.down_proj.bias")
-        consumed.add(f"{lr}.layer_scale1.lambda1")
-        consumed.add(f"{lr}.layer_scale2.lambda1")
+    tok = AutoTokenizer.from_pretrained(text_cfg.get("model_name_or_path", "bert-base-uncased"))
+    ids, lengths, pad_to = [], [], []
+    for instruction, length in sorted(groups.items()):
+        seq = tok(str(instruction), truncation=True, max_length=int(length))["input_ids"]
+        ids += [int(t) for t in seq]
+        lengths.append(len(seq))
+        pad_to.append(int(length))
+    writer.add_array(kv_prefix("text_groups.tokens"), ids)
+    writer.add_array(kv_prefix("text_groups.lengths"), lengths)
+    writer.add_array(kv_prefix("text_groups.pad_to"), pad_to)
 
-    consumed.add(f"{root_vit}.norm.weight")
-    consumed.add(f"{root_vit}.norm.bias")
 
-    root_text = PREFIX_TEXT
-    consumed.add(f"{root_text}.embeddings.word_embeddings.weight")
-    consumed.add(f"{root_text}.embeddings.position_embeddings.weight")
-    consumed.add(f"{root_text}.embeddings.token_type_embeddings.weight")
-    consumed.add(f"{root_text}.embeddings.LayerNorm.weight")
-    consumed.add(f"{root_text}.embeddings.LayerNorm.bias")
-    consumed.add(f"{root_text}.pooler.dense.weight")
-    consumed.add(f"{root_text}.pooler.dense.bias")
-
-    for i in range(dims.text_layers):
-        lr = f"{root_text}.encoder.layer.{i}"
-        consumed.add(f"{lr}.attention.self.query.weight")
-        consumed.add(f"{lr}.attention.self.query.bias")
-        consumed.add(f"{lr}.attention.self.key.weight")
-        consumed.add(f"{lr}.attention.self.key.bias")
-        consumed.add(f"{lr}.attention.self.value.weight")
-        consumed.add(f"{lr}.attention.self.value.bias")
-        consumed.add(f"{lr}.attention.output.dense.weight")
-        consumed.add(f"{lr}.attention.output.dense.bias")
-        consumed.add(f"{lr}.attention.output.LayerNorm.weight")
-        consumed.add(f"{lr}.attention.output.LayerNorm.bias")
-        consumed.add(f"{lr}.intermediate.dense.weight")
-        consumed.add(f"{lr}.intermediate.dense.bias")
-        consumed.add(f"{lr}.output.dense.weight")
-        consumed.add(f"{lr}.output.dense.bias")
-        consumed.add(f"{lr}.output.LayerNorm.weight")
-        consumed.add(f"{lr}.output.LayerNorm.bias")
-
-    consumed.add(KEY_TEXT_PROJ + ".weight")
-    consumed.add(KEY_TEXT_PROJ + ".bias")
-
-    vp = PREFIX_VIT_PROJ
-    consumed.add(f"{vp}.input_norm.weight")
-    consumed.add(f"{vp}.input_norm.bias")
-    consumed.add(f"{vp}.mlp.0.weight")
-    consumed.add(f"{vp}.mlp.0.bias")
-    consumed.add(f"{vp}.mlp.3.weight")
-    consumed.add(f"{vp}.mlp.3.bias")
-    consumed.add(f"{vp}.skip.weight")
-    consumed.add(f"{vp}.output_norm.weight")
-    consumed.add(f"{vp}.output_norm.bias")
-
-    for i in range(dims.num_fusion_layers):
-        lr = f"{PREFIX_FUSION}.{i}"
-        consumed.add(f"{lr}.attn.v_proj.weight")
-        consumed.add(f"{lr}.attn.v_proj.bias")
-        consumed.add(f"{lr}.attn.l_proj.weight")
-        consumed.add(f"{lr}.attn.l_proj.bias")
-        consumed.add(f"{lr}.attn.values_v_proj.weight")
-        consumed.add(f"{lr}.attn.values_v_proj.bias")
-        consumed.add(f"{lr}.attn.values_l_proj.weight")
-        consumed.add(f"{lr}.attn.values_l_proj.bias")
-        consumed.add(f"{lr}.attn.out_v_proj.weight")
-        consumed.add(f"{lr}.attn.out_v_proj.bias")
-        consumed.add(f"{lr}.attn.out_l_proj.weight")
-        consumed.add(f"{lr}.attn.out_l_proj.bias")
-        consumed.add(f"{lr}.layer_norm_v.weight")
-        consumed.add(f"{lr}.layer_norm_v.bias")
-        consumed.add(f"{lr}.layer_norm_l.weight")
-        consumed.add(f"{lr}.layer_norm_l.bias")
-        consumed.add(f"{lr}.gamma_v")
-        consumed.add(f"{lr}.gamma_l")
-
-    for i in range(dims.num_text_layers):
-        lr = f"{PREFIX_VL_TEXT}.{i}"
-        consumed.add(f"{lr}.self_attn.in_proj_weight")
-        consumed.add(f"{lr}.self_attn.in_proj_bias")
-        consumed.add(f"{lr}.self_attn.out_proj.weight")
-        consumed.add(f"{lr}.self_attn.out_proj.bias")
-        consumed.add(f"{lr}.norm1.weight")
-        consumed.add(f"{lr}.norm1.bias")
-        consumed.add(f"{lr}.linear1.weight")
-        consumed.add(f"{lr}.linear1.bias")
-        consumed.add(f"{lr}.linear2.weight")
-        consumed.add(f"{lr}.linear2.bias")
-        consumed.add(f"{lr}.norm2.weight")
-        consumed.add(f"{lr}.norm2.bias")
-
-    consumed.add(f"{PREFIX_ACT_DEC}.action_queries.weight")
-    for i in range(dims.num_action_decoder_layers):
-        lr = f"{PREFIX_ACT_DEC}.decoder.layers.{i}"
-        consumed.add(f"{lr}.self_attn.in_proj_weight")
-        consumed.add(f"{lr}.self_attn.in_proj_bias")
-        consumed.add(f"{lr}.self_attn.out_proj.weight")
-        consumed.add(f"{lr}.self_attn.out_proj.bias")
-        consumed.add(f"{lr}.multihead_attn.in_proj_weight")
-        consumed.add(f"{lr}.multihead_attn.in_proj_bias")
-        consumed.add(f"{lr}.multihead_attn.out_proj.weight")
-        consumed.add(f"{lr}.multihead_attn.out_proj.bias")
-        consumed.add(f"{lr}.norm1.weight")
-        consumed.add(f"{lr}.norm1.bias")
-        consumed.add(f"{lr}.norm2.weight")
-        consumed.add(f"{lr}.norm2.bias")
-        consumed.add(f"{lr}.norm3.weight")
-        consumed.add(f"{lr}.norm3.bias")
-        consumed.add(f"{lr}.linear1.weight")
-        consumed.add(f"{lr}.linear1.bias")
-        consumed.add(f"{lr}.linear2.weight")
-        consumed.add(f"{lr}.linear2.bias")
-
-    ap = f"{PREFIX_ACT_DEC}.action_projection"
-    consumed.add(f"{ap}.layers.0.weight")
-    consumed.add(f"{ap}.layers.0.bias")
-    consumed.add(f"{ap}.layers.1.weight")
-    consumed.add(f"{ap}.layers.1.bias")
-    consumed.add(f"{ap}.layers.2.weight")
-    consumed.add(f"{ap}.layers.2.bias")
-
-    sp = PREFIX_STATE_PROJ
-    consumed.add(f"{sp}.net.0.weight")
-    consumed.add(f"{sp}.net.0.bias")
-    consumed.add(f"{sp}.net.1.weight")
-    consumed.add(f"{sp}.net.1.bias")
-    consumed.add(f"{sp}.net.4.weight")
-    consumed.add(f"{sp}.net.4.bias")
-    consumed.add(f"{sp}.output_norm.weight")
-    consumed.add(f"{sp}.output_norm.bias")
-    consumed.add(f"{sp}.position")
-
-    consumed.add(KEY_VIEW_EMB)
-
-    missing = source_keys - consumed
-    unexpected_missing = [
-        k for k in missing
-        if not any(x in k for x in ["_optim", "_avg", "mask", "running_", ".nbytes"])
-        and not k.endswith(".idx")
-    ]
-
-    if unexpected_missing:
-        print(f"\n  WARNING: {len(unexpected_missing)} keys not consumed:")
-        for k in sorted(unexpected_missing)[:20]:
-            print(f"    {k}")
-        if len(unexpected_missing) > 20:
-            print(f"    ... and {len(unexpected_missing) - 20} more")
-        print(f"\n  Consumed: {len(consumed)} / {len(source_keys)} keys (missing {len(unexpected_missing)})")
-    else:
-        print(f"\n  All {len(consumed)} keys consumed successfully!")
+def verify_consumed_tensors(tensors: TrackedTensors) -> None:
+    """Fail on any checkpoint tensor that no writer read."""
+    left = sorted(k for k in tensors if k not in tensors.read and not k.startswith(UNUSED))
+    if left:
+        raise SystemExit(f"{len(left)} checkpoint tensors not converted: {left[:20]}")
+    print(f"  All {len(tensors.read)} used tensors consumed.")
 
 
 def main() -> int:
@@ -656,35 +538,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=f"Convert TurboVLA checkpoint to GGUF ({ARCH})"
     )
-    parser.add_argument("ckpt", type=Path, help="Path to TurboVLA checkpoint directory")
+    parser.add_argument("ckpt", type=Path,
+                        help="TurboVLA .pth, or a directory with model.safetensors + config.json")
     parser.add_argument("-o", "--out", type=Path, default=None, help="Output GGUF path")
-    parser.add_argument("--dinov3-config", type=Path, required=True,
-                        help="Validated config.json for the exact DINOv3 backbone")
-    parser.add_argument("--verify", action="store_true", help="Verify all tensor keys are consumed")
+    parser.add_argument("--dinov3-config", type=Path, default=None,
+                        help="config.json of the DINOv3 backbone (default: built-in ViT-B/16 values)")
+    parser.add_argument("--verify", action="store_true", help="Fail if a checkpoint tensor is left unconverted")
     args = parser.parse_args()
 
     ckpt = args.ckpt.resolve()
-    if not (ckpt / "model.safetensors").exists():
-        raise SystemExit(f"model.safetensors not found in {ckpt}")
-
-    out = args.out or (ckpt / f"{ARCH}.gguf")
+    out = args.out or (ckpt.with_suffix(".gguf") if ckpt.is_file() else ckpt / f"{ARCH}.gguf")
 
     print(f"Loading checkpoint from {ckpt}...")
-    tensors = load_safetensors(ckpt)
+    tensors, cfg_json = load_checkpoint(ckpt)
     keys = set(tensors.keys())
     print(f"  Loaded {len(tensors)} tensors")
 
-    cfg_json = {}
-    cfg_path = ckpt / "config.json"
-    if cfg_path.exists():
-        cfg_json = json.loads(cfg_path.read_text())
-        print(f"  Config: {cfg_path}")
-
-    dinov3_cfg_path = args.dinov3_config.resolve()
-    if not dinov3_cfg_path.is_file():
-        raise SystemExit(f"DINOv3 config not found: {dinov3_cfg_path}")
-    dinov3_cfg = json.loads(dinov3_cfg_path.read_text())
-    print(f"  DINOv3 config: {dinov3_cfg_path}")
+    dinov3_cfg = {}
+    if args.dinov3_config:
+        dinov3_cfg = json.loads(args.dinov3_config.read_text())
+        print(f"  DINOv3 config: {args.dinov3_config}")
 
     print("  Inferring dimensions from checkpoint...")
     dims = TurboVLADims(tensors, keys, cfg_json, dinov3_cfg)
@@ -725,7 +598,13 @@ def main() -> int:
     writer.add_uint32(kv("num_register_tokens"), dims.num_register_tokens)
     writer.add_float32(kv("rope_theta"), float(dims.rope_theta))
     writer.add_uint32(kv("vocab_size"), dims.vocab_size)
-    writer.add_uint32(kv("max_text_length"), int(cfg_json.get("text", {}).get("padding_length", 256)))
+    # The runtime pads to a fixed length; a checkpoint without text.padding_length
+    # pads each batch to its longest instruction, which it does not implement.
+    padding_length = cfg_json.get("text", {}).get("padding_length")
+    if padding_length is None:
+        raise SystemExit("checkpoint config has no text.padding_length; padding to the longest "
+                         "instruction is not supported")
+    writer.add_uint32(kv("max_text_length"), int(padding_length))
     # TurboVLA's BERT wrapper uses these exact punctuation IDs when it creates
     # sub-sentence attention masks. Persist them so the GGUF runtime does not
     # silently depend on a tokenizer installation.
@@ -741,7 +620,7 @@ def main() -> int:
     writer.add_uint32(kv("sep_token_id"), 102)
     writer.add_uint32(kv("period_token_id"), 1012)
     writer.add_uint32(kv("question_token_id"), 1029)
-    writer.add_float32(kv("dropout"), dims.dropout)
+    write_text_groups(writer, text_cfg)
 
     print("  Writing vision encoder...")
     write_vision_encoder(writer, tensors, dims)
@@ -769,7 +648,7 @@ def main() -> int:
 
     if args.verify:
         print("  Verifying tensor consumption...")
-        verify_consumed_tensors(keys, dims)
+        verify_consumed_tensors(tensors)
 
     writer.write_header_to_file()
     writer.write_kv_data_to_file()

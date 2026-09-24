@@ -331,7 +331,7 @@ class VlaCppClient:
                 raise ValueError(f"{stats_path} contains invalid TurboVLA normalization ranges")
 
             def _state_norm(state_8d, mean=state_mean, std=state_std):
-                return ((state_8d - mean) / (std + 1e-8)).astype(np.float32)
+                return ((state_8d - mean) / (std + 1e-6)).astype(np.float32)
 
             def _action_unnorm(chunk, mn=action_min, mx=action_max):
                 normalized = np.clip(chunk.astype(np.float32), -1.0, 1.0)
@@ -339,9 +339,9 @@ class VlaCppClient:
                 action[..., :6] = ((normalized[..., :6] + 1.0) * 0.5
                                    * (mx[:6] - mn[:6]) + mn[:6])
                 # TurboVLA thresholds the normalized gripper instead of applying
-                # continuous min/max denormalization. See H-EmbodVis/TurboVLA@
-                # b29ab142, turbovla/evaluation/policy.py:213-221.
-                action[..., 6] = np.where(normalized[..., 6] > 0.0, 1.0, -1.0)
+                # continuous min/max denormalization; exactly 0 maps to +1. See
+                # H-EmbodVis/TurboVLA@b29ab142, turbovla/evaluation/policy.py:205-221.
+                action[..., 6] = np.where(normalized[..., 6] < 0.0, -1.0, 1.0)
                 return action.astype(np.float32)
 
             self._turbovla_state_norm = _state_norm
