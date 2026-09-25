@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -107,29 +108,18 @@ def _resize_pos_embd(pos: torch.Tensor, grid: int) -> torch.Tensor:
           f"({native * native}→{grid * grid}) bilinear+antialias")
     return p.reshape(pos.shape[-1], grid * grid).transpose(0, 1).contiguous().to(src_dtype)
 
-def main() -> int:
-    ap = arg_parser(ARCH, "GR00T-N1.6-3B snapshot dir")
-    ap.add_argument(
-        "--vision-size",
-        type=int,
-        default=None,
-        help="Override the SigLIP2 vision-tower input resolution (default: native 224). "
-             "Set 252 to match the reference processor's smart_resize(factor=28) of a "
-             "256px image (252 = 18×14 patches ⇒ 324 patches ⇒ 81 tokens after "
-             "pixel_shuffle÷2). When != 224 the `vit.pos_embd` is bilinear-antialias "
-             "interpolated from the native 16×16 grid to the new grid, exactly mirroring "
-             "SiglipVisionEmbeddings.resize_positional_embeddings (F.interpolate "
-             "mode=bilinear, align_corners=False, antialias=True, float32). The runtime "
-             "is otherwise resolution-agnostic (grid = image_size/patch_size)."
-    )
-    args = ap.parse_args()
-    if args.vision_size is not None:
-        if args.vision_size % VIT["patch_size"] != 0:
-            raise SystemExit(f"--vision-size {args.vision_size} not divisible by patch_size {VIT['patch_size']}")
-        VIT["image_size"] = int(args.vision_size)
+def convert(ckpt: Path, out: Path, *, writer_factory=open_writer, vision_size: int | None = None) -> Path:
+    """Write the GGUF for the checkpoint at `ckpt` to `out` and return `out`.
 
-    ckpt = args.ckpt.resolve()
-    out  = resolve_out(args, ckpt, ARCH)
+    `writer_factory(out, arch)` supplies the gguf.GGUFWriter; VLA-OPT passes one
+    that rewrites the FoldQuant sites (docs/QUANTIZATION.md) as they are added.
+    `vision_size` is --vision-size (see main)."""
+    if vision_size is not None:
+        if vision_size % VIT["patch_size"] != 0:
+            raise SystemExit(f"--vision-size {vision_size} not divisible by patch_size {VIT['patch_size']}")
+        VIT["image_size"] = int(vision_size)
+    ckpt = ckpt.resolve()
+    out  = out.resolve()
     require(ckpt / "model.safetensors.index.json")
     cfg_json = read_json(ckpt / "config.json")
     if str(cfg_json.get("model_type", "")) != "Gr00tN1d6":
@@ -193,7 +183,7 @@ def main() -> int:
           f"embodiments={AH['max_num_embodiments']}  relative_action={USE_RELATIVE_ACTION} percentiles={USE_PERCENTILES} clip_outliers={CLIP_OUTLIERS} sincos_state={APPLY_SINCOS_STATE}  "
           f"stats={len(statistics_json)}c proc={len(processor_json)}c emb_id={embodiment_id_json.strip()}")
 
-    writer = open_writer(out, ARCH)
+    writer = writer_factory(out, ARCH)
     kv_u32(
         writer,
         KV,
@@ -273,7 +263,28 @@ def main() -> int:
     write_dit_blocks(writer, g, f"{AHK}.model.transformer_blocks", "aex.dit", AH["dit_layers"])
     write_gr00t_proj_out(writer, g, AHK, "aex.dit")
 
-    return finish(writer, out, "  - combined GGUF (Eagle-3-VL + AlternateVLDiT action head + cfg + sidecars)")
+    finish(writer, out, "  - combined GGUF (Eagle-3-VL + AlternateVLDiT action head + cfg + sidecars)")
+    return out
+
+def main() -> int:
+    ap = arg_parser(ARCH, "GR00T-N1.6-3B snapshot dir")
+    ap.add_argument(
+        "--vision-size",
+        type=int,
+        default=None,
+        help="Override the SigLIP2 vision-tower input resolution (default: native 224). "
+             "Set 252 to match the reference processor's smart_resize(factor=28) of a "
+             "256px image (252 = 18×14 patches ⇒ 324 patches ⇒ 81 tokens after "
+             "pixel_shuffle÷2). When != 224 the `vit.pos_embd` is bilinear-antialias "
+             "interpolated from the native 16×16 grid to the new grid, exactly mirroring "
+             "SiglipVisionEmbeddings.resize_positional_embeddings (F.interpolate "
+             "mode=bilinear, align_corners=False, antialias=True, float32). The runtime "
+             "is otherwise resolution-agnostic (grid = image_size/patch_size)."
+    )
+    args = ap.parse_args()
+    ckpt = args.ckpt.resolve()
+    convert(ckpt, resolve_out(args, ckpt, ARCH), vision_size=args.vision_size)
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

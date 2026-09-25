@@ -130,28 +130,14 @@ def _write_lerobot_stats(ckpt: Path, out_path: Path, emb_key: str = "new_embodim
     out_path.write_text(json.dumps(blob, indent=2))
     print(f"wrote {out_path}  (embodiment {emb_key!r}: state[{len(s_min)}] + action[{len(a_min)}] min/max)")
 
-def main() -> int:
-    ap = arg_parser(
-        ARCH,
-        "GR00T-N1.5-3B checkpoint dir. Two layouts are auto-detected: "
-        "(a) NVIDIA Isaac snapshot (sharded safetensors, un-prefixed tensor names, "
-        "config.json model_type=gr00t_n1_5, experiment_cfg/metadata.json); "
-        "(b) lerobot finetune (single model.safetensors with `_groot_model.` prefix, "
-        "config.json type=groot, policy_*processor_step_*.safetensors min/max stats)."
-    )
-    ap.add_argument(
-        "--stats-out",
-        type=Path,
-        default=None,
-        help="[lerobot ckpt] where to write the bridge's dataset_statistics.json "
-             "(default: <out dir>/dataset_statistics.json). state+action min/max are "
-             "read from the lerobot processor safetensors; the eval bridge consumes it "
-             "via --stats-json (the un-normalize is a host-side affine, not a ggml concern)."
-    )
-    args = ap.parse_args()
+def convert(ckpt: Path, out: Path, *, writer_factory=open_writer, stats_out: Path | None = None) -> Path:
+    """Write the GGUF for the checkpoint at `ckpt` to `out` and return `out`.
 
-    ckpt = args.ckpt.resolve()
-    out  = resolve_out(args, ckpt, ARCH)
+    `writer_factory(out, arch)` supplies the gguf.GGUFWriter; VLA-OPT passes one
+    that rewrites the FoldQuant sites (docs/QUANTIZATION.md) as they are added.
+    `stats_out` is --stats-out (lerobot checkpoints only)."""
+    ckpt = ckpt.resolve()
+    out  = out.resolve()
     cfg_json = read_json(ckpt / "config.json")
     if not (ckpt / "model.safetensors.index.json").exists() and not (ckpt / "model.safetensors").exists():
         raise SystemExit(f"no model.safetensors[.index.json] under {ckpt}")
@@ -223,7 +209,7 @@ def main() -> int:
           f"horizon={AH['action_horizon']} action_dim={AH['action_dim']} max_state={AH['max_state_dim']}  N_steps={AH['num_inference_timesteps']}  "
           f"future_tok={AH['num_target_vision_tokens']}  embodiments={AH['max_num_embodiments']}  metadata.json={len(metadata_json)} chars")
 
-    writer = open_writer(out, ARCH)
+    writer = writer_factory(out, ARCH)
     kv_u32(
         writer,
         KV,
@@ -295,12 +281,35 @@ def main() -> int:
     write_dit_blocks(writer, g, f"{AHK}.model.transformer_blocks", "aex.dit", AH["dit_layers"])
     write_gr00t_proj_out(writer, g, AHK, "aex.dit")
 
-    rc = finish(writer, out, "  - combined GGUF (Eagle-2.5-VL + action head + cfg + metadata.json)")
+    finish(writer, out, "  - combined GGUF (Eagle-2.5-VL + action head + cfg + metadata.json)")
 
     if is_lerobot:
-        stats_out = (args.stats_out or out.parent / "dataset_statistics.json").resolve()
+        stats_out = (stats_out or out.parent / "dataset_statistics.json").resolve()
         _write_lerobot_stats(ckpt, stats_out)
-    return rc
+    return out
+
+def main() -> int:
+    ap = arg_parser(
+        ARCH,
+        "GR00T-N1.5-3B checkpoint dir. Two layouts are auto-detected: "
+        "(a) NVIDIA Isaac snapshot (sharded safetensors, un-prefixed tensor names, "
+        "config.json model_type=gr00t_n1_5, experiment_cfg/metadata.json); "
+        "(b) lerobot finetune (single model.safetensors with `_groot_model.` prefix, "
+        "config.json type=groot, policy_*processor_step_*.safetensors min/max stats)."
+    )
+    ap.add_argument(
+        "--stats-out",
+        type=Path,
+        default=None,
+        help="[lerobot ckpt] where to write the bridge's dataset_statistics.json "
+             "(default: <out dir>/dataset_statistics.json). state+action min/max are "
+             "read from the lerobot processor safetensors; the eval bridge consumes it "
+             "via --stats-json (the un-normalize is a host-side affine, not a ggml concern)."
+    )
+    args = ap.parse_args()
+    ckpt = args.ckpt.resolve()
+    convert(ckpt, resolve_out(args, ckpt, ARCH), stats_out=args.stats_out)
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

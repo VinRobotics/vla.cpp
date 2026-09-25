@@ -121,6 +121,9 @@ def _load_dataset_stats(
                 out[q] = np.asarray(s[q], dtype=np.float32).reshape(-1)[:dim]
             return out
 
+        if "norm_stats" in d:
+            # OpenPI assets/<org>/<dataset>/norm_stats.json: {"norm_stats": {"state": .., "actions": ..}}
+            d = {"observation.state": d["norm_stats"]["state"], "action": d["norm_stats"]["actions"]}
         st = grab("observation.state", state_dim)
         ac = grab("action", action_dim)
         return {
@@ -149,30 +152,31 @@ def _load_dataset_stats(
         "--dataset-stats <meta/stats.json> or --dataset-repo lerobot/libero. "
         "Refusing to bake identity stats (would make the policy miss; skill footgun #1).")
 
-def main() -> int:
-    ap = arg_parser(ARCH, "lerobot π0.5 checkpoint dir (model.safetensors + config.json + policy_*processor.json)")
-    ap.add_argument(
-        "--dataset-stats",
-        type=Path,
-        default=None,
-        help="Path to a LIBERO dataset meta/stats.json for MEAN_STD norm stats"
-    )
-    ap.add_argument(
-        "--dataset-repo",
-        type=str,
-        default=None,
-        help="HF dataset repo to fetch meta/stats.json from (e.g. lerobot/libero)"
-    )
-    args = ap.parse_args()
+def convert(ckpt: Path, out: Path, *, writer_factory=open_writer, dataset_stats: Optional[Path] = None,
+            dataset_repo: Optional[str] = None, config: Optional[dict] = None) -> Path:
+    """Write the GGUF for the checkpoint at `ckpt` to `out` and return `out`.
 
-    ckpt = args.ckpt.resolve()
-    out  = resolve_out(args, ckpt, ARCH)
+    `writer_factory(out, arch)` supplies the gguf.GGUFWriter; VLA-OPT passes one
+    that rewrites the FoldQuant sites (docs/QUANTIZATION.md) as they are added.
+    `dataset_stats` / `dataset_repo` are --dataset-stats / --dataset-repo (a
+    LeRobot meta/stats.json or an OpenPI norm_stats.json). `config` supplies the
+    lerobot policy fields (chunk_size, num_inference_steps, n_action_steps,
+    max_state_dim, max_action_dim, min_period, max_period, tokenizer_max_length,
+    input_features, output_features) for an OpenPI-converted checkpoint whose
+    config.json carries none of them (--config-json)."""
+    ckpt = ckpt.resolve()
+    out  = out.resolve()
     sf_path = ckpt / "model.safetensors"
     require(sf_path)
 
     cfg_json = read_json(ckpt / "config.json")
     if cfg_json.get("type") != ARCH:
-        raise SystemExit(f"config.json type is {cfg_json.get('type')!r}, expected 'pi05'")
+        if config is None:
+            raise SystemExit(f"config.json type is {cfg_json.get('type')!r}, expected 'pi05'")
+        # An OpenPI-converted checkpoint (config.json carries only the variants):
+        # the policy fields come from the caller (VLA-OPT's policy config, or
+        # --config-json), in the lerobot field names.
+        cfg_json = {**cfg_json, **config}
 
     cfg = dict(GEMMA_2B, **GEMMA_300M)
     cfg["paligemma_variant"]     = str(cfg_json.get("paligemma_variant", "gemma_2b"))
@@ -239,15 +243,15 @@ def main() -> int:
 
     print("loading dataset normalizer stats...")
     stats = _load_dataset_stats(
-        args.dataset_stats,
-        args.dataset_repo,
+        dataset_stats,
+        dataset_repo,
         cfg["real_state_dim"],
         cfg["real_action_dim"]
     )
     print(f"  state_q01[:3]={stats['state_q01'][:3]}  state_q99[:3]={stats['state_q99'][:3]}")
     print(f"  action_q01[:3]={stats['action_q01'][:3]}  action_q99[:3]={stats['action_q99'][:3]}  (QUANTILES)")
 
-    writer = open_writer(out, ARCH)
+    writer = writer_factory(out, ARCH)
     write_pi_kv(writer, KV, cfg, adarms=True)
 
     add(writer, "token_embd.weight",      sf.get_tensor(PFX_VLM_HEAD))
@@ -266,10 +270,38 @@ def main() -> int:
     for name, vec in stats.items():
         add_array(writer, name, vec)
 
-    rc = finish(writer, out)
+    finish(writer, out)
     print("note: self-contained GGUF — SigLIP vision tower + PaliGemma projector are baked in; "
           "no separate mmproj is needed.")
-    return rc
+    return out
+
+def main() -> int:
+    ap = arg_parser(ARCH, "lerobot π0.5 checkpoint dir (model.safetensors + config.json + policy_*processor.json)")
+    ap.add_argument(
+        "--dataset-stats",
+        type=Path,
+        default=None,
+        help="Path to a LIBERO dataset meta/stats.json for MEAN_STD norm stats"
+    )
+    ap.add_argument(
+        "--dataset-repo",
+        type=str,
+        default=None,
+        help="HF dataset repo to fetch meta/stats.json from (e.g. lerobot/libero)"
+    )
+    ap.add_argument(
+        "--config-json",
+        type=Path,
+        default=None,
+        help="[OpenPI-converted checkpoint] JSON with the lerobot policy fields its config.json lacks "
+             "(chunk_size, num_inference_steps, n_action_steps, max_state_dim, max_action_dim, "
+             "min_period, max_period, tokenizer_max_length, input_features, output_features)"
+    )
+    args = ap.parse_args()
+    ckpt = args.ckpt.resolve()
+    convert(ckpt, resolve_out(args, ckpt, ARCH), dataset_stats=args.dataset_stats, dataset_repo=args.dataset_repo,
+            config=read_json(args.config_json) if args.config_json else None)
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())
