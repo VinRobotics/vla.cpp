@@ -326,7 +326,7 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | Y | - | 
 | [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | - | 
 | [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | - | - | 
-| [TurboVLA](https://github.com/H-EmbodVis/TurboVLA)             | ~ | ~ | - | - | - | - |
+| [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | Y | Y | Y | - | 
 
 ---
 
