@@ -228,12 +228,23 @@ int main() {
         { 2048, 12288, 160 }, // fused gate+up at the N1.7 prefill: the 128x64x128 tile
         { 2048, 2048, 193 },  // 192-row tile with a one-row second M tile
         { 2048, 4096, 300 },  // prefix past 256 tokens: 128-row tile, three M tiles
+        // pi0.5 (Gemma-2B prefix, Gemma-300M expert; q and k/v are separate sites)
+        { 2048, 2048, 700 },  // prefix q / o over a ~700-token prefix
+        { 2048, 256,  700 },  // prefix k / v (one KV head)
+        { 2048, 16384, 160 }, // prefix gate / up
+        { 16384, 2048, 160 }, // prefix down: K past the CTA-per-row prologue
+        { 1024, 2048, 50 },   // expert q
+        { 1024, 256,  50 },   // expert k / v
+        { 2048, 1024, 50 },   // expert o
+        { 1024, 4096, 50 },   // expert gate / up
+        { 4096, 1024, 50 },   // expert down
     };
 
     int n = 0;
     for (const Shape & sh : shapes) {
         for (const Case & c : cases) {
-            if (sh.K > 128 && (c.wbits != 8 || c.abits != 8)) continue;   // big W4 cases are slow on the host path
+            // Big W4 cases are slow on the host path; the small-M ones (DiT / expert) are cheap.
+            if (sh.K > 128 && (c.wbits != 8 || c.abits != 8) && sh.T > 64) continue;
             const Inputs in = make_inputs(sh, c, 0x1234u + (uint32_t) n);
             const Result ref = run(cpu,  sh, c, in, false);
             const Result got = run(cuda, sh, c, in, true);

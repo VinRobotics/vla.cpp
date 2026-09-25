@@ -36,10 +36,23 @@ scale is computed at runtime and never stored.
 INT4 nibbles: byte `b` of a row holds column `2b` in the low nibble and
 `2b+1` in the high nibble, two's complement, values in `[-7, 7]`.
 
-Sites of GR00T N1.6 / N1.7:
+Sites of GR00T N1.5 / N1.6 / N1.7 (KV prefix `gr00t_n1_5` / `gr00t_n1_6` / `gr00t_n1_7`):
 
 - LLM: `vlm.blk.{i}.{attn_q, attn_k, attn_v, attn_o, ffn_gate, ffn_up, ffn_down}`
 - DiT: `aex.dit.{i}.{attn_q, attn_k, attn_v, attn_o, ff0, ff2}`
+
+Sites of pi0.5 (KV prefix `pi05`):
+
+- PaliGemma prefix (LLM recipe): `vlm.blk.{i}.{attn_q, attn_k, attn_v, attn_o,
+  ffn_gate, ffn_up, ffn_down}`. The RMSNorm and its folded gamma ride in the
+  q/k/v and gate/up act nodes. vla.cpp loads Gemma norms as `1 + w`, so the
+  exporter writes `attn_norm` / `ffn_norm` as F32 holding the folded gamma
+  minus one.
+- Gemma action expert (action recipe): `aex.blk.{i}.{attn_q, attn_k, attn_v,
+  attn_o, ffn_gate, ffn_up, ffn_down}`, each with an `ascale` (its input comes
+  out of AdaRMS, so there is no gamma to fold into); q/k/v and gate/up share
+  one vector per group. The expert's residuals are gated, so its o / down
+  GEMMs do not take the fused residual.
 
 q/k/v (and gate/up) are separate tensors with their own `wscale`. Projections
 that read the same input share one input transform, so where the loader fuses
@@ -158,8 +171,11 @@ weights into L2 (opt-in; measured slower on Orin).
 ## Producing a file
 
 - Calibrated (SmoothQuant, GPTQ, the arms measured in VLA-OPT):
-  `vla-opt build --policy-type groot_n1_7 --target vlacpp --config groot_n1_7/vlacpp/<preset> ...`
-  writes `weights/model.gguf` inside the Policy Artifact.
+  `vla-opt build --policy-type <groot_n1_5|groot_n1_6|groot_n1_7|pi05> --target vlacpp --config <family>/vlacpp/<preset> ...`
+  writes `weights/model.gguf` inside the Policy Artifact. The converters
+  (`scripts/convert_<arch>_to_gguf.py`) expose `convert(ckpt, out, *, writer_factory, ...)`
+  for that; `convert_pi05_to_gguf.py` also takes an OpenPI-converted checkpoint
+  with `--config-json` (the lerobot policy fields) and an OpenPI `norm_stats.json`.
 - Uncalibrated, for kernel bring-up and benchmarks:
   `python scripts/foldquant_fake_export.py --in n17-bf16.gguf --out n17-fq.gguf`.
 - Check: `python scripts/inspect_gguf_quant.py n17-fq.gguf` (exit 1 on a violation).
@@ -171,4 +187,5 @@ weights into L2 (opt-in; measured slower on Orin).
    same file layout otherwise. The CUDA GEMM runs the CPU reference for these
    sites until the nibble-unpacking kernel lands.
 3. W4A4: INT4 activations with `act_clip_ratio`.
-4. Other families, per-module validation taps, dense (non-Hadamard) rotations.
+4. Other families: GR00T N1.5 and pi0.5 are wired; pi0, SmolVLA and Evo-1 are not
+   (per-module validation taps and dense rotations are also still open).

@@ -29,6 +29,8 @@
 #include "layers/embed.h"
 #include "modules/preprocess.h"
 #include "env_flag.h"
+#include "foldquant.h"
+#include "layers/fq_linear.h"
 
 #include <algorithm>
 #include <chrono>
@@ -60,6 +62,9 @@ struct ExpertLayerW {
     ggml_tensor * Wgate      = nullptr;
     ggml_tensor * Wup        = nullptr;
     ggml_tensor * Wdown      = nullptr;
+    // FoldQuant sites (action recipe): the adaRMS output is quantized per site
+    // group with the shipped SmoothQuant vector (ascale), no gamma.
+    FqLinear fq_q, fq_k, fq_v, fq_o, fq_gate, fq_up, fq_down;
 };
 
 bool ends_with(const std::string & s, const char * sfx) {
@@ -159,11 +164,20 @@ ggml_tensor * build_vlm_layer(
     const int64_t nkv = cfg.n_kv_heads;
     const int64_t qf  = nq * hd;
 
-    ggml_tensor * x_norm = ggml_mul(ctx, ggml_rms_norm(ctx, x_in, cfg.rms_eps), w.ln_in);
-
-    ggml_tensor * q = ggml_mul_mat(ctx, w.Wq, x_norm);
-    ggml_tensor * k = ggml_mul_mat(ctx, w.Wk, x_norm);
-    ggml_tensor * v = ggml_mul_mat(ctx, w.Wv, x_norm);
+    ggml_tensor *q, *k, *v;
+    if (w.fq_q) {
+        // FoldQuant: RMSNorm with the folded gamma is fused into the act node,
+        // which feeds all three projections.
+        ggml_tensor * xq = fq_act(ctx, w.fq_q, x_in);
+        q = fq_gemm(ctx, w.fq_q, xq);
+        k = fq_gemm(ctx, w.fq_k, xq);
+        v = fq_gemm(ctx, w.fq_v, xq);
+    } else {
+        ggml_tensor * x_norm = ggml_mul(ctx, ggml_rms_norm(ctx, x_in, cfg.rms_eps), w.ln_in);
+        q = ggml_mul_mat(ctx, w.Wq, x_norm);
+        k = ggml_mul_mat(ctx, w.Wk, x_norm);
+        v = ggml_mul_mat(ctx, w.Wv, x_norm);
+    }
 
     ggml_tensor * q_h = ggml_reshape_3d(ctx, q, hd, nq,  seq);
     ggml_tensor * k_h = ggml_reshape_3d(ctx, k, hd, nkv, seq);
@@ -194,15 +208,23 @@ ggml_tensor * build_vlm_layer(
 
     ggml_tensor * att_pre = ggml_reshape_2d(ctx,
         ggml_cont(ctx, ggml_permute(ctx, kqv, 0, 2, 1, 3)), qf, seq);
-    ggml_tensor * o_out = ggml_mul_mat(ctx, w.Wo, att_pre);
-    ggml_tensor * h1    = ggml_add(ctx, x_in, o_out);
+    // FoldQuant: the residual adds ride in the o / down GEMM epilogues.
+    ggml_tensor * h1 = w.fq_o ? fq_linear(ctx, w.fq_o, att_pre, x_in)
+                              : ggml_add(ctx, x_in, ggml_mul_mat(ctx, w.Wo, att_pre));
 
-    ggml_tensor * x_norm_mlp = ggml_mul(ctx, ggml_rms_norm(ctx, h1, cfg.rms_eps), w.ln_post);
-    ggml_tensor * gate    = ggml_mul_mat(ctx, w.Wgate, x_norm_mlp);
-    ggml_tensor * up      = ggml_mul_mat(ctx, w.Wup,   x_norm_mlp);
+    ggml_tensor *gate, *up;
+    if (w.fq_gate) {
+        ggml_tensor * xq2 = fq_act(ctx, w.fq_gate, h1);
+        gate = fq_gemm(ctx, w.fq_gate, xq2);
+        up   = fq_gemm(ctx, w.fq_up,   xq2);
+    } else {
+        ggml_tensor * x_norm_mlp = ggml_mul(ctx, ggml_rms_norm(ctx, h1, cfg.rms_eps), w.ln_post);
+        gate = ggml_mul_mat(ctx, w.Wgate, x_norm_mlp);
+        up   = ggml_mul_mat(ctx, w.Wup,   x_norm_mlp);
+    }
     ggml_tensor * inter_t = ggml_mul(ctx, ggml_gelu(ctx, gate), up);
-    ggml_tensor * mlp_out = ggml_mul_mat(ctx, w.Wdown, inter_t);
-    return ggml_add(ctx, h1, mlp_out);
+    return w.fq_down ? fq_linear(ctx, w.fq_down, inter_t, h1)
+                     : ggml_add(ctx, h1, ggml_mul_mat(ctx, w.Wdown, inter_t));
 }
 
 ggml_tensor * build_adarms(
@@ -236,9 +258,17 @@ ggml_tensor * build_expert_layer(
     ggml_tensor * gate_attn = nullptr;
     ggml_tensor * x_norm = build_adarms(ctx, x_in, w.ada_in_w, w.ada_in_b, cond, h, cfg.rms_eps, &gate_attn);
 
-    ggml_tensor * q = ggml_mul_mat(ctx, w.Wq, x_norm);
-    ggml_tensor * k = ggml_mul_mat(ctx, w.Wk, x_norm);
-    ggml_tensor * v = ggml_mul_mat(ctx, w.Wv, x_norm);
+    ggml_tensor *q, *k, *v;
+    if (w.fq_q) {
+        ggml_tensor * xq = fq_act(ctx, w.fq_q, x_norm);   // q/k/v share the act (same ascale)
+        q = fq_gemm(ctx, w.fq_q, xq);
+        k = fq_gemm(ctx, w.fq_k, xq);
+        v = fq_gemm(ctx, w.fq_v, xq);
+    } else {
+        q = ggml_mul_mat(ctx, w.Wq, x_norm);
+        k = ggml_mul_mat(ctx, w.Wk, x_norm);
+        v = ggml_mul_mat(ctx, w.Wv, x_norm);
+    }
 
     ggml_tensor * q_h = ggml_reshape_3d(ctx, q, hd, nq,  seq);
     ggml_tensor * k_h = ggml_reshape_3d(ctx, k, hd, nkv, seq);
@@ -267,16 +297,24 @@ ggml_tensor * build_expert_layer(
 
     ggml_tensor * att_pre = ggml_reshape_2d(ctx,
         ggml_cont(ctx, ggml_permute(ctx, kqv, 0, 2, 1, 3)), qf, seq);
-    ggml_tensor * o_out = ggml_mul_mat(ctx, w.Wo, att_pre);
+    // The expert's residuals are gated (out * gate + x), so no epilogue fusion here.
+    ggml_tensor * o_out = w.fq_o ? fq_linear(ctx, w.fq_o, att_pre) : ggml_mul_mat(ctx, w.Wo, att_pre);
 
     ggml_tensor * h1 = ggml_add(ctx, x_in, ggml_mul(ctx, o_out, gate_attn));
 
     ggml_tensor * gate_ffn = nullptr;
     ggml_tensor * x_norm_mlp = build_adarms(ctx, h1, w.ada_post_w, w.ada_post_b, cond, h, cfg.rms_eps, &gate_ffn);
-    ggml_tensor * gate    = ggml_mul_mat(ctx, w.Wgate, x_norm_mlp);
-    ggml_tensor * up      = ggml_mul_mat(ctx, w.Wup,   x_norm_mlp);
+    ggml_tensor *gate, *up;
+    if (w.fq_gate) {
+        ggml_tensor * xq2 = fq_act(ctx, w.fq_gate, x_norm_mlp);
+        gate = fq_gemm(ctx, w.fq_gate, xq2);
+        up   = fq_gemm(ctx, w.fq_up,   xq2);
+    } else {
+        gate = ggml_mul_mat(ctx, w.Wgate, x_norm_mlp);
+        up   = ggml_mul_mat(ctx, w.Wup,   x_norm_mlp);
+    }
     ggml_tensor * inter_t = ggml_mul(ctx, ggml_gelu(ctx, gate), up);
-    ggml_tensor * mlp_out = ggml_mul_mat(ctx, w.Wdown, inter_t);
+    ggml_tensor * mlp_out = w.fq_down ? fq_linear(ctx, w.fq_down, inter_t) : ggml_mul_mat(ctx, w.Wdown, inter_t);
 
     return ggml_add(ctx, h1, ggml_mul(ctx, mlp_out, gate_ffn));
 }
@@ -404,6 +442,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     if (!m->io.open(ckpt_path))
         return nullptr;
     gguf_reader & g = m->io;
+    const FoldQuantSpec fq = foldquant_parse(g, "pi05");
     if (!g.has("pi05.architecture") || g.str("pi05.architecture") != "pi05") {
         std::fprintf(stderr, "vla(pi05): '%s' is not a π0.5 GGUF (pi05.architecture missing/wrong)\n",
                      ckpt_path.c_str());
@@ -431,6 +470,8 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
             return nullptr;
         }
         m->backend = b.handle;
+        if (!foldquant_check_backend("vla(pi05)", b, fq, opts.weight_dtype.has_value()))
+            return nullptr;
     }
 
     // The SigLIP tower is now bundled in the ckpt GGUF; mmproj_path is ignored.
@@ -464,22 +505,41 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     m->mm_proj_w = L.gemm   ("mm.proj.weight");
     m->mm_proj_b = L.opt_f32("mm.proj.bias");
 
-    m->pl.declare(L, "vlm", cfg.n_layers, false);
+    m->pl.declare(L, "vlm", cfg.n_layers, false, fq.present ? &fq.llm : nullptr, cfg.rms_eps);
 
     m->ex_layers.resize(cfg.n_layers);
     for (int64_t i=0; i<cfg.n_layers; ++i) {
         ExpertLayerW & w = m->ex_layers[i];
         w.ada_in_w   = L.f32 ("aex.blk.%lld.attn_norm.weight", (long long)i);
         w.ada_in_b   = L.f32 ("aex.blk.%lld.attn_norm.bias",   (long long)i);
-        w.Wq         = L.gemm("aex.blk.%lld.attn_q.weight",    (long long)i);
-        w.Wk         = L.gemm("aex.blk.%lld.attn_k.weight",    (long long)i);
-        w.Wv         = L.gemm("aex.blk.%lld.attn_v.weight",    (long long)i);
-        w.Wo         = L.gemm("aex.blk.%lld.attn_o.weight",    (long long)i);
         w.ada_post_w = L.f32 ("aex.blk.%lld.ffn_norm.weight",  (long long)i);
         w.ada_post_b = L.f32 ("aex.blk.%lld.ffn_norm.bias",    (long long)i);
-        w.Wgate      = L.gemm("aex.blk.%lld.ffn_gate.weight",  (long long)i);
-        w.Wup        = L.gemm("aex.blk.%lld.ffn_up.weight",    (long long)i);
-        w.Wdown      = L.gemm("aex.blk.%lld.ffn_down.weight",  (long long)i);
+        if (fq.present) {
+            const FqModuleSpec & a = fq.action;
+            const long long ii = (long long) i;
+            w.fq_q    = fq_declare_linear(L, a, "qkv",    false, nullptr, 0.0f, "aex.blk.%lld.attn_q",   ii);
+            w.fq_k    = fq_declare_linear(L, a, "qkv",    false, nullptr, 0.0f, "aex.blk.%lld.attn_k",   ii);
+            w.fq_v    = fq_declare_linear(L, a, "qkv",    false, nullptr, 0.0f, "aex.blk.%lld.attn_v",   ii);
+            w.fq_o    = fq_declare_linear(L, a, "o",      false, nullptr, 0.0f, "aex.blk.%lld.attn_o",   ii);
+            w.fq_gate = fq_declare_linear(L, a, "gateup", false, nullptr, 0.0f, "aex.blk.%lld.ffn_gate", ii);
+            w.fq_up   = fq_declare_linear(L, a, "gateup", false, nullptr, 0.0f, "aex.blk.%lld.ffn_up",   ii);
+            w.fq_down = fq_declare_linear(L, a, "down",   false, nullptr, 0.0f, "aex.blk.%lld.ffn_down", ii);
+            if (!w.fq_q != !w.fq_k || !w.fq_q != !w.fq_v || !w.fq_gate != !w.fq_up)
+                L.fail("FoldQuant: an expert layer's q/k/v (and gate/up) must all be INT or all float");
+        }
+        if (!w.fq_q) {
+            w.Wq = L.gemm("aex.blk.%lld.attn_q.weight", (long long)i);
+            w.Wk = L.gemm("aex.blk.%lld.attn_k.weight", (long long)i);
+            w.Wv = L.gemm("aex.blk.%lld.attn_v.weight", (long long)i);
+        }
+        if (!w.fq_o)
+            w.Wo = L.gemm("aex.blk.%lld.attn_o.weight", (long long)i);
+        if (!w.fq_gate) {
+            w.Wgate = L.gemm("aex.blk.%lld.ffn_gate.weight", (long long)i);
+            w.Wup   = L.gemm("aex.blk.%lld.ffn_up.weight",   (long long)i);
+        }
+        if (!w.fq_down)
+            w.Wdown = L.gemm("aex.blk.%lld.ffn_down.weight", (long long)i);
     }
 
     m->ex_final_w = L.f32("aex.output_norm.weight");
