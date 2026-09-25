@@ -416,18 +416,14 @@ ggml_cgraph * TurboVlaModelArch::build(ggml_context * C, IO & io, int64_t bert_l
         ggml_tensor * att = self_attention(C, qkv, nullptr, dhd, dec_heads, horizon, 1);
         a = ggml_add(C, a, linear(C, l.self_o_w, l.self_o_b, att));
 
-        // in_proj rows are [W_q; W_k; W_v]: the queries take the first block,
-        // the memory the other two, in one GEMM each.
-        const size_t wr = l.cross_qkv_w->nb[1], br = ggml_element_size(l.cross_qkv_b);
-        ggml_tensor * wq  = ggml_view_2d(C, l.cross_qkv_w, hidden, hidden,   wr, 0);
-        ggml_tensor * wkv = ggml_view_2d(C, l.cross_qkv_w, hidden, 2*hidden, wr, (size_t) hidden*wr);
-        ggml_tensor * bq  = ggml_view_1d(C, l.cross_qkv_b, hidden,   0);
-        ggml_tensor * bkv = ggml_view_1d(C, l.cross_qkv_b, 2*hidden, (size_t) hidden*br);
-        ggml_tensor * q  = linear(C, wq, bq, layer_norm(C, a, l.ln2_w, l.ln2_b, kLnEps));
-        ggml_tensor * kv = linear(C, wkv, bkv, mem);
-        ggml_tensor * Q = to_heads(C, q, dhd, dec_heads, horizon);
-        ggml_tensor * K = ggml_cont(C, ggml_permute(C, split_heads(C, kv, dhd, dec_heads, M, 1, 0), 0, 2, 1, 3));
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, split_heads(C, kv, dhd, dec_heads, M, 1, 1), 1, 2, 0, 3));
+        // in_proj is [W_q; W_k; W_v]: the queries keep the Q block of their
+        // projection, the memory its K and V blocks. Slicing the weight instead
+        // saves little and breaks ggml-openvino once the weights are BF16.
+        ggml_tensor * q  = linear(C, l.cross_qkv_w, l.cross_qkv_b, layer_norm(C, a, l.ln2_w, l.ln2_b, kLnEps));
+        ggml_tensor * kv = linear(C, l.cross_qkv_w, l.cross_qkv_b, mem);
+        ggml_tensor * Q = ggml_cont(C, ggml_permute(C, split_heads(C, q, dhd, dec_heads, horizon, 1, 0), 0, 2, 1, 3));
+        ggml_tensor * K = ggml_cont(C, ggml_permute(C, split_heads(C, kv, dhd, dec_heads, M, 1, 1), 0, 2, 1, 3));
+        ggml_tensor * V = ggml_cont(C, ggml_permute(C, split_heads(C, kv, dhd, dec_heads, M, 1, 2), 1, 2, 0, 3));
         att = attention(C, Q, K, V, nullptr, dscale, hidden, horizon);
         a = ggml_add(C, a, linear(C, l.cross_o_w, l.cross_o_b, att));
         a = ggml_add(C, a, ffn_relu(C, l.fc1_w, l.fc1_b, l.fc2_w, l.fc2_b,
