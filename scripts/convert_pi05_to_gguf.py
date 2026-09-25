@@ -169,7 +169,8 @@ def convert(ckpt: Path, out: Path, *, writer_factory=open_writer, dataset_stats:
     sf_path = ckpt / "model.safetensors"
     require(sf_path)
 
-    cfg_json = read_json(ckpt / "config.json")
+    # An OpenPI checkpoint may carry no config.json at all; `config` then supplies everything.
+    cfg_json = read_json(ckpt / "config.json") if (ckpt / "config.json").exists() or config is None else {}
     if cfg_json.get("type") != ARCH:
         if config is None:
             raise SystemExit(f"config.json type is {cfg_json.get('type')!r}, expected 'pi05'")
