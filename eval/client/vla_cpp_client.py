@@ -22,8 +22,9 @@ import subprocess
 import sys
 import tempfile
 from collections import deque
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 import torch
@@ -49,6 +50,12 @@ ARCH_PRESETS = {
                     "max_state_dim": 8},
     "vla_jepa": {"image_size": 256, "tokenizer": "Qwen/Qwen3-VL-2B-Instruct",
                  "max_state_dim": 8, "use_processor": True},
+    "turbovla": {
+        "image_size": 256,
+        "tokenizer": "bert-base-uncased",
+        "max_state_dim": 8,
+        "max_length": 21,
+    },
     "gr00t_n1_7": {"image_size": 256, "tokenizer": "nvidia/Cosmos-Reason2-2B", "max_state_dim": 132},
 
     "gr00t_n1_5": {"image_size": 224, "tokenizer": "lerobot/eagle2hg-processor-groot-n1p5",
@@ -285,6 +292,65 @@ class VlaCppClient:
                   f"{stats_path}::observation.state ({self._pi05_state_q01.shape[0]}-D)",
                   flush=True)
 
+        self._turbovla_state_norm = None
+        self._turbovla_action_unnorm = None
+        if arch == "turbovla":
+            if stats_json:
+                stats_path = Path(stats_json)
+            else:
+                from huggingface_hub import hf_hub_download
+                stats_path = Path(hf_hub_download(
+                    repo_id="H-EmbodVis/TurboVLA", filename="libero_all4_stats.json"))
+            if not stats_path.exists():
+                raise FileNotFoundError(
+                    f"TurboVLA stats not found at {stats_path}. Pass --stats-json "
+                    "<LIBERO meta/stats.json>.")
+            blob = json.loads(stats_path.read_text())
+            try:
+                if "libero_all4_no_noops" in blob:
+                    blob = blob["libero_all4_no_noops"]
+                state = blob["proprio"] if "proprio" in blob else blob["observation.state"]
+                action = blob["action"]
+                state_mean = np.asarray(state["mean"], dtype=np.float32)
+                state_std = np.asarray(state["std"], dtype=np.float32)
+                action_min = np.asarray(action["min"], dtype=np.float32)
+                action_max = np.asarray(action["max"], dtype=np.float32)
+            except (KeyError, TypeError) as exc:
+                raise ValueError(
+                    f"{stats_path} must contain observation.state mean/std and action min/max") from exc
+            if (
+                state_mean.shape != (8,)
+                or state_std.shape != (8,)
+                or action_min.shape != (7,)
+                or action_max.shape != (7,)
+            ):
+                raise ValueError(
+                    f"{stats_path} does not contain TurboVLA's 8-D state and 7-D action stats"
+                )
+            if np.any(state_std <= 0) or np.any(action_max <= action_min):
+                raise ValueError(f"{stats_path} contains invalid TurboVLA normalization ranges")
+
+            def _state_norm(state_8d, mean=state_mean, std=state_std):
+                return ((state_8d - mean) / (std + 1e-6)).astype(np.float32)
+
+            def _action_unnorm(chunk, mn=action_min, mx=action_max):
+                normalized = np.clip(chunk.astype(np.float32), -1.0, 1.0)
+                action = normalized.copy()
+                action[..., :6] = ((normalized[..., :6] + 1.0) * 0.5
+                                   * (mx[:6] - mn[:6]) + mn[:6])
+                # TurboVLA thresholds the normalized gripper instead of applying
+                # continuous min/max denormalization; exactly 0 maps to +1. See
+                # H-EmbodVis/TurboVLA@b29ab142, turbovla/evaluation/policy.py:205-221.
+                action[..., 6] = np.where(normalized[..., 6] < 0.0, -1.0, 1.0)
+                return action.astype(np.float32)
+
+            self._turbovla_state_norm = _state_norm
+            self._turbovla_action_unnorm = _action_unnorm
+            print(
+                "vla-cpp-direct[arch=turbovla]: release MEAN_STD state / MIN_MAX "
+                f"arm stats via {stats_path}",
+                flush=True,
+            )
 
         self._gr00t_action_unnorm = None
         self._gr00t_state_norm = None
@@ -581,6 +647,8 @@ class VlaCppClient:
 
     def _predict_chunk(self, observations: dict[str, Any]) -> np.ndarray:
 
+        if self.arch == "turbovla":
+            return self._predict_chunk_turbovla(observations)
         if self.arch == "evo1":
             return self._predict_chunk_evo1(observations)
         if self.arch == "gr00t_n1_7":
@@ -649,6 +717,68 @@ class VlaCppClient:
 
         return (np.array(resp.action_chunk, dtype=np.float32)
                   .reshape(resp.chunk_size, resp.action_dim))
+
+    def _predict_chunk_turbovla(self, observations: dict[str, Any]) -> np.ndarray:
+        if self._turbovla_state_norm is None or self._turbovla_action_unnorm is None:
+            raise RuntimeError("TurboVLA statistics were not initialized")
+        images_f32: list[np.ndarray] = []
+        for key in self.image_keys:
+            if key not in observations:
+                raise KeyError(
+                    f"TurboVLA image key {key!r} missing; got {list(observations)}"
+                )
+            image = observations[key]
+            if isinstance(image, torch.Tensor):
+                image = image.numpy()
+            image = np.asarray(image, dtype=np.float32)
+            if image.ndim != 3 or image.shape[0] != 3:
+                raise ValueError(f"{key}: expected CHW float32 [3,H,W], got {image.shape}")
+            image = _resize_with_pad(image, self.image_size, self.image_size)
+            images_f32.append(
+                np.ascontiguousarray(np.transpose(image, (1, 2, 0)), dtype=np.float32)
+            )
+
+        state = observations["observation.state"]
+        if isinstance(state, torch.Tensor):
+            state = state.numpy()
+        state = np.asarray(state, dtype=np.float32).reshape(-1)
+        if state.shape != (8,):
+            raise ValueError(f"TurboVLA requires an 8-D state, got {state.shape}")
+
+        task = observations.get("task", "")
+        if isinstance(task, bytes):
+            task = task.decode()
+        if not isinstance(task, str) or not task.strip():
+            raise ValueError("TurboVLA requires a non-empty task instruction")
+        lang = self.tok(
+            task,
+            padding=False,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="np",
+        )["input_ids"][0].astype(np.int32)
+
+        req = self.pb.PredictRequest()
+        req.request_id = self._step
+        self._step += 1
+        for image in images_f32:
+            proto_image = req.images.add()
+            proto_image.encoding = self.pb.Image.F32_RGB_01
+            proto_image.height, proto_image.width = image.shape[:2]
+            proto_image.data = image.tobytes()
+        req.lang_tokens.extend(lang.tolist())
+        req.state.extend(self._turbovla_state_norm(state).tolist())
+
+        self.sock.send(req.SerializeToString())
+        resp = self.pb.PredictResponse()
+        resp.ParseFromString(self.sock.recv())
+        if resp.error:
+            raise RuntimeError(f"vla-server error: {resp.error}")
+        self._last_response = resp
+        chunk = np.array(resp.action_chunk, dtype=np.float32).reshape(
+            resp.chunk_size, resp.action_dim
+        )
+        return self._turbovla_action_unnorm(chunk)
 
     _VJ_PS, _VJ_TPS, _VJ_MERGE, _VJ_SIDE = 16, 2, 2, 256
 

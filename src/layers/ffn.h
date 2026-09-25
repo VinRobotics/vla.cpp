@@ -26,6 +26,11 @@ inline ggml_tensor * ffn_gelu(ggml_context * C, ggml_tensor * W1, ggml_tensor * 
     return linear(C, W2, b2, ggml_gelu(C, linear(C, W1, b1, x)));
 }
 
+inline ggml_tensor * ffn_relu(ggml_context * C, ggml_tensor * W1, ggml_tensor * b1,
+                              ggml_tensor * W2, ggml_tensor * b2, ggml_tensor * x) {
+    return linear(C, W2, b2, ggml_relu(C, linear(C, W1, b1, x)));
+}
+
 // DINOv2 and SigLIP-so400m were trained with the exact erf form.
 inline ggml_tensor * ffn_gelu_erf(ggml_context * C, ggml_tensor * W1, ggml_tensor * b1,
                                   ggml_tensor * W2, ggml_tensor * b2, ggml_tensor * x) {

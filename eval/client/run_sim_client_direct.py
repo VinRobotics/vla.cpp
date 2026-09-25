@@ -88,7 +88,8 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--stats-json", type=str, default=None,
-        help="[bitvla/gr00t_n1_6/gr00t_n1_7] path to dataset_statistics.json. Default for bitvla: "
+        help="[turbovla/bitvla/gr00t_n1_6/gr00t_n1_7] path to dataset statistics. TurboVLA defaults "
+             "to the H-EmbodVis/TurboVLA release stats. Default for bitvla: "
              "<tokenizer>/dataset_statistics.json. For gr00t_n1_{6,7}, pass the canonical "
              "<model-dir>/experiment_cfg/dataset_statistics.json explicitly. Without "
              "it, gr00t_n1_7 returns the raw normalized [40, 132] chunk and gr00t_n1_6 "
