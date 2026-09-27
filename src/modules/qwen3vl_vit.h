@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "backend.h"
 #include "layers/attn.h"
 #include "loader.h"
 #include "layers/rope.h"
@@ -106,7 +107,7 @@ inline ggml_tensor * build_vit_layer(ggml_context * C, const VitLayerW & w, ggml
         att = attention      (C, Q, K, to_heads_v(C, v, hd, heads, seq), nullptr, scale, hidden, seq);
     ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
     ggml_tensor * n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.ln2w), w.ln2b);
-    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, ggml_gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);
+    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, vla::gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);
     return ggml_add(C, h1, ff);
 }
 
@@ -123,7 +124,7 @@ inline ggml_tensor * build_merger(ggml_context * C, const MergerW & w, ggml_tens
         m = ggml_add(C, ggml_mul(C, ggml_norm(C, mr, ln_eps), w.nw), w.nb);
     }
     ggml_tensor * z1 = ggml_add(C, ggml_mul_mat(C, w.fc1w, m), w.fc1b);
-    return ggml_add(C, ggml_mul_mat(C, w.fc2w, ggml_gelu(C, z1)), w.fc2b);
+    return ggml_add(C, ggml_mul_mat(C, w.fc2w, vla::gelu(C, z1)), w.fc2b);
 }
 
 // Patch row/col after the spatial merge.

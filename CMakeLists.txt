@@ -12,7 +12,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(_vla_accel "")
-foreach(_flag GGML_CUDA GGML_SYCL GGML_METAL GGML_OPENVINO)
+foreach(_flag GGML_CUDA GGML_SYCL GGML_METAL GGML_OPENVINO GGML_HEXAGON GGML_OPENCL)
     if(${_flag})
         list(APPEND _vla_accel ${_flag})
     endif()
@@ -111,19 +111,55 @@ if(VLA_OCTO)
     set(SPM_BUILD_TEST       OFF        CACHE BOOL   "" FORCE)
     set(SPM_ENABLE_TCMALLOC  OFF        CACHE BOOL   "" FORCE)
     set(SPM_PROTOBUF_PROVIDER "package" CACHE STRING "" FORCE)
+    set(_vla_spm_patch "")
+    if(WIN32 AND NOT MSVC)
+        set(_vla_spm_patch PATCH_COMMAND ${CMAKE_COMMAND} -P
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_sentencepiece_fpic.cmake)
+    endif()
     FetchContent_Declare(sentencepiece
         GIT_REPOSITORY https://github.com/google/sentencepiece
         GIT_TAG        v0.2.0
         GIT_SHALLOW    TRUE
+        ${_vla_spm_patch}
     )
     # sentencepiece v0.2.0 still asks for cmake_minimum_required(VERSION 3.1),
     # which CMake 4 refuses outright.
     set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
     FetchContent_MakeAvailable(sentencepiece)
     unset(CMAKE_POLICY_VERSION_MINIMUM)
+    # Only the static library is linked; its CLI tools are dead weight.
+    vla_exclude_fetched_targets(${sentencepiece_SOURCE_DIR})
+    # vcpkg's FindProtobuf shim reports the DLL, not its import library, as
+    # PROTOBUF_LITE_LIBRARY, and sentencepiece links that path verbatim. Link the
+    # imported target instead, which carries the import library and protobuf's
+    # abseil deps. The full runtime, not lite: vla-server links it too, and one
+    # protobuf runtime per binary is the rule above.
+    # Imported targets are directory-scoped, so find it again up here.
+    if(WIN32)
+        find_package(Protobuf CONFIG QUIET)
+    endif()
+    # The link goes on vla_core below rather than on sentencepiece-static:
+    # names in a target's link interface resolve in the directory that made the
+    # target, and sentencepiece's directory has its own copies of abseil's
+    # imported targets, which still carry the MSVC flag stripped further down.
+    if(WIN32 AND TARGET protobuf::libprotobuf)
+        set_property(TARGET sentencepiece-static PROPERTY
+            INTERFACE_LINK_LIBRARIES Threads::Threads)
+        set(VLA_SPM_PROTOBUF protobuf::libprotobuf)
+    endif()
 endif()
 
-add_library(vla_core
+# llama.cpp turns BUILD_SHARED_LIBS on, so these follow it. That is harmless on
+# ELF, which exports everything, but a Windows DLL exports nothing unannotated:
+# the import library comes out empty and every consumer fails to link. Nothing
+# outside this tree links the cores, so on Windows they are static.
+if(WIN32)
+    set(VLA_CORE_LIB_TYPE STATIC)
+else()
+    set(VLA_CORE_LIB_TYPE "")
+endif()
+
+add_library(vla_core ${VLA_CORE_LIB_TYPE}
     src/model.cpp
     src/loader.cpp
     src/options.cpp
@@ -156,7 +192,7 @@ target_link_libraries(vla_core PUBLIC ggml)
 if(VLA_OCTO)
     target_sources(vla_core PRIVATE src/models/octo.cpp)
     target_include_directories(vla_core PRIVATE ${sentencepiece_SOURCE_DIR}/src)
-    target_link_libraries(vla_core PRIVATE sentencepiece-static)
+    target_link_libraries(vla_core PRIVATE sentencepiece-static ${VLA_SPM_PROTOBUF})
     target_compile_definitions(vla_core PUBLIC VLA_USE_OCTO)
 endif()
 
@@ -248,7 +284,20 @@ if(GGML_OPENVINO AND NOT GGML_CUDA AND NOT GGML_SYCL AND NOT GGML_METAL)
     target_compile_definitions(vla_core PUBLIC GGML_USE_OPENVINO)
 endif()
 
-add_library(vlm_core
+# Hexagon and OpenCL reject some ops the archs build; the wrapper in
+# backend_fallback.cpp runs those on the CPU. It reaches into ggml's internal
+# headers for the backend vtable, hence the private include.
+if(GGML_HEXAGON OR GGML_OPENCL)
+    target_sources(vla_core PRIVATE src/backend_fallback.cpp)
+    target_include_directories(vla_core PRIVATE ${llama_SOURCE_DIR}/ggml/src)
+    if(GGML_HEXAGON)
+        target_compile_definitions(vla_core PUBLIC GGML_USE_HEXAGON)
+    else()
+        target_compile_definitions(vla_core PUBLIC GGML_USE_OPENCL)
+    endif()
+endif()
+
+add_library(vlm_core ${VLA_CORE_LIB_TYPE}
     src/vlm/engine.cpp
 )
 target_include_directories(vlm_core
@@ -261,9 +310,23 @@ target_include_directories(vlm_core
 )
 target_link_libraries(vlm_core PUBLIC llama ggml mtmd llama-common)
 
+# vla-cli and vla-bench link neither protobuf nor ZeroMQ; turning this off lets
+# them configure on a machine that has not installed the serving stack.
+option(VLA_BUILD_SERVER "Build vla-server and vlm-server (needs protobuf, libzmq, cppzmq)" ON)
+if(VLA_BUILD_SERVER)
 find_package(Protobuf REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(ZeroMQ REQUIRED IMPORTED_TARGET libzmq)
+# vcpkg (the Windows route) ships a CMake package and no pkg-config binary;
+# Linux distros ship the .pc file. Either yields one target to link.
+find_package(ZeroMQ CONFIG QUIET)
+if(TARGET libzmq)
+    set(VLA_ZMQ_TARGET libzmq)
+elseif(TARGET libzmq-static)
+    set(VLA_ZMQ_TARGET libzmq-static)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(ZeroMQ REQUIRED IMPORTED_TARGET libzmq)
+    set(VLA_ZMQ_TARGET PkgConfig::ZeroMQ)
+endif()
 
 find_path(CPPZMQ_INCLUDE_DIR NAMES zmq.hpp)
 if(NOT CPPZMQ_INCLUDE_DIR)
@@ -299,7 +362,7 @@ target_include_directories(vla-server PRIVATE
 target_link_libraries(vla-server PRIVATE
     vla_core
     protobuf::libprotobuf
-    PkgConfig::ZeroMQ
+    ${VLA_ZMQ_TARGET}
 )
 
 set(VLM_PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/serving/vlm.proto)
@@ -329,8 +392,10 @@ target_include_directories(vlm-server PRIVATE
 target_link_libraries(vlm-server PRIVATE
     vlm_core
     protobuf::libprotobuf
-    PkgConfig::ZeroMQ
+    ${VLA_ZMQ_TARGET}
 )
+
+endif()  # VLA_BUILD_SERVER
 
 add_library(vla SHARED src/vla_c_api.cpp)
 target_include_directories(vla
@@ -360,7 +425,10 @@ add_executable(vla-bench
 target_link_libraries(vla-bench PRIVATE vla_core)
 
 # Warnings and LTO for our own targets only, never the llama.cpp subtree.
-set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla vla-server vlm-server vla-cli vla-bench)
+set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla vla-cli vla-bench)
+if(VLA_BUILD_SERVER)
+    list(APPEND VLA_FIRST_PARTY_TARGETS vla-server vlm-server)
+endif()
 # The CUDA targets were the only first-party code compiled without warnings.
 if(GGML_CUDA)
     list(APPEND VLA_FIRST_PARTY_TARGETS bitvla_cuda_kernels vla_cuda_ops)
@@ -370,6 +438,38 @@ foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)
     target_compile_options(${tgt} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
 endforeach()
 
+# llama.cpp sends its DLLs to <build>/bin, and Windows has no rpath: a binary
+# finds a DLL beside itself or on PATH. Put ours next to them.
+if(WIN32)
+    foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)
+        set_target_properties(${tgt} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    endforeach()
+    # Same problem for the servers' protobuf / abseil / libzmq DLLs, which live
+    # in the package manager's tree.
+    if(VLA_BUILD_SERVER)
+        foreach(tgt vla-server vlm-server)
+            add_custom_command(TARGET ${tgt} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_RUNTIME_DLLS:${tgt}> $<TARGET_FILE_DIR:${tgt}>
+                COMMAND_EXPAND_LISTS)
+        endforeach()
+    endif()
+endif()
+
+# The NPU-side HTP skels are built (and, with HEXAGON_HTP_CERT, signed) inside
+# the fetched tree. FastRPC finds them through ADSP_LIBRARY_PATH, which the
+# Hexagon rung defaults to the binary's own directory, so copy them there.
+if(GGML_HEXAGON AND TARGET ggml-hexagon)
+    set(_vla_htp_dir ${CMAKE_BINARY_DIR}/_deps/llama-build/ggml/src/ggml-hexagon)
+    add_custom_target(vla-htp-skels ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/bin
+        COMMAND ${CMAKE_COMMAND} -DSRC=${_vla_htp_dir} -DDST=${CMAKE_BINARY_DIR}/bin
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_htp_skels.cmake
+        DEPENDS ggml-hexagon
+        COMMENT "copying HTP skels next to the binaries"
+        VERBATIM)
+endif()
+
 include(CheckIPOSupported)
 check_ipo_supported(RESULT VLA_IPO_OK OUTPUT VLA_IPO_MSG)
 if(VLA_IPO_OK AND CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -378,6 +478,20 @@ if(VLA_IPO_OK AND CMAKE_BUILD_TYPE STREQUAL "Release")
     endforeach()
 else()
     message(STATUS "vla: IPO/LTO disabled (${VLA_IPO_MSG})")
+endif()
+
+# vcpkg's abseil hands every consumer "-ignore:4221", an MSVC link.exe flag,
+# through INTERFACE_LINK_LIBRARIES. clang++ driving lld-link rejects it as an
+# unknown argument. The warning it silences is harmless, so drop the flag.
+if(WIN32 AND NOT MSVC)
+    get_directory_property(_vla_imported IMPORTED_TARGETS)
+    foreach(tgt IN LISTS _vla_imported)
+        get_target_property(_libs ${tgt} INTERFACE_LINK_LIBRARIES)
+        if(_libs AND "-ignore:4221" IN_LIST _libs)
+            list(REMOVE_ITEM _libs "-ignore:4221")
+            set_property(TARGET ${tgt} PROPERTY INTERFACE_LINK_LIBRARIES "${_libs}")
+        endif()
+    endforeach()
 endif()
 
 option(VLA_BUILD_TESTS "Build vla.cpp test harnesses and unit tests" OFF)

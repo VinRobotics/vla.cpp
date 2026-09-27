@@ -1,6 +1,11 @@
 # vla.cpp tests, enabled with -DVLA_BUILD_TESTS=ON. predict_check needs a real
 # GGUF so it is built but not run by ctest; the unit tests below are pure.
 
+# Beside the ggml DLLs in <build>/bin; Windows has no rpath (see ../CMakeLists.txt).
+if(WIN32)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 add_executable(vla_predict_check predict_check.cpp)
 target_link_libraries(vla_predict_check PRIVATE vla_core)
 target_compile_options(vla_predict_check PRIVATE -Wall -Wextra)

@@ -207,7 +207,14 @@ void usage(const char * prog) {
 int main(int argc, char ** argv) {
     GOOGLE_PROTOBUF_VERIFY_VERSION;
 
+#ifdef _WIN32
+    // The Windows CRT has no line buffering (_IOLBF means full there) and treats
+    // a zero size as an invalid argument, which fails fast before main prints a
+    // word. Unbuffered is the nearest match.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+#else
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
+#endif
 
     std::string bind_addr   = "tcp://*:5555";
     std::string mmproj_path;

@@ -143,7 +143,7 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_ten
     ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
     ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
     ggml_tensor * n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.ln2w), w.ln2b);
-    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, ggml_gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);
+    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, vla::gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);
     return ggml_add(C, h1, ff);
 }
 
@@ -200,7 +200,7 @@ ggml_tensor * build_vlm_layer(
     ggml_tensor * x_norm_mlp = ggml_mul(ctx, ggml_rms_norm(ctx, h1, cfg.rms_eps), w.ln_post);
     ggml_tensor * gate    = ggml_mul_mat(ctx, w.Wgate, x_norm_mlp);
     ggml_tensor * up      = ggml_mul_mat(ctx, w.Wup,   x_norm_mlp);
-    ggml_tensor * inter_t = ggml_mul(ctx, ggml_gelu(ctx, gate), up);
+    ggml_tensor * inter_t = ggml_mul(ctx, vla::gelu(ctx, gate), up);
     ggml_tensor * mlp_out = ggml_mul_mat(ctx, w.Wdown, inter_t);
     return ggml_add(ctx, h1, mlp_out);
 }
@@ -275,7 +275,7 @@ ggml_tensor * build_expert_layer(
     ggml_tensor * x_norm_mlp = build_adarms(ctx, h1, w.ada_post_w, w.ada_post_b, cond, h, cfg.rms_eps, &gate_ffn);
     ggml_tensor * gate    = ggml_mul_mat(ctx, w.Wgate, x_norm_mlp);
     ggml_tensor * up      = ggml_mul_mat(ctx, w.Wup,   x_norm_mlp);
-    ggml_tensor * inter_t = ggml_mul(ctx, ggml_gelu(ctx, gate), up);
+    ggml_tensor * inter_t = ggml_mul(ctx, vla::gelu(ctx, gate), up);
     ggml_tensor * mlp_out = ggml_mul_mat(ctx, w.Wdown, inter_t);
 
     return ggml_add(ctx, h1, ggml_mul(ctx, mlp_out, gate_ffn));
@@ -399,7 +399,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
 
     auto m = std::make_unique<Pi05ModelArch>();
     m->ckpt_path_  = ckpt_path;
-    m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
+    m->matmul_type = opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16));
 
     if (!m->io.open(ckpt_path))
         return nullptr;

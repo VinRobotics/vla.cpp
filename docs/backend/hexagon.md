@@ -1,24 +1,21 @@
 # `vla.cpp` on Snapdragon (Hexagon NPU)
 
-Notes on what it would take to run `vla.cpp` on Qualcomm's Hexagon NPU, read out
-of llama.cpp's own Hexagon history up to `b10729` - the tag this tree pins.
+What running `vla.cpp` on Qualcomm's Hexagon NPU takes, and what it turned out
+to take once it ran.
 
-> **Status: read and planned, never run.** There is no Hexagon rung in
-> `src/backend.h`, no `GGML_HEXAGON` in `CMakeLists.txt`, and no IQ-9 or IQ-10
-> board on any desk here. Every claim below is either checked against llama.cpp
-> at `b10729` (op tables, env vars, commit hashes - go verify them) or is
-> explicitly a **projection**. Nothing in this file is a measurement on Qualcomm
-> hardware, and the projected latencies are arithmetic, not results.
+> **Status: running on Windows on Arm, not yet on a Linux board.** vla.cpp builds
+> with `GGML_HEXAGON=ON` and runs eleven checkpoints on a Snapdragon X laptop's
+> v73 NPU, each checked against a CPU reference. The build, the measurements and
+> the upstream bugs found along the way are in
+> [hexagon-windows.md](hexagon-windows.md). What follows is the backend in
+> general: the parts that hold on any Snapdragon part, and the Linux / IQ-9 notes
+> from before anything ran, which are still unverified.
 >
-> Two things upstream did in 2026 make this worth writing down now: the NPU
-> backend learned `IM2COL` for patch-embedding convolutions - which is exactly
-> and only what a VLA's vision tower needs - and it learned multi-NPU. Both are
-> already inside the tag we pin.
-
-The previous version of this file was a verbatim copy of upstream's
-[`docs/backend/snapdragon/linux.md`](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/snapdragon/linux.md).
-That build recipe is still the right starting point and is kept below, but it
-builds *llama.cpp*, not this engine; the gap between the two is the subject here.
+> The earlier version of this file was written without hardware and projected
+> 0.8-2.0 s per SmolVLA action chunk on a v79 part. On a v73 part it measured
+> **1.23 s**, inside the band. Its op-gap prediction was half right: `GELU_ERF`
+> is still missing, and `RELU` has landed upstream. What it did not foresee was
+> ops the NPU claims and then computes wrongly.
 
 ## What "IQ9" and "IQ10" refer to
 
@@ -85,87 +82,92 @@ The knobs worth knowing on day one:
 | `GGML_HEXAGON_OPPOLL=1` | poll for op completion instead of sleeping - matters for many small graphs |
 | `GGML_HEXAGON_HOSTBUF=1` | disable repack buffers (op testing) |
 
-## Op coverage against what `vla.cpp` actually builds
+## Op coverage, measured
 
-This is the part that decides whether the port is a weekend or a month. The
-column on the right is `ggml_backend_hexagon_device_supports_op` at `b10729`;
-the middle column is a grep of `src/`.
+The previous version read `supports_op` at `b10729` and found two gaps, `RELU`
+and `GELU_ERF`, and warned that in this engine an absent op is fatal. Running it
+changed all three conclusions:
 
-| ggml op | Where we build it | Hexagon at `b10729` |
+- **`RELU` landed upstream**, and the local checkout used here (build 11201) has
+  it.
+- **`GELU_ERF` is still missing.** It now runs on the CPU (next point) in every
+  DINOv2 and SigLIP-so400m tower, and costs what that implies: Evo-1 spends more
+  on copies than the NPU saves.
+- **Absent is no longer fatal.** `src/backend_fallback.cpp` wraps the NPU in a
+  backend that runs whatever it rejects on the CPU, without touching an arch.
+  That also covers ops refused for shape rather than type: softmax rows that are
+  not a multiple of 32, `GROUP_NORM`, `SIN` and `COS`.
+
+The larger finding was not a missing op but **wrong ones**. `supports_op` claims
+these, and they compute something else:
+
+| Op | What goes wrong | Handled by |
 |---|---|---|
-| `MUL_MAT` / `MUL_MAT_ID` | 154 sites, everywhere | yes - Q4_0/Q4_1/Q8_0/IQ4_NL/MXFP4 (repacked), or F16/F32 direct. **No BF16.** Refuses `src0->ne[1] > 32768` (lm-heads), and anything whose tile misses VTCM |
-| `IM2COL` | 6 `ggml_conv_2d`, every SigLIP/DINOv2 patch embed | yes, **partial** - added by `355303ed` (#26007) "targeting only patch-embedding convolutions": 2D only, F32 source, contiguous, **zero padding**. Our conv is kernel = stride = patch, pad 0, dilation 1. On paper it is precisely the supported case |
-| `FLASH_ATTN_EXT` | 8 sites | yes - F16 or Q8_0 K/V, F16 mask, F32 sinks |
-| `ROPE` / `ROPE_MULTI` | 14 sites | yes, including MROPE/IMROPE (`17d22a35`) and vision RoPE (`f2d1c2f3`) |
-| `NORM`, `RMS_NORM`, `L2_NORM`, `SOFT_MAX`, `SCALE`, `CONCAT`, `SQR`, `GET_ROWS`, `ADD/SUB/MUL/DIV` | all over | yes |
-| `CPY` / `CONT` (`ggml_cast`, 14 sites) | dtype hops between stages | yes, but **F32↔F16 only, and never a reshape and a conversion in the same op** |
-| `SILU`, `GELU` (tanh), `GELU_QUICK`, `TANH`, `SIGMOID`, `NEG`, `ABS`, `EXP`, `SOFTPLUS` | 22 `ggml_silu`, 10 `ggml_gelu` | yes |
-| **`RELU`** | **18 sites** - `action_expert.cpp` state encoder and action decoder, plus Evo-1, VLA-Adapter, VLA-JEPA, GR00T N1.7, OpenVLA-OFT, BitVLA | **not implemented.** `grep -i relu` over `ggml-hexagon/` returns nothing |
-| **`GELU_ERF`** | **13 sites** - `ffn_gelu_erf` in `src/layers/ffn.h` and `dual_tower.h`, i.e. every tower trained with the exact erf form (DINOv2, SigLIP-so400m) | **not implemented.** `ggml_gelu` (tanh) is a *different op*, and substituting it silently changes numerics |
-| `ggml_map_custom1` | BitVLA only | no, and BitVLA pins itself to CPU by design anyway |
+| `GELU` | Runs `x*sigmoid(1.702x)` (GELU_QUICK) | `vla::gelu()` builds the tanh form from correct ops |
+| `ADD`/`MUL`/... | `src1` broadcast over one dim but not a higher one | Refused, runs on the CPU |
+| `IM2COL` | Wrong unless kernel = stride > 1 and no padding | Refused, runs on the CPU |
+| `CPY` F32→F16 | Reads back wrong on the host | Copies feeding a CPU op run on the CPU |
+| fused `MUL_MAT+ADD`, `RMS_NORM+MUL` | ~10x the error of the unfused ops | `GGML_HEXAGON_OPFUSION=0` by default |
 
-Two missing unary kernels, and one of them is in the vision tower of half the
-model zoo. That is the whole gap. Note the shape of the mistake it invites: on
-OpenVINO, "GELU is GELU" cost us a wrong arch and a day of bisection
-([ov.md](ov.md)); here the op is simply absent, which is the *better* failure -
-`supports_op` returns false and you find out at load time.
+Each one flips the gripper channel, or comes close, on some checkpoint. The
+earlier warning that a wrong op would be the worse failure than a missing one
+was right: a missing op fails at load, and these only show in the actions.
+[hexagon-windows.md](hexagon-windows.md#hexagon-issues-found-and-worked-around)
+has the numbers and how each was bisected. They belong upstream.
 
-**Except that in this engine, absent is fatal.** `src/backend.h` brings up one
-backend and drives it through `gallocr` - there is no scheduler and no per-op CPU
-fallback, by design, so an unsupported op asserts at predict time instead of
-quietly limping. Every other backend we support (CUDA, Metal, SYCL, OpenVINO)
-covers our op set completely, so this constraint has never bitten. Hexagon would
-be the first backend where it does.
+## What changed in `vla.cpp`
 
-So the port is gated on one of:
+The shape of the diff was predicted correctly, apart from the scheduler:
 
-1. **Two HVX kernels upstream.** `e70802a0` (#27786) added `ABS` and `LOG` as HTP
-   unary ops; `RELU` and `GELU_ERF` are the same shape of change, and `RELU` in
-   particular is a `vmax` against zero. This is the honest path and it is small.
-2. **A scheduler in `vla.cpp`.** `ggml_backend_sched` with a CPU fallback, which
-   is an engine change with consequences for every backend, not a Hexagon one.
-3. **Graph surgery** - swapping `gelu_erf` for `gelu` and re-checking fidelity.
-   Cheap, wrong, and it will cost more than it saves. Do not.
+1. **Build flags.** `GGML_HEXAGON` (and `GGML_OPENCL`) joined the accelerator
+   list and define `GGML_USE_HEXAGON` / `GGML_USE_OPENCL`.
+2. **A rung in [src/backend.h](../../src/backend.h).**
+   - It goes through the registry, because `ggml_backend_hexagon_init` is
+     declared but not defined upstream.
+   - `VLA_DEVICE` indexes HTP sessions, and `VLA_DEVICE=cpu` gives the reference.
+   - It sets the defaults above and points `ADSP_LIBRARY_PATH` at the
+     executable's folder.
+3. **Weights.**
+   - The NPU takes no BF16. Both accelerator builds default to F16 resident
+     weights, which hold BF16 exactly.
+   - Q8_0 works, but moves actions by 1e-2 or more on most checkpoints, and does
+     so on the CPU too.
+   - SmolVLA's loader learned to keep packed weights.
+4. **Serving dependencies** are optional (`VLA_BUILD_SERVER`), and on Windows
+   come from vcpkg.
+5. **No scheduler.**
+   - The fallback wraps one backend instead, so the ~84 gallocr/compute sites
+     across 13 archs stay as they were.
+   - CUDA, Metal, SYCL and OpenVINO do not compile it.
+   - K/V for flash attention are cast to F16 on Hexagon only (`vla::fa_kv`),
+     because the NPU kernel takes nothing else.
 
-## What would have to change in `vla.cpp`
+## Bring-up checklist, for a new part
 
-Nothing here has been written; this is the shape of the diff.
+In order. Each step is cheap, and steps 4 and 5 are where every bug above was
+found.
 
-**1. Build flags.** `GGML_HEXAGON` joins the mutually-exclusive accelerator list
-at [CMakeLists.txt:15](../../CMakeLists.txt#L15) and defines `GGML_USE_HEXAGON`
-the way the other four do.
-
-**2. A rung in the ladder** at [src/backend.h:176](../../src/backend.h#L176).
-The Hexagon init API takes no ordinal - `ggml_backend_hexagon_init(void)` - so
-device selection is environment-driven, and `VLA_DEVICE` (an integer ordinal for
-CUDA and SYCL) does not map onto it. The right binding is `VLA_DEVICE=HTP0:0`
-passed through to `GGML_HEXAGON_DEVICES`, which means the rung needs its own
-parse rather than `backend_device_index()`.
-
-**3. Weights.** Our default resident dtype is BF16, which the NPU does not
-accept in any op. Every Hexagon run needs a requantized checkpoint -
-`python scripts/quantize_gguf.py --in model-bf16.gguf --out model-q8_0.gguf
---type Q8_0` (or `Q4_0`) - and the fidelity of *that* against the CPU reference
-has to be established before any NPU number means anything. `--weight-dtype f32`
-is the other option and doubles resident memory.
-
-**4. The build that is actually the most work: `vla-server`'s dependencies.**
-`find_package(Protobuf REQUIRED)` and `pkg_check_modules(libzmq REQUIRED)` are
-unconditional in our `CMakeLists.txt`, and the Snapdragon toolchain image carries
-the Hexagon SDK and the OpenCL SDK but not protobuf, libzmq or cppzmq for arm64.
-Configure fails before a single object compiles - including for `vla-cli` and
-`vla-bench`, which link neither. Options, cheapest first:
-
-- Make the serving deps conditional so `vla-cli` / `vla-bench` configure without
-  them. Worth doing regardless of Hexagon; it is a dozen lines.
-- Add the three to the cross sysroot.
-- Build natively on the board, which for an IQ-9-class Linux part is plausible
-  and is how the first bring-up will probably actually happen.
-
-**5. Presets.** We have no `CMakeUserPresets.json`; upstream's
-`arm64-linux-snapdragon-release` is the base to copy, with `GGML_HEXAGON=ON` and
-`-march=armv8.2a+fp16+dotprod`. Note it sets `GGML_OPENCL=OFF` - upstream CI adds
-`-DGGML_OPENCL=ON` on the command line for the IoT job.
+1. **Confirm the arch and session lines.**
+   - Expect `ggml-hex: Hexagon Arch version v73` (or v79/v81) and
+     `allocating new session`.
+   - A v73 line on a part you believe is newer means `htpdrv_get_arch` failed,
+     and you are on the fallback skel.
+2. **`llama-bench` on a small model**, to prove the driver, signing and
+   `ADSP_LIBRARY_PATH` before any VLA is involved.
+3. **Run a VLA and read the fallback lines.** Each process prints which ops went
+   to the CPU and how much was copied (`VLA_FALLBACK_STATS=1` for per-graph
+   detail).
+4. **Fidelity before latency.**
+   - Compare `vla_predict_check` output against the same binary with
+     `VLA_DEVICE=cpu`, and against `--weight-dtype f32`.
+   - The bar is 2.9e-3.
+   - A run with a wrong kernel still prints a latency, and it is usually a good
+     one.
+5. **Bisect anything off the bar** with `GGML_HEXAGON_OPFILTER=<regex>`, which
+   moves matching ops to the CPU fallback. Families first, then single ops.
+   `GGML_HEXAGON_OPFILTER=.*` must reproduce the CPU run exactly; if it does
+   not, the fallback is at fault, not the NPU.
+6. **Then profile.** Use `GGML_HEXAGON_PROFILE=1 ... |& scripts/snapdragon/ggml-hexagon-profile.py -`.
 
 ## Building llama.cpp for the board
 
@@ -208,89 +210,7 @@ SSH or ADB from the host:
     llama-completion -m gemma-2b-it-Q4_0.gguf -f prompt.txt --split-mode tensor
 ```
 
-## Bring-up checklist, for the day a board arrives
-
-In order. Each step is cheap and each one has failed for somebody upstream.
-
-1. **Confirm the arch and session lines.** `ggml-hex: Hexagon Arch version v79`
-   and `allocating new session: HTP0:0`. A v73 line on a part you believe is
-   newer means `htpdrv_get_arch` failed and you are on the fallback skel.
-2. **`test-backend-ops` before anything of ours.**
-   `run.py --hex-hostbuf 0 --devices HTP0:0 -- test-backend-ops -b HTP0:0 -o MUL_MAT`,
-   then `-o IM2COL`, `-o FLASH_ATTN_EXT`, `-o ROPE`. Filter to the dtypes we
-   would actually ship (`q8_0`, `q4_0`, `f16`).
-3. **`llama-bench` on a 1B Q4_0** to get a throughput anchor on *this* board that
-   is comparable with upstream's published numbers, before any VLA is involved.
-4. **Load a requantized VLA with `GGML_HEXAGON_VERBOSE=1`** and read which ops the
-   NPU accepted. This is where the two missing unaries will announce themselves.
-5. **Fidelity before latency.** max|delta| against a CPU-backend reference on the
-   same checkpoint, the same 2.9e-3 bar SYCL and OpenVINO are held to
-   ([ov-progress.md](ov-progress.md)). A partially-failing run still prints a
-   wall-clock time; do not read a latency off a run whose actions did not come out.
-6. **Then profile.** `GGML_HEXAGON_PROFILE=1 ... |& scripts/snapdragon/ggml-hexagon-profile.py -`,
-   and `GGML_HEXAGON_OPFILTER` to bisect anything that looks wrong.
-
-## Projections
-
-Everything in this section is arithmetic over numbers measured elsewhere. It is
-here to set expectations and to be *falsified* by the first real run, not to be
-quoted.
-
-Measured reference points, all ours, all `server_total_ms` per action chunk
-(`ci/baselines/`, [sycl.md](sycl.md)):
-
-| Device | SmolVLA | π0 | GR00T N1.5 | Evo-1 |
-|---|---:|---:|---:|---:|
-| Ryzen 5 5500, CPU backend, 8 threads | 1,920 | - | - | 7,695 |
-| Jetson Orin Nano | 510 | 1,485 | 1,183 | 3,552 |
-| Apple M4 (Metal) | 324 | 1,129 | - | - |
-| Arc A380 (SYCL) | 630 | - | - | 1,176 |
-| RTX 3090 | 99 | 262 | 204 | 487 |
-
-The only Hexagon anchor that exists is upstream's own, on a v79 phone part:
-Llama-3.2-1B Q4_0, **pp128 = 169 t/s**, **tg64 = 51.5 t/s** (single `HTP0`
-session). Read as work rather than tokens: prefill at 169 t/s over 1.24 B params
-is ≈ 0.42 TFLOP/s effective; decode at 51.5 t/s over 730 MiB of weights is
-≈ 37 GB/s of weight traffic, which is a believable LPDDR5 read rate and a good
-sign the published number is not cherry-picked.
-
-A VLA action chunk is **all prefill and no decode**: fixed shapes, a tiny KV
-cache, no sampling loop. That is the regime the 0.42 TFLOP/s figure comes from,
-which makes the extrapolation less dishonest than usual. SmolVLA is 1.07 GiB of
-BF16 weights (≈ 0.54 B params), spent on three stages per prediction - a vision
-tower over 2-3 views, a ~113-token prefix through the VLM, and 10 denoise steps
-over a ~50-token suffix through the much smaller action expert. Multiplying that
-out lands in the region of 300-400 GFLOP per chunk, so at the anchor rate:
-
-**SmolVLA, single v79-class HTP, Q4_0: 0.8-2.0 s per action chunk.** The band is
-wide on purpose. The bottom needs the vision tower to land on the NPU via the new
-`IM2COL` and the denoise loop to stay fed; the top is what you get if the loop is
-dispatch-bound and the towers fall back. Either way that is somewhere between the
-Orin Nano (510 ms) and a desktop CPU (1,920 ms) - useful for a 5-10 Hz policy on
-a part that draws a few watts, not competitive with a discrete GPU. Expect the
-first honest number to be nearer the top of the band and to improve with repack,
-fusion and `OPPOLL`, exactly as upstream's own numbers did over the 107 commits
-that have touched `ggml/src/ggml-hexagon/` since the backend landed in October
-2025 (`63d2fc46`, "experimental").
-
-Where the interesting risk is:
-
-- **The vision tower is the prize.** It is 58% of SmolVLA's CPU-backend time
-  (1,119 ms of 1,920 ms) and 7.1x faster on an A380. `IM2COL` landing for
-  patch-embed convolutions specifically is the single most encouraging thing in
-  this entire history, and it landed in July 2026 for reasons that had nothing to
-  do with us.
-- **The denoise loop is the risk.** Ten sequential steps of small GEMMs is the
-  worst case for any offload engine - it is why SmolVLA gains least on SYCL
-  (3.0x when its own vision tower gains 7.1x). The fully-async backend, op
-  batching and graph reuse from #26501 are aimed at exactly this, which is
-  encouraging, but "many small ops over FastRPC" is a dispatch-latency problem
-  and NPUs do not usually win those.
-- **The lm-head refusal does not touch us.** Hexagon bails on `src0->ne[1] >
-  32768`; VLA action heads are small and no in-tree arch decodes a vocabulary on
-  the action path.
-
-### IQ-10, imagined
+## IQ-10, imagined
 
 Nothing about a second-generation part is knowable from this repository, so what
 follows is a bet, not a forecast. The code in #26501 tells you what Qualcomm
@@ -308,21 +228,24 @@ steady stream of chunks to pipeline.
 
 `vla.cpp` cannot do that today, for the same reason it cannot split across an
 Intel iGPU and NPU ([ov.md](ov.md) reaches this conclusion from the other
-direction): the core drives one backend for a whole prediction. It would need a
+direction): the core drives one backend for a whole prediction. (The CPU fallback
+splits a graph by op, not by stage, so it does not change this.) It would need a
 per-*stage* backend, not a per-op scheduler. The seam is already in the right
 place. That is the one engine change this whole document argues for, and it pays
 off on more than Hexagon.
 
-## What would falsify all of this
+## What the measurements settled
 
-- `RELU` and `GELU_ERF` turn out to be a 200-line HVX patch each → the port is a
-  weekend once the board exists, and everything above about schedulers is moot.
-- `IM2COL`'s "partial" support turns out not to cover our patch shapes after all
-  (multi-view batching, a non-contiguous pixel buffer) → the vision tower stays
-  on CPU, the projection's lower bound disappears, and the whole exercise gets
-  much less interesting.
-- Q8_0 requantization moves any arch past 2.9e-3 → the dtype story needs work
-  before the backend story does.
-- VTCM budgets reject our GEMM shapes (which are wider and shorter than an LLM's)
-  → `supports_op` starts returning false for reasons no table here predicts, and
-  the answer is measurement, not more reading.
+The previous version listed four ways it could be wrong. Here is how each came out:
+
+- **"`RELU` and `GELU_ERF` are a weekend each."** `RELU` came from upstream;
+  `GELU_ERF` has not. The CPU fallback made both moot for correctness.
+- **"`IM2COL`'s partial support might not cover our patch shapes."** It covers
+  SigLIP's 16x16/16 patch embed, and SmolVLA's vision tower runs 4x faster than
+  on the CPU. It gets every other geometry wrong while claiming it.
+- **"Q8_0 might move an arch past 2.9e-3."** It does, for most archs and on the
+  CPU as much as the NPU, so F16 is the default.
+- **"VTCM might reject our GEMM shapes."** Nothing was rejected for VTCM. The
+  NPU loses where the fallback copies dominate (GELU_ERF towers, 1025-wide
+  softmaxes), and on SigLIP-so400m, whose tower is slower on the NPU than on the
+  CPU with nothing falling back.

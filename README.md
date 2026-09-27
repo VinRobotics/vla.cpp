@@ -12,8 +12,8 @@ A C++ inference engine for **Vision-Language-Action (VLA) models**, built on [`l
 It runs the open VLA policies - SmolVLA, π0, BitVLA, Evo-1, GR00T N1.5/1.6/1.7 and more -
 under one runtime, each packaged as a single self-contained GGUF that needs no Python or
 PyTorch at inference time. The binaries drive robots on **CPU**, **Apple Silicon**, **CUDA** -
-from consumer GPUs down to Jetson-class boards - or **Intel GPUs and NPUs** via
-SYCL and OpenVINO.
+from consumer GPUs down to Jetson-class boards - **Intel GPUs and NPUs** via
+SYCL and OpenVINO, or the **Snapdragon X** Hexagon NPU and Adreno GPU on Windows on Arm.
 
 [**Learn vla.cpp**](https://fai-modelopt-tech.github.io/learn-vla-cpp/) walks through the engine design and how each policy is implemented on ggml.
 
@@ -72,7 +72,8 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
 
 Check [docs/backend](docs/backend) for compiling `vla.cpp` on other platforms.
-WSL2, Apple Silicon, and Intel GPU are all tested.
+WSL2, Apple Silicon, Intel GPU and Snapdragon X on Windows on Arm
+([docs/backend/hexagon-windows.md](docs/backend/hexagon-windows.md)) are all tested.
 To build and run in containers instead, see [docs/DOCKER.md](docs/DOCKER.md).
 
 ---
@@ -161,7 +162,9 @@ Precision flags (`vla-server --help` for the full list).
 The fastest configuration per model, with measured latency and success rate, is
 in [`CHANGELOG.md`](CHANGELOG.md):
 
-- `--weight-dtype f32|bf16` - resident dtype for GEMM weights.
+- `--weight-dtype f32|bf16|f16` - resident dtype for GEMM weights. `f16` is the
+  default on Hexagon and OpenCL, which have no BF16 kernels. It is also 2.5-3.5x
+  faster than the BF16 default on CPUs without BF16 matmul (e.g. Snapdragon X).
 - `--act-dtype f32|bf16` - activation dtype; needs CUDA and bf16 weights.
 - `--flash-attn` - faster on the larger towers, but changes numerics.
 - `--mm-prec default|f32` - matmul accumulation precision.
@@ -170,7 +173,9 @@ in [`CHANGELOG.md`](CHANGELOG.md):
 Environment knobs that apply to every arch:
 
 - `VLA_N_THREADS` - CPU backend thread count, default core count capped at 16.
-- `VLA_DEVICE` - GPU ordinal for CUDA and SYCL builds, default 0.
+- `VLA_DEVICE` - GPU ordinal for CUDA and SYCL builds, default 0. In Hexagon and
+  OpenCL builds it indexes the NPU session or GPU, and `VLA_DEVICE=cpu` skips the
+  accelerator.
 - `VLA_CACHE` - where `-hf` stores checkpoints, default `~/.cache/vla`.
 
 ---
@@ -312,21 +317,28 @@ Experimental results on other platforms can be found in
 Support matrix of models (rows) against platforms (columns). Legend: `Y` =
 supported (released and benchmarked), `~` = in progress, `-` = planned.
 
-| Model | CPU (x86-64 / ARM) | CUDA | [SYCL (Intel)](docs/backend/sycl.md) | [Metal](docs/backend/metal.md) | [OpenVINO](docs/backend/ov.md) | Hexagon |
+| Model | CPU (x86-64 / ARM) | CUDA | [SYCL (Intel)](docs/backend/sycl.md) | [Metal](docs/backend/metal.md) | [OpenVINO](docs/backend/ov.md) | [Hexagon](docs/backend/hexagon-windows.md) |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
-| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | Y | - | 
-| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | Y | - | 
-| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | Y | Y | - | 
-| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | Y | Y | - | 
-| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | Y | - | 
-| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | Y | - | 
-| [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | ~ | - | - | 
-| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | Y | - | 
-| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | Y | - | 
-| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | Y | - | 
-| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | - | 
-| [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | - | - | 
-| [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | Y | Y | Y | - | 
+| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | Y | Y |
+| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | Y | ~ |
+| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | Y | Y | Y |
+| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | Y | Y | Y |
+| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | Y | Y |
+| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | Y | Y |
+| [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | ~ | - | - |
+| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | Y | Y |
+| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | Y | Y |
+| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | Y | - |
+| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | ~ |
+| [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | - | Y |
+| [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | Y | Y | Y | Y |
+
+Hexagon is measured on a Snapdragon X laptop (Windows on Arm, v73 NPU). `~` there
+means the model runs but lands outside the 2.9e-3 fidelity bar: π0 and VLA-JEPA
+are precision-sensitive even on the CPU at F16. The same laptop's **Adreno GPU**
+(`GGML_OPENCL=ON`) runs the eleven models in the Hexagon column's `Y`/`~` rows
+within 1.4e-3 of an F32 reference; see
+[hexagon-windows.md](docs/backend/hexagon-windows.md).
 
 ---
 

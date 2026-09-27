@@ -186,6 +186,12 @@ std::string tokenize_text(const std::string & ckpt, const std::string & text) {
         std::fprintf(stderr, "vla-cli: --text takes plain prose (letters, digits, space . , - _ ')\n");
         return "";
     }
+#ifdef _WIN32
+    // cmd.exe has no single quotes. text_ok already rules out '"', so the text
+    // needs no escaping inside double quotes.
+    const std::string esc = text;
+    const std::string q   = "\"";
+#else
     std::string esc;
     for (const char c : text) {
         if (c == '\'')
@@ -193,16 +199,28 @@ std::string tokenize_text(const std::string & ckpt, const std::string & text) {
         else
             esc += c;
     }
+    const std::string q = "'";
+#endif
     // Env first so a packaged binary can point at its own copy of the script.
     const char * env = std::getenv("VLA_TOKENIZE_SCRIPT");
     const std::string script = (env && *env) ? std::string(env)
                                              : std::string(VLA_SOURCE_DIR) + "/scripts/tokenize_prompt.py";
     const char * py = std::getenv("VLA_PYTHON");
-    const std::string interp = (py && *py) ? std::string(py) : std::string("python3");
-    const std::string cmd = "'" + interp + "' '" + script + "' --arch " + arch_slug(arch) +
-                            " --text '" + esc + "'";
-
+#ifdef _WIN32
+    const char * def_py = "python";  // python3.exe is the Store stub on Windows
+#else
+    const char * def_py = "python3";
+#endif
+    const std::string interp = (py && *py) ? std::string(py) : std::string(def_py);
+    std::string cmd = q + interp + q + " " + q + script + q + " --arch " + arch_slug(arch) +
+                      " --text " + q + esc + q;
+#ifdef _WIN32
+    // cmd /c strips the first and last quote of the line; give it a pair to eat.
+    cmd = "\"" + cmd + "\"";
+    FILE * fp = _popen(cmd.c_str(), "r");
+#else
     FILE * fp = popen(cmd.c_str(), "r");
+#endif
     if (!fp) {
         std::fprintf(stderr, "vla-cli: cannot run %s\n", cmd.c_str());
         return "";
@@ -211,7 +229,11 @@ std::string tokenize_text(const std::string & ckpt, const std::string & text) {
     char buf[4096];
     while (std::fgets(buf, sizeof(buf), fp))
         out += buf;
+#ifdef _WIN32
+    if (_pclose(fp) != 0) {
+#else
     if (pclose(fp) != 0) {
+#endif
         std::fprintf(stderr,
                      "vla-cli: tokenizing failed. Install the client extras with\n"
                      "         pip install -e \".[client]\"\n"

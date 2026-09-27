@@ -245,7 +245,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
 
     auto m = std::make_unique<Gr00tN1d7ModelArch>();
     m->gguf_path   = ckpt_path;
-    m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
+    m->matmul_type = opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16));
 
     gguf_reader g("gr00tn1d7");
     if (!g.open(ckpt_path))
