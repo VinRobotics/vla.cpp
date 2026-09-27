@@ -244,7 +244,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
         std::printf("vla(gr00tn1d6): note - mmproj '%s' is ignored (the vision tower is bundled in the combined GGUF)\n", mmproj_path.c_str());
 
     auto m = std::make_unique<Gr00tN1d6ModelArch>();
-    m->matmul_type           = opts.weight_dtype.value_or(GGML_TYPE_BF16);
+    m->matmul_type           = opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16));
     m->lm.cfg.rope.freq_base = 1000000.0f;
 
     if (!m->io.open(ckpt_path))

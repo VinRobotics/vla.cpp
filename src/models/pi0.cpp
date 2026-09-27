@@ -137,9 +137,10 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_ten
     ggml_tensor * att;
     if (vla::flash_attn_enabled()) {
         // Avoids materialising the per-head score matrix; K/V stay F32 so the
-        // numerics track the explicit path below.
+        // numerics track the explicit path below (except on Hexagon, whose
+        // kernel takes F16 K/V only; see fa_kv).
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 0, 2, 1, 3));
-        ggml_tensor * fa = ggml_flash_attn_ext(C, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+        ggml_tensor * fa = ggml_flash_attn_ext(C, Q, vla::fa_kv(C, K), vla::fa_kv(C, V), nullptr, scale, 0.0f, 0.0f);
         ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
         att = ggml_reshape_2d(C, fa, hidden, seq);
     } else {
@@ -150,7 +151,7 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_ten
     }
     ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, mm_act(C, w.Wo, as_type(C, att, at), at), w.bo));
     ggml_tensor * n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.ln2w), w.ln2b);
-    ggml_tensor * ff = ggml_add(C, mm_act(C, w.Wfc2, ggml_gelu(C, ggml_add(C, mm_act(C, w.Wfc1, n2, at), w.bfc1)), at), w.bfc2);
+    ggml_tensor * ff = ggml_add(C, mm_act(C, w.Wfc2, vla::gelu(C, ggml_add(C, mm_act(C, w.Wfc1, n2, at), w.bfc1)), at), w.bfc2);
     return ggml_add(C, h1, ff);
 }
 
@@ -209,7 +210,7 @@ ggml_tensor * build_gemma_layer(
         // ggml_flash_attn_ext asserts an F16 mask. The mask holds only 0 and
         // -inf, both exactly representable in F16, so the cast is lossless.
         ggml_tensor * mask_f16 = mask ? ggml_cast(ctx, mask, GGML_TYPE_F16) : nullptr;
-        ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, K, V, mask_f16, scale, 0.0f, 0.0f);
+        ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, vla::fa_kv(ctx, K), vla::fa_kv(ctx, V), mask_f16, scale, 0.0f, 0.0f);
         ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
         att_pre = ggml_reshape_2d(ctx, fa, qf, seq);
     } else {
@@ -227,7 +228,7 @@ ggml_tensor * build_gemma_layer(
     ggml_tensor * x_norm_mlp = ggml_mul(ctx, ggml_rms_norm(ctx, h1, cfg.rms_eps), w.ln_post);
     ggml_tensor * gate    = mm_act(ctx, w.Wgate, x_norm_mlp, at);
     ggml_tensor * up      = mm_act(ctx, w.Wup,   x_norm_mlp, at);
-    ggml_tensor * inter_t = ggml_mul(ctx, ggml_gelu(ctx, gate), up);
+    ggml_tensor * inter_t = ggml_mul(ctx, vla::gelu(ctx, gate), up);
     ggml_tensor * mlp_out = mm_act(ctx, w.Wdown, inter_t, at);
     return ggml_add(ctx, h1, mlp_out);
 }
@@ -359,7 +360,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
 
     auto m = std::make_unique<Pi0ModelArch>();
     m->ckpt_path_ = ckpt_path;
-    m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
+    m->matmul_type = opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16));
 
     if (!m->io.open(ckpt_path))
         return nullptr;

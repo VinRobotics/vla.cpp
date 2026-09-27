@@ -28,6 +28,16 @@
 #include <string>
 #include <vector>
 
+// fseeko is POSIX; the Windows CRT spells the 64-bit seek _fseeki64. A plain
+// fseek takes a 32-bit long there and cannot reach past 2 GiB into a GGUF.
+inline int vla_fseek64(FILE * fp, uint64_t off) {
+#ifdef _WIN32
+    return _fseeki64(fp, (long long) off, SEEK_SET);
+#else
+    return fseeko(fp, (off_t) off, SEEK_SET);
+#endif
+}
+
 namespace vla {
 
 struct gguf_reader {
@@ -129,7 +139,7 @@ struct gguf_reader {
                          arch, name, nb, cap);
             return false;
         }
-        if (fseeko(fp, (off_t) off, SEEK_SET) != 0)
+        if (vla_fseek64(fp, off) != 0)
             return false;
         return std::fread(buf, 1, nb, fp) == nb;
     }
@@ -141,15 +151,16 @@ struct gguf_reader {
         std::vector<float> out(n);
         if (t->type == GGML_TYPE_F32) { if (!read_raw(name, out.data(), out.size()*sizeof(float))) return {}; }
         else if (t->type == GGML_TYPE_BF16) { std::vector<ggml_bf16_t> tmp(n); if (!read_raw(name, tmp.data(), tmp.size()*sizeof(ggml_bf16_t))) return {}; ggml_bf16_to_fp32_row(tmp.data(), out.data(), n); }
+        else if (t->type == GGML_TYPE_F16)  { std::vector<ggml_fp16_t> tmp(n); if (!read_raw(name, tmp.data(), tmp.size()*sizeof(ggml_fp16_t))) return {}; ggml_fp16_to_fp32_row(tmp.data(), out.data(), n); }
         else { std::fprintf(stderr, "vla(%s): tensor %s unsupported type %d\n", arch, name, (int) t->type); return {}; }
         return out;
     }
 
-    // F32/BF16 targets dequantize to that resident type. Any other target (I8,
-    // Q8_0, Q4_0, ...) is stored raw so ggml_mul_mat dequantizes at compute.
+    // F32/BF16/F16 targets dequantize to that resident type. Any other target
+    // (I8, Q8_0, Q4_0, ...) is stored raw so ggml_mul_mat dequantizes at compute.
     // gemma_norm adds 1.0 per weight.
     std::vector<uint8_t> read_convert(const char * name, ggml_type target, bool gemma_norm = false) {
-        if (target != GGML_TYPE_F32 && target != GGML_TYPE_BF16) {
+        if (target != GGML_TYPE_F32 && target != GGML_TYPE_BF16 && target != GGML_TYPE_F16) {
             if (gemma_norm) {
                 // The +1 needs unpacked floats; skipping it would silently give wrong
                 // norm weights.
@@ -177,6 +188,11 @@ struct gguf_reader {
             ggml_fp32_to_bf16_row(f.data(), reinterpret_cast<ggml_bf16_t *>(o.data()), n);
             return o;
         }
+        if (target == GGML_TYPE_F16) {
+            std::vector<uint8_t> o(n * sizeof(ggml_fp16_t));
+            ggml_fp32_to_fp16_row(f.data(), reinterpret_cast<ggml_fp16_t *>(o.data()), n);
+            return o;
+        }
         std::fprintf(stderr, "vla(%s): unsupported resident type %d for %s\n", arch, (int) target, name); return {};
     }
 
@@ -202,7 +218,7 @@ struct gguf_reader {
                 std::fprintf(stderr, "vla(%s): row %d out of range for %s\n", arch, r, name);
                 return false;
             }
-            if (fseeko(fp, (off_t) (base+(size_t) r * rb), SEEK_SET) != 0)
+            if (vla_fseek64(fp, base+(size_t) r * rb) != 0)
                 return false;
             if (std::fread(row.data(), 1, rb, fp) != rb)
                 return false;

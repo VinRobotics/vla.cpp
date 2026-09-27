@@ -34,6 +34,10 @@ bool parse_dtype(const std::string & v, ggml_type & out) {
         out = GGML_TYPE_BF16;
         return true;
     }
+    if (v == "f16" || v == "fp16") {
+        out = GGML_TYPE_F16;
+        return true;
+    }
     return false;
 }
 
@@ -53,7 +57,7 @@ bool parse_bool(const std::string & v, bool & out) {
 }
 
 const char * dtype_name(ggml_type t) {
-    return t == GGML_TYPE_BF16 ? "bf16" : "f32";
+    return t == GGML_TYPE_BF16 ? "bf16" : t == GGML_TYPE_F16 ? "f16" : "f32";
 }
 
 namespace {
@@ -76,7 +80,7 @@ bool mm_prec_f32_enabled()     {
 }
 
 const char * Options::usage() {
-    return "  --weight-dtype f32|bf16   resident dtype for GEMM weights\n"
+    return "  --weight-dtype f32|bf16|f16  resident dtype for GEMM weights\n"
            "  --act-dtype f32|bf16      activation dtype (needs CUDA and bf16 weights)\n"
            "  --flash-attn [0|1]        flash attention; faster, changes numerics\n"
            "  --mm-prec default|f32     matmul accumulation precision\n";
@@ -101,6 +105,12 @@ bool Options::parse_arg(int argc, char ** argv, int & i, std::string & err) {
 
         ggml_type t;
         if (!parse_dtype(v, t)) {
+            err = a+": expected f32, bf16 or f16, got '"+v+"'";
+            return false;
+        }
+        // F16 weights are for backends without BF16 kernels (Hexagon, OpenCL);
+        // the BF16 activation path is CUDA's and has no F16 twin.
+        if (a == "--act-dtype" && t == GGML_TYPE_F16) {
             err = a+": expected f32 or bf16, got '"+v+"'";
             return false;
         }

@@ -213,7 +213,7 @@ struct gguf_source {
         const int64_t id     = gguf_find_tensor(gctx, name.c_str());
         const size_t  offset = data_off+gguf_get_tensor_offset(gctx, id);
         const size_t  bytes  = gguf_get_tensor_size(gctx, id);
-        if (fseeko(fp, (off_t) offset, SEEK_SET) != 0) {
+        if (vla_fseek64(fp, offset) != 0) {
             std::fprintf(stderr, "vla: fseek failed for %s\n", name.c_str());
             return false;
         }
@@ -225,12 +225,43 @@ struct gguf_source {
             if (std::fread(tmp.data(), 1, bytes, fp) != bytes)
                 return false;
             ggml_bf16_to_fp32_row(tmp.data(), dst, tmp.size());
+        } else if (t->type == GGML_TYPE_F16 || ggml_is_quantized(t->type)) {
+            // A requantized file (scripts/quantize_gguf.py) may pack a tensor
+            // this model keeps float; unpack it rather than refuse the file.
+            const ggml_type_traits * tt = ggml_get_type_traits(t->type);
+            if (!tt->to_float) {
+                std::fprintf(stderr, "vla: gguf cannot dequantize %s for %s\n",
+                             ggml_type_name(t->type), name.c_str());
+                return false;
+            }
+            std::vector<uint8_t> tmp(bytes);
+            if (std::fread(tmp.data(), 1, bytes, fp) != bytes)
+                return false;
+            tt->to_float(tmp.data(), dst, ggml_nelements(t));
         } else {
             std::fprintf(stderr, "vla: gguf unsupported dtype %d for %s\n",
                          (int) t->type, name.c_str());
             return false;
         }
         return true;
+    }
+
+    /// Type of a tensor in the file, or GGML_TYPE_COUNT if it is absent.
+    ggml_type file_type(const std::string & name) const {
+        const ggml_tensor * t = ggml_get_tensor(meta_ctx, name.c_str());
+        return t ? t->type : GGML_TYPE_COUNT;
+    }
+
+    /// Packed bytes, stored as they are: the caller made the tensor that type.
+    bool read_packed(const std::string & name, void * dst, ggml_type want, size_t expected_bytes) {
+        const int64_t id = gguf_find_tensor(gctx, name.c_str());
+        if (id < 0 || file_type(name) != want || gguf_get_tensor_size(gctx, id) != expected_bytes) {
+            std::fprintf(stderr, "vla: gguf bad packed read for %s\n", name.c_str());
+            return false;
+        }
+        if (vla_fseek64(fp, data_off+gguf_get_tensor_offset(gctx, id)) != 0)
+            return false;
+        return std::fread(dst, 1, expected_bytes, fp) == expected_bytes;
     }
 
     bool read_raw(const std::string & name, void * dst, size_t expected_bytes,
@@ -249,7 +280,7 @@ struct gguf_source {
             return false;
         }
         const size_t offset = data_off+gguf_get_tensor_offset(gctx, id);
-        if (fseeko(fp, (off_t) offset, SEEK_SET) != 0)
+        if (vla_fseek64(fp, offset) != 0)
             return false;
         return std::fread(dst, 1, bytes, fp) == bytes;
     }
@@ -410,7 +441,7 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_ten
         // numerics match the explicit path; the expert layers below already call
         // this op the same way.
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 0, 2, 1, 3));
-        ggml_tensor * fa = ggml_flash_attn_ext(C, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+        ggml_tensor * fa = ggml_flash_attn_ext(C, Q, vla::fa_kv(C, K), vla::fa_kv(C, V), nullptr, scale, 0.0f, 0.0f);
         ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
         att = ggml_reshape_2d(C, fa, hidden, seq);
     } else {
@@ -421,7 +452,7 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_ten
     }
     ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
     ggml_tensor * n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.ln2w), w.ln2b);
-    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, ggml_gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);
+    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, vla::gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);
     return ggml_add(C, h1, ff);
 }
 
@@ -794,8 +825,8 @@ ggml_tensor * build_vlm_layer(ggml_context * ctx, const VlmLayerW & w,
     *v_out = v_h;
 
     ggml_tensor * Q = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
-    ggml_tensor * K = ggml_permute(ctx, k_rope, 0, 2, 1, 3);
-    ggml_tensor * V = ggml_permute(ctx, v_h,    0, 2, 1, 3);
+    ggml_tensor * K = ggml_permute(ctx, vla::fa_kv(ctx, k_rope), 0, 2, 1, 3);
+    ggml_tensor * V = ggml_permute(ctx, vla::fa_kv(ctx, v_h),    0, 2, 1, 3);
     const float scale = 1.f/std::sqrt(static_cast<float>(cfg.head_dim));
     ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, K, V, mask, scale,
                                             0.f,  0.f);
@@ -833,8 +864,8 @@ ggml_tensor * build_expert_self_attn_layer(
     ggml_tensor * V_full = ggml_concat(ctx, cached_V, v_h,    2);
 
     ggml_tensor * Q  = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
-    ggml_tensor * Kp = ggml_permute(ctx, K_full, 0, 2, 1, 3);
-    ggml_tensor * Vp = ggml_permute(ctx, V_full, 0, 2, 1, 3);
+    ggml_tensor * Kp = ggml_permute(ctx, vla::fa_kv(ctx, K_full), 0, 2, 1, 3);
+    ggml_tensor * Vp = ggml_permute(ctx, vla::fa_kv(ctx, V_full), 0, 2, 1, 3);
     const float scale = 1.f/std::sqrt(static_cast<float>(cfg.head_dim));
     ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, Kp, Vp, mask_full, scale,
                                             0.f,  0.f);
@@ -872,8 +903,8 @@ ggml_tensor * build_expert_cross_attn_layer(
     ggml_tensor * q_rope = rope_q_or_k(ctx, q_h, positions_rebased, cfg);
 
     ggml_tensor * Q  = ggml_permute(ctx, q_rope,  0, 2, 1, 3);
-    ggml_tensor * Kp = ggml_permute(ctx, K_repro, 0, 2, 1, 3);
-    ggml_tensor * Vp = ggml_permute(ctx, V_repro, 0, 2, 1, 3);
+    ggml_tensor * Kp = ggml_permute(ctx, vla::fa_kv(ctx, K_repro), 0, 2, 1, 3);
+    ggml_tensor * Vp = ggml_permute(ctx, vla::fa_kv(ctx, V_repro), 0, 2, 1, 3);
     const float scale = 1.f/std::sqrt(static_cast<float>(cfg.head_dim));
     ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, Kp, Vp, mask_prefix_only, scale,
                                             0.f,  0.f);
@@ -1241,6 +1272,35 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
                                                    cfg.expert_h, cfg.n_suffix);
     }
 
+    // A GEMM weight the file stores packed (Q8_0, Q4_0, ...) stays packed and
+    // ggml_mul_mat dequantizes at compute, as in the shared WeightLoader. Every
+    // tensor above that uses wdt is a mul_mat operand, so those are the ones
+    // eligible. Retyping is safe here: nothing is allocated yet.
+    struct PendingPacked { std::string name; ggml_tensor * t; };
+    std::vector<PendingPacked> pending_packed;
+    if (use_gguf) {
+        std::vector<PendingF32> keep;
+        keep.reserve(pending_f32.size());
+        for (auto & p : pending_f32) {
+            const ggml_type ft = gst.file_type(hf_to_gguf(p.name));
+            if (p.t->type == wdt && ft != GGML_TYPE_COUNT && ggml_is_quantized(ft) &&
+                p.t->ne[0] % ggml_blck_size(ft) == 0) {
+                p.t->type  = ft;
+                p.t->nb[0] = ggml_type_size(ft);
+                p.t->nb[1] = p.t->nb[0] * (p.t->ne[0] / ggml_blck_size(ft));
+                for (int d = 2; d < GGML_MAX_DIMS; ++d)
+                    p.t->nb[d] = p.t->nb[d-1] * p.t->ne[d-1];
+                pending_packed.push_back({p.name, p.t});
+            } else {
+                keep.push_back(std::move(p));
+            }
+        }
+        pending_f32.swap(keep);
+        if (!pending_packed.empty())
+            std::printf("vla: %zu GEMM weights kept packed as in the file (%s)\n",
+                        pending_packed.size(), ggml_type_name(pending_packed[0].t->type));
+    }
+
     m->weight_buf = alloc_weights(m->ctx_weights, m->backend);
     if (!m->weight_buf) {
         std::fprintf(stderr, "vla: alloc_weights failed\n");
@@ -1288,6 +1348,14 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
             delete m;
             return nullptr;
         }
+    }
+    for (auto & p : pending_packed) {
+        std::vector<uint8_t> hbuf(ggml_nbytes(p.t));
+        if (!gst.read_packed(hf_to_gguf(p.name), hbuf.data(), p.t->type, hbuf.size())) {
+            delete m;
+            return nullptr;
+        }
+        ggml_backend_tensor_set(p.t, hbuf.data(), 0, hbuf.size());
     }
 
     {
@@ -1972,7 +2040,7 @@ std::unique_ptr<ModelArchBase> smolvla_create(const std::string& mmproj_path,
                                               const std::string& ckpt_path,
                                               const std::string& config_path,
                                               const Options& opts) {
-    SmolVLAModelArch* raw = smolvla_load_impl(opts.weight_dtype.value_or(GGML_TYPE_BF16),
+    SmolVLAModelArch* raw = smolvla_load_impl(opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16)),
                                              mmproj_path, ckpt_path, config_path);
     if (!raw)
         return nullptr;

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "arch.h"
+#include "backend.h"
 #include "model.h"
 #include "options.h"
 
@@ -231,7 +232,7 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
         }
     }
 
-    set_flash_attn(opts.flash_attn.value_or(false));
+    set_flash_attn(opts.flash_attn.value_or(default_flash_attn()));
     set_mm_prec_f32(opts.mm_prec_f32.value_or(true));
 
     switch (arch) {

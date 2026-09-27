@@ -28,7 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#include <ctime>
+#include <chrono>
 #include <vector>
 
 using namespace vla;
@@ -113,11 +113,10 @@ int main(int argc, char** argv) {
         for (int w = 0; w < 3; ++w) (void)predict(m, in);
         double best = 1e30, sum = 0.0;
         for (int i = 0; i < iters; ++i) {
-            struct timespec t0, t1;
-            clock_gettime(CLOCK_MONOTONIC, &t0);
+            const auto t0 = std::chrono::steady_clock::now();
             std::vector<float> a = predict(m, in);
-            clock_gettime(CLOCK_MONOTONIC, &t1);
-            double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+            const auto t1 = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             best = ms < best ? ms : best;
             sum += ms;
         }

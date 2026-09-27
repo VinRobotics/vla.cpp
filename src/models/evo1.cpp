@@ -210,7 +210,9 @@ ggml_tensor * evo1_flash_attn(ggml_context * C, ggml_tensor * q, ggml_tensor * k
     // K/V stay F32. Casting them to F16 (as some in-tree FA helpers do) costs
     // real precision: over 24 ViT layers it moved evo1's actions by ~1e-2, which
     // is enough to change a LIBERO episode's outcome. smolvla's expert passes
-    // F32 K/V to the same op, so the backend handles it.
+    // F32 K/V to the same op, so the backend handles it. Hexagon's kernel takes
+    // F16 K/V only, and casting there measured 3.9e-2 against the CPU reference,
+    // so on Hexagon this attention runs on the CPU fallback instead.
     ggml_tensor * o = ggml_flash_attn_ext(C, q, k, v, nullptr, scale, 0.0f, 0.0f);
     // F32 accumulation keeps the softmax/AV reduction at the precision the
     // explicit path used, so switching kernels does not move the actions.
@@ -366,7 +368,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
 
     auto m = std::make_unique<Evo1ModelArch>();
     m->gguf_path = ckpt_path;
-    m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_BF16);
+    m->matmul_type = opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16));
 
     if (!m->io.open(ckpt_path))
         return nullptr;

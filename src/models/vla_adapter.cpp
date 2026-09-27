@@ -185,7 +185,7 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
     if (!mmproj_path.empty())
         std::printf("vla(vla_adapter): note - mmproj '%s' ignored (vision baked into combined GGUF)\n", mmproj_path.c_str());
     auto m = std::make_unique<VlaAdapterModelArch>();
-    m->mt = opts.weight_dtype.value_or(GGML_TYPE_BF16);
+    m->mt = opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16));
 
     gguf_reader g("vla_adapter");
     if (!g.open(ckpt_path))

@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "backend.h"
 #include "layers/linear.h"
 
 #include "ggml.h"
@@ -23,7 +24,7 @@ namespace vla {
 
 inline ggml_tensor * ffn_gelu(ggml_context * C, ggml_tensor * W1, ggml_tensor * b1,
                               ggml_tensor * W2, ggml_tensor * b2, ggml_tensor * x) {
-    return linear(C, W2, b2, ggml_gelu(C, linear(C, W1, b1, x)));
+    return linear(C, W2, b2, gelu(C, linear(C, W1, b1, x)));
 }
 
 inline ggml_tensor * ffn_relu(ggml_context * C, ggml_tensor * W1, ggml_tensor * b1,

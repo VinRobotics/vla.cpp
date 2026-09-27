@@ -6,6 +6,20 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 
+- **Snapdragon X on Windows on Arm: Hexagon NPU, Adreno GPU and CPU.**
+  - `-DGGML_HEXAGON=ON` and `-DGGML_OPENCL=ON` build natively with Visual
+    Studio's Clang; `scripts/build_windows_snapdragon.ps1` drives the build,
+    including skel signing.
+  - Ops either accelerator rejects run on the CPU through a wrapper backend
+    (`src/backend_fallback.cpp`), with no change to any arch.
+  - SmolVLA runs in 1.23 s on the NPU (2.57 s CPU), within 1.5e-3 of the CPU
+    reference; eleven checkpoints run on both accelerators.
+  - Five ggml-hexagon kernels that give wrong answers for VLA shapes are routed
+    around. See `docs/backend/hexagon-windows.md`.
+- `--weight-dtype f16`. It is the default on Hexagon and OpenCL, and 2.5-3.5x
+  faster than BF16 on CPUs without BF16 matmul.
+- `VLA_BUILD_SERVER=OFF` builds `vla-cli` and `vla-bench` without protobuf or
+  ZeroMQ.
 - **OpenVINO backend.** `-DGGML_OPENVINO=ON` runs the archs on Intel CPUs, iGPUs
   and NPUs through ggml's OpenVINO backend. SmolVLA, π0.5, Evo-1 and VLA-Adapter
   match an F32 CPU reference to 1e-3; on an Arc B390 iGPU that is 3.0x to 9.6x
@@ -31,6 +45,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Fixed
 
+- A `scripts/quantize_gguf.py` file did not load for SmolVLA on any platform:
+  its loader read every weight as float and refused the packed connector. It now
+  keeps packed GEMM weights packed, like the other archs, and dequantizes the
+  rest.
 - Two elementwise adds stacked on a GEMM came out wrong on the Intel iGPU. The
   GPU plugin folds elementwise ops into the preceding GEMM as post-ops, and given
   `ADD(ADD(residual, GEMM), graph_input)` it folds both and silently drops the
