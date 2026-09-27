@@ -64,14 +64,16 @@
 #include <string>
 #include <unordered_set>
 #endif
-#if defined(GGML_USE_SYCL) || defined(GGML_USE_OPENVINO) || defined(GGML_USE_HEXAGON) || defined(GGML_USE_OPENCL)
+#if defined(GGML_USE_SYCL) || defined(GGML_USE_OPENVINO) || \
+    defined(GGML_USE_HEXAGON) || defined(GGML_USE_OPENCL)
 #include <stdlib.h>  // setenv / _putenv_s
 #include <mutex>
 #endif
 
 namespace vla {
 
-#if defined(GGML_USE_SYCL) || defined(GGML_USE_OPENVINO) || defined(GGML_USE_HEXAGON) || defined(GGML_USE_OPENCL)
+#if defined(GGML_USE_SYCL) || defined(GGML_USE_OPENVINO) || \
+    defined(GGML_USE_HEXAGON) || defined(GGML_USE_OPENCL)
 // setenv is POSIX. _putenv_s has no "do not overwrite" mode, so check first.
 // Empty counts as unset; an empty KEY= in a compose file is not a choice.
 inline void setenv_default(const char * key, const char * val) {
@@ -407,13 +409,14 @@ inline Backend backend_init(const char * tag, int n_threads) {
             ggml_backend_reg_t reg  = ggml_backend_opencl_reg();
             const char *       what = "OpenCL";
 #endif
-            const int    dev   = backend_device_index();
-            const size_t n_dev = reg ? ggml_backend_reg_dev_count(reg) : 0;
+            const int      dev   = backend_device_index();
+            const size_t   n_dev = reg ? ggml_backend_reg_dev_count(reg) : 0;
             ggml_backend_t accel = nullptr;
             if ((size_t) dev >= n_dev) {
-                std::fprintf(stderr, "%s: %s device %d out of range (%zu visible); falling back to CPU\n",
+                std::fprintf(stderr,
+                             "%s: %s device %d out of range (%zu visible); falling back to CPU\n",
                              tag, what, dev, n_dev);
-            } else if ((accel = ggml_backend_dev_init(ggml_backend_reg_dev_get(reg, dev), nullptr)) == nullptr) {
+            } else if (!(accel = ggml_backend_dev_init(ggml_backend_reg_dev_get(reg, dev), nullptr))) {
                 std::fprintf(stderr, "%s: %s init failed; falling back to CPU\n", tag, what);
             } else if ((b.handle = fallback_backend_new(accel, n_threads)) != nullptr) {
                 std::printf("%s: backend = %s (%s), rejected ops on CPU (%d threads)\n",

@@ -1,8 +1,7 @@
 # vla.cpp on Snapdragon X (Windows on Arm): Hexagon NPU, Adreno GPU and CPU
 
-Date: 2026-09-27
-vla.cpp: `3f0a38a` plus the changes described here (uncommitted)
-llama.cpp: local checkout, build 11201, commit `2145525a4` (not the `b10729` pin)
+Measured 2026-09 against llama.cpp build 11201 (`2145525a4`), passed in with
+`-LlamaDir`. The `b10729` tag that `CMakeLists.txt` pins was not tested.
 
 ## Summary
 
@@ -30,11 +29,9 @@ Every accelerator result below was checked against a CPU-backend reference on id
 
   The CPU fallback now routes around each of them, and each is described [below](#hexagon-issues-found-and-worked-around).
 
-The NPU path needs the same one-off setup as llama.cpp: a newer NPU driver, test-signing, and a self-signed certificate. That setup is described in `../llama.cpp/snapdragon-x-windows-report.md` and was reused unchanged.
+The NPU path needs the same one-off setup as llama.cpp's Hexagon backend: a newer NPU driver, test-signing, and a self-signed certificate. See [NPU prerequisites](#npu-prerequisites).
 
 ## Device
-
-Same laptop as the llama.cpp report:
 
 | Item | Value |
 |---|---|
@@ -47,10 +44,12 @@ Same laptop as the llama.cpp report:
 
 ## Toolchain
 
-Everything llama.cpp needed, plus the following:
-
 | Component | Version / location | Used for |
 |---|---|---|
+| Visual Studio | 2026 (18), MSVC 14.51, ARM64 libraries | Its bundled Clang 22.1.3, CMake and Ninja build everything |
+| Windows SDK / WDK | 10.0.26100 | `inf2cat` and `signtool`, to sign the HTP skels |
+| Hexagon SDK | 6.6.0.0, tools 19.0.07 (`HEXAGON_SDK_ROOT`, `HEXAGON_TOOLS_ROOT`) | Building the HTP skels |
+| OpenCL SDK | 2.3.2 (`OPENCL_SDK_ROOT`) | The Adreno backend |
 | vcpkg | `C:\vcpkg` | protobuf 6.33.4 (triplet `arm64-windows-clangcl`, in this repo), zeromq 4.3.5 and cppzmq (stock `arm64-windows`) for `vla-server` |
 | Python | 3.14.7 ARM64, venv in `.venv` | `transformers` 5.17, `tokenizers`, `gguf`, `numpy`: tokenizing prompts and `scripts/quantize_gguf.py` |
 
@@ -73,16 +72,33 @@ C:\vcpkg\vcpkg install protobuf --triplet arm64-windows-clangcl --overlay-triple
 The build script sets up the Visual Studio shell, the compiler flags llama.cpp's Snapdragon preset uses, vcpkg, and (for the NPU) skel signing:
 
 ```
-.\scripts\build_windows_snapdragon.ps1 -Backend htp    -LlamaDir C:\Users\khanh\git\llama.cpp -HtpCert C:\Users\khanh\Certs\ggml-htp-v1.pfx
-.\scripts\build_windows_snapdragon.ps1 -Backend opencl -LlamaDir C:\Users\khanh\git\llama.cpp
-.\scripts\build_windows_snapdragon.ps1 -Backend cpu    -LlamaDir C:\Users\khanh\git\llama.cpp
+.\scripts\build_windows_snapdragon.ps1 -Backend htp    -LlamaDir <llama.cpp> -HtpCert <cert.pfx>
+.\scripts\build_windows_snapdragon.ps1 -Backend opencl -LlamaDir <llama.cpp>
+.\scripts\build_windows_snapdragon.ps1 -Backend cpu    -LlamaDir <llama.cpp>
 ```
 
 Each build goes into `build-wos-<backend>`, with every binary and DLL in `build-wos-<backend>\bin`. `-NoServer` skips `vla-server`, Octo and their protobuf and ZeroMQ dependencies.
 
-`-LlamaDir` points the build at an existing llama.cpp checkout through `FETCHCONTENT_SOURCE_DIR_LLAMA`. This build uses the local checkout, which already builds and signs the HTP skels on this machine. The `b10729` pin in `CMakeLists.txt` still applies when `-LlamaDir` is not given. That pin was not tested here.
+`-LlamaDir` points the build at an existing llama.cpp checkout through `FETCHCONTENT_SOURCE_DIR_LLAMA`. Without it, the `b10729` pin in `CMakeLists.txt` applies, which was not tested here.
 
-The HTP build also signs `libggml-htp-v*.so` with the certificate and copies the skels and their catalog next to the binaries. At startup the Hexagon backend points `ADSP_LIBRARY_PATH` at the executable's own folder, but only if the variable is unset. The llama.cpp setup set it for the user to `llama.cpp\pkg-wos\lib`. Those skels come from the same llama.cpp commit, so they work too.
+The HTP build also signs `libggml-htp-v*.so` with the certificate and copies the skels and their catalog next to the binaries. At startup the Hexagon backend points `ADSP_LIBRARY_PATH` at the executable's own folder, but only if the variable is unset. If it is already set, for example by a llama.cpp install, the skels it names must come from the same llama.cpp commit.
+
+### NPU prerequisites
+
+These follow llama.cpp's [Windows guide](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/snapdragon/windows.md). They are one-off per machine, and the steps that need admin rights are marked.
+
+1. **Update the NPU driver.** Install Qualcomm's HND package from the Qualcomm Software Center (driver 30.0.220 or later; admin and a reboot). The driver shipped with the laptop (30.0.143) lacks the `dspqueue_*` functions, and the backend fails with `failed to dlsym dspqueue_create`.
+2. **Enable test-signing** (admin and a reboot). Secure Boot must be off first, in the firmware setup. Then run `bcdedit /set TESTSIGNING ON`.
+3. **Create and trust a code-signing certificate** (admin, for the trust step):
+
+   ```
+   New-SelfSignedCertificate -Subject "CN=GGML.HTP.v1" -Type CodeSigningCert -CertStoreLocation Cert:\CurrentUser\My
+   # export it to <cert.pfx> and <cert.cer>, then:
+   certutil -addstore Root <cert.cer>
+   certutil -addstore TrustedPublisher <cert.cer>
+   ```
+
+4. **Pass the `.pfx` to the build** with `-HtpCert`. Without it the skels are unsigned, and opening a session fails with error `0x80000406`.
 
 ### What had to change for Windows
 
@@ -296,10 +312,18 @@ SmolVLA's CPU Q8_0 run keeps its float weights at F16; the other rows keep the C
 
 ## Known issues
 
-- The NPU prints `ggml-hex: FASTRPC_GET_DOMAINS query failed (0x6c), using static CDSP domains` on every run. It works regardless, as in the llama.cpp report.
+- The NPU prints `ggml-hex: FASTRPC_GET_DOMAINS query failed (0x6c), using static CDSP domains` on every run. It works regardless.
 - The Adreno driver refuses `GGML_OPENCL_ADRENO_USE_LARGE_BUFFER` ("not supported by driver"), so no single allocation can exceed about 1 GB. F16 weights keep every model here under that.
 - `Launch-VsDevShell.ps1` prints `'vswhere.exe' is not recognized`; the build is not affected.
 
 ## Security state
 
-Unchanged from the llama.cpp report: Secure Boot off, test-signing on, and a self-signed certificate trusted as a root authority. This build signs its skels with the same certificate. Rollback is described in that report.
+Using the NPU leaves the machine with Secure Boot off, test-signing on, and a self-signed certificate trusted as a root authority. Anyone who can read the `.pfx` can sign code that machine will trust, so keep it private. To undo, run the following; the NPU backend then stops loading, while the CPU and GPU are unaffected:
+
+```
+certutil -delstore Root <thumbprint>
+certutil -delstore TrustedPublisher <thumbprint>
+bcdedit /set TESTSIGNING OFF
+```
+
+Then turn Secure Boot back on in the firmware setup.

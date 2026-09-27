@@ -314,88 +314,84 @@ target_link_libraries(vlm_core PUBLIC llama ggml mtmd llama-common)
 # them configure on a machine that has not installed the serving stack.
 option(VLA_BUILD_SERVER "Build vla-server and vlm-server (needs protobuf, libzmq, cppzmq)" ON)
 if(VLA_BUILD_SERVER)
-find_package(Protobuf REQUIRED)
-# vcpkg (the Windows route) ships a CMake package and no pkg-config binary;
-# Linux distros ship the .pc file. Either yields one target to link.
-find_package(ZeroMQ CONFIG QUIET)
-if(TARGET libzmq)
-    set(VLA_ZMQ_TARGET libzmq)
-elseif(TARGET libzmq-static)
-    set(VLA_ZMQ_TARGET libzmq-static)
-else()
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(ZeroMQ REQUIRED IMPORTED_TARGET libzmq)
-    set(VLA_ZMQ_TARGET PkgConfig::ZeroMQ)
+    find_package(Protobuf REQUIRED)
+    if(WIN32)
+        # vcpkg ships ZeroMQ's CMake package and no pkg-config.
+        find_package(ZeroMQ CONFIG REQUIRED)
+        set(VLA_ZMQ_TARGET libzmq)
+    else()
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(ZeroMQ REQUIRED IMPORTED_TARGET libzmq)
+        set(VLA_ZMQ_TARGET PkgConfig::ZeroMQ)
+    endif()
+
+    find_path(CPPZMQ_INCLUDE_DIR NAMES zmq.hpp)
+    if(NOT CPPZMQ_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "cppzmq (zmq.hpp) not found. Install 'cppzmq-dev' (Debian/Ubuntu) or set "
+            "CMAKE_PREFIX_PATH to your cppzmq install prefix.")
+    endif()
+
+    set(VLA_PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/serving/vla.proto)
+    set(VLA_PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/proto-gen/serving)
+    file(MAKE_DIRECTORY ${VLA_PROTO_GEN_DIR})
+
+    add_custom_command(
+        OUTPUT  ${VLA_PROTO_GEN_DIR}/vla.pb.h
+                ${VLA_PROTO_GEN_DIR}/vla.pb.cc
+        COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+                --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/src/serving
+                --cpp_out=${VLA_PROTO_GEN_DIR}
+                ${VLA_PROTO_SRC}
+        DEPENDS ${VLA_PROTO_SRC}
+        VERBATIM
+    )
+
+    add_executable(vla-server
+        src/serving/server.cpp
+        ${VLA_PROTO_GEN_DIR}/vla.pb.cc
+    )
+    target_include_directories(vla-server PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/proto-gen
+        ${llama_SOURCE_DIR}/vendor/stb
+        ${CPPZMQ_INCLUDE_DIR}
+    )
+    target_link_libraries(vla-server PRIVATE
+        vla_core
+        protobuf::libprotobuf
+        ${VLA_ZMQ_TARGET}
+    )
+
+    set(VLM_PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/serving/vlm.proto)
+    set(VLM_PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/proto-gen/serving)
+    file(MAKE_DIRECTORY ${VLM_PROTO_GEN_DIR})
+
+    add_custom_command(
+        OUTPUT  ${VLM_PROTO_GEN_DIR}/vlm.pb.h
+                ${VLM_PROTO_GEN_DIR}/vlm.pb.cc
+        COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+                --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/src/serving
+                --cpp_out=${VLM_PROTO_GEN_DIR}
+                ${VLM_PROTO_SRC}
+        DEPENDS ${VLM_PROTO_SRC}
+        VERBATIM
+    )
+
+    add_executable(vlm-server
+        src/serving/vlm-server.cpp
+        ${VLM_PROTO_GEN_DIR}/vlm.pb.cc
+    )
+    target_include_directories(vlm-server PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/proto-gen
+        ${llama_SOURCE_DIR}/vendor/stb
+        ${CPPZMQ_INCLUDE_DIR}
+    )
+    target_link_libraries(vlm-server PRIVATE
+        vlm_core
+        protobuf::libprotobuf
+        ${VLA_ZMQ_TARGET}
+    )
 endif()
-
-find_path(CPPZMQ_INCLUDE_DIR NAMES zmq.hpp)
-if(NOT CPPZMQ_INCLUDE_DIR)
-    message(FATAL_ERROR
-        "cppzmq (zmq.hpp) not found. Install 'cppzmq-dev' (Debian/Ubuntu) or set "
-        "CMAKE_PREFIX_PATH to your cppzmq install prefix.")
-endif()
-
-set(VLA_PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/serving/vla.proto)
-set(VLA_PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/proto-gen/serving)
-file(MAKE_DIRECTORY ${VLA_PROTO_GEN_DIR})
-
-add_custom_command(
-    OUTPUT  ${VLA_PROTO_GEN_DIR}/vla.pb.h
-            ${VLA_PROTO_GEN_DIR}/vla.pb.cc
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE}
-            --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/src/serving
-            --cpp_out=${VLA_PROTO_GEN_DIR}
-            ${VLA_PROTO_SRC}
-    DEPENDS ${VLA_PROTO_SRC}
-    VERBATIM
-)
-
-add_executable(vla-server
-    src/serving/server.cpp
-    ${VLA_PROTO_GEN_DIR}/vla.pb.cc
-)
-target_include_directories(vla-server PRIVATE
-    ${CMAKE_CURRENT_BINARY_DIR}/proto-gen
-    ${llama_SOURCE_DIR}/vendor/stb
-    ${CPPZMQ_INCLUDE_DIR}
-)
-target_link_libraries(vla-server PRIVATE
-    vla_core
-    protobuf::libprotobuf
-    ${VLA_ZMQ_TARGET}
-)
-
-set(VLM_PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/serving/vlm.proto)
-set(VLM_PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/proto-gen/serving)
-file(MAKE_DIRECTORY ${VLM_PROTO_GEN_DIR})
-
-add_custom_command(
-    OUTPUT  ${VLM_PROTO_GEN_DIR}/vlm.pb.h
-            ${VLM_PROTO_GEN_DIR}/vlm.pb.cc
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE}
-            --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/src/serving
-            --cpp_out=${VLM_PROTO_GEN_DIR}
-            ${VLM_PROTO_SRC}
-    DEPENDS ${VLM_PROTO_SRC}
-    VERBATIM
-)
-
-add_executable(vlm-server
-    src/serving/vlm-server.cpp
-    ${VLM_PROTO_GEN_DIR}/vlm.pb.cc
-)
-target_include_directories(vlm-server PRIVATE
-    ${CMAKE_CURRENT_BINARY_DIR}/proto-gen
-    ${llama_SOURCE_DIR}/vendor/stb
-    ${CPPZMQ_INCLUDE_DIR}
-)
-target_link_libraries(vlm-server PRIVATE
-    vlm_core
-    protobuf::libprotobuf
-    ${VLA_ZMQ_TARGET}
-)
-
-endif()  # VLA_BUILD_SERVER
 
 add_library(vla SHARED src/vla_c_api.cpp)
 target_include_directories(vla
