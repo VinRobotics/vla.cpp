@@ -19,6 +19,8 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_PNG
 // stb ships its full implementation here; silence its unused-function noise so
 // our own -Wall -Wextra output stays meaningful.
 #pragma GCC diagnostic push
@@ -48,6 +50,7 @@ void on_signal(int) {
 // Reject absurd image dimensions before any size arithmetic, so an untrusted
 // width or height cannot overflow size_t or truncate to a negative int.
 constexpr unsigned kMaxImageDim = 8192;
+constexpr size_t   kMaxTotalPixels = size_t(64) << 20;
 
 bool decode_image(const vla::Image & img,
                   std::vector<uint8_t> & u8,
@@ -154,19 +157,15 @@ std::string make_error_response(uint64_t request_id, const std::string & msg) {
 }
 
 // Discard frames after the first. Must run to completion: a queued frame keeps
-// REP in receive state and send throws EFSM. Stalled means the peer announced a
-// frame it never sent, so no reply is possible until the rest arrives.
-enum class Drain { Clean, Extra, Stalled };
-
-Drain drain_extra_frames(zmq::socket_t & sock) {
-    Drain d = Drain::Clean;
+// REP in receive state and send throws EFSM.
+bool drain_extra_frames(zmq::socket_t & sock) {
+    bool extra = false;
     while (sock.get(zmq::sockopt::rcvmore)) {
         zmq::message_t junk;
-        if (!sock.recv(junk, zmq::recv_flags::none))
-            return Drain::Stalled;
-        d = Drain::Extra;
+        (void) sock.recv(junk, zmq::recv_flags::none);
+        extra = true;
     }
-    return d;
+    return extra;
 }
 
 int find_non_finite(const float * data, int n) {
@@ -180,13 +179,12 @@ int find_non_finite(const float * data, int n) {
 void usage(const char * prog) {
     std::fprintf(stderr,
         "usage: %s [--bind ADDR] [--timing-detail none|phase] [--config PATH] "
-        "[<mmproj.gguf>] (<ckpt> | -hf user/repo[:file.gguf])\n"
-        "  <mmproj.gguf>           vision-tower mmproj GGUF (SigLIP / PaliGemma /\n"
-        "                          connector). Required for SmolVLA, π0, Evo-1, GR00T.\n"
-        "                          Omit for BitVLA - its vision tower is baked into\n"
-        "                          the combined ckpt GGUF.\n"
+        "([<mmproj.gguf>] <ckpt> | -hf user/repo[:file.gguf])\n"
+        "  <mmproj.gguf>           ignored; every arch bundles its vision tower in the\n"
+        "                          ckpt GGUF. Accepted so older command lines still work.\n"
         "  -hf                     HuggingFace repo, user/repo[:file.gguf]; downloaded\n"
-        "                          on a miss and cached under $VLA_CACHE.\n"
+        "                          on a miss and cached under $VLA_CACHE. Not combined\n"
+        "                          with positional args.\n"
         "  <ckpt>                  SmolVLA .safetensors or .gguf, or any of the other\n"
         "                          supported architectures' .gguf; the architecture is\n"
         "                          auto-detected from the checkpoint.\n"
@@ -194,11 +192,13 @@ void usage(const char * prog) {
         "  --timing-detail LEVEL   per-request timing breakdown (default: none)\n"
         "                          'none'  : single ms_inference\n"
         "                          'phase' : ms_prefill + ms_denoise broken out\n"
-        "                          (π0 currently reports only the combined ms_inference)\n"
+        "                          (only SmolVLA, BitVLA and VLA-JEPA report the split;\n"
+        "                          the others report ms_inference only)\n"
         "%s"
-        "  --config PATH           LeRobot policy config.json (SmolVLA safetensors only;\n"
-        "                          ignored for GGUF checkpoints). If omitted, uses\n"
-        "                          <dirname(ckpt)>/config.json.\n",
+        "  --config PATH           policy config.json. Its \"runtime\" object sets the\n"
+        "                          precision flags above for any arch; flags given on\n"
+        "                          the command line win. SmolVLA safetensors also read\n"
+        "                          the policy from it (default <dirname(ckpt)>/config.json).\n",
         prog, vla::Options::usage());
 }
 
@@ -261,7 +261,12 @@ int main(int argc, char ** argv) {
             positionals.push_back(std::move(a));
         }
     }
-    if (!hf_spec.empty() && positionals.empty()) {
+    if (!hf_spec.empty()) {
+        if (!positionals.empty()) {
+            std::fprintf(stderr, "vla-server: pass <ckpt> or -hf, not both\n");
+            usage(argv[0]);
+            return 1;
+        }
         ckpt_path = vla::hf_resolve(hf_spec);
         if (ckpt_path.empty())
             return 1;
@@ -272,9 +277,7 @@ int main(int argc, char ** argv) {
         ckpt_path   = positionals[1];
     } else {
         std::fprintf(stderr,
-                     "vla-server: expected -hf, or 1 or 2 positional args "
-                     "(<mmproj.gguf> <ckpt> for SmolVLA/π0/Evo-1/GR00T, "
-                     "or just <ckpt> for BitVLA), got %zu\n",
+                     "vla-server: expected -hf or [<mmproj.gguf>] <ckpt>, got %zu positional args\n",
                      positionals.size());
         usage(argv[0]);
         return 1;
@@ -311,10 +314,12 @@ int main(int argc, char ** argv) {
     // 64 MiB is above any real request (16 views of 512x512 F32 RGB is ~50 MiB) and
     // low enough to bound protobuf's expansion during ParseFromArray.
     sock.set(zmq::sockopt::maxmsgsize, int64_t(64)*1024*1024);
-    // A peer that sends a frame with SNDMORE and then stalls would otherwise park
-    // this single-threaded loop in recv for good, starving every other client.
-    sock.set(zmq::sockopt::rcvtimeo, 5000);
-    sock.bind(bind_addr);
+    try {
+        sock.bind(bind_addr);
+    } catch (const zmq::error_t & e) {
+        std::fprintf(stderr, "vla-server: bind %s: %s\n", bind_addr.c_str(), e.what());
+        return 1;
+    }
     std::printf("vla-server: bound to %s. ready.\n", bind_addr.c_str());
 
     if (bind_addr.find("127.0.0.1") == std::string::npos &&
@@ -375,13 +380,7 @@ int main(int argc, char ** argv) {
 
         // Without this an unauthenticated client shuts the server down with one
         // two-frame request: the reply fails and send_reply sets g_shutdown.
-        const Drain drained = drain_extra_frames(sock);
-        if (drained == Drain::Stalled) {
-            // Back to the poll rather than blocking here, so shutdown still works.
-            std::fprintf(stderr, "vla-server: peer stalled mid-request\n");
-            continue;
-        }
-        if (drained == Drain::Extra) {
+        if (drain_extra_frames(sock)) {
             send_reply(make_error_response(0, "expected a single-frame request"));
             continue;
         }
@@ -457,8 +456,13 @@ int main(int argc, char ** argv) {
             precomputed_n_views = static_cast<int>(req.precomputed_img_emb_n_views());
             const int64_t per_view = cfg.n_img*cfg.hidden;
             const int64_t expected = per_view * static_cast<int64_t>(precomputed_n_views);
-            if (precomputed_n_views < 1 ||
-                static_cast<int64_t>(req.precomputed_img_emb_size()) != expected) {
+            if (precomputed_n_views < 1 || precomputed_n_views > 16) {
+                char buf[96]; std::snprintf(buf, sizeof(buf),
+                    "precomputed_img_emb_n_views %d out of range [1, 16]", precomputed_n_views);
+                send_reply(make_error_response(rid, buf));
+                continue;
+            }
+            if (static_cast<int64_t>(req.precomputed_img_emb_size()) != expected) {
                 char buf[160]; std::snprintf(buf, sizeof(buf),
                     "precomputed_img_emb size %d != %lld (n_views=%d * n_img_per_view=%lld * hidden=%lld)",
                     req.precomputed_img_emb_size(), (long long) expected, precomputed_n_views,
@@ -480,10 +484,16 @@ int main(int argc, char ** argv) {
         } else {
 
             bool decode_ok = true;
+            size_t total_px = 0;
             for (int v=0; v<n_views; ++v) {
                 if (!decode_image(req.images(v), u8_bufs[v], f32_bufs[v], img_views[v])) {
                     char buf[64]; std::snprintf(buf, sizeof(buf), "image[%d] decode failed", v);
                     send_reply(make_error_response(rid, buf));
+                    decode_ok = false;
+                    break;
+                }
+                if ((total_px += size_t(img_views[v].w)*size_t(img_views[v].h)) > kMaxTotalPixels) {
+                    send_reply(make_error_response(rid, "images exceed the per-request pixel budget"));
                     decode_ok = false;
                     break;
                 }

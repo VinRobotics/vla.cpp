@@ -182,6 +182,10 @@ std::string tokenize_text(const std::string & ckpt, const std::string & text) {
         std::fprintf(stderr, "vla-cli: cannot detect the arch of %s for --text\n", ckpt.c_str());
         return "";
     }
+    if (arch == Arch::GR00T_N1_6 || arch == Arch::VLA_JEPA) {
+        std::fprintf(stderr, "vla-cli: --text is not supported for %s; pass --tokens\n", arch_slug(arch));
+        return "";
+    }
     if (!text_ok(text)) {
         std::fprintf(stderr, "vla-cli: --text takes plain prose (letters, digits, space . , - _ ')\n");
         return "";
@@ -249,7 +253,7 @@ void usage(const char * prog) {
     std::fprintf(stderr,
         "usage: %s [--mmproj m.gguf] (--ckpt c.gguf | -hf user/repo) --image img.jpg [--image ...]\n"
         "          (--text \"...\" | --tokens id,id,...) [--state f,f,...] [--pretty]\n"
-        "  --mmproj   vision-tower GGUF (SmolVLA/pi0/pi0.5); omit for baked-vision archs\n"
+        "  --mmproj   ignored; every arch bundles its vision tower in the ckpt GGUF\n"
         "  --ckpt     model checkpoint GGUF\n"
         "  -hf        HuggingFace repo, user/repo[:file.gguf], cached under $VLA_CACHE\n"
         "  --image    image file, repeat for multi-view (decoded via stb_image)\n"
