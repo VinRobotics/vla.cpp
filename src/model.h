@@ -95,9 +95,9 @@ struct Model;
  */
 enum class TimingDetail {
     NONE,   ///< Only @c ms_total is populated.
-    /// Per-phase timings (vision, prefill, denoise, ...). SmolVLA uses a second
-    /// builder here that does not pad the prefix to @c n_lang; same positions and
-    /// masking, so it differs from @c NONE only by float reduction order.
+    /// Per-phase timings (vision, prefill, denoise, ...). SmolVLA builds the graph
+    /// here without padding the prefix to @c n_lang; same positions and masking,
+    /// so it differs from @c NONE only by float reduction order.
     PHASE,
 };
 
