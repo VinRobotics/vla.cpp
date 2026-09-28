@@ -15,12 +15,16 @@
 #include "modules/dit_head.h"
 
 #include "layers/attn.h"
+#include "layers/embed.h"
 #include "layers/ffn.h"
 #include "layers/linear.h"
 #include "layers/norm.h"
 
+#include "ggml-backend.h"
+
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace vla {
 
@@ -144,6 +148,35 @@ ggml_tensor * DitHead::proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor *
     ggml_tensor * hn    = ggml_norm(C, h, cfg.norm_out_eps);
     ggml_tensor * h_mod = ggml_add(C, ggml_add(C, hn, ggml_mul(C, hn, sc)), sh);
     return linear(C, po2W, po2b, h_mod);
+}
+
+void FlowTimes::build(int64_t steps, int64_t buckets, int64_t embed_dim, int64_t horizon) {
+    tau.assign((size_t) steps, {});
+    tproj.assign((size_t) steps, {});
+    for (int64_t s=0; s<steps; ++s) {
+        const int64_t bucket = (int64_t) ((double) s/(double) steps*(double) buckets);
+        action_sinusoid(bucket, embed_dim, horizon, tau[(size_t) s]);
+        timesteps_proj(bucket, tproj[(size_t) s]);
+    }
+}
+
+void FlowTimes::upload(const std::vector<ggml_tensor *> & t_tau, const std::vector<ggml_tensor *> & t_tproj) const {
+    for (size_t s=0; s<t_tau.size(); ++s) {
+        ggml_backend_tensor_set(t_tau[s],   tau[s].data(),   0, ggml_nbytes(t_tau[s]));
+        ggml_backend_tensor_set(t_tproj[s], tproj[s].data(), 0, ggml_nbytes(t_tproj[s]));
+    }
+}
+
+void env_num_steps(const char * arch, int64_t & steps) {
+    const char * e = std::getenv("VLA_NUM_STEPS");
+    if (!e)
+        return;
+    char * end = nullptr;
+    const long v = std::strtol(e, &end, 10);
+    if (end && *end == '\0' && v >= 1) {
+        steps = (int64_t) v;
+        std::fprintf(stderr, "vla(%s): VLA_NUM_STEPS override → num_steps=%lld\n", arch, (long long) v);
+    }
 }
 
 }

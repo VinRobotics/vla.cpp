@@ -15,7 +15,6 @@
 #include "arch.h"
 #include "options.h"
 #include "backend.h"
-#include "env_flag.h"
 #include "gguf_reader.h"
 #include "layers/embed.h"
 #include "layers/ffn.h"
@@ -36,10 +35,8 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -58,6 +55,7 @@ struct Gr00tN1d6ModelArch : public ModelArchBase {
     ggml_type             matmul_type = GGML_TYPE_F32;
     scratch_ctx           vision_scratch;
     scratch_ctx           merge_scratch;
+    FlowTimes             times;
 
     struct MainKey {
         int64_t seq=-1, n_img=-1, seq_txt=-1, nsteps=-1;
@@ -151,41 +149,8 @@ bool load_config(const gguf_reader & g, Gr00tN1d6ModelArch & m, Config & cfg) {
     m.lm.cfg.rope.n_dims   = (int) m.lm.cfg.head_dim;
 
     m.aex.embodiment_id = 20;
-    {
-        const std::string js = g.str(fk("embodiment_id_mapping"));
-        auto lookup = [&](const char * key) -> long {
-            const std::string k = std::string("\"")+key+"\"";
-            size_t p = js.find(k);
-            if (p == std::string::npos)
-                return -1;
-            p = js.find(':', p+k.size());
-            if (p == std::string::npos)
-                return -1;
-            return std::strtol(js.c_str()+p+1, nullptr, 10);
-        };
-
-        const long gr1 = lookup("gr1");
-        if (gr1 >= 0)
-            m.aex.embodiment_id = gr1;
-
-        if (const char * e = std::getenv("VLA_GR00T_EMBODIMENT")) {
-            char * end = nullptr;
-            const long v = std::strtol(e, &end, 10);
-            if (end && *end == '\0') {
-                m.aex.embodiment_id = v;
-            } else {
-                const long id = lookup(e);
-                if (id >= 0)
-                    m.aex.embodiment_id = id;
-                else std::fprintf(stderr, "vla(gr00tn1d6): embodiment tag '%s' not in embodiment_id_mapping; using id %lld\n", e, (long long) m.aex.embodiment_id);
-            }
-        }
-    }
-    if (m.aex.embodiment_id < 0 || m.aex.embodiment_id >= m.max_embodiments) {
-        std::fprintf(stderr, "vla(gr00tn1d6): embodiment id %lld out of range [0,%lld)\n",
-                     (long long) m.aex.embodiment_id, (long long) m.max_embodiments);
+    if (!resolve_embodiment("gr00tn1d6", g.str(fk("embodiment_id_mapping")), "gr1", m.max_embodiments, m.aex.embodiment_id))
         return false;
-    }
 
     // pixel_shuffle_back writes (grid/shuffle)^2 tokens into a buffer sized from
     // n_img_tokens, so the KV has to agree with the grid it is derived from.
@@ -261,6 +226,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
     }
     if (!load_config(g, *m, m->cfg))
         return nullptr;
+    m->times.build(m->num_steps, m->num_buckets, m->in_embed_dim, m->action_horizon);
 
     std::printf("vla(gr00tn1d6): vit=%lldd×%lldL×%lldh (Linear patch embed)  pixel_shuffle÷%lld ⇒ n_img_tok=%lld  mlp1=LN(%lld)→Linear→GELU→Linear  "
                 "lm=Qwen3 %lldd×%lldL (%lldq/%lldkv×%lld)  dit=AlternateVLDiT %lldL×%lldh×%lld(inner %lld) attend_text_every_n=%lld  in_emb=%lld  "
@@ -325,7 +291,6 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
     const int64_t c4        = vit.enc.cfg.hidden*r*r;
     const int64_t AD        = action_dim;
     const int64_t AH        = action_horizon;
-    const int64_t Nsa       = 1+AH;
 
     int64_t n_views = 0;
     std::vector<float> img_emb_host;
@@ -415,7 +380,7 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
     const int64_t SEQ_TXT = prompt.n_text();
 
     std::vector<float> inputs_embeds;
-    if (!fetch_embeds("gr00tn1d6", io, prompt, img_emb_ptr, H, inputs_embeds)) return {};
+    if (!fetch_embeds(io, prompt, img_emb_ptr, H, inputs_embeds)) return {};
 
     std::vector<float> x_init;
     init_noise(in, (size_t) AH*AD, x_init);
@@ -446,38 +411,8 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
         ggml_tensor * vl_img  = ggml_get_rows(C, vl_embs, t_img_idx);
         ggml_tensor * vl_txt  = t_txt_idx ? ggml_get_rows(C, vl_embs, t_txt_idx) : vl_img;
 
-        ggml_tensor * state_features = aex.encode_state(C, t_state);
-
-        const float   dt     = 1.0f/(float) num_steps;
-        const int64_t every2 = 2*attend_text_every_n;
-
-        std::vector<ggml_tensor *> Kc(dit.cfg.layers, nullptr), Vc(dit.cfg.layers, nullptr);
-        for (int64_t i=0; i<dit.cfg.layers; ++i) {
-            if (dit_interleave && (i%2 == 1))
-                continue;
-            dit.kv(C, dit.blk[i], (i%every2 == 0) ? vl_txt : vl_img, &Kc[i], &Vc[i]);
-        }
-
-        ggml_tensor * actions = t_x0;
-        for (int64_t s=0; s<num_steps; ++s) {
-            ggml_tensor * temb = dit.time_emb(C, t_tproj[s]);
-            ggml_tensor * af   = aex.encode_action(C, actions, t_tau[s], E, AH);
-            ggml_tensor * hh   = ggml_concat(C, state_features, af, 1);
-
-            for (int64_t i=0; i<dit.cfg.layers; ++i) {
-                ggml_tensor * enc;
-                if (dit_interleave && (i%2 == 1))
-                    enc = nullptr;
-                else if (i%every2 == 0)           enc = vl_txt;
-                else
-                    enc = vl_img;
-                hh = dit.block(C, dit.blk[i], hh, temb, enc, Kc[i], Vc[i]);
-            }
-
-            ggml_tensor * pred = aex.decode(C, dit.proj_out(C, hh, temb));
-            ggml_tensor * vel  = ggml_cont(C, ggml_view_2d(C, pred, AD, AH, pred->nb[1], (size_t)(Nsa-AH)*pred->nb[1]));
-            actions = ggml_add(C, actions, ggml_scale(C, vel, dt));
-        }
+        ggml_tensor * actions = aex.denoise(C, dit, dit_interleave != 0, 2*attend_text_every_n, t_state, nullptr,
+                                            vl_txt, vl_img, t_x0, t_tau, t_tproj);
         ggml_set_name(actions, "action_pred");
         ggml_set_output(actions);
 
@@ -512,15 +447,7 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_set(gio.t_img_idx, prompt.image_pos.data(), 0, ggml_nbytes(gio.t_img_idx));
     if (gio.t_txt_idx)
         ggml_backend_tensor_set(gio.t_txt_idx, prompt.text_pos.data(), 0, ggml_nbytes(gio.t_txt_idx));
-
-    for (int64_t s=0; s<num_steps; ++s) {
-        const int64_t bucket = (int64_t) ((double) s/(double) num_steps*(double) num_buckets);
-        std::vector<float> tau, tpr;
-        action_sinusoid(bucket, E, AH, tau);
-        timesteps_proj(bucket, tpr);
-        ggml_backend_tensor_set(gio.t_tau[s],   tau.data(), 0, ggml_nbytes(gio.t_tau[s]));
-        ggml_backend_tensor_set(gio.t_tproj[s], tpr.data(), 0, ggml_nbytes(gio.t_tproj[s]));
-    }
+    times.upload(gio.t_tau, gio.t_tproj);
 
     graph_unique_names(main_graph.graph());
     const auto tc0 = std::chrono::steady_clock::now();

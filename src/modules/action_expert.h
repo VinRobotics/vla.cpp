@@ -17,10 +17,13 @@
 #pragma once
 
 #include "loader.h"
+#include "modules/dit_head.h"
 
 #include "ggml.h"
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace vla {
 
@@ -41,6 +44,14 @@ struct ActionExpert {
                                 int64_t embed_dim, int64_t horizon) const;
 
     ggml_tensor * decode(ggml_context * C, ggml_tensor * model_out) const;
+
+    ggml_tensor * denoise(ggml_context * C, const DitHead & dit, bool interleave, int64_t every2,
+                          ggml_tensor * state, ggml_tensor * future, ggml_tensor * txt, ggml_tensor * img,
+                          ggml_tensor * x0, const std::vector<ggml_tensor *> & tau,
+                          const std::vector<ggml_tensor *> & tproj) const;
 };
+
+bool resolve_embodiment(const char * arch, const std::string & mapping, const char * default_tag,
+                        int64_t max_id, int64_t & id);
 
 }

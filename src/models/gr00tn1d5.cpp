@@ -15,7 +15,6 @@
 #include "arch.h"
 #include "options.h"
 #include "backend.h"
-#include "env_flag.h"
 #include "gguf_reader.h"
 #include "layers/embed.h"
 #include "layers/linear.h"
@@ -36,10 +35,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <memory>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -57,6 +53,7 @@ struct Gr00tN1d5ModelArch : public ModelArchBase {
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_F32;
     scratch_ctx           vision_scratch;
+    FlowTimes             times;
 
     struct MainKey {
         int64_t seq=-1, nsteps=-1;
@@ -82,7 +79,7 @@ struct Gr00tN1d5ModelArch : public ModelArchBase {
     int64_t vit_layers=27, vit_inter=4304, image_size=224, patch_size=14, n_img_tokens=256;
     int64_t lm_inter=6144, vocab=151680, image_token_index=151669;
     int64_t bb_embed_dim=2048, in_embed_dim=1536, dit_interleave=1, vlsa_layers=4;
-    int64_t num_future=32, action_horizon=16, action_dim=32, max_state_dim=64;
+    int64_t action_horizon=16, action_dim=32, max_state_dim=64;
     int64_t num_steps=4, num_buckets=1000, max_embodiments=32, max_seq_len=1024;
     float   vlln_eps=1e-5f;
 
@@ -121,7 +118,6 @@ bool load_config(const gguf_reader & g, Gr00tN1d5ModelArch & m, Config & cfg) {
     U(fk("vlsa_layers"    ), m.vlsa_layers);
     U(fk("vlsa_heads"     ), m.vlsa.cfg.heads);
     U(fk("vlsa_head_dim"  ), m.vlsa.cfg.head_dim);
-    U(fk("num_target_vision_tokens"), m.num_future);
     U(fk("action_horizon" ), m.action_horizon);
     U(fk("action_dim"     ), m.action_dim);
     U(fk("max_state_dim"  ), m.max_state_dim);
@@ -152,25 +148,8 @@ bool load_config(const gguf_reader & g, Gr00tN1d5ModelArch & m, Config & cfg) {
     m.lm.cfg.rope.n_dims   = (int) m.lm.cfg.head_dim;
 
     m.aex.embodiment_id = 24;
-    if (const char * e = std::getenv("VLA_GR00T_EMBODIMENT")) {
-        char * end = nullptr;
-        const long v = std::strtol(e, &end, 10);
-        if (end && *end == '\0') {
-            m.aex.embodiment_id = (int64_t) v;
-        } else {
-            const std::string js  = g.str(fk("embodiment_tag_mapping"));
-            const std::string key = std::string("\"")+e+"\":";
-            const size_t p = js.find(key);
-            if (p != std::string::npos)
-                m.aex.embodiment_id = std::strtol(js.c_str()+p+key.size(), nullptr, 10);
-            else std::fprintf(stderr, "vla(gr00tn1d5): embodiment tag '%s' not in embodiment_tag_mapping; using id %lld\n", e, (long long) m.aex.embodiment_id);
-        }
-    }
-    if (m.aex.embodiment_id < 0 || m.aex.embodiment_id >= m.max_embodiments) {
-        std::fprintf(stderr, "vla(gr00tn1d5): embodiment id %lld out of range [0,%lld)\n",
-                     (long long) m.aex.embodiment_id, (long long) m.max_embodiments);
+    if (!resolve_embodiment("gr00tn1d5", g.str(fk("embodiment_tag_mapping")), nullptr, m.max_embodiments, m.aex.embodiment_id))
         return false;
-    }
 
     cfg = Config{};
     cfg.n_img           = m.n_img_tokens;
@@ -229,6 +208,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
     }
     if (!load_config(g, *m, m->cfg))
         return nullptr;
+    m->times.build(m->num_steps, m->num_buckets, m->in_embed_dim, m->action_horizon);
 
     std::printf("vla(gr00tn1d5): vit=%lldd×%lldL×%lldh n_img_tok=%lld  lm=Qwen3 %lldd×%lldL (%lldq/%lldkv×%lld)  "
                 "dit=%lldL×%lldh×%lld(inner %lld) interleave=%lld  vlsa=%lldL×%lldh×%lld  in_emb=%lld  horizon=%lld action_dim=%lld N_steps=%lld  embodiment=%lld  resident=%s\n",
@@ -285,7 +265,6 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     const int64_t E   = in_embed_dim;
     const int64_t AD  = action_dim;
     const int64_t AH  = action_horizon;
-    const int64_t Nsa = 1+num_future+AH;
 
     int64_t n_views = 0;
     std::vector<float> img_emb_host;
@@ -338,7 +317,7 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     const int64_t SEQ = prompt.len();
 
     std::vector<float> inputs_embeds;
-    if (!fetch_embeds("gr00tn1d5", io, prompt, img_emb_ptr, H, inputs_embeds)) return {};
+    if (!fetch_embeds(io, prompt, img_emb_ptr, H, inputs_embeds)) return {};
 
     std::vector<float> x_init;
     init_noise(in, (size_t) AH*AD, x_init);
@@ -362,31 +341,8 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
         ggml_tensor * vl      = layer_norm(C, eagle, vlln_w, vlln_b, vlln_eps);
         ggml_tensor * vl_embs = vlsa.build(C, vl, SEQ);
 
-        ggml_tensor * state_features = aex.encode_state(C, t_state);
-
-        std::vector<ggml_tensor *> Kc(dit.cfg.layers, nullptr), Vc(dit.cfg.layers, nullptr);
-        for (int64_t i=0; i<dit.cfg.layers; ++i) {
-            if (dit_interleave && (i%2 == 1))
-                continue;
-            dit.kv(C, dit.blk[i], vl_embs, &Kc[i], &Vc[i]);
-        }
-
-        const float dt = 1.0f/(float) num_steps;
-        ggml_tensor * actions = t_x0;
-        for (int64_t s=0; s<num_steps; ++s) {
-            ggml_tensor * temb = dit.time_emb(C, t_tproj[s]);
-            ggml_tensor * af   = aex.encode_action(C, actions, t_tau[s], E, AH);
-            ggml_tensor * hh   = ggml_concat(C, ggml_concat(C, state_features, future_tokens, 1), af, 1);
-
-            for (int64_t i=0; i<dit.cfg.layers; ++i) {
-                ggml_tensor * enc = (dit_interleave && (i%2 == 1)) ? nullptr : vl_embs;
-                hh = dit.block(C, dit.blk[i], hh, temb, enc, Kc[i], Vc[i]);
-            }
-
-            ggml_tensor * pred = aex.decode(C, dit.proj_out(C, hh, temb));
-            ggml_tensor * vel  = ggml_cont(C, ggml_view_2d(C, pred, AD, AH, pred->nb[1], (size_t)(Nsa-AH)*pred->nb[1]));
-            actions = ggml_add(C, actions, ggml_scale(C, vel, dt));
-        }
+        ggml_tensor * actions = aex.denoise(C, dit, dit_interleave != 0, 1, t_state, future_tokens, vl_embs, vl_embs,
+                                            t_x0, t_tau, t_tproj);
         ggml_set_name(actions, "action_pred");
         ggml_set_output(actions);
 
@@ -418,15 +374,7 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_set(gio.t_state, st.data(), 0, ggml_nbytes(gio.t_state));
 
     ggml_backend_tensor_set(gio.t_x0, x_init.data(), 0, ggml_nbytes(gio.t_x0));
-
-    for (int64_t s=0; s<num_steps; ++s) {
-        const int64_t bucket = (int64_t) ((double) s/(double) num_steps*(double) num_buckets);
-        std::vector<float> tau, tpr;
-        action_sinusoid(bucket, E, AH, tau);
-        timesteps_proj(bucket, tpr);
-        ggml_backend_tensor_set(gio.t_tau[s],   tau.data(), 0, ggml_nbytes(gio.t_tau[s]));
-        ggml_backend_tensor_set(gio.t_tproj[s], tpr.data(), 0, ggml_nbytes(gio.t_tproj[s]));
-    }
+    times.upload(gio.t_tau, gio.t_tproj);
 
     graph_unique_names(main_graph.graph());
     const auto tc0 = std::chrono::steady_clock::now();

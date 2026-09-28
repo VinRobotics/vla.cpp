@@ -67,4 +67,14 @@ struct DitHead {
     ggml_tensor * proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * temb) const;
 };
 
+struct FlowTimes {
+    std::vector<std::vector<float>> tau, tproj;
+
+    void build(int64_t steps, int64_t buckets, int64_t embed_dim, int64_t horizon);
+
+    void upload(const std::vector<ggml_tensor *> & t_tau, const std::vector<ggml_tensor *> & t_tproj) const;
+};
+
+void env_num_steps(const char * arch, int64_t & steps);
+
 }

@@ -16,6 +16,9 @@
 
 #include "layers/linear.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 namespace vla {
 
 void ActionExpert::declare(WeightLoader & L, const char * prefix) {
@@ -55,6 +58,78 @@ ggml_tensor * ActionExpert::encode_action(ggml_context * C, ggml_tensor * action
 ggml_tensor * ActionExpert::decode(ggml_context * C, ggml_tensor * model_out) const {
     ggml_tensor * h = ggml_relu(C, cat_linear(C, ad_l1W, ad_l1b, embodiment_id, model_out));
     return cat_linear(C, ad_l2W, ad_l2b, embodiment_id, h);
+}
+
+ggml_tensor * ActionExpert::denoise(ggml_context * C, const DitHead & dit, bool interleave, int64_t every2,
+                                    ggml_tensor * state, ggml_tensor * future, ggml_tensor * txt, ggml_tensor * img,
+                                    ggml_tensor * x0, const std::vector<ggml_tensor *> & tau,
+                                    const std::vector<ggml_tensor *> & tproj) const {
+    const int64_t n_layers = dit.cfg.layers, AD = x0->ne[0], AH = x0->ne[1];
+    ggml_tensor * state_features = encode_state(C, state);
+
+    std::vector<ggml_tensor *> enc(n_layers, nullptr), Kc(n_layers, nullptr), Vc(n_layers, nullptr);
+    for (int64_t i=0; i<n_layers; ++i) {
+        if (interleave && (i%2 == 1))
+            continue;
+        enc[i] = (i%every2 == 0) ? txt : img;
+        dit.kv(C, dit.blk[i], enc[i], &Kc[i], &Vc[i]);
+    }
+
+    const float dt = 1.0f/(float) tau.size();
+    ggml_tensor * actions = x0;
+    for (size_t s=0; s<tau.size(); ++s) {
+        ggml_tensor * temb = dit.time_emb(C, tproj[s]);
+        ggml_tensor * af   = encode_action(C, actions, tau[s], tau[s]->ne[0], AH);
+        ggml_tensor * sa   = future ? ggml_concat(C, state_features, future, 1) : state_features;
+        ggml_tensor * hh   = ggml_concat(C, sa, af, 1);
+
+        for (int64_t i=0; i<n_layers; ++i)
+            hh = dit.block(C, dit.blk[i], hh, temb, enc[i], Kc[i], Vc[i]);
+
+        ggml_tensor * pred = decode(C, dit.proj_out(C, hh, temb));
+        ggml_tensor * vel  = ggml_cont(C, ggml_view_2d(C, pred, AD, AH, pred->nb[1], (size_t)(pred->ne[1]-AH)*pred->nb[1]));
+        actions = ggml_add(C, actions, ggml_scale(C, vel, dt));
+    }
+    return actions;
+}
+
+bool resolve_embodiment(const char * arch, const std::string & mapping, const char * default_tag,
+                        int64_t max_id, int64_t & id) {
+    auto lookup = [&](const char * key) -> long {
+        const std::string k = std::string("\"")+key+"\"";
+        size_t p = mapping.find(k);
+        if (p == std::string::npos)
+            return -1;
+        p = mapping.find(':', p+k.size());
+        if (p == std::string::npos)
+            return -1;
+        return std::strtol(mapping.c_str()+p+1, nullptr, 10);
+    };
+
+    if (default_tag) {
+        const long d = lookup(default_tag);
+        if (d >= 0)
+            id = d;
+    }
+    if (const char * e = std::getenv("VLA_GR00T_EMBODIMENT")) {
+        char * end = nullptr;
+        const long v = std::strtol(e, &end, 10);
+        if (end && *end == '\0') {
+            id = v;
+        } else {
+            const long t = lookup(e);
+            if (t >= 0)
+                id = t;
+            else
+                std::fprintf(stderr, "vla(%s): embodiment tag '%s' not in the GGUF embodiment mapping; using id %lld\n",
+                             arch, e, (long long) id);
+        }
+    }
+    if (id < 0 || id >= max_id) {
+        std::fprintf(stderr, "vla(%s): embodiment id %lld out of range [0,%lld)\n", arch, (long long) id, (long long) max_id);
+        return false;
+    }
+    return true;
 }
 
 }
