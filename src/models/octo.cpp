@@ -15,6 +15,10 @@
 #include "arch.h"
 #include "backend.h"
 #include "gguf_reader.h"
+#include "layers/attn.h"
+#include "layers/ffn.h"
+#include "layers/linear.h"
+#include "layers/norm.h"
 #include "loader.h"
 #include "model.h"
 #include "models/octo.h"
@@ -63,7 +67,6 @@ constexpr uint32_t kReplaySeed = 20260921u;
 
 struct OctoRuntime {
     ggml_backend_t backend = nullptr;
-    ggml_context * ctx_w   = nullptr;
     std::unordered_map<std::string, ggml_tensor *> by_name;
 
     // One cache per camera: the views differ in side and token count, so they
@@ -194,7 +197,6 @@ struct OctoRuntime {
 
     void init(ggml_backend_t b, ggml_context * w) {
         backend = b;
-        ctx_w   = w;
         // ggml_get_tensor is a linear strcmp scan, and building the stage graphs
         // looks up a few hundred weights by name.
         by_name.clear();
@@ -248,7 +250,6 @@ struct OctoModelArch : public ModelArchBase {
         if (backend)     ggml_backend_free(backend);
     }
 
-    std::string           gguf_path;
     ggml_backend_t        backend     = nullptr;
     ggml_context *        ctx_weights = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
@@ -585,7 +586,7 @@ bool run_obs_tokenizer_graph(OctoRuntime& rt,
             ggml_get_rows(C, ggml_reshape_2d(C, pos_r, kHidden*n_tok, pos_r->ne[2]), rows),
             kHidden, n_tok, steps);
 
-        ggml_tensor * out = ggml_add(C, ggml_add(C, ggml_mul_mat(C, jw, tok), jb), pe);
+        ggml_tensor * out = ggml_add(C, linear(C, jw, jb, tok), pe);
         ggml_set_name(out, "obs.tokenizer.pos");
         ggml_set_output(out);
         io.pos = out;
@@ -683,7 +684,7 @@ bool run_proprio_tokenizer_graph(OctoRuntime& rt,
         ggml_tensor * pe = ggml_reshape_3d(C,
             ggml_get_rows(C, ggml_reshape_2d(C, pos_r, kHidden*n_dims, pos_r->ne[2]), rows),
             kHidden, n_dims, steps);
-        ggml_tensor * out = ggml_add(C, ggml_add(C, ggml_mul_mat(C, proj_w, x), proj_b), pe);
+        ggml_tensor * out = ggml_add(C, linear(C, proj_w, proj_b, x), pe);
         ggml_set_name(out, "obs.proprio.pos");
         ggml_set_output(out);
         io.pos = out;
@@ -733,7 +734,7 @@ bool run_language_graph(OctoRuntime& rt,
         ggml_set_input(in);
         io.in = in;
 
-        ggml_tensor * pos_t = ggml_add(C, ggml_add(C, ggml_mul_mat(C, jw, in), jb), pe);
+        ggml_tensor * pos_t = ggml_add(C, linear(C, jw, jb, in), pe);
         ggml_set_name(pos_t, "task_language.pos");
         ggml_set_output(pos_t);
         io.pos = pos_t;
@@ -863,28 +864,19 @@ bool run_t5_encoder_graph(OctoRuntime& rt,
         ggml_tensor * mask = ggml_add(C, pos_bias, padmask_t);
 
         for (int i=0; i<12; ++i) {
-            ggml_tensor * n1 = ggml_mul(C, ggml_rms_norm(C, x, ln_eps), blk_w[i][0]);
-            ggml_tensor * Q  = ggml_mul_mat(C, blk_w[i][1], n1);
-            ggml_tensor * K  = ggml_mul_mat(C, blk_w[i][2], n1);
-            ggml_tensor * V  = ggml_mul_mat(C, blk_w[i][3], n1);
-            ggml_tensor * Qh = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, Q, head_dim, heads, seq), 0, 2, 1, 3));
-            ggml_tensor * Kh = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, K, head_dim, heads, seq), 0, 2, 1, 3));
-            ggml_tensor * Vh = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, V, head_dim, heads, seq), 1, 2, 0, 3));
-
-            ggml_tensor * scores = ggml_mul_mat(C, Kh, Qh);
-            ggml_prec_set_acc(scores, GGML_PREC_F32);
+            ggml_tensor * n1 = rms_norm(C, x, blk_w[i][0], ln_eps);
+            ggml_tensor * Qh = to_heads(C, ggml_mul_mat(C, blk_w[i][1], n1), head_dim, heads, seq);
+            ggml_tensor * Kh = to_heads(C, ggml_mul_mat(C, blk_w[i][2], n1), head_dim, heads, seq);
+            ggml_tensor * Vh = to_heads_v(C, ggml_mul_mat(C, blk_w[i][3], n1), head_dim, heads, seq);
             // T5 folds 1/sqrt(d_k) into the weights, so the scale here is 1.
-            ggml_tensor * probs    = ggml_soft_max_ext(C, scores, mask, 1.0f, 0.0f);
-            ggml_tensor * attended = ggml_mul_mat(C, Vh, probs);
-            ggml_tensor * merged   = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, attended, 0, 2, 1, 3)), hidden, seq);
+            ggml_tensor * merged = attention(C, Qh, Kh, Vh, mask, 1.0f, hidden, seq);
             x = ggml_add(C, x, ggml_mul_mat(C, blk_w[i][4], merged));
 
-            ggml_tensor * n2 = ggml_mul(C, ggml_rms_norm(C, x, ln_eps), blk_w[i][5]);
-            ggml_tensor * h  = ggml_relu(C, ggml_mul_mat(C, blk_w[i][6], n2));
-            x = ggml_add(C, x, ggml_mul_mat(C, blk_w[i][7], h));
+            ggml_tensor * n2 = rms_norm(C, x, blk_w[i][5], ln_eps);
+            x = ggml_add(C, x, ffn_relu(C, blk_w[i][6], nullptr, blk_w[i][7], nullptr, n2));
         }
 
-        ggml_tensor * out = ggml_mul(C, ggml_rms_norm(C, x, ln_eps), outw);
+        ggml_tensor * out = rms_norm(C, x, outw, ln_eps);
         ggml_set_name(out, "t5.out");
         ggml_set_output(out);
         io.out = out;
@@ -1113,31 +1105,20 @@ bool run_transformer_graph(OctoRuntime& rt,
         io.readout_idx = readout_idx;
 
         for (int i=0; i<12; ++i) {
-            ggml_tensor * n1  = ggml_add(C, ggml_mul(C, ggml_norm(C, x, ln_eps), blk_w[i][0]), blk_w[i][1]);
-            ggml_tensor * qkv = ggml_add(C, ggml_mul_mat(C, blk_w[i][2], n1), blk_w[i][3]);
-            ggml_tensor * q   = ggml_cont(C, ggml_view_2d(C, qkv, kHidden, seq, qkv->nb[1], 0));
-            ggml_tensor * k   = ggml_cont(C, ggml_view_2d(C, qkv, kHidden, seq, qkv->nb[1], (size_t) kHidden*qkv->nb[0]));
-            ggml_tensor * v   = ggml_cont(C, ggml_view_2d(C, qkv, kHidden, seq, qkv->nb[1], (size_t) 2*kHidden*qkv->nb[0]));
-            ggml_tensor * Q   = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, head_dim, heads, seq), 0, 2, 1, 3));
-            ggml_tensor * K   = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, head_dim, heads, seq), 0, 2, 1, 3));
-            ggml_tensor * V   = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
+            ggml_tensor * n1  = layer_norm(C, x, blk_w[i][0], blk_w[i][1], ln_eps);
+            ggml_tensor * qkv = linear(C, blk_w[i][2], blk_w[i][3], n1);
+            ggml_tensor * Q   = ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, seq, kHidden, 3, 0), 0, 2, 1, 3));
+            ggml_tensor * K   = ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, seq, kHidden, 3, 1), 0, 2, 1, 3));
+            ggml_tensor * V   = ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, seq, kHidden, 3, 2), 1, 2, 0, 3));
 
-            ggml_tensor * scores = ggml_mul_mat(C, K, Q);
-            ggml_prec_set_acc(scores, GGML_PREC_F32);
-            ggml_tensor * probs    = ggml_soft_max_ext(C, scores, mask, attn_scale, 0.0f);
-            ggml_tensor * attended = ggml_mul_mat(C, V, probs);
-            ggml_tensor * merged   = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, attended, 0, 2, 1, 3)), kHidden, seq);
-            ggml_tensor * attn_out = ggml_add(C, ggml_mul_mat(C, blk_w[i][4], merged), blk_w[i][5]);
-            ggml_tensor * residual = ggml_add(C, x, attn_out);
+            ggml_tensor * merged   = attention(C, Q, K, V, mask, attn_scale, kHidden, seq);
+            ggml_tensor * residual = ggml_add(C, x, linear(C, blk_w[i][4], blk_w[i][5], merged));
 
-            ggml_tensor * n2  = ggml_add(C, ggml_mul(C, ggml_norm(C, residual, ln_eps), blk_w[i][6]), blk_w[i][7]);
-            ggml_tensor * mlp = ggml_add(C, ggml_mul_mat(C, blk_w[i][8], n2), blk_w[i][9]);
-            mlp = ggml_gelu_erf(C, mlp);
-            mlp = ggml_add(C, ggml_mul_mat(C, blk_w[i][10], mlp), blk_w[i][11]);
-            x = ggml_add(C, residual, mlp);
+            ggml_tensor * n2 = layer_norm(C, residual, blk_w[i][6], blk_w[i][7], ln_eps);
+            x = ggml_add(C, residual, ffn_gelu_erf(C, blk_w[i][8], blk_w[i][9], blk_w[i][10], blk_w[i][11], n2));
         }
 
-        ggml_tensor * output = ggml_add(C, ggml_mul(C, ggml_norm(C, x, ln_eps), out_w), out_b);
+        ggml_tensor * output = layer_norm(C, x, out_w, out_b, ln_eps);
         // The readouts are not evenly spaced once padded timesteps drop their
         // observation groups, so they are gathered rather than strided.
         ggml_tensor * readout = ggml_get_rows(C, output, readout_idx);
@@ -1255,19 +1236,16 @@ ggml_tensor * build_score_actor(ggml_context * ctx,
 
     ggml_tensor * f       = ggml_scale(ctx, ggml_mul_mat(ctx, w.time_w, time), two_pi);
     ggml_tensor * time_ff = ggml_concat(ctx, ggml_cos(ctx, f), ggml_sin(ctx, f), 0);
-    ggml_tensor * cond    = ggml_silu(ctx, ggml_add(ctx, ggml_mul_mat(ctx, w.c0w, time_ff), w.c0b));
-    cond = ggml_add(ctx, ggml_mul_mat(ctx, w.c1w, cond), w.c1b);
+    ggml_tensor * cond    = linear(ctx, w.c1w, w.c1b, ggml_silu(ctx, linear(ctx, w.c0w, w.c0b, time_ff)));
 
     ggml_tensor * reverse_input = ggml_concat(ctx, ggml_concat(ctx, cond, obs, 0), actions, 0);
-    ggml_tensor * x = ggml_add(ctx, ggml_mul_mat(ctx, w.rinw, reverse_input), w.rinb);
+    ggml_tensor * x = linear(ctx, w.rinw, w.rinb, reverse_input);
     for (int i=0; i<3; ++i) {
-        ggml_tensor * residual = x;
-        ggml_tensor * h = ggml_add(ctx, ggml_mul(ctx, ggml_norm(ctx, x, ln_eps), w.blk[i][0]), w.blk[i][1]);
-        h = ggml_silu(ctx, ggml_add(ctx, ggml_mul_mat(ctx, w.blk[i][2], h), w.blk[i][3]));
-        h = ggml_add(ctx, ggml_mul_mat(ctx, w.blk[i][4], h), w.blk[i][5]);
-        x = ggml_add(ctx, residual, h);
+        ggml_tensor * h = layer_norm(ctx, x, w.blk[i][0], w.blk[i][1], ln_eps);
+        h = ggml_silu(ctx, linear(ctx, w.blk[i][2], w.blk[i][3], h));
+        x = ggml_add(ctx, x, linear(ctx, w.blk[i][4], w.blk[i][5], h));
     }
-    return ggml_add(ctx, ggml_mul_mat(ctx, w.routw, ggml_silu(ctx, x)), w.routb);
+    return linear(ctx, w.routw, w.routb, ggml_silu(ctx, x));
 }
 
 // The DDPM reverse process as ONE graph. The steps are sequentially dependent so
@@ -1442,17 +1420,17 @@ bool run_l1_action_head_graph(OctoRuntime& rt,
         // in_proj_weight, so each needs its own mul_mat and drops the slices it
         // does not use -- nn.MultiheadAttention keeps the [Wq;Wk;Wv] row blocks
         // whatever is fed through it.
-        ggml_tensor * qkv_probe = ggml_add(C, ggml_mul_mat(C, qkv_w, probe), qkv_b);
+        ggml_tensor * qkv_probe = linear(C, qkv_w, qkv_b, probe);
         ggml_tensor * q         = ggml_cont(C, ggml_view_2d(C, qkv_probe, kHidden, 1, qkv_probe->nb[1], 0));
-        ggml_tensor * qkv_x     = ggml_add(C, ggml_mul_mat(C, qkv_w, x), qkv_b);
+        ggml_tensor * qkv_x     = linear(C, qkv_w, qkv_b, x);
         ggml_tensor * k         = ggml_cont(C, ggml_view_2d(C, qkv_x, kHidden, width, qkv_x->nb[1], (size_t) kHidden*qkv_x->nb[0]));
         ggml_tensor * v         = ggml_cont(C, ggml_view_2d(C, qkv_x, kHidden, width, qkv_x->nb[1], (size_t) 2*kHidden*qkv_x->nb[0]));
 
         // Heads on ne2 and window on ne3 are both batch axes mul_mat loops over,
         // never cross-multiplied, which keeps each timestep independent.
-        ggml_tensor * Qh = ggml_cont(C, ggml_permute(C, ggml_reshape_4d(C, q, map_head_dim, map_heads, 1, 1), 0, 2, 1, 3));
-        ggml_tensor * Kh = ggml_cont(C, ggml_permute(C, ggml_reshape_4d(C, k, map_head_dim, map_heads, 1, width), 0, 2, 1, 3));
-        ggml_tensor * Vh = ggml_cont(C, ggml_permute(C, ggml_reshape_4d(C, v, map_head_dim, map_heads, 1, width), 1, 2, 0, 3));
+        ggml_tensor * Qh = to_heads(C, q, map_head_dim, map_heads, 1);
+        ggml_tensor * Kh = to_heads(C, k, map_head_dim, map_heads, 1, width);
+        ggml_tensor * Vh = to_heads_v(C, v, map_head_dim, map_heads, 1, width);
 
         ggml_tensor * scores = ggml_mul_mat(C, Qh, Kh);
         ggml_prec_set_acc(scores, GGML_PREC_F32);
@@ -1462,14 +1440,12 @@ bool run_l1_action_head_graph(OctoRuntime& rt,
         ggml_tensor * attended = ggml_mul_mat(C, Vh, probs);
         ggml_tensor * merged   = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, attended, 0, 2, 1, 3)), kHidden, width);
 
-        ggml_tensor * attn_out = ggml_add(C, ggml_mul_mat(C, o_w, merged), o_b);
-        ggml_tensor * y        = ggml_add(C, ggml_mul(C, ggml_norm(C, attn_out, ln_eps), norm_w), norm_b);
-        ggml_tensor * h        = ggml_gelu_erf(C, ggml_add(C, ggml_mul_mat(C, ffn_up_w, y), ffn_up_b));
-        h = ggml_add(C, ggml_mul_mat(C, ffn_down_w, h), ffn_down_b);
+        ggml_tensor * attn_out = linear(C, o_w, o_b, merged);
+        ggml_tensor * y        = layer_norm(C, attn_out, norm_w, norm_b, ln_eps);
         // The residual is onto attn_out, before the norm, as in MAPHead.
-        ggml_tensor * emb = ggml_add(C, attn_out, h);
+        ggml_tensor * emb = ggml_add(C, attn_out, ffn_gelu_erf(C, ffn_up_w, ffn_up_b, ffn_down_w, ffn_down_b, y));
 
-        ggml_tensor * mean_raw = ggml_add(C, ggml_mul_mat(C, mean_w, emb), mean_b);
+        ggml_tensor * mean_raw = linear(C, mean_w, mean_b, emb);
         ggml_tensor * out = ggml_scale(C, ggml_tanh(C, ggml_scale(C, mean_raw, 1.0f/max_action)), max_action);
         ggml_set_name(out, "l1_head.mean_normalized");
         ggml_set_output(out);
@@ -1827,7 +1803,6 @@ std::unique_ptr<ModelArchBase> octo_create(const std::string& mmproj_path,
         std::printf("vla(octo): note - mmproj '%s' is ignored (Octo ships one GGUF)\n", mmproj_path.c_str());
 
     auto m = std::make_unique<OctoModelArch>();
-    m->gguf_path = ckpt_path;
 
     if (!m->io.open(ckpt_path))
         return nullptr;
