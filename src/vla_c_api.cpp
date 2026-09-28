@@ -21,13 +21,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace {
 
 // vla_model is opaque to C, so it can just wrap the C++ handle.
 struct vla_model_impl {
-    vla::Model * m = nullptr;
+    vla::Model *       m = nullptr;
+    mutable std::mutex mu;
 };
 
 vla::PixelFormat to_pixel_format(int32_t f) {
@@ -129,6 +131,7 @@ int32_t vla_predict(vla_model * h, const vla_inputs * in,
         return VLA_ERR_ARG;
 
     try {
+        std::lock_guard<std::mutex> lk(h->mu);
         std::vector<vla::ImageView> views((size_t) (in->n_images > 0 ? in->n_images : 0));
         for (size_t i=0; i<views.size(); ++i) {
             views[i] = vla::ImageView{ in->images[i].data,
@@ -177,6 +180,7 @@ int32_t vla_last_stats(const vla_model * h, vla_stats * out) {
     if (!h || !h->m || !out)
         return VLA_ERR_ARG;
     try {
+        std::lock_guard<std::mutex> lk(h->mu);
         const vla::Stats & s = vla::last_stats(h->m);
         out->ms_total     = s.ms_total;
         out->ms_vision    = s.ms_vision;

@@ -45,9 +45,10 @@ namespace {
 enum class Where : uint8_t { Accel, Cpu, Either };
 
 struct FallbackCtx {
-    ggml_backend_t accel = nullptr;
-    ggml_backend_t cpu   = nullptr;
-    std::string    name;
+    ggml_backend_t    accel = nullptr;
+    ggml_backend_t    cpu   = nullptr;
+    ggml_threadpool_t tp    = nullptr;
+    std::string       name;
 
     // Host copies of weights some CPU-side op reads, made once. Keyed by tensor:
     // the wrapper lives exactly as long as the model that owns the weights.
@@ -137,14 +138,15 @@ ggml_tensor * host_input(FallbackCtx * fc, ggml_context * meta,
     if (is_host(t)) {
         s->data = t->data;
     } else if (is_weight(t)) {
-        std::vector<uint8_t> & w = fc->weights[t];
+        const ggml_tensor *    base = t->view_src ? t->view_src : t;
+        std::vector<uint8_t> & w    = fc->weights[base];
         if (w.empty()) {
             // get_tensor undoes the accelerator's repacking, so this is plain ggml layout.
-            w.resize(n);
-            ggml_backend_tensor_get(t, w.data(), 0, n);
-            fc->bytes_in += n;
+            w.resize(ggml_nbytes(base));
+            ggml_backend_tensor_get(base, w.data(), 0, w.size());
+            fc->bytes_in += w.size();
         }
-        s->data = w.data();
+        s->data = w.data() + (t->view_src ? t->view_offs : 0);
     } else {
         s->data = take(fc, n);
         ggml_backend_tensor_get(t, s->data, 0, n);
@@ -258,6 +260,7 @@ void fb_free(ggml_backend_t be) {
     }
     ggml_backend_free(fc->accel);
     ggml_backend_free(fc->cpu);
+    ggml_threadpool_free(fc->tp);
     delete fc;
     delete be;
 }
@@ -418,6 +421,11 @@ ggml_backend_t fallback_backend_new(ggml_backend_t accel, int n_threads) {
     auto * fc  = new FallbackCtx;
     fc->accel  = accel;
     fc->cpu    = cpu;
+    ggml_threadpool_params tpp = ggml_threadpool_params_default(n_threads);
+    tpp.poll   = 0;
+    fc->tp     = ggml_threadpool_new(&tpp);
+    if (fc->tp)
+        ggml_backend_cpu_set_threadpool(cpu, fc->tp);
     fc->name   = std::string(ggml_backend_name(accel)) + "+CPU";
     const char * st = std::getenv("VLA_FALLBACK_STATS");
     fc->stats  = st && st[0] == '1';

@@ -61,8 +61,8 @@ const char * dtype_name(ggml_type t) {
 }
 
 namespace {
-bool g_flash_attn  = false;
-bool g_mm_prec_f32 = true;
+thread_local bool g_flash_attn  = false;
+thread_local bool g_mm_prec_f32 = true;
 }
 
 void set_flash_attn(bool on) {
@@ -199,15 +199,32 @@ bool Options::load_json(const std::string & path, std::string & err) {
     const nlohmann::json & r = j["runtime"];
 
     try {
-        ggml_type t;
-        if (r.contains("weight_dtype") && parse_dtype(r["weight_dtype"].get<std::string>(), t))
-            weight_dtype = t;
-        if (r.contains("act_dtype")    && parse_dtype(r["act_dtype"].get<std::string>(),    t))
-            act_dtype    = t;
-        if (r.contains("flash_attn"))
-            flash_attn  = r["flash_attn"].get<bool>();
-        if (r.contains("mm_prec"))
-            mm_prec_f32 = r["mm_prec"].get<std::string>() == "f32";
+        auto dtype = [&](const char * k, std::optional<ggml_type> & dst, bool allow_f16) {
+            if (!r.contains(k))
+                return true;
+            const std::string v = r[k].get<std::string>();
+            ggml_type t;
+            if (!parse_dtype(v, t) || (!allow_f16 && t == GGML_TYPE_F16)) {
+                err = std::string("config json runtime.")+k+": bad value '"+v+"'";
+                return false;
+            }
+            if (!dst)
+                dst = t;
+            return true;
+        };
+        if (!dtype("weight_dtype", weight_dtype, true) || !dtype("act_dtype", act_dtype, false))
+            return false;
+        if (r.contains("flash_attn") && !flash_attn)
+            flash_attn = r["flash_attn"].get<bool>();
+        if (r.contains("mm_prec")) {
+            const std::string v = r["mm_prec"].get<std::string>();
+            if (v != "default" && v != "f32") {
+                err = "config json runtime.mm_prec: expected default or f32, got '"+v+"'";
+                return false;
+            }
+            if (!mm_prec_f32)
+                mm_prec_f32 = v == "f32";
+        }
     } catch (const std::exception & e) {
         err = std::string("config json runtime: ")+e.what();
         return false;

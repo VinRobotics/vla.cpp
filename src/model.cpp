@@ -30,6 +30,8 @@ namespace vla {
 
 struct Model {
     std::unique_ptr<ModelArchBase> impl;
+    bool fa = false;
+    bool mm = true;
 };
 
 namespace {
@@ -209,7 +211,13 @@ bool detect_arch_from_ckpt(const std::string& ckpt_path, Arch* out) {
 
 Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
                   const std::string& config_path) {
-    return model_load(mmproj_path, ckpt_path, config_path, Options{});
+    Options o;
+    std::string err;
+    if (!o.load_json(config_path, err)) {
+        std::fprintf(stderr, "vla: %s\n", err.c_str());
+        return nullptr;
+    }
+    return model_load(mmproj_path, ckpt_path, config_path, o);
 }
 
 Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
@@ -232,8 +240,10 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
         }
     }
 
-    set_flash_attn(opts.flash_attn.value_or(default_flash_attn()));
-    set_mm_prec_f32(opts.mm_prec_f32.value_or(true));
+    const bool fa = opts.flash_attn.value_or(default_flash_attn());
+    const bool mm = opts.mm_prec_f32.value_or(true);
+    set_flash_attn(fa);
+    set_mm_prec_f32(mm);
 
     switch (arch) {
         case Arch::SMOLVLA:
@@ -300,6 +310,8 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
 
     auto* m = new Model();
     m->impl = std::move(impl);
+    m->fa = fa;
+    m->mm = mm;
     return m;
 }
 
@@ -317,6 +329,8 @@ const Stats& last_stats(const Model* m) {
 
 std::vector<float> predict(Model* m, const Inputs& in) {
     if (!m || !m->impl) return {};
+    set_flash_attn(m->fa);
+    set_mm_prec_f32(m->mm);
     return m->impl->predict(in);
 }
 
