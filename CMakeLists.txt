@@ -11,6 +11,13 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+include(GNUInstallDirs)
+if(APPLE)
+    set(CMAKE_INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}" CACHE STRING "")
+elseif(UNIX)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}" CACHE STRING "")
+endif()
+
 set(_vla_accel "")
 foreach(_flag GGML_CUDA GGML_SYCL GGML_METAL GGML_OPENVINO GGML_HEXAGON GGML_OPENCL)
     if(${_flag})
@@ -153,7 +160,7 @@ if(VLA_OCTO)
     )
     FetchContent_MakeAvailable(sentencepiece)
     # Only the static library is linked; its CLI tools are dead weight.
-    vla_exclude_fetched_targets(${sentencepiece_SOURCE_DIR})
+    set_property(DIRECTORY ${sentencepiece_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
     # vcpkg's FindProtobuf shim reports the DLL, not its import library, as
     # PROTOBUF_LITE_LIBRARY, and sentencepiece links that path verbatim. Link the
     # imported target instead, which carries the import library and protobuf's
@@ -426,6 +433,12 @@ add_executable(vla-bench
     src/serving/vla-bench.cpp
 )
 target_link_libraries(vla-bench PRIVATE vla_core)
+
+install(TARGETS vla COMPONENT libvla)
+install(TARGETS vla_core vla-cli vla-bench)
+if(VLA_BUILD_SERVER)
+    install(TARGETS vlm_core vla-server vlm-server)
+endif()
 
 # Warnings and LTO for our own targets only, never the llama.cpp subtree.
 set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla vla-cli vla-bench)
