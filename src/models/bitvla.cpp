@@ -483,14 +483,9 @@ static std::vector<uint8_t> pack_ladder_int2(const int8_t* W, int64_t N, int64_t
     return out;
 }
 
-static inline uint16_t f32_to_bf16_u16(float f) {
-    return ggml_fp32_to_bf16(f).bits;
-}
-
 static __nv_bfloat16* upload_bf16_from_f32(const float* h, size_t n, std::vector<void*>& out_ptrs) {
-    std::vector<uint16_t> tmp(n);
-    for (size_t i=0; i<n; ++i)
-        tmp[i] = f32_to_bf16_u16(h[i]);
+    std::vector<ggml_bf16_t> tmp(n);
+    ggml_fp32_to_bf16_row(h, tmp.data(), (int64_t) n);
     __nv_bfloat16* d = nullptr;
     cudaMalloc(&d, n * sizeof(__nv_bfloat16));
     cudaMemcpy(d, tmp.data(), n * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice);
@@ -1170,11 +1165,10 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
 #ifdef VLA_BITVLA_CUDA_KERNELS
             if (cuda_vit_ready) {
 
-                std::vector<uint16_t> patches_bf16((size_t) N * patch_flat);
-                for (size_t i=0; i<patches_bf16.size(); ++i)
-                    patches_bf16[i] = f32_to_bf16_u16(patches[i]);
+                std::vector<ggml_bf16_t> patches_bf16((size_t) N * patch_flat);
+                ggml_fp32_to_bf16_row(patches.data(), patches_bf16.data(), (int64_t) patches_bf16.size());
                 std::vector<ggml_bf16_t> img_bf16((size_t) N * hidden_l);
-                if (cudaMemcpy(d_vit_patches, patches_bf16.data(), patches_bf16.size()*sizeof(uint16_t), cudaMemcpyHostToDevice) != cudaSuccess ||
+                if (cudaMemcpy(d_vit_patches, patches_bf16.data(), patches_bf16.size()*sizeof(ggml_bf16_t), cudaMemcpyHostToDevice) != cudaSuccess ||
                     bitvla_vit_cuda_forward(vit_cuda_ctx, d_vit_patches, d_vit_img_embeds,  0) != 0 ||
                     cudaMemcpy(img_bf16.data(), d_vit_img_embeds, img_bf16.size()*sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
                     std::fprintf(stderr, "vla(bitvla): CUDA ViT forward failed (view %lld)\n", (long long) v);
@@ -1373,14 +1367,13 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
 #ifdef VLA_BITVLA_CUDA_KERNELS
     if (cuda_lm_ready && seq <= cuda_max_seq) {
 
-        std::vector<uint16_t> in_bf16((size_t) seq * hidden_l);
-        for (size_t i=0; i<in_bf16.size(); ++i)
-            in_bf16[i] = f32_to_bf16_u16(inputs_embeds[i]);
+        std::vector<ggml_bf16_t> in_bf16((size_t) seq * hidden_l);
+        ggml_fp32_to_bf16_row(inputs_embeds.data(), in_bf16.data(), (int64_t) in_bf16.size());
         std::vector<int32_t> aids(n_action);
         for (int64_t i=0; i<n_action; ++i)
             aids[i] = (int32_t) (seq-2-n_action+i);
         std::vector<ggml_bf16_t> out_bf16((size_t) n_action * hidden_l);
-        if (cudaMemcpy(d_inputs_embeds, in_bf16.data(), in_bf16.size()*sizeof(uint16_t), cudaMemcpyHostToDevice) != cudaSuccess ||
+        if (cudaMemcpy(d_inputs_embeds, in_bf16.data(), in_bf16.size()*sizeof(ggml_bf16_t), cudaMemcpyHostToDevice) != cudaSuccess ||
             bitvla_lm_cuda_forward(lm_cuda_ctx, d_inputs_embeds, d_last_hidden, (int) seq,  0) != 0 ||
             cudaMemcpy(d_action_ids, aids.data(), n_action * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess) {
             std::fprintf(stderr, "vla(bitvla): CUDA LM forward failed\n");
