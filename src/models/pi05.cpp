@@ -138,7 +138,7 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_ten
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, head_dim, heads, seq), 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, head_dim, heads, seq), 0, 2, 1, 3));
     ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
-    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
     ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
     ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
     ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
@@ -187,7 +187,7 @@ ggml_tensor * build_vlm_layer(
     ggml_tensor * V = ggml_cont(ctx, ggml_permute(ctx, v_h,    1, 2, 0, 3));
 
     ggml_tensor * kq = ggml_mul_mat(ctx, K, Q);
-    ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+    ggml_prec_set_acc(kq, GGML_PREC_F32);
     const float scale = 1.f/std::sqrt((float) hd);
     ggml_tensor * attn = ggml_soft_max_ext(ctx, kq,  nullptr, scale, 0.f);
     ggml_tensor * kqv  = ggml_mul_mat(ctx, V, attn);
@@ -260,7 +260,7 @@ ggml_tensor * build_expert_layer(
     ggml_tensor * V = ggml_cont(ctx, ggml_permute(ctx, V_full, 1, 2, 0, 3));
 
     ggml_tensor * kq = ggml_mul_mat(ctx, K, Q);
-    ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+    ggml_prec_set_acc(kq, GGML_PREC_F32);
     const float scale = 1.f/std::sqrt((float) hd);
     ggml_tensor * attn = ggml_soft_max_ext(ctx, kq,  nullptr, scale, 0.f);
     ggml_tensor * kqv  = ggml_mul_mat(ctx, V, attn);

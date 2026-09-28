@@ -442,11 +442,11 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_ten
         // this op the same way.
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 0, 2, 1, 3));
         ggml_tensor * fa = ggml_flash_attn_ext(C, Q, vla::fa_kv(C, K), vla::fa_kv(C, V), nullptr, scale, 0.0f, 0.0f);
-        ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+        ggml_prec_set_acc(fa, GGML_PREC_F32);
         att = ggml_reshape_2d(C, fa, hidden, seq);
     } else {
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
-        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
         ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
         att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
     }
@@ -802,7 +802,7 @@ static inline bool tower_mm_f32_prec() {
 static inline ggml_tensor * mm_w(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x) {
     ggml_tensor * r = ggml_mul_mat(ctx, w, x);
     if (tower_mm_f32_prec())
-        ggml_mul_mat_set_prec(r, GGML_PREC_F32);
+        ggml_prec_set_acc(r, GGML_PREC_F32);
     return r;
 }
 
@@ -830,7 +830,7 @@ ggml_tensor * build_vlm_layer(ggml_context * ctx, const VlmLayerW & w,
     const float scale = 1.f/std::sqrt(static_cast<float>(cfg.head_dim));
     ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, K, V, mask, scale,
                                             0.f,  0.f);
-    ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+    ggml_prec_set_acc(fa, GGML_PREC_F32);
     ggml_tensor * att_pre_o = ggml_reshape_2d(ctx, fa, cfg.q_full_dim, cfg.n_prefix);
     ggml_tensor * o_out = mm_w(ctx, w.Wo, att_pre_o);
     ggml_tensor * h1    = ggml_add(ctx, x_in, o_out);
@@ -869,7 +869,7 @@ ggml_tensor * build_expert_self_attn_layer(
     const float scale = 1.f/std::sqrt(static_cast<float>(cfg.head_dim));
     ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, Kp, Vp, mask_full, scale,
                                             0.f,  0.f);
-    ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+    ggml_prec_set_acc(fa, GGML_PREC_F32);
     ggml_tensor * att_pre_o = ggml_reshape_2d(ctx, fa, cfg.q_full_dim, cfg.n_suffix);
     ggml_tensor * h1 = ggml_add(ctx, x_in, mm_w(ctx, w.Wo, att_pre_o));
 
@@ -908,7 +908,7 @@ ggml_tensor * build_expert_cross_attn_layer(
     const float scale = 1.f/std::sqrt(static_cast<float>(cfg.head_dim));
     ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, Kp, Vp, mask_prefix_only, scale,
                                             0.f,  0.f);
-    ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+    ggml_prec_set_acc(fa, GGML_PREC_F32);
     ggml_tensor * att_pre_o = ggml_reshape_2d(ctx, fa, cfg.q_full_dim, cfg.n_suffix);
     ggml_tensor * h1 = ggml_add(ctx, x_in, mm_w(ctx, w.Wo, att_pre_o));
 

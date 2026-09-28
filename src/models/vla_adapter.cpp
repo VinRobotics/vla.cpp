@@ -393,7 +393,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         ggml_tensor*qr=ggml_rope_ext(C,qh,t_pos,nullptr,(int)lm_head_dim,GGML_ROPE_TYPE_NEOX,0,lm_rope_base,1.0f,0.0f,1.0f,32.0f,1.0f);
         ggml_tensor*kr=ggml_rope_ext(C,kh,t_pos,nullptr,(int)lm_head_dim,GGML_ROPE_TYPE_NEOX,0,lm_rope_base,1.0f,0.0f,1.0f,32.0f,1.0f);
         ggml_tensor*Q=ggml_cont(C,ggml_permute(C,qr,0,2,1,3)),*K=ggml_cont(C,ggml_permute(C,kr,0,2,1,3)),*V=ggml_cont(C,ggml_permute(C,vh,1,2,0,3));
-        ggml_tensor*kq=ggml_mul_mat(C,K,Q); ggml_mul_mat_set_prec(kq,GGML_PREC_F32);
+        ggml_tensor*kq=ggml_mul_mat(C,K,Q); ggml_prec_set_acc(kq,GGML_PREC_F32);
         ggml_tensor*aw=ggml_soft_max_ext(C,kq,t_mask,lsc,0.0f);
         ggml_tensor*kqv=ggml_mul_mat(C,V,aw);
         ggml_tensor*att=ggml_reshape_2d(C,ggml_cont(C,ggml_permute(C,kqv,0,2,1,3)),HC,SEQ);
@@ -439,7 +439,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         auto tov=[&](ggml_tensor*pp){ int64_t L=pp->ne[1]; return ggml_cont(C,ggml_permute(C,ggml_reshape_3d(C,pp,HD,NH,L),1,2,0,3)); };
         ggml_tensor*Vs=tov(vse),*Va=tov(vad),*VT=tov(vta);
         ggml_tensor*ss2=ggml_mul_mat(C,kse,q),*sa=ggml_mul_mat(C,kad,q),*sr=ggml_mul_mat(C,kta,q);
-        ggml_mul_mat_set_prec(ss2,GGML_PREC_F32); ggml_mul_mat_set_prec(sa,GGML_PREC_F32); ggml_mul_mat_set_prec(sr,GGML_PREC_F32);
+        ggml_prec_set_acc(ss2,GGML_PREC_F32); ggml_prec_set_acc(sa,GGML_PREC_F32); ggml_prec_set_acc(sr,GGML_PREC_F32);
         ggml_tensor*st2=ggml_scale(C,sr,w.rg);
         ggml_tensor*scr=ggml_concat(C,ggml_concat(C,ss2,sa,0),st2,0);
         ggml_tensor*attn=ggml_soft_max_ext(C,scr,nullptr,hsc,0.0f);

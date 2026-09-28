@@ -43,6 +43,30 @@ if(GGML_CUDA)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_cuda_ext_hook.py <SOURCE_DIR>)
+
+    find_package(CUDAToolkit REQUIRED)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        # SASS per supported GPU, PTX only for the newest arch so future cards JIT.
+        set(_vla_cuda_archs 80-real 86-real 87-real 89-real 90-real)
+        set(_vla_cuda_ptx 90-virtual)
+        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+            list(APPEND _vla_cuda_archs 100-real 120-real)
+            set(_vla_cuda_ptx 120-virtual)
+        else()
+            message(WARNING
+                "CUDA ${CUDAToolkit_VERSION} < 12.8: omitting Blackwell sm_100/sm_120. "
+                "Pass -DCMAKE_CUDA_ARCHITECTURES=<arch> explicitly to override.")
+        endif()
+        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
+            list(APPEND _vla_cuda_archs 121-real)
+        endif()
+        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+            list(APPEND _vla_cuda_archs 110-real)
+        endif()
+        set(CMAKE_CUDA_ARCHITECTURES ${_vla_cuda_archs} ${_vla_cuda_ptx}
+            CACHE STRING "" FORCE)
+    endif()
+    set(GGML_CUDA_FA_QUANTS "f16-f16" CACHE STRING "")
 elseif(GGML_OPENVINO)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
@@ -63,7 +87,7 @@ endif()
 # build dir (-DVLA_LLAMA_TAG=b10326) without editing this file. The patch
 # anchors in scripts/patch_ggml_cuda_ext_hook.py and scripts/patch_ggml_openvino.py
 # are checked against the default.
-set(_vla_llama_tag_default "b10729")
+set(_vla_llama_tag_default "b11223")
 set(VLA_LLAMA_TAG "${_vla_llama_tag_default}" CACHE STRING "llama.cpp tag to fetch")
 # A cache entry survives an edit to the line above, so an existing build dir keeps
 # the tag it was first configured with and quietly builds the wrong llama.cpp.
@@ -200,22 +224,6 @@ if(GGML_CUDA)
     target_compile_definitions(vla_core PUBLIC GGML_USE_CUDA)
 
     enable_language(CUDA)
-    find_package(CUDAToolkit REQUIRED)
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        # SASS per supported GPU, PTX only for the newest arch so future cards JIT.
-        set(_vla_cuda_archs 80-real 86-real 87-real 89-real 90-real)
-        set(_vla_cuda_ptx 90-virtual)
-        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-            list(APPEND _vla_cuda_archs 100-real 120-real)
-            set(_vla_cuda_ptx 120-virtual)
-        else()
-            message(WARNING
-                "CUDA ${CUDAToolkit_VERSION} < 12.8: omitting Blackwell sm_100/sm_120. "
-                "Pass -DCMAKE_CUDA_ARCHITECTURES=<arch> explicitly to override.")
-        endif()
-        set(CMAKE_CUDA_ARCHITECTURES ${_vla_cuda_archs} ${_vla_cuda_ptx}
-            CACHE STRING "" FORCE)
-    endif()
     add_library(bitvla_cuda_kernels STATIC
         src/kernels/bitvla/bitnet_kernels.cu
         src/kernels/bitvla/bitvla_lm_cuda.cu

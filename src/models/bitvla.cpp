@@ -192,7 +192,7 @@ ggml_tensor * build_vit_layer(ggml_context * C, const VitLayerW & w, ggml_tensor
     ggml_tensor * Q  = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, head_dim, heads, seq), 0, 2, 1, 3));
     ggml_tensor * K  = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, head_dim, heads, seq), 0, 2, 1, 3));
     ggml_tensor * V  = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
-    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
     ggml_tensor * att= ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
     ggml_tensor * y  = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, att), 0, 2, 1, 3)), hidden, seq);
     ggml_tensor * o  = bit_linear(C, w.Wo, w.bo, y);
@@ -220,7 +220,7 @@ ggml_tensor * build_lm_layer(ggml_context * C, const BitvlaModelArch & m, const 
     ggml_tensor * Q  = ggml_cont(C, ggml_permute(C, qR, 0, 2, 1, 3));
     ggml_tensor * K  = ggml_cont(C, ggml_permute(C, kR, 0, 2, 1, 3));
     ggml_tensor * V  = ggml_cont(C, ggml_permute(C, v3, 1, 2, 0, 3));
-    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
     // Unmasked on purpose, same as openvla_oft: BitVLA is fine-tuned with
     // OpenVLA-OFT's recipe, which swaps the causal mask for a bidirectional one
     // so the action chunk decodes in a single pass.

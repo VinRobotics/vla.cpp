@@ -26,6 +26,8 @@ Measured on an **Intel Core Ultra X7 358H** (Panther Lake) with the Arc B390
 iGPU and the AI Boost NPU, Ubuntu 24.04, OpenVINO 2026.2.1, llama.cpp `b10729`,
 on the checkpoints under `vrfai/` on the Hub. Every **fidelity** number was
 re-measured on that pin; only the **latency** table still dates from `b10331`.
+The build now pins llama.cpp `b11223` and `install_ov.sh` installs OpenVINO
+2026.4; the numbers below have not been re-measured on that pin yet.
 
 ggml's backend translates a ggml compute graph into an OpenVINO model and hands
 it to the CPU, GPU or NPU plugin, which compiles and fuses it for the device.
@@ -139,9 +141,9 @@ carry them across restarts; it produces silently wrong actions here - see
 one camera view, best of 4-6 iterations after 3 warmups. "CPU backend" is ggml's
 own CPU backend on the same 16-core host. No `GGML_OPENVINO_CACHE_DIR`.
 
-Latencies were taken at `b10331` and have not been re-timed on `b10729`. Read the
-GPU column for VLA-JEPA and GR00T N1.7 as the cost of a wrong answer at that pin;
-both are correct now.
+Latencies were taken at `b10331` and have not been re-timed on `b10729` or
+`b11223`. Read the GPU column for VLA-JEPA and GR00T N1.7 as the cost of a wrong
+answer at that pin; both are correct now.
 
 | Model | input | CPU backend | OpenVINO CPU | OpenVINO GPU | OpenVINO NPU |
 |---|---|---:|---:|---:|---:|
@@ -268,7 +270,7 @@ the ggml contract, or fills a gap:
 | Folded weights padded to full rank | a 2-D weight becomes a rank-2 constant, but views index it at ggml rank |
 | CONCAT input ranks aligned | same rank-2 constants, and concat cannot broadcast rank |
 | Missing `GELU_ERF` translator | the exact-erf GELU op had no table entry at all, so a graph using it could not run |
-| Naive-path graph cache | that path re-compiled the whole model on every graph_compute, and its `graph_key` is a node count plus two names, which two graphs can share |
+| Naive-path graph cache | that path re-compiled the whole model on every graph_compute, and its `graph_key` is a node count plus tensor names, which two graphs of different shapes can share |
 | Interleaved-mrope sectors bounded | the sector cycle ignored `sections`, so the last few took the wrong stream |
 | Naive-path threshold settable | the 20-node constant is what picks the literal path |
 

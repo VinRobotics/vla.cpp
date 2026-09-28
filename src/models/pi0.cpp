@@ -141,11 +141,11 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_ten
         // kernel takes F16 K/V only; see fa_kv).
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 0, 2, 1, 3));
         ggml_tensor * fa = ggml_flash_attn_ext(C, Q, vla::fa_kv(C, K), vla::fa_kv(C, V), nullptr, scale, 0.0f, 0.0f);
-        ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+        ggml_prec_set_acc(fa, GGML_PREC_F32);
         att = ggml_reshape_2d(C, fa, hidden, seq);
     } else {
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
-        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
         ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
         att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
     }
@@ -211,12 +211,12 @@ ggml_tensor * build_gemma_layer(
         // -inf, both exactly representable in F16, so the cast is lossless.
         ggml_tensor * mask_f16 = mask ? ggml_cast(ctx, mask, GGML_TYPE_F16) : nullptr;
         ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, vla::fa_kv(ctx, K), vla::fa_kv(ctx, V), mask_f16, scale, 0.0f, 0.0f);
-        ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+        ggml_prec_set_acc(fa, GGML_PREC_F32);
         att_pre = ggml_reshape_2d(ctx, fa, qf, seq);
     } else {
         ggml_tensor * V = ggml_cont(ctx, ggml_permute(ctx, V_full, 1, 2, 0, 3));
         ggml_tensor * kq = ggml_mul_mat(ctx, K, Q);
-        ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        ggml_prec_set_acc(kq, GGML_PREC_F32);
         ggml_tensor * attn = ggml_soft_max_ext(ctx, kq, mask, scale,  0.f);
         ggml_tensor * kqv  = ggml_mul_mat(ctx, V, attn);
         att_pre = ggml_reshape_2d(ctx,

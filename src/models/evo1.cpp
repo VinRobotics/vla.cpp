@@ -146,7 +146,7 @@ ggml_tensor * build_qwen2_layer(ggml_context * C, const Evo1ModelArch & m, const
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, q_rope, 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, k_rope, 0, 2, 1, 3));
     ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, vp, hd, n_kv, seq), 1, 2, 0, 3));
-    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+    ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
     ggml_tensor * aw = ggml_soft_max_ext(C, kq, mask, scale, 0.0f);
     ggml_tensor * kqv = ggml_mul_mat(C, V, aw);
     ggml_tensor * att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), hq, seq);
@@ -216,7 +216,7 @@ ggml_tensor * evo1_flash_attn(ggml_context * C, ggml_tensor * q, ggml_tensor * k
     ggml_tensor * o = ggml_flash_attn_ext(C, q, k, v, nullptr, scale, 0.0f, 0.0f);
     // F32 accumulation keeps the softmax/AV reduction at the precision the
     // explicit path used, so switching kernels does not move the actions.
-    ggml_flash_attn_ext_set_prec(o, GGML_PREC_F32);
+    ggml_prec_set_acc(o, GGML_PREC_F32);
     return ggml_reshape_2d(C, o, hidden, N);
 }
 
@@ -240,7 +240,7 @@ ggml_tensor * build_internvit_layer(ggml_context * C, const Evo1ModelArch & m, c
         att = evo1_flash_attn(C, Q, K, V, scale, H, N);
     } else {
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, hd, n_heads, N), 1, 2, 0, 3));
-        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
         ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
         ggml_tensor * kqv = ggml_mul_mat(C, V, aw);
         att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), H, N);
@@ -735,7 +735,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             ggml_tensor * x_q = ggml_add(C, ggml_mul(C, ggml_norm(C, x, proj_ln_eps), w.n1w), w.n1b);
             ggml_tensor * qp = as_type(C, ggml_add(C, mm_act(C, c.Wq, x_q, at), c.bq), GGML_TYPE_F32);
             ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, qp, hd_dit, dit_heads, horizon), 0, 2, 1, 3));
-            ggml_tensor * kq = ggml_mul_mat(C, c.K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+            ggml_tensor * kq = ggml_mul_mat(C, c.K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
             // The Evo-1 reference cross-attends over the full padded context
             // (no key mask), so the action queries see every LM position.
             ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale_dit, 0.0f);

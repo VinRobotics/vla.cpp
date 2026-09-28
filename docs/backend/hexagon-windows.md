@@ -1,7 +1,7 @@
 # vla.cpp on Snapdragon X (Windows on Arm): Hexagon NPU, Adreno GPU and CPU
 
 Measured 2026-09 against llama.cpp build 11201 (`2145525a4`), passed in with
-`-LlamaDir`. The `b10729` tag that `CMakeLists.txt` pins was not tested.
+`-LlamaDir`. The `b11223` tag that `CMakeLists.txt` pins was not tested.
 
 ## Summary
 
@@ -79,7 +79,7 @@ The build script sets up the Visual Studio shell, the compiler flags llama.cpp's
 
 Each build goes into `build-wos-<backend>`, with every binary and DLL in `build-wos-<backend>\bin`. `-NoServer` skips `vla-server`, Octo and their protobuf and ZeroMQ dependencies.
 
-`-LlamaDir` points the build at an existing llama.cpp checkout through `FETCHCONTENT_SOURCE_DIR_LLAMA`. Without it, the `b10729` pin in `CMakeLists.txt` applies, which was not tested here.
+`-LlamaDir` points the build at an existing llama.cpp checkout through `FETCHCONTENT_SOURCE_DIR_LLAMA`. Without it, the `b11223` pin in `CMakeLists.txt` applies, which was not tested here.
 
 The HTP build also signs `libggml-htp-v*.so` with the certificate and copies the skels and their catalog next to the binaries. At startup the Hexagon backend points `ADSP_LIBRARY_PATH` at the executable's own folder, but only if the variable is unset. If it is already set, for example by a llama.cpp install, the skels it names must come from the same llama.cpp commit.
 

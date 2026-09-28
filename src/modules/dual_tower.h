@@ -92,7 +92,7 @@ inline ggml_tensor* vit_block(ggml_context*C, const ViTLayerW&w, ggml_tensor*x, 
     ggml_tensor*Q=ggml_cont(C,ggml_permute(C,ggml_reshape_3d(C,q,hd,heads,N),0,2,1,3));
     ggml_tensor*K=ggml_cont(C,ggml_permute(C,ggml_reshape_3d(C,k,hd,heads,N),0,2,1,3));
     ggml_tensor*V=ggml_cont(C,ggml_permute(C,ggml_reshape_3d(C,v,hd,heads,N),1,2,0,3));
-    ggml_tensor*kq=ggml_mul_mat(C,K,Q); ggml_mul_mat_set_prec(kq,GGML_PREC_F32);
+    ggml_tensor*kq=ggml_mul_mat(C,K,Q); ggml_prec_set_acc(kq,GGML_PREC_F32);
     ggml_tensor*aw=ggml_soft_max_ext(C,kq,nullptr,sc,0.0f);
     ggml_tensor*kqv=ggml_mul_mat(C,V,aw);
     ggml_tensor*att=ggml_reshape_2d(C,ggml_cont(C,ggml_permute(C,kqv,0,2,1,3)),hidden,N);

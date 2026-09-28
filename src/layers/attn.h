@@ -38,7 +38,7 @@ inline ggml_tensor * to_heads_v(ggml_context * C, ggml_tensor * p, int64_t hd, i
 inline ggml_tensor * attention(ggml_context * C, ggml_tensor * Q, ggml_tensor * K, ggml_tensor * V,
                                ggml_tensor * mask, float scale, int64_t dim, int64_t T, int64_t nv = 1) {
     ggml_tensor * kq = ggml_mul_mat(C, K, Q);
-    ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+    ggml_prec_set_acc(kq, GGML_PREC_F32);
 
     ggml_tensor * aw  = ggml_soft_max_ext(C, kq, mask, scale, 0.0f);
     ggml_tensor * kqv = ggml_mul_mat(C, V, aw);
@@ -52,7 +52,7 @@ inline ggml_tensor * flash_attention(ggml_context * C, ggml_tensor * Q, ggml_ten
     ggml_tensor * vf = V->type == GGML_TYPE_F16 ? V : ggml_cast(C, V, GGML_TYPE_F16);
 
     ggml_tensor * o = ggml_flash_attn_ext(C, Q, kf, vf, mask, scale, 0.0f, 0.0f);
-    ggml_flash_attn_ext_set_prec(o, GGML_PREC_F32);
+    ggml_prec_set_acc(o, GGML_PREC_F32);
     return ggml_reshape_2d(C, o, o->ne[0]*o->ne[1], o->ne[2]*o->ne[3]);
 }
 

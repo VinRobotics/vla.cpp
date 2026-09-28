@@ -862,7 +862,7 @@ bool run_t5_encoder_graph(OctoRuntime& rt,
             ggml_tensor * Vh = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, V, head_dim, heads, seq), 1, 2, 0, 3));
 
             ggml_tensor * scores = ggml_mul_mat(C, Kh, Qh);
-            ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+            ggml_prec_set_acc(scores, GGML_PREC_F32);
             // T5 folds 1/sqrt(d_k) into the weights, so the scale here is 1.
             ggml_tensor * probs    = ggml_soft_max_ext(C, scores, mask, 1.0f, 0.0f);
             ggml_tensor * attended = ggml_mul_mat(C, Vh, probs);
@@ -1113,7 +1113,7 @@ bool run_transformer_graph(OctoRuntime& rt,
             ggml_tensor * V   = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
 
             ggml_tensor * scores = ggml_mul_mat(C, K, Q);
-            ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+            ggml_prec_set_acc(scores, GGML_PREC_F32);
             ggml_tensor * probs    = ggml_soft_max_ext(C, scores, mask, attn_scale, 0.0f);
             ggml_tensor * attended = ggml_mul_mat(C, V, probs);
             ggml_tensor * merged   = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, attended, 0, 2, 1, 3)), kHidden, seq);
@@ -1445,7 +1445,7 @@ bool run_l1_action_head_graph(OctoRuntime& rt,
         ggml_tensor * Vh = ggml_cont(C, ggml_permute(C, ggml_reshape_4d(C, v, map_head_dim, map_heads, 1, width), 1, 2, 0, 3));
 
         ggml_tensor * scores = ggml_mul_mat(C, Qh, Kh);
-        ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+        ggml_prec_set_acc(scores, GGML_PREC_F32);
         // One readout token per timestep, so this softmax is over a single logit
         // and always yields 1.0. Kept as the real op in case that changes.
         ggml_tensor * probs    = ggml_soft_max_ext(C, scores, nullptr, 1.0f/std::sqrt((float) map_head_dim), 0.0f);
