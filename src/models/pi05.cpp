@@ -421,13 +421,8 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         if (!VC) { std::fprintf(stderr, "vla(pi05): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vis.image_size, vis.image_size, 3); ggml_set_input(t_px);
         ggml_tensor * h = vis.vit.build(VC, vis.vit.embed_conv(VC, t_px, vis.patch_size, grid), K);
-        // PaliGemma projector: linear (+ optional bias), then 1/sqrt(hidden) scale (matches clip.cpp siglip.cpp).
-        ggml_tensor * proj = linear(VC, vis.proj_w, vis.proj_b, h);
-        // Undo the 1/sqrt(hidden) the shared vision graph applies; pi05 wants raw
-        // projector features. Inside this branch on purpose: precomputed_img_emb
-        // replaces the tower and is already LM-ready.
-        ggml_tensor * vit_emb = ggml_scale(VC, ggml_scale(VC, proj, 1.0f/std::sqrt((float) proj->ne[0])),
-                                           (float) std::sqrt((double) hidden_pl));
+        // PaliGemma projector: linear (+ optional bias).
+        ggml_tensor * vit_emb = linear(VC, vis.proj_w, vis.proj_b, h);
         ggml_set_output(vit_emb);
 
         ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
