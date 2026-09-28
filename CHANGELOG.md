@@ -45,6 +45,52 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Fixed
 
+- vla-server no longer dies on a bad request. An out-of-vocab Octo token, 9 to
+  16 OpenVLA-OFT or VLA-Adapter views, a BitVLA prompt past 1024 tokens, or Octo
+  stats without a mask each abort the process today; they now get an error
+  reply. Images are decoded as JPEG or PNG only, a request is capped at 64
+  megapixels in total, precomputed embeddings at 16 views, and a port that is
+  already in use exits with a message instead of SIGABRT after the model load.
+- vlm-server segfaulted on every start at `b11223`, read an uninitialized prompt
+  length, died on a chat-template exception, corrupted multi-turn prompts,
+  streamed invalid UTF-8, and handed network bytes to the ffmpeg image fallback.
+  All fixed; a full context now ends with `finish_reason="length"`.
+- Graph sizes follow the real node count in π0, π0.5, SmolVLA, OpenVLA-OFT,
+  VLA-Adapter, VLA-JEPA and GR00T N1.7, so more views or `VLA_NUM_STEPS` no
+  longer trip a fixed 16384/65536-node assert.
+- Malformed GGUF metadata (zero heads or patch size, non-square position tables,
+  bad RoPE theta, mismatched patch shapes) is rejected at load for every arch
+  instead of dividing by zero or reading past a buffer.
+- BitVLA: BF16/F16/Q8_0 weights were uploaded to CUDA as float (NaN or garbage
+  actions), `VLA_DEVICE` was ignored, CUDA allocation and launch errors were
+  dropped, three kernels had shared-memory races, and failed inits leaked up to
+  250 MiB.
+- The BF16 CUDA hook could write F32 into a BF16 buffer on a declined matmul,
+  lost launch errors, shared one cuBLAS handle across threads, and missed an
+  alignment check on batched views.
+- Evo-1's Q8_0 file aborted on a view assert; its attention split now uses row
+  views and no longer copies 24 weight slices per call.
+- `WeightLoader::fuse` read quantized sources as float, so a quantized TurboVLA
+  failed to load.
+- A `--config` runtime block overrode flags given on the command line and
+  silently dropped bad values. The command line now wins, bad values are an
+  error, and `libvla` and the Python bindings apply the block too.
+- Two models in one process shared the flash-attention and matmul-precision
+  flags of whichever loaded last.
+- The C API and Python bindings are safe to call from several threads on one
+  handle, and the bindings reject an image whose dtype does not match its pixel
+  format instead of reading past it.
+- The CPU fallback wrapper reuses one threadpool instead of spawning threads for
+  every split.
+- `scripts/quantize_gguf.py` wrote array metadata as INT32, which broke Octo and
+  TurboVLA, and packed the action experts and vision towers its skip list meant
+  to keep float.
+- Converters: both lerobot key layouts for π0/π0.5, π0.5's normalization mapping,
+  legacy SmolVLA stats, head counts from config, `torch.load(weights_only=True)`
+  on third-party checkpoints (torch >= 2.6), and unsupported config variants are
+  refused.
+- The eval client's REQ socket stayed stuck after one timeout, and the ALOHA
+  prefetch could replay a chunk from an earlier observation.
 - A `scripts/quantize_gguf.py` file did not load for SmolVLA on any platform:
   its loader read every weight as float and refused the packed connector. It now
   keeps packed GEMM weights packed, like the other archs, and dequantizes the
