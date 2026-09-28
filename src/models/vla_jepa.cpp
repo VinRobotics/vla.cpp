@@ -46,7 +46,7 @@ struct VlaJepaModelArch : public ModelArchBase {
     ggml_backend_t        backend     = nullptr;
     int                   n_threads   = default_cpu_threads();
     ggml_context *        ctx_weights = nullptr;
-    scratch_ctx           vision_scratch;
+    graph_cache<int, VitIO> vision_graph;
     struct LmKey {
         int64_t seq=-1, nfuture=-1;
         bool operator==(const LmKey & o) const {
@@ -66,7 +66,6 @@ struct VlaJepaModelArch : public ModelArchBase {
     };
     struct HeadIO {
         ggml_tensor *t_cond=nullptr,*t_state=nullptr,*t_x0=nullptr,*actions=nullptr;
-        std::vector<ggml_tensor*> t_tau, t_tproj;
     };
     graph_cache<LmKey, LmIO>     lm_graph;
     graph_cache<HeadKey, HeadIO> head_graph;
@@ -191,7 +190,6 @@ std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
     }
     if (!load_config(g, *m, m->cfg))
         return nullptr;
-    m->times.build(m->num_steps, m->num_buckets, m->dit_hidden, m->action_horizon);
     std::printf("vla(vla_jepa): vit=Qwen3-VL %lldd×%lldL (deepstack@{%lld,%lld,%lld}, merge÷%lld)  lm=Qwen3-VL %lldd×%lldL (%lldq/%lldkv×%lld, θ=%g)  "
                 "dit-B %lldL×%lldh×%lld(inner %lld, cross %lld, out %lld)  horizon=%lld action_dim=%lld state_dim=%lld future=%lld N_steps=%lld  resident=%s\n",
                 (long long) m->vit.hidden, (long long) m->vit.layers, (long long) m->vit.deepstack_idx[0], (long long) m->vit.deepstack_idx[1], (long long) m->vit.deepstack_idx[2], (long long) m->vit.merge,
@@ -233,6 +231,8 @@ std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
     m->dit.declare(L, "ah.dit", false, false, "ah");
 
     if (!L.upload(m->backend, &m->weight_buf))
+        return nullptr;
+    if (!m->times.build("vla_jepa", m->backend, m->dit, m->num_steps, m->num_buckets, m->dit_hidden, m->action_horizon))
         return nullptr;
 
     std::printf("vla(vla_jepa): weights resident in %.2f GiB (%s)\n",
@@ -298,7 +298,7 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         if (inj_patches.empty() && !in.images) { std::fprintf(stderr, "vla(vla_jepa): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
 
         const auto tv0 = std::chrono::steady_clock::now();
-        const bool vok = vit.encode("vla_jepa", backend, vision_scratch, in.images, n_views,
+        const bool vok = vit.encode("vla_jepa", backend, vision_graph, in.images, n_views,
                                     inj_patches.empty() ? nullptr : inj_patches.data(), img_emb_host, ds_host);
         stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now()-tv0).count();
         if (!vok) return {};
@@ -403,15 +403,11 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
     ggml_tensor * t_cond  = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, num_future); ggml_set_input(t_cond);
     ggml_tensor * t_state = ggml_new_tensor_2d(C, GGML_TYPE_F32, state_dim, 1);  ggml_set_input(t_state);
     ggml_tensor * t_x0    = ggml_new_tensor_2d(C, GGML_TYPE_F32, AD, AH);        ggml_set_input(t_x0);
-    std::vector<ggml_tensor *> t_tau(num_steps), t_tproj(num_steps);
-    for (int64_t s=0; s<num_steps; ++s) {
-        t_tau[s] = ggml_new_tensor_2d(C, GGML_TYPE_F32, E, AH);
-        ggml_set_input(t_tau[s]);
-        t_tproj[s] = ggml_new_tensor_1d(C, GGML_TYPE_F32, time_proj_dim);
-        ggml_set_input(t_tproj[s]);
-    }
 
     ggml_tensor * state_features = ffn_relu(C, se_l1W, se_l1b, se_l2W, se_l2b, t_state);
+    std::vector<ggml_tensor *> Kc(dit_layers, nullptr), Vc(dit_layers, nullptr);
+    for (int64_t i=0; i<dit_layers; i+=2)
+        dit.kv(C, dit.blk[i], t_cond, &Kc[i], &Vc[i]);
     ggml_tensor * future = future_tokens;
     const float dt = 1.0f/(float) num_steps;
     step_seq.assign(num_steps, nullptr); step_pred.assign(num_steps, nullptr);
@@ -419,10 +415,8 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
 
     ggml_tensor * actions = t_x0;
     for (int64_t s=0; s<num_steps; ++s) {
-        ggml_tensor * temb = dit.time_emb(C, t_tproj[s]);
-
         ggml_tensor * a_emb = ggml_add(C, ggml_mul_mat(C, ae_l1W, actions), ae_l1b);
-        ggml_tensor * cat   = ggml_concat(C, a_emb, t_tau[s], 0);
+        ggml_tensor * cat   = ggml_concat(C, a_emb, times.tau[s], 0);
         ggml_tensor * x2    = ggml_silu(C, ggml_add(C, ggml_mul_mat(C, ae_l2W, cat), ae_l2b));
         ggml_tensor * af    = ggml_add(C, ggml_mul_mat(C, ae_l3W, x2), ae_l3b);
         af = ggml_add(C, af, ggml_view_2d(C, pos_embd, E, AH, pos_embd->nb[1], 0));
@@ -431,10 +425,10 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         ggml_tensor * x = seq;
         for (int64_t i=0; i<dit_layers; ++i) {
             ggml_tensor * enc = (i%2 == 0) ? t_cond : nullptr;
-            x = dit.block(C, dit.blk[i], x, temb, enc);
+            x = dit.block(C, dit.blk[i], x, times.mod(C, s, i), enc, Kc[i], Vc[i]);
         }
 
-        ggml_tensor * model_output = dit.proj_out(C, x, temb);
+        ggml_tensor * model_output = dit.proj_out(C, x, times.mod(C, s, dit_layers));
         step_pred[s] = model_output;
 
         ggml_tensor * last = ggml_cont(C, ggml_view_2d(C, model_output, OUTD, AH, model_output->nb[1], (size_t) (Nseq-AH)*model_output->nb[1]));
@@ -451,7 +445,6 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
     }
     ggml_set_output(actions);
     gio.t_cond=t_cond; gio.t_state=t_state; gio.t_x0=t_x0; gio.actions=actions;
-    gio.t_tau=t_tau; gio.t_tproj=t_tproj;
 
     ggml_cgraph * hg = ggml_new_graph_custom(C, head_nodes, false);
     ggml_build_forward_expand(hg, actions);
@@ -468,7 +461,6 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
     HeadIO & hio = head_graph.io();
     ggml_cgraph * hg = head_graph.graph();
     ggml_tensor * t_cond = hio.t_cond, * t_state = hio.t_state, * t_x0 = hio.t_x0, * actions = hio.actions;
-    std::vector<ggml_tensor*> & t_tau = hio.t_tau; std::vector<ggml_tensor*> & t_tproj = hio.t_tproj;
 
     ggml_backend_tensor_set(t_cond, cond_host.data(), 0, ggml_nbytes(t_cond));
     {
@@ -478,7 +470,6 @@ std::vector<float> VlaJepaModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(t_state, st.data(), 0, ggml_nbytes(t_state));
     }
     ggml_backend_tensor_set(t_x0, x_init.data(), 0, ggml_nbytes(t_x0));
-    times.upload(t_tau, t_tproj);
 
     const auto td0 = std::chrono::steady_clock::now();
     graph_unique_names(hg);

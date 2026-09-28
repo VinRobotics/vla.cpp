@@ -42,6 +42,7 @@ constexpr float QWEN3VL_STD [3] = {0.5f, 0.5f, 0.5f};
 
 struct VitLayerW { ggml_tensor *ln1w,*ln1b,*ln2w,*ln2b,*Wqkv,*bqkv,*Wo,*bo,*Wfc1,*bfc1,*Wfc2,*bfc2; };
 struct MergerW   { ggml_tensor *nw,*nb,*fc1w,*fc1b,*fc2w,*fc2b; };
+struct VitIO     { ggml_tensor *t_patches=nullptr,*t_pos=nullptr,*t_cos=nullptr,*t_sin=nullptr,*embeds=nullptr,*ds[3]={}; };
 
 struct Qwen3VLTower {
     int64_t hidden = 1024, layers = 24, heads = 16, patch = 16, temporal = 2, merge = 2;
@@ -70,7 +71,7 @@ struct Qwen3VLTower {
 
     bool build_caches(const char * arch, gguf_reader & io);
 
-    bool encode(const char * arch, ggml_backend_t backend, scratch_ctx & scratch, const ImageView * images,
+    bool encode(const char * arch, ggml_backend_t backend, graph_cache<int, VitIO> & cache, const ImageView * images,
                 int64_t n_views, const float * patches_in, std::vector<float> & emb, std::vector<float> (&ds)[3]) const;
 
     void declare(WeightLoader & L, const char * prefix) {
@@ -321,47 +322,48 @@ inline bool Qwen3VLTower::build_caches(const char * arch, gguf_reader & io) {
     return true;
 }
 
-inline bool Qwen3VLTower::encode(const char * arch, ggml_backend_t backend, scratch_ctx & scratch, const ImageView * images,
+inline bool Qwen3VLTower::encode(const char * arch, ggml_backend_t backend, graph_cache<int, VitIO> & cache, const ImageView * images,
                                  int64_t n_views, const float * patches_in, std::vector<float> & emb,
                                  std::vector<float> (&ds)[3]) const {
     const int64_t n_patches = grid()*grid(), hd = hidden/heads;
 
-    ggml_context * VC = scratch.reset((size_t) 512*1024*1024);
-    if (!VC) {
-        std::fprintf(stderr, "vla(%s): ggml_init(vision ctx) failed\n", arch);
-        return false;
-    }
-    ggml_tensor * t_patches = ggml_new_tensor_2d(VC, GGML_TYPE_F32, patch_flat, n_patches); ggml_set_input(t_patches);
-    ggml_tensor * t_pos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hidden, n_patches);     ggml_set_input(t_pos);
-    ggml_tensor * t_cos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hd, n_patches);         ggml_set_input(t_cos);
-    ggml_tensor * t_sin     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hd, n_patches);         ggml_set_input(t_sin);
-    ggml_tensor * h = ggml_add(VC, ggml_add(VC, ggml_mul_mat(VC, patch_w, t_patches), patch_b), t_pos);
-    ggml_set_output(h);
+    const bool built = cache.ensure(backend, 0, (size_t) 512*1024*1024, [&](ggml_context * VC, VitIO & io) -> ggml_cgraph * {
+        ggml_tensor * t_patches = ggml_new_tensor_2d(VC, GGML_TYPE_F32, patch_flat, n_patches); ggml_set_input(t_patches);
+        ggml_tensor * t_pos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hidden, n_patches);     ggml_set_input(t_pos);
+        ggml_tensor * t_cos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hd, n_patches);         ggml_set_input(t_cos);
+        ggml_tensor * t_sin     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hd, n_patches);         ggml_set_input(t_sin);
+        ggml_tensor * h = ggml_add(VC, ggml_add(VC, ggml_mul_mat(VC, patch_w, t_patches), patch_b), t_pos);
 
-    ggml_tensor * stash[3] = {nullptr, nullptr, nullptr};
-    for (int64_t i=0; i<layers; ++i) {
-        h = build_vit_layer(VC, blk[i], h, t_cos, t_sin, n_patches, heads, hd, hidden, ln_eps);
-        ggml_set_output(h);
+        ggml_tensor * stash[3] = {nullptr, nullptr, nullptr};
+        for (int64_t i=0; i<layers; ++i) {
+            h = build_vit_layer(VC, blk[i], h, t_cos, t_sin, n_patches, heads, hd, hidden, ln_eps);
+            for (int j=0; j<3; ++j)
+                if (i == deepstack_idx[j])
+                    stash[j] = h;
+        }
+        for (int j=0; j<3; ++j) {
+            io.ds[j] = build_merger(VC, deepstack[j], stash[j] ? stash[j] : h, hidden, merge, conn_eps, false);
+            ggml_set_output(io.ds[j]);
+        }
+        io.embeds = build_merger(VC, merger, h, hidden, merge, conn_eps, true);
+        ggml_set_output(io.embeds);
+        io.t_patches = t_patches; io.t_pos = t_pos; io.t_cos = t_cos; io.t_sin = t_sin;
+
+        ggml_cgraph * vg = ggml_new_graph_custom(VC, 16384, false);
+        ggml_build_forward_expand(vg, io.embeds);
         for (int j=0; j<3; ++j)
-            if (i == deepstack_idx[j])
-                stash[j] = h;
-    }
-    ggml_tensor * ds_out[3];
-    for (int j=0; j<3; ++j) {
-        ds_out[j] = build_merger(VC, deepstack[j], stash[j] ? stash[j] : h, hidden, merge, conn_eps, false);
-        ggml_set_output(ds_out[j]);
-    }
-    ggml_tensor * embeds = build_merger(VC, merger, h, hidden, merge, conn_eps, true);
-    ggml_set_output(embeds);
-
-    ggml_cgraph * vg = ggml_new_graph_custom(VC, 16384, false);
-    ggml_build_forward_expand(vg, embeds);
-    for (int j=0; j<3; ++j)
-        ggml_build_forward_expand(vg, ds_out[j]);
-    if (!scratch.alloc(backend, vg)) {
-        std::fprintf(stderr, "vla(%s): vision gallocr alloc failed\n", arch);
+            ggml_build_forward_expand(vg, io.ds[j]);
+        return vg;
+    });
+    if (!built) {
+        std::fprintf(stderr, "vla(%s): vision graph build failed\n", arch);
         return false;
     }
+    const VitIO & io = cache.io();
+    ggml_cgraph * vg = cache.graph();
+    ggml_tensor * t_patches = io.t_patches, * t_pos = io.t_pos, * t_cos = io.t_cos, * t_sin = io.t_sin;
+    ggml_tensor * embeds = io.embeds;
+    ggml_tensor * const * ds_out = io.ds;
 
     const size_t per_view = (size_t) ggml_nelements(embeds);
     emb.assign((size_t) n_views*per_view, 0.0f);
