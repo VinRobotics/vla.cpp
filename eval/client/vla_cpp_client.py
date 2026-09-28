@@ -129,6 +129,12 @@ def _resize_with_pad(img_chw: np.ndarray, target_h: int, target_w: int,
     t = F.pad(t, (pad_w, 0, pad_h, 0), value=pad_value)
     return t.squeeze(0).numpy()
 
+def _minmax_norm(x: np.ndarray, lo: np.ndarray, hi: np.ndarray, mask: np.ndarray) -> np.ndarray:
+
+    out = np.zeros_like(x, dtype=np.float32)
+    out[..., mask] = 2.0 * (x[..., mask] - lo[mask]) / (hi[mask] - lo[mask]) - 1.0
+    return out
+
 class VlaCppClient:
 
     DEFAULT_RECV_TIMEOUT_MS = 30_000
@@ -205,7 +211,7 @@ class VlaCppClient:
 
         self._bitvla_proprio_norm = None
         self._bitvla_unnorm_key   = None
-        if arch == "bitvla":
+        if arch in ("bitvla", "vla_adapter"):
             if stats_json:
                 stats_path = Path(stats_json)
             elif (Path(tokenizer_name) / "dataset_statistics.json").exists():
@@ -217,10 +223,12 @@ class VlaCppClient:
                 stats_path = Path(hf_hub_download(tokenizer_name, "dataset_statistics.json"))
             if not stats_path.exists():
                 raise FileNotFoundError(
-                    f"BitVLA dataset_statistics.json not found at {stats_path}. "
+                    f"{arch} dataset_statistics.json not found at {stats_path}. "
                     f"Pass --stats-json or point --tokenizer at a ckpt dir that has it.")
             blob = json.loads(stats_path.read_text())
             key = bitvla_unnorm_key
+            if key is None and arch == "vla_adapter":
+                key = os.environ.get("VLA_ADAPTER_UNNORM_KEY")
             if key is None:
                 if len(blob) != 1:
                     raise ValueError(
@@ -239,7 +247,7 @@ class VlaCppClient:
                 out = np.where(mask, 2.0 * (y - q01) / (q99 - q01 + 1e-8) - 1.0, y)
                 return np.clip(out, -1.0, 1.0).astype(np.float32)
             self._bitvla_proprio_norm = _norm
-            print(f"vla-cpp-direct[arch=bitvla]: proprio normalizer "
+            print(f"vla-cpp-direct[arch={arch}]: proprio normalizer "
                   f"BOUNDS_Q99 via {stats_path}::{key}.proprio", flush=True)
 
         self._oft_proprio_norm = None
@@ -477,11 +485,9 @@ class VlaCppClient:
             self._gr00t_state_dims = tuple(state_dims)
             s_q01 = self._gr00t_quantile(state_stats, state_keys, "q01")
             s_q99 = self._gr00t_quantile(state_stats, state_keys, "q99")
-            s_rng = (s_q99 - s_q01).astype(np.float32)
-            def _state_norm(state_8d: np.ndarray, q01=s_q01, q99=s_q99, rng=s_rng) -> np.ndarray:
-
-                norm = 2.0 * (state_8d - q01) / np.where(rng > 1e-8, rng, 1.0) - 1.0
-                return np.clip(norm, -1.0, 1.0).astype(np.float32)
+            def _state_norm(state_8d: np.ndarray, q01=s_q01, q99=s_q99,
+                            mask=~np.isclose(s_q99, s_q01)) -> np.ndarray:
+                return np.clip(_minmax_norm(state_8d, q01, q99, mask), -1.0, 1.0)
             self._gr00t_state_norm = _state_norm
             print(f"vla-cpp-direct[arch=gr00t_n1_7]: state normalizer "
                   f"(q01/q99 + clip) via {stats_path}::{key}.state "
@@ -537,10 +543,9 @@ class VlaCppClient:
                 s_min_parts.append(mn); s_max_parts.append(mx)
             s_min = np.concatenate(s_min_parts)
             s_max = np.concatenate(s_max_parts)
-            s_rng = (s_max - s_min).astype(np.float32)
-            def _state_norm_n16(state_8d: np.ndarray, mn=s_min, mx=s_max, rng=s_rng) -> np.ndarray:
-                norm = 2.0 * (state_8d - mn) / np.where(rng > 1e-8, rng, 1.0) - 1.0
-                return np.clip(norm, -1.0, 1.0).astype(np.float32)
+            def _state_norm_n16(state_8d: np.ndarray, mn=s_min, mx=s_max,
+                                mask=~np.isclose(s_max, s_min)) -> np.ndarray:
+                return np.clip(_minmax_norm(state_8d, mn, mx, mask), -1.0, 1.0)
             self._gr00t_state_norm = _state_norm_n16
             print(f"vla-cpp-direct[arch=gr00t_n1_6]: state normalizer "
                   f"(min/max + clip) via {stats_path}::{key}.state "
@@ -579,10 +584,8 @@ class VlaCppClient:
                   f"[min={a_min.tolist()}, max={a_max.tolist()}]", flush=True)
             s_min = np.asarray(blob[key]["state"]["min"], dtype=np.float32)
             s_max = np.asarray(blob[key]["state"]["max"], dtype=np.float32)
-            s_rng = (s_max - s_min).astype(np.float32)
-            def _state_norm_n15(state_vec, mn=s_min, mx=s_max, rng=s_rng):
-
-                return (2.0 * (state_vec - mn) / np.where(rng > 1e-8, rng, 1.0) - 1.0).astype(np.float32)
+            def _state_norm_n15(state_vec, mn=s_min, mx=s_max, mask=s_min != s_max):
+                return _minmax_norm(state_vec, mn, mx, mask)
             self._gr00t_state_norm = _state_norm_n15
             print(f"vla-cpp-direct[arch=gr00t_n1_5]: state normalizer "
                   f"(flat min/max, no clip) via {stats_path}::{key}.state "
@@ -1200,6 +1203,7 @@ class VlaCppClient:
         if isinstance(st, torch.Tensor):
             st = st.numpy()
         st = np.asarray(st, dtype=np.float32).reshape(-1)[:8]
+        st = self._bitvla_proprio_norm(st)
 
         task = observations.get("task", "")
         if isinstance(task, bytes):
@@ -1747,11 +1751,7 @@ class VlaCppSimplerGr00tClient:
     def _state_norm(self, sv: np.ndarray) -> np.ndarray:
 
         mn, mx = self._s_min, self._s_max
-        rng = mx - mn
-        mask = ~np.isclose(mx, mn)
-        out = np.zeros_like(sv)
-        out[mask] = 2.0 * (sv[mask] - mn[mask]) / rng[mask] - 1.0
-        return np.clip(out, -1.0, 1.0).astype(np.float32)
+        return np.clip(_minmax_norm(sv, mn, mx, ~np.isclose(mx, mn)), -1.0, 1.0)
 
     def _decode_action(self, chunk: np.ndarray) -> np.ndarray:
 
