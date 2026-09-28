@@ -150,7 +150,7 @@ inline ggml_tensor * build_merger(ggml_context * C, const MergerW & w, ggml_tens
         m = ggml_add(C, ggml_mul(C, ggml_norm(C, mr, ln_eps), w.nw), w.nb);
     }
     ggml_tensor * z1 = ggml_add(C, ggml_mul_mat(C, w.fc1w, m), w.fc1b);
-    return ggml_add(C, ggml_mul_mat(C, w.fc2w, vla::gelu(C, z1)), w.fc2b);
+    return ggml_add(C, ggml_mul_mat(C, w.fc2w, ggml_gelu_erf(C, z1)), w.fc2b);
 }
 
 // Patch row/col after the spatial merge.
