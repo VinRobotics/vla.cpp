@@ -76,6 +76,8 @@ bool spm_encode(const gguf_reader& g, const char * arch, const std::string& text
 }
 
 bool has_spm_tokenizer(const std::string& ckpt_path, const char * arch) {
+    if (ckpt_path.size() < 5 || ckpt_path.compare(ckpt_path.size()-5, 5, ".gguf") != 0)
+        return false;
     gguf_reader g{arch};
     return g.open(ckpt_path) && g.has((std::string(arch) + ".tokenizer.spm_model").c_str());
 }
@@ -153,6 +155,11 @@ bool tokenize_prompt(const std::string& ckpt_path, const char * arch, const std:
         const uint32_t eos_id     = g.has("octo.tokenizer.eos_id") ? g.u32("octo.tokenizer.eos_id") : 1;
         const uint32_t pad_id     = g.has("octo.tokenizer.pad_id") ? g.u32("octo.tokenizer.pad_id") : 0;
         const int64_t  max_length = g.has("octo.tokens.language") ? g.u32("octo.tokens.language") : 16;
+        if (max_length != 16) {
+            std::fprintf(stderr, "vla(octo): octo.tokens.language=%lld, the T5 encoder is built for 16\n",
+                         (long long) max_length);
+            return false;
+        }
         if ((int64_t) ids.size() > max_length-1)
             ids.resize((size_t) (max_length-1));
         ids.push_back((int32_t) eos_id);

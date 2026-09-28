@@ -249,6 +249,10 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
             return nullptr;
         }
     }
+    if (opts.act_dtype == GGML_TYPE_BF16 && arch != Arch::PI0 && arch != Arch::EVO1) {
+        std::fprintf(stderr, "vla: act_dtype bf16 is only supported by pi0 and evo1\n");
+        return nullptr;
+    }
 
     const bool fa = opts.flash_attn.value_or(default_flash_attn());
     const bool mm = opts.mm_prec_f32.value_or(true);

@@ -117,7 +117,7 @@ struct Evo1ModelArch : public ModelArchBase {
 
 namespace {
 
-// BF16 activation path (VLA_EVO1_BF16_ACT=1); see models/act_dtype.h for what
+// BF16 activation path (--act-dtype bf16); see act_dtype.h for what
 // mm_act/as_type do and why. The split here: GEMMs, bias adds, residuals,
 // norms and activations in BF16; attention scores, softmax and RoPE in F32;
 // and the flow-matching Euler integrator in F32 so 32 steps of dt = 1/32 do
@@ -171,7 +171,7 @@ ggml_tensor * build_qwen2_layer(ggml_context * C, const Evo1ModelArch & m, const
 // (see modeling_intern_vit.py), so this path is closer to the upstream model
 // than the explicit one, not a divergence from it.
 //
-// OPT-IN (VLA_EVO1_FA=1), not default. It cuts the vision stage from ~132 ms to
+// OPT-IN (--flash-attn), not default. It cuts the vision stage from ~132 ms to
 // ~82 ms, but ggml's CUDA flash attention computes K/V at F16 — fattn.cu accepts
 // an F32 K/V only by reinterpreting it as F16, so there is no full-precision FA
 // path on this backend. Over 24 ViT layers that moved actions by ~1e-2 and
@@ -374,9 +374,9 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
             if (b.is_cuda && m->matmul_type == GGML_TYPE_BF16) {
                 m->act_type = GGML_TYPE_BF16;
                 cuda_register_bf16_ops();   // installs the in-tree BF16 CUDA kernels
-                std::printf("vla(evo1): activations = BF16 (VLA_EVO1_BF16_ACT)\n");
+                std::printf("vla(evo1): activations = BF16\n");
             } else {
-                std::fprintf(stderr, "vla(evo1): VLA_EVO1_BF16_ACT ignored - needs CUDA and BF16 weights\n");
+                std::fprintf(stderr, "vla(evo1): --act-dtype bf16 ignored - needs CUDA and BF16 weights\n");
             }
         }
     }

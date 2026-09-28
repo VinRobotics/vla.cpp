@@ -296,7 +296,7 @@ struct SmolVLAModelArch : public ModelArchBase {
 
 namespace {
 
-// Fused attention in the SigLIP tower. OPT-IN (VLA_SMOLVLA_FA=1), not default.
+// Fused attention in the SigLIP tower. OPT-IN (--flash-attn), not default.
 // It cuts the vision stage from 33.2 ms to 22.1 ms (total 68.5 -> 55.8 ms), which
 // is enough to beat compiled PyTorch — but ggml's CUDA flash attention computes
 // K/V at F16 regardless of input type (fattn.cu accepts F32 K/V only by
@@ -1101,7 +1101,7 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
     }
 
     std::unordered_set<const ggml_tensor *> widened;
-    if (m->is_cuda && vla::mm_prec_f32_enabled()) {
+    if (m->is_cuda && vla::mm_prec_f32_enabled() && !opts.weight_dtype) {
         for (const auto * layers : {&m->vlm_layers, &m->expert_layers})
             for (const LayerW & w : *layers)
                 for (ggml_tensor * t : {w.Wq, w.Wk, w.Wv, w.Wo, w.Wgate, w.Wup, w.Wdown})
@@ -1109,6 +1109,8 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
                         retype(t, GGML_TYPE_F32);
                         widened.insert(t);
                     }
+        if (!widened.empty())
+            std::printf("vla: %zu LM GEMM weights widened to f32 for --mm-prec f32\n", widened.size());
     }
 
     const std::string emb = "model.vlm_with_expert.vlm.model.text_model.embed_tokens.weight";

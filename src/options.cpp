@@ -112,7 +112,8 @@ bool resolve_num_steps(const char * arch, const Options & opts, int & steps) {
 
 const char * Options::usage() {
     return "  --weight-dtype f32|bf16|f16  resident dtype for GEMM weights\n"
-           "  --act-dtype f32|bf16      activation dtype (needs CUDA and bf16 weights)\n"
+           "  --act-dtype f32|bf16      activation dtype; bf16 is pi0/evo1 only, needs CUDA\n"
+           "                            and bf16 weights\n"
            "  --flash-attn [0|1]        flash attention; faster, changes numerics\n"
            "  --mm-prec default|f32     matmul accumulation precision\n"
            "  --num-steps N             flow-matching solver steps, 1-1000 (default: the\n"
