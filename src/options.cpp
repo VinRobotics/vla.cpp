@@ -184,8 +184,10 @@ bool Options::load_json(const std::string & path, std::string & err) {
         return true;
 
     std::ifstream f(path);
-    if (!f)
-        return true;
+    if (!f) {
+        err = "config json: cannot open "+path;
+        return false;
+    }
 
     nlohmann::json j;
     try {

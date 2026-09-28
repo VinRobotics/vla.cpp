@@ -22,9 +22,11 @@
 //
 //   vla-cli [--mmproj m.gguf] --ckpt c.gguf --image img.jpg [--image img2.jpg]
 //           (--text "pick up the bowl" | --tokens id,id,...) [--state f,f,...] [--pretty]
+//           [--config c.json] [precision flags]
 
 #include "arch.h"
 #include "model.h"
+#include "options.h"
 #include "serving/hf_fetch.h"
 #ifdef VLA_USE_OCTO
 #include "models/octo.h"
@@ -253,6 +255,7 @@ void usage(const char * prog) {
     std::fprintf(stderr,
         "usage: %s [--mmproj m.gguf] (--ckpt c.gguf | -hf user/repo) --image img.jpg [--image ...]\n"
         "          (--text \"...\" | --tokens id,id,...) [--state f,f,...] [--pretty]\n"
+        "          [--config c.json] [precision flags]\n"
         "  --mmproj   ignored; every arch bundles its vision tower in the ckpt GGUF\n"
         "  --ckpt     model checkpoint GGUF\n"
         "  -hf        HuggingFace repo, user/repo[:file.gguf], cached under $VLA_CACHE\n"
@@ -261,16 +264,21 @@ void usage(const char * prog) {
         "             transformers), or in-process for Octo, whose vocab is in the GGUF\n"
         "  --tokens   language token ids, comma-separated, if you tokenized already\n"
         "  --state    proprioception floats, comma-separated (default zeros)\n"
-        "  --pretty   print one action row (max_action_dim values) per line\n",
-        prog);
+        "  --pretty   print one action row (max_action_dim values) per line\n"
+        "  --config   policy config.json; its \"runtime\" block sets the flags below,\n"
+        "             and flags given here win\n"
+        "%s",
+        prog, Options::usage());
 }
 
 }  // namespace
 
 int main(int argc, char ** argv) {
-    std::string mmproj, ckpt, hf, tokens_s, state_s, text_s;
+    std::string mmproj, ckpt, hf, tokens_s, state_s, text_s, config_path;
     std::vector<std::string> image_paths;
     bool pretty = false;
+    Options opts;
+    std::string opt_err;
 
     for (int i=1; i<argc; ++i) {
         const std::string a = argv[i];
@@ -290,6 +298,13 @@ int main(int argc, char ** argv) {
         else if (a == "--text")    text_s = need("--text");
         else if (a == "--state")   state_s = need("--state");
         else if (a == "--pretty")  pretty = true;
+        else if (a == "--config")  config_path = need("--config");
+        else if (opts.parse_arg(argc, argv, i, opt_err)) continue;
+        else if (!opt_err.empty()) {
+            std::fprintf(stderr, "vla-cli: %s\n", opt_err.c_str());
+            usage(argv[0]);
+            return 1;
+        }
         else if (a == "-h" || a == "--help") {
             usage(argv[0]);
             return 0;
@@ -299,6 +314,10 @@ int main(int argc, char ** argv) {
             usage(argv[0]);
             return 1;
         }
+    }
+    if (!opts.load_json(config_path, opt_err)) {
+        std::fprintf(stderr, "vla-cli: %s\n", opt_err.c_str());
+        return 1;
     }
     if (!hf.empty()) {
         if (!ckpt.empty()) {
@@ -342,7 +361,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    Model * m = model_load(mmproj, ckpt, "");
+    Model * m = model_load(mmproj, ckpt, config_path, opts);
     if (!m) {
         std::fprintf(stderr, "vla-cli: model_load failed\n");
         return 1;

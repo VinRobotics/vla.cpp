@@ -54,6 +54,9 @@ int main(void) {
         return failures ? 1 : 0;
     }
 
+    check(vla_model_load(getenv("VLA_TEST_MMPROJ"), gguf, "/nonexistent/config.json") == NULL,
+          "load rejects a missing config");
+
     vla_model * m = vla_model_load(getenv("VLA_TEST_MMPROJ"), gguf, NULL);
     check(m != NULL, "load real checkpoint");
     if (!m) return 1;
