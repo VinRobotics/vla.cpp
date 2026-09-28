@@ -14,48 +14,32 @@
 
 #include "arch.h"
 #include "modules/gemma_expert.h"
-#include "modules/siglip_vit.h"
 #include "options.h"
 #include "model.h"
 
 #include "ggml.h"
-#include "ggml-cpu.h"
 #include "ggml-backend.h"
-#include "ggml-alloc.h"
 #include "backend.h"
-#include "gguf.h"
 #include "gguf_reader.h"
 #include "scratch_ctx.h"
+#include "layers/attn.h"
 #include "layers/embed.h"
+#include "layers/norm.h"
 #include "modules/preprocess.h"
+#include "modules/prompt.h"
 #include "act_dtype.h"
 #include "cuda/vla_cuda_ops.h"
-#include "env_flag.h"
 
-#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <random>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace vla {
-
-namespace {
-
-
-bool ends_with(const std::string & s, const char * sfx) {
-    const size_t n = std::strlen(sfx);
-    return s.size() >= n && s.compare(s.size()-n, n, sfx) == 0;
-}
-
-}
 
 struct Pi0ModelArch : public ModelArchBase {
     Pi0ModelArch() : ModelArchBase(Arch::PI0) {}
@@ -80,22 +64,15 @@ struct Pi0ModelArch : public ModelArchBase {
         std::vector<ggml_tensor*> t_time;
     };
     graph_cache<MainKey, MainIO> main_graph;
-    std::string           ckpt_path_;
     // Opened once at load: reopening per predict re-parses the whole GGUF header.
     gguf_reader           io{"pi0"};
     ggml_type             matmul_type = GGML_TYPE_BF16;
     // Activation dtype carried between ops. F32 by default; BF16 under
-    // VLA_PI0_BF16_ACT, which removes the per-GEMM F32<->BF16 round trip ggml
+    // --act-dtype bf16, which removes the per-GEMM F32<->BF16 round trip ggml
     // pays when BF16 weights meet F32 activations. See mm_act/as_type below.
     ggml_type             act_type    = GGML_TYPE_F32;
 
-    // In-tree SigLIP-So400m/14 vision tower (was llama.cpp clip.cpp mmproj).
-    int64_t vit_hidden = 1152, vit_layers = 27, vit_heads = 16;
-    int64_t vit_image_size = 224, vit_patch_size = 14, vit_n_tokens = 256;
-    float   vit_ln_eps = 1e-6f;
-    SigLipTower   vit;
-    ggml_tensor * mm_proj_w = nullptr, * mm_proj_b = nullptr;
-
+    PaliVision    vis;
     GemmaStack    pl;
     GemmaStack    ex;
 
@@ -107,7 +84,6 @@ struct Pi0ModelArch : public ModelArchBase {
 
     std::vector<float> state_mean, state_std, action_mean, action_std;
 
-    std::mt19937 rng{std::random_device{}()};
     int n_threads = default_cpu_threads();
 };
 
@@ -117,120 +93,38 @@ namespace {
 // (the PaliGemma vision tower is the same SigLIP-So400m/14). Bidirectional
 // attention (nullptr mask), F32 score accumulation, tanh GELU FFN.
 // Fused attention for the SigLIP tower and the PaliGemma/expert stack.
-// OPT-IN (VLA_PI0_FA=1): pi0's score matrices are small (~560 keys, 8 heads), so
+// OPT-IN (--flash-attn): pi0's score matrices are small (~560 keys, 8 heads), so
 // fusing them only moved 111.4 ms -> 107.5 ms (3.5%), and ggml's FA computes K/V
 // at F16 regardless of the input type. pi0's flash-attention SR was never
 // measured, so it stays opt-in on an unquantified risk rather than a measured
 // cost. (The evo1 SR drop this used to cite did not reproduce.)
-// VLA_PI0_BF16_ACT is the better lever here: 9.1%, and its SR was measured.
+// --act-dtype bf16 is the better lever here: 9.1%, and its SR was measured.
 
 ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_tensor * x,
-                                 int64_t seq, int64_t heads, int64_t head_dim, int64_t hidden, float ln_eps,
-                                 ggml_type at) {
-    const float scale = 1.0f/std::sqrt((float) head_dim);
-    ggml_tensor * n1 = ggml_add(C, ggml_mul(C, ggml_norm(C, x, ln_eps), w.ln1w), w.ln1b);
+                                 int64_t seq, const EncCfg & c, ggml_type at) {
+    const float scale = 1.0f/std::sqrt((float) c.head_dim);
+    ggml_tensor * n1 = layer_norm(C, x, w.ln1w, w.ln1b, c.ln_eps);
     ggml_tensor * q = as_type(C, ggml_add(C, mm_act(C, w.Wq, n1, at), w.bq), GGML_TYPE_F32);
     ggml_tensor * k = as_type(C, ggml_add(C, mm_act(C, w.Wk, n1, at), w.bk), GGML_TYPE_F32);
     ggml_tensor * v = as_type(C, ggml_add(C, mm_act(C, w.Wv, n1, at), w.bv), GGML_TYPE_F32);
-    ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, head_dim, heads, seq), 0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, head_dim, heads, seq), 0, 2, 1, 3));
+    ggml_tensor * Q = to_heads(C, q, c.head_dim, c.heads, seq);
+    ggml_tensor * K = to_heads(C, k, c.head_dim, c.heads, seq);
     ggml_tensor * att;
     if (vla::flash_attn_enabled()) {
         // Avoids materialising the per-head score matrix; K/V stay F32 so the
         // numerics track the explicit path below (except on Hexagon, whose
         // kernel takes F16 K/V only; see fa_kv).
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 0, 2, 1, 3));
+        ggml_tensor * V = to_heads(C, v, c.head_dim, c.heads, seq);
         ggml_tensor * fa = ggml_flash_attn_ext(C, Q, vla::fa_kv(C, K), vla::fa_kv(C, V), nullptr, scale, 0.0f, 0.0f);
         ggml_prec_set_acc(fa, GGML_PREC_F32);
-        att = ggml_reshape_2d(C, fa, hidden, seq);
+        att = ggml_reshape_2d(C, fa, c.hidden, seq);
     } else {
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
-        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
-        ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
-        att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
+        att = attention(C, Q, K, to_heads_v(C, v, c.head_dim, c.heads, seq), nullptr, scale, c.hidden, seq);
     }
     ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, mm_act(C, w.Wo, as_type(C, att, at), at), w.bo));
-    ggml_tensor * n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.ln2w), w.ln2b);
+    ggml_tensor * n2 = layer_norm(C, h1, w.ln2w, w.ln2b, c.ln_eps);
     ggml_tensor * ff = ggml_add(C, mm_act(C, w.Wfc2, vla::gelu(C, ggml_add(C, mm_act(C, w.Wfc1, n2, at), w.bfc1)), at), w.bfc2);
     return ggml_add(C, h1, ff);
-}
-
-// CHW-planar float image in [-1,1] for ggml_conv_2d (SigLIP mean/std 0.5).
-
-ggml_tensor * build_gemma_layer(
-        ggml_context * ctx, const GemmaLayerW & w,
-        ggml_tensor * x_in, ggml_tensor * positions,
-        const Config & cfg, int64_t seq, float rope_base,
-        ggml_tensor * cached_K, ggml_tensor * cached_V, ggml_tensor * mask,
-        ggml_tensor ** k_out, ggml_tensor ** v_out, ggml_type at) {
-    const int64_t hd  = cfg.head_dim;
-    const int64_t nq  = cfg.n_q_heads;
-    const int64_t nkv = cfg.n_kv_heads;
-    const int64_t qf  = nq * hd;
-
-    ggml_tensor * x_norm = ggml_mul(ctx, ggml_rms_norm(ctx, x_in, cfg.rms_eps), w.ln_in);
-
-    // Q/K/V land in F32: RoPE, the KV cache the suffix passes re-read, and the
-    // score/softmax core all stay full precision.
-    ggml_tensor * q = as_type(ctx, mm_act(ctx, w.Wq, x_norm, at), GGML_TYPE_F32);
-    ggml_tensor * k = as_type(ctx, mm_act(ctx, w.Wk, x_norm, at), GGML_TYPE_F32);
-    ggml_tensor * v = as_type(ctx, mm_act(ctx, w.Wv, x_norm, at), GGML_TYPE_F32);
-
-    ggml_tensor * q_h = ggml_reshape_3d(ctx, q, hd, nq,  seq);
-    ggml_tensor * k_h = ggml_reshape_3d(ctx, k, hd, nkv, seq);
-    ggml_tensor * v_h = ggml_reshape_3d(ctx, v, hd, nkv, seq);
-
-    auto rope_call = [&](ggml_tensor * t) {
-        return ggml_rope_ext(ctx, t, positions,  nullptr,
-                              (int) hd,  GGML_ROPE_TYPE_NEOX,  0,
-                             rope_base,  1.f,  0.f,  1.f,
-                              32.f,  1.f);
-    };
-    ggml_tensor * q_rope = rope_call(q_h);
-    ggml_tensor * k_rope = rope_call(k_h);
-
-    if (k_out)
-        *k_out = k_rope;
-    if (v_out)
-        *v_out = v_h;
-
-    ggml_tensor * K_full = k_rope;
-    ggml_tensor * V_full = v_h;
-    if (cached_K && cached_V) {
-        K_full = ggml_concat(ctx, cached_K, k_rope,  2);
-        V_full = ggml_concat(ctx, cached_V, v_h,     2);
-    }
-
-    const float scale = 1.f/std::sqrt((float) hd);
-    ggml_tensor * Q = ggml_cont(ctx, ggml_permute(ctx, q_rope, 0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(ctx, ggml_permute(ctx, K_full, 0, 2, 1, 3));
-    ggml_tensor * att_pre;
-    if (vla::flash_attn_enabled()) {
-        ggml_tensor * V = ggml_cont(ctx, ggml_permute(ctx, V_full, 0, 2, 1, 3));
-        // ggml_flash_attn_ext asserts an F16 mask. The mask holds only 0 and
-        // -inf, both exactly representable in F16, so the cast is lossless.
-        ggml_tensor * mask_f16 = mask ? ggml_cast(ctx, mask, GGML_TYPE_F16) : nullptr;
-        ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, vla::fa_kv(ctx, K), vla::fa_kv(ctx, V), mask_f16, scale, 0.0f, 0.0f);
-        ggml_prec_set_acc(fa, GGML_PREC_F32);
-        att_pre = ggml_reshape_2d(ctx, fa, qf, seq);
-    } else {
-        ggml_tensor * V = ggml_cont(ctx, ggml_permute(ctx, V_full, 1, 2, 0, 3));
-        ggml_tensor * kq = ggml_mul_mat(ctx, K, Q);
-        ggml_prec_set_acc(kq, GGML_PREC_F32);
-        ggml_tensor * attn = ggml_soft_max_ext(ctx, kq, mask, scale,  0.f);
-        ggml_tensor * kqv  = ggml_mul_mat(ctx, V, attn);
-        att_pre = ggml_reshape_2d(ctx,
-            ggml_cont(ctx, ggml_permute(ctx, kqv, 0, 2, 1, 3)), qf, seq);
-    }
-    ggml_tensor * o_out = mm_act(ctx, w.Wo, as_type(ctx, att_pre, at), at);
-    ggml_tensor * h1    = ggml_add(ctx, x_in, o_out);
-
-    ggml_tensor * x_norm_mlp = ggml_mul(ctx, ggml_rms_norm(ctx, h1, cfg.rms_eps), w.ln_post);
-    ggml_tensor * gate    = mm_act(ctx, w.Wgate, x_norm_mlp, at);
-    ggml_tensor * up      = mm_act(ctx, w.Wup,   x_norm_mlp, at);
-    ggml_tensor * inter_t = ggml_mul(ctx, vla::gelu(ctx, gate), up);
-    ggml_tensor * mlp_out = mm_act(ctx, w.Wdown, inter_t, at);
-    return ggml_add(ctx, h1, mlp_out);
 }
 
 ggml_tensor * build_embed_suffix(ggml_context * ctx, const Pi0ModelArch & m,
@@ -248,92 +142,17 @@ ggml_tensor * build_embed_suffix(ggml_context * ctx, const Pi0ModelArch & m,
     return ggml_concat(ctx, state_emb_2d, action_time_emb, 1);
 }
 
-bool load_config(const gguf_reader & g, Config & cfg) {
-    auto need = [&](const char * k) {
-        if (!g.has(k)) {
-            std::fprintf(stderr, "vla(pi0): gguf missing key %s\n", k);
-            return false;
-        }
-        return true;
-    };
-    for (const char * k : {"pi0.hidden", "pi0.intermediate", "pi0.n_q_heads", "pi0.n_kv_heads",
-                           "pi0.head_dim", "pi0.n_layers", "pi0.expert_h", "pi0.expert_inter",
-                           "pi0.chunk_size", "pi0.num_steps", "pi0.max_state_dim", "pi0.max_action_dim",
-                           "pi0.real_state_dim", "pi0.real_action_dim", "pi0.tokenizer_max_length",
-                           "pi0.min_period", "pi0.max_period"}) {
-        if (!need(k))
-            return false;
-    }
-    cfg = Config{};
-    cfg.hidden          = g.u32("pi0.hidden");
-    cfg.intermediate    = g.u32("pi0.intermediate");
-    cfg.n_q_heads       = g.u32("pi0.n_q_heads");
-    cfg.n_kv_heads      = g.u32("pi0.n_kv_heads");
-    cfg.head_dim        = g.u32("pi0.head_dim");
-    cfg.n_layers        = g.u32("pi0.n_layers");
-    cfg.expert_h        = g.u32("pi0.expert_h");
-    cfg.expert_inter    = g.u32("pi0.expert_inter");
-    cfg.n_suffix        = g.u32("pi0.chunk_size");
-    cfg.num_steps       = g.u32("pi0.num_steps");
-    cfg.max_state_dim   = g.u32("pi0.max_state_dim");
-    cfg.max_action_dim  = g.u32("pi0.max_action_dim");
-    cfg.real_state_dim  = g.u32("pi0.real_state_dim");
-    cfg.real_action_dim = g.u32("pi0.real_action_dim");
-    cfg.n_lang          = g.u32("pi0.tokenizer_max_length");
-    cfg.min_period      = g.f64("pi0.min_period");
-    cfg.max_period      = g.f64("pi0.max_period");
-    if (cfg.num_steps < 1 || cfg.num_steps > 1000) {
-        std::fprintf(stderr, "vla(pi0): num_steps %d out of range [1, 1000]\n", cfg.num_steps);
-        return false;
-    }
-
-    cfg.n_state         = 1;
-    cfg.n_img           = 256;
-    cfg.q_full_dim      = cfg.n_q_heads  * cfg.head_dim;
-    cfg.kv_full_dim     = cfg.n_kv_heads*cfg.head_dim;
-    cfg.self_attn_every_n = 0;
-    cfg.rms_eps         = g.has("pi0.rms_norm_eps") ? g.f32("pi0.rms_norm_eps") : 1e-6f;
-    cfg.norm_eps        = g.has("pi0.norm_eps")     ? g.f32("pi0.norm_eps")     : 1e-8f;
-    cfg.rope_mode       = GGML_ROPE_TYPE_NEOX;
-    cfg.rope_n_dims     = (int) cfg.head_dim;
-    cfg.rope_freq_base  = g.has("pi0.rope_theta") ? (float) g.f64("pi0.rope_theta") : 10000.f;
-    cfg.n_prefix        = 0;
-    cfg.n_full          = 0;
-    return true;
-}
-
 bool load_stats(gguf_reader & g, Pi0ModelArch & m) {
     const auto & cfg = m.cfg;
     m.state_mean .assign(cfg.real_state_dim,  0.f);
     m.state_std  .assign(cfg.real_state_dim,  1.f);
     m.action_mean.assign(cfg.real_action_dim, 0.f);
     m.action_std .assign(cfg.real_action_dim, 1.f);
-    // Absent stats are a valid checkpoint: identity, carry on. Stats that are
-    // present but unreadable are not - falling back to identity there hands back
-    // un-denormalised actions with nothing in the log. Note stderr, not stdout:
-    // stdout is the action stream tests/predict_check.cpp diffs.
-    auto read1d = [&](const char * name, std::vector<float> & dst) {
-        const ggml_tensor * t = g.meta(name);
-        if (!t) {
-            std::fprintf(stderr, "vla(pi0): %s missing - identity\n", name);
-            return true;
-        }
-        if (t->ne[0] != (int64_t) dst.size()) {
-            std::fprintf(stderr, "vla(pi0): %s is %lld wide, expected %zu\n",
-                         name, (long long) t->ne[0], dst.size());
-            return false;
-        }
-        if (!g.read_raw(name, dst.data(), dst.size()*sizeof(float))) {
-            std::fprintf(stderr, "vla(pi0): %s read failed\n", name);
-            return false;
-        }
-        return true;
-    };
     bool ok = true;
-    ok &= read1d("state_mean",  m.state_mean);
-    ok &= read1d("state_std",   m.state_std);
-    ok &= read1d("action_mean", m.action_mean);
-    ok &= read1d("action_std",  m.action_std);
+    ok &= read_pi_stat(g, "state_mean",  m.state_mean);
+    ok &= read_pi_stat(g, "state_std",   m.state_std);
+    ok &= read_pi_stat(g, "action_mean", m.action_mean);
+    ok &= read_pi_stat(g, "action_std",  m.action_std);
     return ok;
 }
 
@@ -354,27 +173,11 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
                                           const Options& opts) {
     (void) config_path;
 
-    if (!ends_with(ckpt_path, ".gguf")) {
-        std::fprintf(stderr,
-            "vla(pi0): ckpt must be a GGUF produced by scripts/convert_pi0_to_gguf.py "
-            "(got '%s'); direct .safetensors loading for π₀ is not yet supported\n",
-            ckpt_path.c_str());
-        return nullptr;
-    }
-
     auto m = std::make_unique<Pi0ModelArch>();
-    m->ckpt_path_ = ckpt_path;
     m->matmul_type = opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16));
 
-    if (!m->io.open(ckpt_path))
-        return nullptr;
     gguf_reader & g = m->io;
-    if (!g.has("pi0.architecture") || g.str("pi0.architecture") != "pi0") {
-        std::fprintf(stderr, "vla(pi0): '%s' is not a π₀ GGUF (pi0.architecture missing/wrong)\n",
-                     ckpt_path.c_str());
-        return nullptr;
-    }
-    if (!load_config(g, m->cfg))
+    if (!load_pi_config(g, ckpt_path, 1, m->cfg))
         return nullptr;
     const Config & cfg = m->cfg;
     std::printf("vla(pi0): hidden=%lld inter=%lld heads=%lldq/%lldkv x%lld n_layers=%lld "
@@ -386,7 +189,6 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
                 cfg.num_steps, (long long) cfg.real_state_dim, (long long) cfg.real_action_dim,
                 m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
-    m->n_threads = default_cpu_threads();
     {
         const Backend b = backend_init("vla(pi0)", m->n_threads);
         if (!b.handle) {
@@ -399,36 +201,17 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
             if (b.is_cuda && m->matmul_type == GGML_TYPE_BF16) {
                 m->act_type = GGML_TYPE_BF16;
                 cuda_register_bf16_ops();   // installs the in-tree BF16 CUDA kernels
-                std::printf("vla(pi0): activations = BF16 (VLA_PI0_BF16_ACT)\n");
+                std::printf("vla(pi0): activations = BF16\n");
             } else {
-                std::fprintf(stderr, "vla(pi0): VLA_PI0_BF16_ACT ignored - needs CUDA and BF16 weights\n");
+                std::fprintf(stderr, "vla(pi0): --act-dtype bf16 ignored - needs CUDA and BF16 weights\n");
             }
         }
     }
 
     // The SigLIP tower is now bundled in the ckpt GGUF; mmproj_path is ignored.
     (void) mmproj_path;
-    {
-        auto vu = [&](const char * k, int64_t & d) { if (g.has(k)) d = (int64_t) g.u32(k); };
-        vu("pi0.vit_hidden", m->vit_hidden); vu("pi0.vit_layers", m->vit_layers);
-        vu("pi0.vit_heads",  m->vit_heads);  vu("pi0.image_size", m->vit_image_size);
-        vu("pi0.patch_size", m->vit_patch_size); vu("pi0.n_img_tokens", m->vit_n_tokens);
-        if (g.has("pi0.vit_ln_eps"))
-            m->vit_ln_eps = g.f32("pi0.vit_ln_eps");
-        if (m->vit_patch_size <= 0 || m->vit_heads <= 0 || m->vit_hidden % m->vit_heads ||
-            m->vit_image_size % m->vit_patch_size) {
-            std::fprintf(stderr, "vla(pi0): bad vit geometry (image %lld patch %lld hidden %lld heads %lld)\n",
-                         (long long) m->vit_image_size, (long long) m->vit_patch_size,
-                         (long long) m->vit_hidden, (long long) m->vit_heads);
-            return nullptr;
-        }
-        const int64_t grid = m->vit_image_size/m->vit_patch_size;
-        if (grid * grid != m->vit_n_tokens || m->vit_n_tokens != cfg.n_img) {
-            std::fprintf(stderr, "vla(pi0): vit geometry mismatch (grid^2=%lld n_img_tokens=%lld cfg.n_img=%lld)\n",
-                         (long long) (grid * grid), (long long) m->vit_n_tokens, (long long) cfg.n_img);
-            return nullptr;
-        }
-    }
+    if (!m->vis.load(g, cfg.n_img))
+        return nullptr;
 
     {
         ggml_init_params wp = {  (size_t) 16*1024*1024,  nullptr,  true };
@@ -440,9 +223,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     }
     WeightLoader L("pi0", g, m->ctx_weights, m->matmul_type);
 
-    m->vit.declare(L, "vit", m->vit_layers);
-    m->mm_proj_w = L.gemm   ("mm.proj.weight");
-    m->mm_proj_b = L.opt_f32("mm.proj.bias");
+    m->vis.declare(L);
 
     m->pl.declare(L, "vlm", cfg.n_layers, false);
     m->ex.declare(L, "aex", cfg.n_layers, true);
@@ -480,7 +261,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     const int64_t max_ad    = cfg.max_action_dim;
     const int     num_steps = cfg.num_steps;
     const float   dt        = -1.0f/(float) num_steps;
-    const float   rope_base = cfg.rope_freq_base;
+    const bool    fa        = flash_attn_enabled();
 
     std::vector<float> img_emb_host;
     int64_t n_img_tokens = 0;
@@ -497,24 +278,22 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
             std::fprintf(stderr, "vla(pi0): predict: no images and no precomputed_img_emb\n");
             return {};
         }
-        const int64_t K = vit_n_tokens, H = hidden_pl, grid = vit_image_size/vit_patch_size;
+        const int64_t K = vis.n_tokens, H = hidden_pl, grid = vis.image_size/vis.patch_size;
         n_img_tokens = (int64_t) in.n_images*K;
         img_emb_host.assign((size_t) in.n_images*K * H, 0.0f);
 
         ggml_context * VC = vision_scratch.reset((size_t) 128*1024*1024);
         if (!VC) { std::fprintf(stderr, "vla(pi0): ggml_init(vision ctx) failed\n"); return {}; }
-        ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vit_image_size, vit_image_size, 3); ggml_set_input(t_px);
-        ggml_tensor * conv = ggml_conv_2d(VC, vit.patch_w, t_px, (int) vit_patch_size, (int) vit_patch_size, 0, 0, 1, 1);
-        ggml_tensor * patches = ggml_cont(VC, ggml_transpose(VC, ggml_reshape_2d(VC, conv, grid * grid, vit_hidden)));
+        ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vis.image_size, vis.image_size, 3); ggml_set_input(t_px);
         // patch embed (conv_2d) stays F32; the tower runs in the activation dtype
-        ggml_tensor * h = as_type(VC, ggml_add(VC, ggml_add(VC, patches, vit.patch_b), vit.pos), act_type);
-        for (int64_t i=0; i<vit_layers; ++i)
-            h = build_siglip_layer(VC, vit.enc.blk[i], h, K, vit_heads, vit_hidden/vit_heads, vit_hidden, vit_ln_eps, act_type);
-        h = ggml_add(VC, ggml_mul(VC, ggml_norm(VC, h, vit_ln_eps), vit.post_ln_w), vit.post_ln_b);
+        ggml_tensor * h = as_type(VC, vis.vit.embed_conv(VC, t_px, vis.patch_size, grid), act_type);
+        for (const EncBlockW & w : vis.vit.enc.blk)
+            h = build_siglip_layer(VC, w, h, K, vis.vit.enc.cfg, act_type);
+        h = layer_norm(VC, h, vis.vit.post_ln_w, vis.vit.post_ln_b, vis.vit.enc.cfg.ln_eps);
         // PaliGemma projector: linear (+ optional bias), then 1/sqrt(hidden) scale (matches clip.cpp siglip.cpp).
-        ggml_tensor * proj = mm_act(VC, mm_proj_w, h, act_type);
-        if (mm_proj_b)
-            proj = ggml_add(VC, proj, mm_proj_b);
+        ggml_tensor * proj = mm_act(VC, vis.proj_w, h, act_type);
+        if (vis.proj_b)
+            proj = ggml_add(VC, proj, vis.proj_b);
         // read back to the host as F32
         ggml_tensor * vit_emb = as_type(VC, ggml_scale(VC, proj, 1.0f/std::sqrt((float) proj->ne[0])), GGML_TYPE_F32);
         ggml_set_output(vit_emb);
@@ -529,7 +308,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
         const auto tv0 = clk::now();
         std::vector<float> chw;
         for (int v=0; v<in.n_images; ++v) {
-            if (!preprocess_image_chw("pi0", in.images[v], vit_image_size, chw)) { return {}; }
+            if (!preprocess_image_chw("pi0", in.images[v], vis.image_size, chw)) { return {}; }
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
             graph_unique_names(vg);
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
@@ -582,9 +361,8 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     {
         ggml_tensor * h = prefix_embs;
         for (int64_t i=0; i<n_layers; ++i) {
-            h = build_gemma_layer(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix, rope_base,
-                                   nullptr,  nullptr,  nullptr,
-                                  &cK[i], &cV[i], act_type);
+            h = gemma_layer(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix,
+                            nullptr, nullptr, nullptr, &cK[i], &cV[i], act_type, fa);
         }
         (void) h;
     }
@@ -596,9 +374,8 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     for (int step=0; step<num_steps; ++step) {
         ggml_tensor * h = build_embed_suffix(C, *this, t_state, x_t, t_time[step]);
         for (int64_t i=0; i<n_layers; ++i) {
-            h = build_gemma_layer(C, ex.blk[i], h, t_suffix_pos, cfg, n_suf, rope_base,
-                                   cK[i],  cV[i],  t_full_mask,
-                                   nullptr,  nullptr, act_type);
+            h = gemma_layer(C, ex.blk[i], h, t_suffix_pos, cfg, n_suf,
+                            cK[i], cV[i], t_full_mask, nullptr, nullptr, act_type, fa);
         }
         ggml_tensor * h_final = ggml_mul(C, ggml_rms_norm(C, h, cfg.rms_eps), ex.output_norm);
         // row stride follows h_final's dtype, which is BF16 on the BF16 path
@@ -649,14 +426,8 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(t_state, sh.data(), 0, ggml_nbytes(t_state));
     }
     {
-        std::vector<float> x0h((size_t) max_ad * chunk);
-        if (in.noise)
-            std::memcpy(x0h.data(), in.noise, x0h.size()*sizeof(float));
-        else {
-            std::normal_distribution<float> nd(0.f, 1.f);
-            for (auto & v : x0h)
-                v = nd(rng);
-        }
+        std::vector<float> x0h;
+        init_noise(in, (size_t) max_ad * chunk, x0h);
         ggml_backend_tensor_set(t_x0, x0h.data(), 0, ggml_nbytes(t_x0));
     }
     {
