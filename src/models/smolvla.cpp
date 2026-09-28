@@ -1014,8 +1014,8 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
             w.Wk = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h,    cfg.kv_full_dim);
             w.Wv = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h,    cfg.kv_full_dim);
         } else {
-            w.Wk = ggml_new_tensor_2d(ctx, wdt, cfg.kv_full_dim, cfg.kv_full_dim);
-            w.Wv = ggml_new_tensor_2d(ctx, wdt, cfg.kv_full_dim, cfg.kv_full_dim);
+            w.Wk = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.kv_full_dim, cfg.kv_full_dim);
+            w.Wv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.kv_full_dim, cfg.kv_full_dim);
         }
         w.Wo       = ggml_new_tensor_2d(ctx, wdt, cfg.q_full_dim, cfg.expert_h);
         w.Wln_post = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.expert_h);
