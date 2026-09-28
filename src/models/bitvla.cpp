@@ -433,16 +433,13 @@ namespace {
 
 static void recover_ternary_and_scale(const float* W, int64_t n,
                                        std::vector<int8_t>& ternary, float& absmean) {
-    // Per-tensor absmean scale (1/mean|W|), matching scripts/convert_bitvla_to_gguf.py;
-    // the int2-packed path bakes the same scale.
-    double s = 0.0;
+    float amax = 0.0f;
     for (int64_t i=0; i<n; ++i)
-        s += std::fabs((double) W[i]);
-    float mean = n > 0 ? (float) (s/(double) n) : 0.0f;
-    if (mean < 1e-5f)
-        mean = 1e-5f;
-    absmean = mean;
-    const float inv = 1.0f/mean;
+        amax = std::max(amax, std::fabs(W[i]));
+    if (amax < 1e-5f)
+        amax = 1e-5f;
+    absmean = amax;
+    const float inv = 1.0f/amax;
     ternary.resize(n);
     for (int64_t i=0; i<n; ++i) {
         float q = std::nearbyintf(W[i]*inv);
@@ -487,8 +484,7 @@ static std::vector<uint8_t> pack_ladder_int2(const int8_t* W, int64_t N, int64_t
 }
 
 static inline uint16_t f32_to_bf16_u16(float f) {
-    uint32_t u; std::memcpy(&u, &f, 4);
-    return (uint16_t)(u >> 16);
+    return ggml_fp32_to_bf16(f).bits;
 }
 
 static __nv_bfloat16* upload_bf16_from_f32(const float* h, size_t n, std::vector<void*>& out_ptrs) {
