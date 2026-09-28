@@ -244,7 +244,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     m->matmul_type = opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16));
 
     gguf_reader & g = m->io;
-    if (!load_pi_config(g, ckpt_path, 0, m->cfg))
+    if (!load_pi_config(g, ckpt_path, 0, m->cfg) || !resolve_num_steps("pi05", opts, m->cfg.num_steps))
         return nullptr;
     const Config & cfg = m->cfg;
     m->quantile_norm = g.has("pi05.norm_mode") && g.str("pi05.norm_mode") == "quantiles";

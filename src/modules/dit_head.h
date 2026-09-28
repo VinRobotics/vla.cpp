@@ -88,6 +88,4 @@ private:
     ggml_backend_buffer_t buf = nullptr;
 };
 
-void env_num_steps(const char * arch, int64_t & steps);
-
 }

@@ -79,11 +79,44 @@ bool mm_prec_f32_enabled()     {
     return g_mm_prec_f32;
 }
 
+bool resolve_num_steps(const char * arch, const Options & opts, int64_t & steps) {
+    long long v = steps;
+    const char * e = std::getenv("VLA_NUM_STEPS");
+    if (opts.num_steps) {
+        v = *opts.num_steps;
+    } else if (e && *e) {
+        char * end = nullptr;
+        v = std::strtoll(e, &end, 10);
+        if (end == e || *end != '\0') {
+            std::fprintf(stderr, "vla(%s): VLA_NUM_STEPS '%s' is not an integer\n", arch, e);
+            return false;
+        }
+    }
+    if (v < 1 || v > 1000) {
+        std::fprintf(stderr, "vla(%s): num_steps %lld out of range [1, 1000]\n", arch, v);
+        return false;
+    }
+    if (v != steps)
+        std::fprintf(stderr, "vla(%s): num_steps %lld (checkpoint %lld)\n", arch, v, (long long) steps);
+    steps = v;
+    return true;
+}
+
+bool resolve_num_steps(const char * arch, const Options & opts, int & steps) {
+    int64_t v = steps;
+    if (!resolve_num_steps(arch, opts, v))
+        return false;
+    steps = (int) v;
+    return true;
+}
+
 const char * Options::usage() {
     return "  --weight-dtype f32|bf16|f16  resident dtype for GEMM weights\n"
            "  --act-dtype f32|bf16      activation dtype (needs CUDA and bf16 weights)\n"
            "  --flash-attn [0|1]        flash attention; faster, changes numerics\n"
-           "  --mm-prec default|f32     matmul accumulation precision\n";
+           "  --mm-prec default|f32     matmul accumulation precision\n"
+           "  --num-steps N             flow-matching solver steps, 1-1000 (default: the\n"
+           "                            checkpoint's; also VLA_NUM_STEPS)\n";
 }
 
 bool Options::parse_arg(int argc, char ** argv, int & i, std::string & err) {
@@ -143,6 +176,20 @@ bool Options::parse_arg(int argc, char ** argv, int & i, std::string & err) {
         }
         err = "--mm-prec: expected default or f32, got '"+v+"'";
         return false;
+    }
+
+    if (a == "--num-steps") {
+        std::string v;
+        if (!next(v))
+            return false;
+        char * end = nullptr;
+        const long n = std::strtol(v.c_str(), &end, 10);
+        if (*end != '\0' || n < 1 || n > 1000) {
+            err = "--num-steps: expected an integer in [1, 1000], got '"+v+"'";
+            return false;
+        }
+        num_steps = (int) n;
+        return true;
     }
 
     err.clear();
@@ -226,6 +273,19 @@ bool Options::load_json(const std::string & path, std::string & err) {
             }
             if (!mm_prec_f32)
                 mm_prec_f32 = v == "f32";
+        }
+        if (r.contains("num_steps")) {
+            if (!r["num_steps"].is_number_integer()) {
+                err = "config json runtime.num_steps: expected an integer, got "+r["num_steps"].dump();
+                return false;
+            }
+            const int64_t v = r["num_steps"].get<int64_t>();
+            if (v < 1 || v > 1000) {
+                err = "config json runtime.num_steps: expected [1, 1000], got "+std::to_string(v);
+                return false;
+            }
+            if (!num_steps)
+                num_steps = (int) v;
         }
     } catch (const std::exception & e) {
         err = std::string("config json runtime: ")+e.what();

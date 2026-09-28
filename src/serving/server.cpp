@@ -179,10 +179,10 @@ int find_non_finite(const float * data, int n) {
 void usage(const char * prog) {
     std::fprintf(stderr,
         "usage: %s [--bind ADDR] [--timing-detail none|phase] [--config PATH] "
-        "([<mmproj.gguf>] <ckpt> | -hf user/repo[:file.gguf])\n"
+        "([<mmproj.gguf>] <ckpt> | -hf user/repo[:file.gguf|:tag])\n"
         "  <mmproj.gguf>           ignored; every arch bundles its vision tower in the\n"
         "                          ckpt GGUF. Accepted so older command lines still work.\n"
-        "  -hf                     HuggingFace repo, user/repo[:file.gguf]; downloaded\n"
+        "  -hf                     HuggingFace repo, user/repo[:file.gguf|:tag]; downloaded\n"
         "                          on a miss and cached under $VLA_CACHE. Not combined\n"
         "                          with positional args.\n"
         "  <ckpt>                  SmolVLA .safetensors or .gguf, or any of the other\n"
@@ -196,7 +196,7 @@ void usage(const char * prog) {
         "                          the others report ms_inference only)\n"
         "%s"
         "  --config PATH           policy config.json. Its \"runtime\" object sets the\n"
-        "                          precision flags above for any arch; flags given on\n"
+        "                          runtime flags above for any arch; flags given on\n"
         "                          the command line win. SmolVLA safetensors also read\n"
         "                          the policy from it (default <dirname(ckpt)>/config.json).\n",
         prog, vla::Options::usage());

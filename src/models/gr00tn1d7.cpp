@@ -90,7 +90,7 @@ struct Gr00tN1d7ModelArch : public ModelArchBase {
 
 namespace {
 
-bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
+bool load_config(const gguf_reader & g, const Options & opts, Gr00tN1d7ModelArch & m, Config & cfg) {
     auto U = [&](const char * k, int64_t & dst) { if (g.has(k)) dst = (int64_t) g.u32(k); };
     auto F = [&](const char * k, float & dst)   { if (g.has(k)) dst = g.f32(k); };
     auto fk = [&](const char * s) { thread_local char b[64]; std::snprintf(b, sizeof(b), "gr00t_n1_7.%s", s); return b; };
@@ -110,7 +110,8 @@ bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
         return false;
     }
 
-    env_num_steps("gr00tn1d7", m.num_steps);
+    if (!resolve_num_steps("gr00tn1d7", opts, m.num_steps))
+        return false;
     F(fk("lm_rms_eps"), m.lm_rms_eps); F(fk("ln_eps"), m.ln_eps); F(fk("norm_out_eps"), m.norm_out_eps);
     F(fk("vlln_eps"), m.vlln_eps); F(fk("vlsa_ln_eps"), m.vlsa_ln_eps);
     if (g.has(fk("lm_rope_theta")))
@@ -193,7 +194,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
         std::fprintf(stderr, "vla(gr00tn1d7): %s is not a gr00t_n1_7 GGUF\n", ckpt_path.c_str());
         return nullptr;
     }
-    if (!load_config(g, *m, m->cfg))
+    if (!load_config(g, opts, *m, m->cfg))
         return nullptr;
     std::printf("vla(gr00tn1d7): vit=Qwen3-VL %lldd×%lldL×%lldh (Conv3d patch %lld², temporal %lld; learned pos %lld + 2D rope; deepstack@{%lld,%lld,%lld}; merge÷%lld)  "
                 "lm=Qwen3-VL %lldd×%lldL (%lldq/%lldkv×%lld, θ=%g)  vlsa=%lldL×%lldh×%lld  dit=AlternateVLDiT %lldL×%lldh×%lld(inner %lld) attend_text_every_n=%lld  "

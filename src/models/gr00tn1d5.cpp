@@ -92,7 +92,7 @@ struct Gr00tN1d5ModelArch : public ModelArchBase {
 
 namespace {
 
-bool load_config(const gguf_reader & g, Gr00tN1d5ModelArch & m, Config & cfg) {
+bool load_config(const gguf_reader & g, const Options & opts, Gr00tN1d5ModelArch & m, Config & cfg) {
     auto U  = [&](const char * k, int64_t & dst) { if (g.has(k)) dst = (int64_t) g.u32(k); };
     auto F  = [&](const char * k, float & dst)   { if (g.has(k)) dst = g.f32(k); };
     auto fk = [&](const char * s) { thread_local char b[64]; std::snprintf(b, sizeof(b), "gr00t_n1_5.%s", s); return b; };
@@ -156,6 +156,9 @@ bool load_config(const gguf_reader & g, Gr00tN1d5ModelArch & m, Config & cfg) {
     if (!resolve_embodiment("gr00tn1d5", g.str(fk("embodiment_tag_mapping")), nullptr, m.max_embodiments, m.aex.embodiment_id))
         return false;
 
+    if (!resolve_num_steps("gr00tn1d5", opts, m.num_steps))
+        return false;
+
     cfg = Config{};
     cfg.n_img           = m.n_img_tokens;
     cfg.n_lang          = m.max_seq_len;
@@ -211,7 +214,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
         std::fprintf(stderr, "vla(gr00tn1d5): %s is not a gr00t_n1_5 GGUF\n", ckpt_path.c_str());
         return nullptr;
     }
-    if (!load_config(g, *m, m->cfg))
+    if (!load_config(g, opts, *m, m->cfg))
         return nullptr;
 
     std::printf("vla(gr00tn1d5): vit=%lldd×%lldL×%lldh n_img_tok=%lld  lm=Qwen3 %lldd×%lldL (%lldq/%lldkv×%lld)  "
@@ -332,7 +335,8 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
     init_noise(in, (size_t) AH*AD, x_init);
 
     const MainKey mkey{ SEQ, num_steps };
-    const bool built = main_graph.ensure(backend, mkey, (size_t) 128*1024*1024,
+    const size_t main_nodes = 32768 + (size_t) num_steps*64*(dit.cfg.layers+1);
+    const bool built = main_graph.ensure(backend, mkey, main_nodes*ggml_tensor_overhead() + ggml_graph_overhead_custom(main_nodes, false),
                                          [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
         ggml_tensor * t_embeds = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);           ggml_set_input(t_embeds);
         ggml_tensor * t_pos    = ggml_new_tensor_1d(C, GGML_TYPE_I32, SEQ);              ggml_set_input(t_pos);
@@ -352,7 +356,7 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
         gio.t_embeds=t_embeds; gio.t_pos=t_pos; gio.t_lmmask=t_lmmask; gio.t_state=t_state;
         gio.t_x0=t_x0; gio.actions=actions;
 
-        ggml_cgraph * gf = ggml_new_graph_custom(C, 32768, false);
+        ggml_cgraph * gf = ggml_new_graph_custom(C, main_nodes, false);
         ggml_build_forward_expand(gf, actions);
         return gf;
     });

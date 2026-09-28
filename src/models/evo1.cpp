@@ -263,7 +263,7 @@ ggml_tensor * inproj_split_b(ggml_context * C, ggml_tensor * bin, int64_t E, int
     return ggml_view_1d(C, bin, E, (size_t) k * E * bin->nb[0]);
 }
 
-bool load_config(const gguf_reader & g, Evo1ModelArch & m, Config & cfg) {
+bool load_config(const gguf_reader & g, const Options & opts, Evo1ModelArch & m, Config & cfg) {
     auto u = [&](const char * k, int64_t & dst) { if (g.has((std::string("evo1.")+k).c_str())) dst = g.u32((std::string("evo1.")+k).c_str()); };
     u("lm_hidden", m.lm_hidden); u("lm_layers_used", m.lm_layers); u("lm_q_heads", m.n_q); u("lm_kv_heads", m.n_kv);
     u("lm_head_dim", m.lm_head_dim); u("lm_inter", m.lm_inter); u("embed_dim", m.embed_dim); u("dit_layers", m.dit_layers);
@@ -295,6 +295,9 @@ bool load_config(const gguf_reader & g, Evo1ModelArch & m, Config & cfg) {
         std::fprintf(stderr, "vla(evo1): action_dim (%lld) != horizon (%lld) * per_action_dim (%lld)\n",
                      (long long) m.action_dim, (long long) m.horizon, (long long) m.per_a); return false;
     }
+
+    if (!resolve_num_steps("evo1", opts, m.num_steps))
+        return false;
 
     cfg = Config{};
     cfg.n_suffix       = m.horizon;
@@ -350,7 +353,7 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
     if (!g.has("evo1.architecture")) {
         std::fprintf(stderr, "vla(evo1): %s is not an evo1 GGUF (no evo1.architecture KV)\n", ckpt_path.c_str()); return nullptr;
     }
-    if (!load_config(g, *m, m->cfg))
+    if (!load_config(g, opts, *m, m->cfg))
         return nullptr;
     std::printf("vla(evo1): lm=%lldd×%lldL (%lldq/%lldkv×%lld) inter=%lld  embed=%lld dit=%lldL×%lldh  "
                 "horizon=%lld per_a=%lld N_steps=%lld  resident matmul=%s\n",
@@ -666,7 +669,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
 
     // LM + DiT graph depends only on the padded length and step count.
     const MainKey mkey{ SEQ, num_steps };
-    const bool built = main_graph.ensure(backend, mkey, (size_t) 96*1024*1024,
+    const size_t main_nodes = 32768 + (size_t) num_steps*64*(dit_layers+1);
+    const bool built = main_graph.ensure(backend, mkey, main_nodes*ggml_tensor_overhead() + ggml_graph_overhead_custom(main_nodes, false),
                                          [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
     const int64_t E = embed_dim, hd_dit = E/dit_heads;
     const float   scale_dit = 1.0f/std::sqrt((float) hd_dit);
@@ -759,7 +763,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     gio.t_embeds=t_embeds; gio.t_pos=t_pos; gio.t_lmmask=t_lmmask; gio.t_qmask=t_qmask;
     gio.t_state=t_state; gio.t_x=t_x; gio.t_amask=t_amask; gio.x_action=x_action;
 
-    ggml_cgraph * gf = ggml_new_graph_custom(C,  32768,  false);
+    ggml_cgraph * gf = ggml_new_graph_custom(C, main_nodes, false);
     ggml_build_forward_expand(gf, x_action);
     return gf;
     });

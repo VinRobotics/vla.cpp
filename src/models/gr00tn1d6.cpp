@@ -94,7 +94,7 @@ struct Gr00tN1d6ModelArch : public ModelArchBase {
 
 namespace {
 
-bool load_config(const gguf_reader & g, Gr00tN1d6ModelArch & m, Config & cfg) {
+bool load_config(const gguf_reader & g, const Options & opts, Gr00tN1d6ModelArch & m, Config & cfg) {
     auto U  = [&](const char * k, int64_t & dst) { if (g.has(k)) dst = (int64_t) g.u32(k); };
     auto F  = [&](const char * k, float & dst)   { if (g.has(k)) dst = g.f32(k); };
     auto fk = [&](const char * s) { thread_local char b[64]; std::snprintf(b, sizeof(b), "gr00t_n1_6.%s", s); return b; };
@@ -173,6 +173,9 @@ bool load_config(const gguf_reader & g, Gr00tN1d6ModelArch & m, Config & cfg) {
         }
     }
 
+    if (!resolve_num_steps("gr00tn1d6", opts, m.num_steps))
+        return false;
+
     cfg = Config{};
     cfg.n_img           = m.n_img_tokens;
     cfg.n_lang          = m.max_seq_len;
@@ -228,7 +231,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
         std::fprintf(stderr, "vla(gr00tn1d6): %s is not a gr00t_n1_6 GGUF\n", ckpt_path.c_str());
         return nullptr;
     }
-    if (!load_config(g, *m, m->cfg))
+    if (!load_config(g, opts, *m, m->cfg))
         return nullptr;
 
     std::printf("vla(gr00tn1d6): vit=%lldd×%lldL×%lldh (Linear patch embed)  pixel_shuffle÷%lld ⇒ n_img_tok=%lld  mlp1=LN(%lld)→Linear→GELU→Linear  "
@@ -375,7 +378,8 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
     init_noise(in, (size_t) AH*AD, x_init);
 
     const MainKey mkey{ SEQ, n_img, SEQ_TXT, num_steps };
-    const bool built = main_graph.ensure(backend, mkey, (size_t) 256*1024*1024,
+    const size_t main_nodes = 65536 + (size_t) num_steps*64*(dit.cfg.layers+1);
+    const bool built = main_graph.ensure(backend, mkey, main_nodes*ggml_tensor_overhead() + ggml_graph_overhead_custom(main_nodes, false),
                                          [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
         ggml_tensor * t_embeds = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);           ggml_set_input(t_embeds);
         ggml_tensor * t_pos    = ggml_new_tensor_1d(C, GGML_TYPE_I32, SEQ);              ggml_set_input(t_pos);
@@ -402,7 +406,7 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
         gio.t_embeds=t_embeds; gio.t_pos=t_pos; gio.t_lmmask=t_lmmask; gio.t_state=t_state; gio.t_x0=t_x0;
         gio.t_img_idx=t_img_idx; gio.t_txt_idx=t_txt_idx; gio.actions=actions;
 
-        ggml_cgraph * gf = ggml_new_graph_custom(C, 65536, false);
+        ggml_cgraph * gf = ggml_new_graph_custom(C, main_nodes, false);
         ggml_build_forward_expand(gf, actions);
         return gf;
     });

@@ -787,7 +787,8 @@ static void backend_set_from_f32(ggml_tensor * t, const float * src, int64_t n) 
 
 std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
                                                     const std::string& ckpt_path,
-                                                    const std::string& config_path) {
+                                                    const std::string& config_path,
+                                                    const Options& opts) {
     auto m = std::make_unique<SmolVLAModelArch>();
 
     const bool use_gguf = ends_with_gguf(ckpt_path);
@@ -804,10 +805,8 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
             return nullptr;
         std::printf("vla: config = %s\n", cfg_path.c_str());
     }
-    if (m->cfg.num_steps < 1 || m->cfg.num_steps > 1000) {
-        std::fprintf(stderr, "vla(smolvla): num_steps %d out of range [1, 1000]\n", m->cfg.num_steps);
+    if (!resolve_num_steps("smolvla", opts, m->cfg.num_steps))
         return nullptr;
-    }
 
     {
         const Backend b = backend_init("vla", default_cpu_threads());
@@ -1569,7 +1568,7 @@ std::unique_ptr<ModelArchBase> smolvla_create(const std::string&,
                                               const std::string& config_path,
                                               const Options& opts) {
     return smolvla_load_impl(opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16)),
-                             ckpt_path, config_path);
+                             ckpt_path, config_path, opts);
 }
 
 }

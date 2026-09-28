@@ -25,7 +25,6 @@
 
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 
 namespace vla {
 
@@ -244,18 +243,6 @@ bool FlowTimes::build(const char * arch, ggml_backend_t backend, const DitHead &
 
 ggml_tensor * FlowTimes::mod(ggml_context * C, int64_t s, int64_t i) const {
     return ggml_view_1d(C, mods, mods->ne[0], (size_t) (s*per_step+i)*mods->nb[1]);
-}
-
-void env_num_steps(const char * arch, int64_t & steps) {
-    const char * e = std::getenv("VLA_NUM_STEPS");
-    if (!e)
-        return;
-    char * end = nullptr;
-    const long v = std::strtol(e, &end, 10);
-    if (end && *end == '\0' && v >= 1) {
-        steps = (int64_t) v;
-        std::fprintf(stderr, "vla(%s): VLA_NUM_STEPS override → num_steps=%lld\n", arch, (long long) v);
-    }
 }
 
 }

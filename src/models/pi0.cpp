@@ -184,7 +184,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     m->matmul_type = opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16));
 
     gguf_reader & g = m->io;
-    if (!load_pi_config(g, ckpt_path, 1, m->cfg))
+    if (!load_pi_config(g, ckpt_path, 1, m->cfg) || !resolve_num_steps("pi0", opts, m->cfg.num_steps))
         return nullptr;
     const Config & cfg = m->cfg;
     std::printf("vla(pi0): hidden=%lld inter=%lld heads=%lldq/%lldkv x%lld n_layers=%lld "
