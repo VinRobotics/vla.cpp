@@ -34,12 +34,17 @@ Usage: $(basename "$0") -i <MODELS_ROOT> [-o <OUTPUT_ROOT>] [-n <N_EPISODES>] [-
   -n N_EPISODES    episodes per task-id (default: 1)
   -m MODEL         which model to run: smol | pi0 | pi05 | bit | evo1 |
                                        vla_adapter | openvla_oft |
-                                       gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | all
+                                       gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 |
+                                       octo | turbovla | vla_jepa | all
                    (default: all)
   -h               show this help
 
 Env overrides: BIND_ADDR, CLIENT_ADDR, BITVLA_TOKENIZER, GR00T_N1_6_TOKENIZER,
-               GR00T_N1_5_STATS, GR00T_N1_6_STATS, GR00T_N1_7_STATS
+               GR00T_N1_5_STATS, GR00T_N1_6_STATS, GR00T_N1_7_STATS,
+               PALIGEMMA_TOKENIZER (pi0/pi05), TURBOVLA_STATS, VLA_JEPA_STATS,
+               TASK_IDS (default "0 1 2 3 4 5 6 7 8 9"),
+               SERVER_BIN (prebuilt vla-server; setting it skips the build),
+               VLA_FIXED_NOISE_SEED (client-side noise, for paired A/B runs)
 EOF
 }
 
@@ -62,9 +67,9 @@ done
 shift $((OPTIND - 1))
 
 case "${MODEL}" in
-    smol|pi0|pi05|bit|evo1|vla_adapter|openvla_oft|gr00t_n1_5|gr00t_n1_6|gr00t_n1_7|all) ;;
+    smol|pi0|pi05|bit|evo1|vla_adapter|openvla_oft|gr00t_n1_5|gr00t_n1_6|gr00t_n1_7|octo|turbovla|vla_jepa|all) ;;
     *)
-        echo "ERROR: -m must be one of: smol | pi0 | pi05 | bit | evo1 | vla_adapter | openvla_oft | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | all (got '${MODEL}')" >&2
+        echo "ERROR: -m must be one of: smol | pi0 | pi05 | bit | evo1 | vla_adapter | openvla_oft | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | octo | turbovla | vla_jepa | all (got '${MODEL}')" >&2
         exit 1
         ;;
 esac
@@ -87,7 +92,12 @@ if ! [[ "${N_EPISODES}" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
-SERVER_BIN="${REPO_ROOT}/build/vla-server"
+if [[ -n "${SERVER_BIN:-}" ]]; then
+    SKIP_BUILD=1
+fi
+SERVER_BIN="${SERVER_BIN:-${REPO_ROOT}/build/vla-server}"
+TASK_IDS="${TASK_IDS:-0 1 2 3 4 5 6 7 8 9}"
+PALIGEMMA_TOKENIZER="${PALIGEMMA_TOKENIZER:-}"
 VENV_PY="${REPO_ROOT}/eval/sim/libero/libero_uv/.venv/bin/python"
 CLIENT="${REPO_ROOT}/eval/client/run_sim_client_direct.py"
 BIND_ADDR="${BIND_ADDR:-tcp://*:5555}"
@@ -121,6 +131,9 @@ N_ACTION_STEPS_BIT="${N_ACTION_STEPS_BIT:-8}"                # BitVLA NUM_ACTION
 N_ACTION_STEPS_GR00T_N1_5="${N_ACTION_STEPS_GR00T_N1_5:-16}" # N1.5 lerobot closeout (10/10 on libero_object/task_0)
 N_ACTION_STEPS_GR00T_N1_6="${N_ACTION_STEPS_GR00T_N1_6:-16}" # N1.6 H4 closeout (10/10 on libero_object/task_0)
 N_ACTION_STEPS_GR00T_N1_7="${N_ACTION_STEPS_GR00T_N1_7:-16}" # N1.7 H4 closeout (10/10 on libero_object/task_0)
+N_ACTION_STEPS_OCTO="${N_ACTION_STEPS_OCTO:-4}"
+N_ACTION_STEPS_TURBOVLA="${N_ACTION_STEPS_TURBOVLA:-12}"
+N_ACTION_STEPS_VLA_JEPA="${N_ACTION_STEPS_VLA_JEPA:-7}"
 
 mkdir -p "${OUTPUT_ROOT}"
 OUTPUT_ROOT="$(cd "${OUTPUT_ROOT}" && pwd)"
@@ -132,11 +145,13 @@ echo "[config] MODELS_ROOT=${MODELS_ROOT}"
 echo "[config] OUTPUT_ROOT=${OUTPUT_ROOT}"
 echo "[config] N_EPISODES=${N_EPISODES}"
 echo "[config] MODEL=${MODEL}"
+echo "[config] TASK_IDS=${TASK_IDS}"
+echo "[config] SERVER_BIN=${SERVER_BIN}"
 
 cd "${REPO_ROOT}"
 
 if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
-    echo "[build] skipped (SKIP_BUILD=1)"
+    echo "[build] skipped (SKIP_BUILD=1 or SERVER_BIN set)"
 else
     echo "[build] cmake --build build"
     cmake --build build -j"$(nproc)"
@@ -294,6 +309,9 @@ run_model() {
     if [[ "${arch}" == "gr00t_n1_6" ]]; then
         client_extra+=(--tokenizer "${GR00T_N1_6_TOKENIZER:-${model_dir}}")
     fi
+    if [[ ( "${arch}" == pi0 || "${arch}" == pi05 ) && -n "${PALIGEMMA_TOKENIZER}" ]]; then
+        client_extra+=(--tokenizer "${PALIGEMMA_TOKENIZER}")
+    fi
     if [[ -n "${stats_json}" ]]; then
         client_extra+=(--stats-json "${stats_json}")
     fi
@@ -326,6 +344,10 @@ run_model() {
     else
         unset VLA_OPENVLA_OFT_UNNORM_KEY
     fi
+    if [[ "${arch}" == octo ]]; then
+        export VLA_OCTO_UNNORM_DATASET="${VLA_OCTO_UNNORM_DATASET:-${TASK_SUITE}}"
+        echo "[${arch}] VLA_OCTO_UNNORM_DATASET=${VLA_OCTO_UNNORM_DATASET}"
+    fi
 
     local log="${LOG_DIR}/${arch}.log"
     echo "===================="
@@ -336,7 +358,7 @@ run_model() {
     local out_dir="${OUTPUT_ROOT}/${arch}"
     mkdir -p "${out_dir}"
 
-    for task_id in $(seq 0 9); do
+    for task_id in ${TASK_IDS}; do
         echo "[${arch}] task_id=${task_id}  episodes=${N_EPISODES}"
         "${VENV_PY}" "${CLIENT}" \
             --arch "${arch}" \
@@ -405,10 +427,10 @@ fi
 # tokenizer auto-loads from the base ckpt on the Hub, stats baked into the GGUF.
 if should_run vla_adapter; then
     run_model vla_adapter \
-        "${MODELS_ROOT}/vla-adapter-libero-object-gguf" \
+        "${MODELS_ROOT}/vla-adapter-libero-gguf" \
         "${N_ACTION_STEPS_VLA_ADAPTER}" \
         "" \
-        "${MODELS_ROOT}/vla-adapter-libero-object-gguf/libero_object/vla-adapter-libero-object.gguf"
+        "${MODELS_ROOT}/vla-adapter-libero-gguf/libero_object/vla-adapter-libero-object.gguf"
 fi
 
 # openvla_oft: Llama-2-7B + MLPResNet head; vision baked in (no mmproj). Needs the
@@ -474,6 +496,35 @@ if should_run gr00t_n1_7; then
             "${MODELS_ROOT}/gr00tn1d7-libero-gguf/libero_object/gr00tn1d7-libero-object.gguf"
     else
         echo "[skip] gr00t_n1_7: dataset_statistics.json not found at ${g7_stats}; set GR00T_N1_7_STATS to override"
+    fi
+fi
+
+if should_run octo; then
+    run_model octo \
+        "${MODELS_ROOT}/octo-small-libero-gguf" \
+        "${N_ACTION_STEPS_OCTO}" \
+        "" \
+        "${MODELS_ROOT}/octo-small-libero-gguf/octo-small-libero-f32.gguf"
+fi
+
+if should_run turbovla; then
+    run_model turbovla \
+        "${MODELS_ROOT}/turbovla-libero-gguf" \
+        "${N_ACTION_STEPS_TURBOVLA}" \
+        "${TURBOVLA_STATS:-}" \
+        "${MODELS_ROOT}/turbovla-libero-gguf/turbovla-libero-f32.gguf"
+fi
+
+if should_run vla_jepa; then
+    jepa_stats="${VLA_JEPA_STATS:-${MODELS_ROOT}/vla-jepa-libero}"
+    if [[ -f "${jepa_stats}/policy_preprocessor_step_3_normalizer_processor.safetensors" ]]; then
+        run_model vla_jepa \
+            "${MODELS_ROOT}/vla-jepa-libero" \
+            "${N_ACTION_STEPS_VLA_JEPA}" \
+            "${jepa_stats}" \
+            "${MODELS_ROOT}/vla-jepa-libero/vla-jepa.gguf"
+    else
+        echo "[skip] vla_jepa: policy_{pre,post}processor safetensors not found in ${jepa_stats}; set VLA_JEPA_STATS to override"
     fi
 fi
 

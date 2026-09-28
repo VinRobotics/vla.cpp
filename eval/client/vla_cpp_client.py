@@ -195,6 +195,7 @@ class VlaCppClient:
         self.image_keys = list(image_keys)
         self.max_length = max_length
         self._step = 0
+        self._episode = 0
         self._last_response = None
 
         if n_action_steps < 1:
@@ -641,6 +642,8 @@ class VlaCppClient:
     def reset(self) -> None:
 
         self._action_queue.clear()
+        self._episode += 1
+        self._step = 0
 
     def get_action(self, observations: dict[str, Any]) -> np.ndarray:
 
@@ -720,6 +723,7 @@ class VlaCppClient:
         req.lang_tokens.extend(lang.tolist())
         req.state.extend(state_padded.tolist())
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
         resp = self.pb.PredictResponse()
@@ -870,6 +874,7 @@ class VlaCppClient:
         req.lang_tokens.extend(int(t) for t in lang)
         req.state.extend(float(x) for x in state_padded)
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         resp = self.pb.PredictResponse()
         resp.ParseFromString(self.sock.recv())
@@ -930,6 +935,7 @@ class VlaCppClient:
         req.lang_tokens.extend(lang.tolist())
         req.state.extend([0.0] * self.max_state_dim)
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
         resp = self.pb.PredictResponse()
@@ -945,9 +951,13 @@ class VlaCppClient:
     _EVO1_IMG_CTX           = "<IMG_CONTEXT>"
     _EVO1_NUM_IMAGE_TOKEN   = 256
     _EVO1_MAX_TEXT_LENGTH   = 1024
-    _EVO1_NOISE_LEN         = 50 * 24   # horizon * per_action_dim
+    _FIXED_NOISE_LEN = {
+        "smolvla": 50 * 32, "pi0": 50 * 32, "pi05": 50 * 32, "evo1": 50 * 24,
+        "gr00t_n1_5": 16 * 32, "gr00t_n1_6": 50 * 128, "gr00t_n1_7": 40 * 132,
+        "vla_jepa": 7 * 7, "octo": 4 * 7,
+    }
 
-    def _maybe_add_fixed_noise(self, req, n: int | None) -> None:
+    def _maybe_add_fixed_noise(self, req) -> None:
         """Attach a reproducible noise vector when VLA_FIXED_NOISE_SEED is set.
 
         Without it the server draws flow-matching noise from a clock-seeded RNG,
@@ -956,14 +966,18 @@ class VlaCppClient:
         verifiable: same inputs plus same noise must give the same actions.
         """
         seed = os.environ.get("VLA_FIXED_NOISE_SEED")
+        n = self._FIXED_NOISE_LEN.get(self.arch)
         if seed is None or not n:
             return
         # Vary per step but reproducibly, so a replay of the same episode sends
         # the same sequence of noise vectors.
-        rng = np.random.default_rng(int(seed) + self._step)
+        rng = np.random.default_rng([int(seed), self._episode, self._step])
         # Evo-1 is trained on uniform[-1,1]; matching that keeps the check in
         # the distribution the model actually sees.
-        req.noise.extend(rng.uniform(-1.0, 1.0, size=n).astype(np.float32).tolist())
+        if self.arch == "evo1":
+            req.noise.extend(rng.uniform(-1.0, 1.0, size=n).astype(np.float32).tolist())
+        else:
+            req.noise.extend(rng.standard_normal(n, dtype=np.float32).tolist())
 
     def _predict_chunk_evo1(self, observations: dict[str, Any]) -> np.ndarray:
 
@@ -1042,7 +1056,7 @@ class VlaCppClient:
         req.lang_tokens.extend(input_ids_full[:n_real].tolist())
         req.state.extend(state_padded.tolist())
         req.attention_mask.extend(attn_mask.tolist())
-        self._maybe_add_fixed_noise(req, self._EVO1_NOISE_LEN)
+        self._maybe_add_fixed_noise(req)
 
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
@@ -1095,6 +1109,7 @@ class VlaCppClient:
         req.lang_tokens.extend(input_ids.tolist())
         req.attention_mask.extend(attn_mask.tolist())
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
         resp = self.pb.PredictResponse()
@@ -1422,6 +1437,7 @@ class VlaCppClient:
         req.lang_tokens.extend(int(t) for t in lang)
         req.state.extend(float(x) for x in state_padded)
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
         resp = self.pb.PredictResponse()
@@ -1542,6 +1558,7 @@ class VlaCppClient:
         req.lang_tokens.extend(int(t) for t in lang)
         req.state.extend(float(x) for x in state_padded)
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
         resp = self.pb.PredictResponse()
@@ -1628,6 +1645,7 @@ class VlaCppClient:
         req.lang_tokens.extend(int(t) for t in lang)
         req.state.extend(float(x) for x in state_padded)
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
         resp = self.pb.PredictResponse()
