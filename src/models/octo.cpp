@@ -128,10 +128,9 @@ struct OctoRuntime {
     graph_cache<LangKey, LangIO> language;
 
     struct BtKey {
-        int seq       = -1;
-        int n_readout = -1;
+        std::vector<int32_t> runs;
         bool operator==(const BtKey& o) const {
-            return seq == o.seq && n_readout == o.n_readout;
+            return runs == o.runs;
         }
     };
     struct BtIO {
@@ -181,6 +180,7 @@ struct OctoRuntime {
     std::vector<float>   lang_pos;
     std::vector<float>   lang_repeated;
     int                  lang_steps = -1;
+    std::vector<float>   readout_pos;
 
     struct ActionStats {
         std::vector<float>   mean, stdv;
@@ -508,33 +508,33 @@ std::vector<float> tensor_to_vec(const ggml_tensor * t) {
 // stages at stride 2, a 1x1 patch embedding, a projection to the model width,
 // and the per-timestep position embedding.
 //
-// `obs` holds the normalized CHW frames for `steps`, `task` the single goal
-// frame, which is concatenated onto every one of them as channels 3..5.
+// `frame` is the normalized CHW frame at every one of the timesteps in
+// `pos_rows`, and the goal frame concatenated onto each as channels 3..5 is the
+// constant -1.
 bool run_obs_tokenizer_graph(OctoRuntime& rt,
                              graph_cache<OctoRuntime::ObsKey, OctoRuntime::ObsIO>& cache,
                              const char * view,
-                             const std::vector<float>& obs,
-                             const std::vector<float>& task,
+                             const std::vector<float>& frame,
                              int side,
                              int n_tok,
-                             int steps,
                              const std::vector<int32_t>& pos_rows,
                              std::vector<float>& pos) {
-    const size_t frame = (size_t) 3*side*side;
-    if (obs.size() != frame*(size_t) steps || task.size() != frame) {
+    if (frame.size() != (size_t) 3*side*side) {
         std::fprintf(stderr, "vla(octo): unexpected input image shape for side=%d\n", side);
         return false;
     }
-    if ((int) pos_rows.size() != steps)
-        return false;
+    const int steps = (int) pos_rows.size();
     pos.resize((size_t) steps*n_tok*kHidden);
 
     const OctoRuntime::ObsKey key{side, n_tok, steps};
+    bool fresh = false;
     const bool built = cache.ensure(rt.backend, key, (size_t) 32*1024*1024,
                                     [&](ggml_context * C, OctoRuntime::ObsIO& io) -> ggml_cgraph * {
+        fresh = true;
         ggml_tensor * x = ggml_new_tensor_4d(C, GGML_TYPE_F32, side, side, 6, steps);
         ggml_set_name(x, "octo.obs.input_norm");
         ggml_set_input(x);
+        ggml_set_output(x);
         io.input = x;
 
         char rname[160];
@@ -601,13 +601,13 @@ bool run_obs_tokenizer_graph(OctoRuntime& rt,
     }
 
     OctoRuntime::ObsIO& io = cache.io();
-    std::vector<float> input((size_t) steps*2*frame);
-    for (int t=0; t<steps; ++t) {
-        const size_t dst = (size_t) t*2*frame;
-        std::copy_n(obs.begin()+(ptrdiff_t) ((size_t) t*frame), frame, input.begin()+(ptrdiff_t) dst);
-        std::copy_n(task.begin(), frame, input.begin()+(ptrdiff_t) (dst+frame));
+    if (fresh) {
+        const std::vector<float> task((size_t) ggml_nelements(io.input), -1.0f);
+        ggml_backend_tensor_set(io.input, task.data(), 0, ggml_nbytes(io.input));
     }
-    ggml_backend_tensor_set(io.input, input.data(), 0, ggml_nbytes(io.input));
+    const size_t n = frame.size()*sizeof(float);
+    for (int t=0; t<steps; ++t)
+        ggml_backend_tensor_set(io.input, frame.data(), (size_t) t*2*n, n);
     ggml_backend_tensor_set(io.rows, pos_rows.data(), 0, ggml_nbytes(io.rows));
     if (!octo_compute(rt, cache.graph(), "obs tokenizer"))
         return false;
@@ -1057,7 +1057,6 @@ void build_transformer_mask(const OctoSeqLayout& layout, std::vector<float>& mas
 bool run_transformer_graph(OctoRuntime& rt,
                            const OctoSeqLayout& layout,
                            const std::vector<float>& input,
-                           const std::vector<float>& blocked_mask,
                            std::vector<float>& readout_action) {
     constexpr int   heads      = 6;
     constexpr int   head_dim   = 64;
@@ -1065,12 +1064,16 @@ bool run_transformer_graph(OctoRuntime& rt,
     constexpr float attn_scale = 0.125f;
     const int seq       = layout.seq;
     const int n_readout = (int) layout.readout_seq_idx.size();
-    if (input.size() != (size_t) kHidden*seq || blocked_mask.size() != (size_t) seq*seq)
+    if (input.size() != (size_t) kHidden*seq)
         return false;
 
-    const OctoRuntime::BtKey key{seq, n_readout};
+    OctoRuntime::BtKey key;
+    for (const OctoSeqRun& r : layout.runs)
+        key.runs.insert(key.runs.end(), {(int32_t) r.group, r.timestep, r.n_tokens, r.key_valid});
+    bool fresh = false;
     const bool built = rt.transformer.ensure(rt.backend, key, (size_t) 32*1024*1024,
                                              [&](ggml_context * C, OctoRuntime::BtIO& io) -> ggml_cgraph * {
+        fresh = true;
         char rname[160];
         ggml_tensor * blk_w[12][12];
         const char * leaves[12] = {"attn_norm.weight", "attn_norm.bias", "attn_qkv.weight", "attn_qkv.bias",
@@ -1097,11 +1100,13 @@ bool run_transformer_graph(OctoRuntime& rt,
         ggml_tensor * mask = ggml_new_tensor_2d(C, GGML_TYPE_F32, seq, seq);
         ggml_set_name(mask, "octo.block_transformer.additive_mask");
         ggml_set_input(mask);
+        ggml_set_output(mask);
         io.mask = mask;
 
         ggml_tensor * readout_idx = ggml_new_tensor_1d(C, GGML_TYPE_I32, n_readout);
         ggml_set_name(readout_idx, "octo.block_transformer.readout_idx");
         ggml_set_input(readout_idx);
+        ggml_set_output(readout_idx);
         io.readout_idx = readout_idx;
 
         for (int i=0; i<12; ++i) {
@@ -1136,9 +1141,13 @@ bool run_transformer_graph(OctoRuntime& rt,
     }
 
     OctoRuntime::BtIO& io = rt.transformer.io();
-    ggml_backend_tensor_set(io.input,       input.data(),                   0, ggml_nbytes(io.input));
-    ggml_backend_tensor_set(io.mask,        blocked_mask.data(),            0, ggml_nbytes(io.mask));
-    ggml_backend_tensor_set(io.readout_idx, layout.readout_seq_idx.data(),  0, ggml_nbytes(io.readout_idx));
+    if (fresh) {
+        std::vector<float> mask;
+        build_transformer_mask(layout, mask);
+        ggml_backend_tensor_set(io.mask,        mask.data(),                    0, ggml_nbytes(io.mask));
+        ggml_backend_tensor_set(io.readout_idx, layout.readout_seq_idx.data(),  0, ggml_nbytes(io.readout_idx));
+    }
+    ggml_backend_tensor_set(io.input, input.data(), 0, ggml_nbytes(io.input));
     if (!octo_compute(rt, rt.transformer.graph(), "block transformer"))
         return false;
     readout_action.resize((size_t) kHidden*n_readout);
@@ -1704,29 +1713,13 @@ bool run_pipeline(OctoModelArch& m, const OctoFrame& f,
     // Every live window slot holds the same frame, so it is replicated rather
     // than re-decoded. Language-only conditioning means no goal image: the task
     // frame is a zero uint8 image, which normalizes to -1.
-    auto tokenize_view = [&](graph_cache<OctoRuntime::ObsKey, OctoRuntime::ObsIO>& cache,
-                             const char * view, const std::vector<float>& frame, int side, int n_tok,
-                             const std::vector<int32_t>& steps, std::vector<float>& out) {
-        const size_t n = (size_t) 3*side*side;
-        if (frame.size() != n) {
-            std::fprintf(stderr, "vla(octo): %s frame is %zu floats, expected %zu\n", view, frame.size(), n);
-            return false;
-        }
-        std::vector<float> obs(n*steps.size());
-        for (size_t i=0; i<steps.size(); ++i)
-            std::copy(frame.begin(), frame.end(), obs.begin()+(ptrdiff_t) (i*n));
-
-        const std::vector<float> task(n, -1.0f);
-        return run_obs_tokenizer_graph(rt, cache, view, obs, task, side, n_tok, (int) steps.size(), steps, out);
-    };
-
     if (!layout.primary_steps.empty() &&
-        !tokenize_view(rt.obs_primary, "primary", f.primary, (int) m.primary_size,
-                       (int) m.primary_tokens, layout.primary_steps, primary_pos))
+        !run_obs_tokenizer_graph(rt, rt.obs_primary, "primary", f.primary, (int) m.primary_size,
+                                 (int) m.primary_tokens, layout.primary_steps, primary_pos))
         return false;
     if (!layout.wrist_steps.empty() &&
-        !tokenize_view(rt.obs_wrist, "wrist", f.wrist, (int) m.wrist_size,
-                       (int) m.wrist_tokens, layout.wrist_steps, wrist_pos))
+        !run_obs_tokenizer_graph(rt, rt.obs_wrist, "wrist", f.wrist, (int) m.wrist_size,
+                                 (int) m.wrist_tokens, layout.wrist_steps, wrist_pos))
         return false;
 
     if (!layout.proprio_steps.empty()) {
@@ -1765,19 +1758,20 @@ bool run_pipeline(OctoModelArch& m, const OctoFrame& f,
         rt.lang_steps = window_size;
     }
 
-    ggml_tensor * readout_pos_r = rt.weight("octo.readout.action.pos_embd");
-    if (!readout_pos_r)
-        return false;
-    const std::vector<float> readout_pos = tensor_to_vec(readout_pos_r);
+    if (rt.readout_pos.empty()) {
+        ggml_tensor * readout_pos_r = rt.weight("octo.readout.action.pos_embd");
+        if (!readout_pos_r)
+            return false;
+        rt.readout_pos = tensor_to_vec(readout_pos_r);
+    }
 
-    std::vector<float> input, mask;
+    std::vector<float> input;
     if (!assemble_transformer_input(layout, rt.lang_pos, primary_pos, wrist_pos, proprio_pos,
-                                    rt.lang_repeated, readout_pos, input))
+                                    rt.lang_repeated, rt.readout_pos, input))
         return false;
-    build_transformer_mask(layout, mask);
 
     std::vector<float> readout_action;
-    if (!run_transformer_graph(rt, layout, input, mask, readout_action))
+    if (!run_transformer_graph(rt, layout, input, readout_action))
         return false;
 
     std::vector<float> normalized;
