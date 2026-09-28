@@ -73,7 +73,7 @@ jobs:
           ldd "$out/vla-server" | awk '/libgomp|libprotobuf/ {print $3}' | xargs cp -L -t "$out/"
           cp /usr/share/doc/libprotobuf32t64/copyright "$out/LICENSE.protobuf"
           cp include/vla.h LICENSE.md README.md "$out/"
-          # vla-cli --text runs this; VLA_TOKENIZE_SCRIPT points at it.
+          # vla-cli --text finds this in scripts/ next to itself.
           cp scripts/tokenize_prompt.py "$out/scripts/"
           tar -czf "$out.tar.gz" "$out"
 

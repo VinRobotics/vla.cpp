@@ -14,8 +14,8 @@
 # limitations under the License.
 
 """Requantize a vla.cpp GGUF: pack large weight matrices to Q8_0/Q4_0 and copy
-everything else unchanged. The loader keeps quantized weights packed and lets
-ggml_mul_mat dequantize at compute, so a Q8_0 file is about half the size of the
+everything else unchanged. The loader keeps quantized weights packed and ggml
+runs them as int8 dot products, so a Q8_0 file is about half the size of the
 bf16 one with near-identical actions. Embeddings, the output head, norms, conv
 patch embeddings and position tables stay float (row-fetch and small tensors do
 not benefit and can lose accuracy).
@@ -26,6 +26,8 @@ not benefit and can lose accuracy).
 import argparse
 import numpy as np
 import gguf
+
+from gguf_common import copy_kv, copy_tensor
 
 # Substrings that keep a tensor at its source precision. Embeddings, the output
 # head, norms, conv, position tables and the action expert stay float. The vision
@@ -93,15 +95,9 @@ def main() -> None:
     arch = r.fields["general.architecture"].contents()
     w = gguf.GGUFWriter(args.dst, arch)
 
-    meta = {"GGUF.version", "GGUF.tensor_count", "GGUF.kv_count", "general.architecture"}
-    for name, f in r.fields.items():
-        if name in meta:
-            continue
-        sub = f.types[-1] if f.types[0] == gguf.GGUFValueType.ARRAY else None
-        w.add_key_value(name, f.contents(), f.types[0], sub_type=sub)
+    copy_kv(r, w)
 
     qtype = getattr(gguf.GGMLQuantizationType, args.type)
-    F32, BF16 = gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.BF16
     n_q = 0
     bytes_in = bytes_out = 0
     for t in r.tensors:
@@ -114,13 +110,7 @@ def main() -> None:
             bytes_out += int(packed.nbytes)
             n_q += 1
         else:
-            # Pass copies in their natural dtype so the writer keeps the size right.
-            data = np.ascontiguousarray(t.data)
-            if t.tensor_type == BF16:
-                data = data.view(np.uint16)
-            elif t.tensor_type == F32:
-                data = data.astype(np.float32, copy=False)
-            w.add_tensor(t.name, data, raw_dtype=t.tensor_type)
+            copy_tensor(w, t)
             bytes_out += src_bytes
 
     w.write_header_to_file()

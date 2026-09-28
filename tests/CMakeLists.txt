@@ -56,6 +56,11 @@ target_link_libraries(test_config_guard PRIVATE vla_core)
 target_compile_options(test_config_guard PRIVATE -Wall -Wextra)
 add_test(NAME config_guard COMMAND test_config_guard)
 
+add_executable(test_prompt test_prompt.cpp)
+target_link_libraries(test_prompt PRIVATE vla_core)
+target_compile_options(test_prompt PRIVATE -Wall -Wextra)
+add_test(NAME prompt COMMAND test_prompt)
+
 # A/B harness for the two BitVLA ternary-GEMM tilings. Built so it cannot rot,
 # not registered with ctest: it needs a GPU and is read by hand.
 # VLA_BITVLA_NARROW_GEMM=1 selects the old one-tile-per-CTA kernel at runtime.

@@ -91,8 +91,8 @@ $args_ = @(
 )
 if ($LlamaDir) { $args_ += "-DFETCHCONTENT_SOURCE_DIR_LLAMA=$($LlamaDir -replace '\\','/')" }
 if ($NoServer) {
-    # Octo tokenizes in-process through SentencePiece, which needs protobuf too.
-    $args_ += @("-DVLA_BUILD_SERVER=OFF", "-DVLA_OCTO=OFF")
+    # SentencePiece, for in-GGUF tokenizers, needs protobuf too.
+    $args_ += @("-DVLA_BUILD_SERVER=OFF", "-DVLA_SPM=OFF")
 } else {
     $args_ += @(
         "-DCMAKE_PREFIX_PATH=$($triplet -replace '\\','/');$($tripletC -replace '\\','/');$($env:OPENCL_SDK_ROOT -replace '\\','/')",

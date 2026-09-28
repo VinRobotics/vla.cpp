@@ -173,14 +173,12 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
 
 /**
  * @brief Build an Octo model. Vision, T5 text encoder and tokenizer vocab are
- *        all baked into @p ckpt_path. Only compiled when VLA_OCTO is on.
+ *        all baked into @p ckpt_path.
  * @copydetails smolvla_create
  */
-#ifdef VLA_USE_OCTO
 std::unique_ptr<ModelArchBase> octo_create(const std::string& mmproj_path,
                                            const std::string& ckpt_path,
                                            const std::string& config_path);
-#endif
 
 /**
  * @brief Build a BitVLA model. Vision is baked into @p ckpt_path.

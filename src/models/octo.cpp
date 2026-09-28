@@ -21,7 +21,6 @@
 #include "layers/norm.h"
 #include "loader.h"
 #include "model.h"
-#include "models/octo.h"
 #include "modules/preprocess.h"
 #include "scratch_ctx.h"
 
@@ -30,7 +29,6 @@
 #include "gguf.h"
 
 #include "nlohmann/json.hpp"
-#include "sentencepiece_processor.h"
 
 #include <algorithm>
 #include <chrono>
@@ -1514,22 +1512,6 @@ bool run_l1_action_head_graph(OctoRuntime& rt,
     return true;
 }
 
-bool read_kv_u8_array(const gguf_reader& g, const char * key, std::vector<uint8_t>& out) {
-    const int64_t id = gguf_find_key(g.gctx, key);
-    if (id < 0) {
-        std::fprintf(stderr, "vla(octo): missing metadata %s\n", key);
-        return false;
-    }
-    if (gguf_get_kv_type(g.gctx, id) != GGUF_TYPE_ARRAY || gguf_get_arr_type(g.gctx, id) != GGUF_TYPE_UINT8) {
-        std::fprintf(stderr, "vla(octo): %s is not a UINT8 array\n", key);
-        return false;
-    }
-    const size_t    n    = gguf_get_arr_n(g.gctx, id);
-    const uint8_t * data = (const uint8_t *) gguf_get_arr_data(g.gctx, id);
-    out.assign(data, data+n);
-    return true;
-}
-
 // Which top-level key of octo.dataset_statistics to un-normalize against, when
 // the caller did not pin one down. In order: VLA_OCTO_UNNORM_DATASET, the sole
 // key if there is only one, then bridge_dataset, which is what the pretrain
@@ -1848,41 +1830,6 @@ std::unique_ptr<ModelArchBase> octo_create(const std::string& mmproj_path,
                 m->head_type.c_str(), (long long) m->window_size, (long long) m->action_horizon,
                 (long long) m->action_dim, m->has_proprio ? "yes" : "no");
     return m;
-}
-
-bool octo_tokenize_text(const std::string& ckpt_path,
-                        const std::string& text,
-                        std::vector<int32_t>& input_ids,
-                        std::vector<int32_t>& attention_mask) {
-    gguf_reader g{"octo"};
-    if (!g.open(ckpt_path))
-        return false;
-
-    std::vector<uint8_t> spm_bytes;
-    if (!read_kv_u8_array(g, "octo.tokenizer.spm_model", spm_bytes))
-        return false;
-    const uint32_t eos_id     = g.has("octo.tokenizer.eos_id") ? g.u32("octo.tokenizer.eos_id") : 1;
-    const uint32_t pad_id     = g.has("octo.tokenizer.pad_id") ? g.u32("octo.tokenizer.pad_id") : 0;
-    const int64_t  max_length = g.has("octo.tokens.language") ? g.u32("octo.tokens.language") : kTaskTokens;
-
-    sentencepiece::SentencePieceProcessor sp;
-    const auto status = sp.LoadFromSerializedProto(
-        absl::string_view(reinterpret_cast<const char *>(spm_bytes.data()), spm_bytes.size()));
-    if (!status.ok()) {
-        std::fprintf(stderr, "vla(octo): sentencepiece LoadFromSerializedProto failed: %s\n",
-                     status.ToString().c_str());
-        return false;
-    }
-
-    std::vector<int> ids = sp.EncodeAsIds(text);
-    if ((int64_t) ids.size() > max_length-1)
-        ids.resize((size_t) (max_length-1));
-    input_ids.assign(ids.begin(), ids.end());
-    input_ids.push_back((int32_t) eos_id);
-    attention_mask.assign(input_ids.size(), 1);
-    input_ids.resize((size_t) max_length, (int32_t) pad_id);
-    attention_mask.resize((size_t) max_length, 0);
-    return true;
 }
 
 // Unlike the other archs, this returns the action in world units rather than the

@@ -27,7 +27,7 @@ wheel.py-api = "py3"
 
 [tool.scikit-build.cmake.define]
 VLA_BUILD_SERVER = "OFF"
-VLA_OCTO = "OFF"
+VLA_SPM = "OFF"
 BUILD_SHARED_LIBS = "OFF"
 GGML_NATIVE = "OFF"
 CMAKE_INSTALL_LIBDIR = "lib"

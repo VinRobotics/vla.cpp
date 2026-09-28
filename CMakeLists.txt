@@ -136,11 +136,15 @@ function(vla_exclude_fetched_targets dir)
 endfunction()
 vla_exclude_fetched_targets(${llama_SOURCE_DIR})
 
-# Octo is the one arch that tokenizes in-process, so it is also the one that
-# needs SentencePiece and, through it, a protobuf. Optional so a build that does
-# not want Octo does not inherit that dependency.
-option(VLA_OCTO "Build the Octo arch (fetches SentencePiece, needs system protobuf)" ON)
-if(VLA_OCTO)
+# SentencePiece, and through it a protobuf, is only needed to tokenize --text with
+# a tokenizer stored in the GGUF. Optional so a build without it has no protobuf.
+option(VLA_SPM "Link SentencePiece for in-GGUF tokenizers (needs system protobuf)" ON)
+if(DEFINED VLA_OCTO)
+    message(DEPRECATION "VLA_OCTO is deprecated, use VLA_SPM")
+    set_property(CACHE VLA_SPM PROPERTY VALUE ${VLA_OCTO})
+    unset(VLA_OCTO CACHE)
+endif()
+if(VLA_SPM)
     # The system protobuf, not sentencepiece's vendored protobuf-lite: vla-server
     # aborts at static-init if two protobuf runtimes reach the same binary.
     set(SPM_ENABLE_SHARED    OFF        CACHE BOOL   "" FORCE)
@@ -213,6 +217,8 @@ add_library(vla_core ${VLA_CORE_LIB_TYPE}
     src/models/openvla_oft.cpp
     src/models/vla_jepa.cpp
     src/models/turbovla.cpp
+    src/models/octo.cpp
+    src/tokenizer.cpp
 )
 target_include_directories(vla_core
     PUBLIC
@@ -221,11 +227,10 @@ target_include_directories(vla_core
 )
 # The VLA archs call no llama_* API; only vlm_core needs llama.
 target_link_libraries(vla_core PUBLIC ggml)
-if(VLA_OCTO)
-    target_sources(vla_core PRIVATE src/models/octo.cpp)
+if(VLA_SPM)
     target_include_directories(vla_core PRIVATE ${sentencepiece_SOURCE_DIR}/src)
     target_link_libraries(vla_core PRIVATE sentencepiece-static ${VLA_SPM_PROTOBUF})
-    target_compile_definitions(vla_core PUBLIC VLA_USE_OCTO)
+    target_compile_definitions(vla_core PRIVATE VLA_USE_SPM)
 endif()
 
 if(GGML_CUDA)
@@ -426,7 +431,7 @@ target_include_directories(vla-cli PRIVATE
     ${llama_SOURCE_DIR}/vendor/stb
 )
 target_link_libraries(vla-cli PRIVATE vla_core)
-# --text shells out to the tokenizer script; VLA_TOKENIZE_SCRIPT overrides it.
+# --text shells out to the tokenizer script when the GGUF has no tokenizer.
 target_compile_definitions(vla-cli PRIVATE VLA_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 add_executable(vla-bench
@@ -436,6 +441,7 @@ target_link_libraries(vla-bench PRIVATE vla_core)
 
 install(TARGETS vla COMPONENT libvla)
 install(TARGETS vla_core vla-cli vla-bench)
+install(FILES scripts/tokenize_prompt.py DESTINATION ${CMAKE_INSTALL_DATADIR}/vla)
 if(VLA_BUILD_SERVER)
     install(TARGETS vlm_core vla-server vlm-server)
 endif()
