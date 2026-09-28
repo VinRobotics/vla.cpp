@@ -45,6 +45,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace vla {
@@ -249,14 +250,16 @@ struct SmolVLAModelArch : public ModelArchBase {
 
     ggml_backend_t        backend     = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
+    bool                  is_cuda     = false;
 
     ggml_type             weight_dtype = GGML_TYPE_BF16;
 
     ggml_context * ctx_weights = nullptr;
     scratch_ctx vision_scratch;
-    scratch_ctx connector_scratch;
 
-    ggml_tensor *  E_lang   = nullptr;
+    gguf_source              gst;
+    std::vector<ggml_bf16_t> E_lang;
+    int64_t                  n_vocab = 0;
     ggml_tensor *  Wstate   = nullptr;
     ggml_tensor *  bstate   = nullptr;
 
@@ -281,7 +284,7 @@ struct SmolVLAModelArch : public ModelArchBase {
     std::mt19937   rng{std::random_device{}()};
 
     struct MainIO {
-        ggml_tensor *img_emb = nullptr, *lang_ids = nullptr, *state = nullptr, *x0 = nullptr;
+        ggml_tensor *img_emb = nullptr, *lang_emb = nullptr, *state = nullptr, *x0 = nullptr;
         ggml_tensor *mask_prefill = nullptr, *pos_prefill = nullptr, *mask_full = nullptr;
         ggml_tensor *mask_pfx_only = nullptr, *pos_full = nullptr, *pos_rebased = nullptr, *x_t = nullptr;
         std::vector<ggml_tensor *> k_cache, v_cache, k_leaf, v_leaf;
@@ -789,8 +792,8 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
 
     const bool use_gguf = ends_with_gguf(ckpt_path);
     const std::string cfg_path = config_path.empty() ? dir_of(ckpt_path) + "/config.json" : config_path;
-    safetensors  st;
-    gguf_source  gst;
+    safetensors   st;
+    gguf_source & gst = m->gst;
 
     if (use_gguf) {
         if (!gst.open(ckpt_path) || !load_config_from_gguf(gst, m->cfg))
@@ -811,6 +814,7 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
         if (!b.handle)
             return nullptr;
         m->backend = b.handle;
+        m->is_cuda = b.is_cuda;
     }
     vram_probe(m->backend, "after backend init");
 
@@ -923,8 +927,6 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
 
     struct PendingF32  { std::string name; ggml_tensor * t; std::vector<int64_t> shape; };
     std::vector<PendingF32>  pending_f32;
-
-    m->E_lang = ggml_new_tensor_2d(ctx, GGML_TYPE_BF16, cfg.hidden,  49280);
 
     m->Wstate = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.max_state_dim, cfg.hidden);
     m->bstate = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.hidden);
@@ -1071,6 +1073,13 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
     // ggml_mul_mat dequantizes at compute, as in the shared WeightLoader. Every
     // tensor above that uses wdt is a mul_mat operand, so those are the ones
     // eligible. Retyping is safe here: nothing is allocated yet.
+    auto retype = [](ggml_tensor * t, ggml_type type) {
+        t->type  = type;
+        t->nb[0] = ggml_type_size(type);
+        t->nb[1] = t->nb[0] * (t->ne[0] / ggml_blck_size(type));
+        for (int d = 2; d < GGML_MAX_DIMS; ++d)
+            t->nb[d] = t->nb[d-1] * t->ne[d-1];
+    };
     struct PendingPacked { std::string name; ggml_tensor * t; };
     std::vector<PendingPacked> pending_packed;
     if (use_gguf) {
@@ -1080,11 +1089,7 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
             const ggml_type ft = gst.file_type(hf_to_gguf(p.name));
             if (p.t->type == wdt && ft != GGML_TYPE_COUNT && ggml_is_quantized(ft) &&
                 p.t->ne[0] % ggml_blck_size(ft) == 0) {
-                p.t->type  = ft;
-                p.t->nb[0] = ggml_type_size(ft);
-                p.t->nb[1] = p.t->nb[0] * (p.t->ne[0] / ggml_blck_size(ft));
-                for (int d = 2; d < GGML_MAX_DIMS; ++d)
-                    p.t->nb[d] = p.t->nb[d-1] * p.t->ne[d-1];
+                retype(p.t, ft);
                 pending_packed.push_back({p.name, p.t});
             } else {
                 keep.push_back(std::move(p));
@@ -1094,6 +1099,36 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
         if (!pending_packed.empty())
             std::printf("vla: %zu GEMM weights kept packed as in the file (%s)\n",
                         pending_packed.size(), ggml_type_name(pending_packed[0].t->type));
+    }
+
+    std::unordered_set<const ggml_tensor *> widened;
+    if (m->is_cuda && vla::mm_prec_f32_enabled()) {
+        for (const auto * layers : {&m->vlm_layers, &m->expert_layers})
+            for (const LayerW & w : *layers)
+                for (ggml_tensor * t : {w.Wq, w.Wk, w.Wv, w.Wo, w.Wgate, w.Wup, w.Wdown})
+                    if (t->type == GGML_TYPE_BF16) {
+                        retype(t, GGML_TYPE_F32);
+                        widened.insert(t);
+                    }
+    }
+
+    const std::string emb = "model.vlm_with_expert.vlm.model.text_model.embed_tokens.weight";
+    if (use_gguf) {
+        const ggml_tensor * te = gst.meta(hf_to_gguf(emb).c_str());
+        if (!te || te->ne[0] != cfg.hidden || te->ne[2] != 1 || te->ne[3] != 1 ||
+            (te->type != GGML_TYPE_BF16 && te->type != GGML_TYPE_F32)) {
+            std::fprintf(stderr, "vla(smolvla): gguf %s missing or not a [%lld, vocab] f32/bf16 table\n",
+                         hf_to_gguf(emb).c_str(), (long long) cfg.hidden);
+            return nullptr;
+        }
+        m->n_vocab = te->ne[1];
+    } else {
+        m->n_vocab = 49280;
+        m->E_lang.resize(size_t(cfg.hidden)*m->n_vocab);
+        if (!st.read_raw(emb, m->E_lang.data(), m->E_lang.size()*sizeof(ggml_bf16_t), "BF16")) {
+            std::fprintf(stderr, "vla: read_raw failed for %s\n", emb.c_str());
+            return nullptr;
+        }
     }
 
     m->weight_buf = alloc_weights(m->ctx_weights, m->backend);
@@ -1115,6 +1150,11 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
             std::fprintf(stderr, "vla: read_to_f32 failed for %s\n", hf_name.c_str());
             return false;
         }
+        if (widened.count(t)) {
+            std::vector<ggml_bf16_t> tmp(hbuf.size());
+            ggml_fp32_to_bf16_row(hbuf.data(), tmp.data(), (int64_t) hbuf.size());
+            ggml_bf16_to_fp32_row(tmp.data(), hbuf.data(), (int64_t) hbuf.size());
+        }
         backend_set_from_f32(t, hbuf.data(), ggml_nelements(t));
         return true;
     };
@@ -1122,18 +1162,6 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
     for (auto & p : pending_f32) {
         if (!stream_f32(p.name, p.t, p.shape))
             return nullptr;
-    }
-    {
-        const std::string emb = "model.vlm_with_expert.vlm.model.text_model.embed_tokens.weight";
-        std::vector<ggml_bf16_t> hbuf(ggml_nelements(m->E_lang));
-        const bool ok = use_gguf
-            ? gst.read_packed(hf_to_gguf(emb), hbuf.data(), GGML_TYPE_BF16, ggml_nbytes(m->E_lang))
-            : st .read_raw(emb,                hbuf.data(), ggml_nbytes(m->E_lang), "BF16");
-        if (!ok) {
-            std::fprintf(stderr, "vla: read_raw failed for %s\n", emb.c_str());
-            return nullptr;
-        }
-        ggml_backend_tensor_set(m->E_lang, hbuf.data(), 0, ggml_nbytes(m->E_lang));
     }
     for (auto & p : pending_packed) {
         std::vector<uint8_t> hbuf(ggml_nbytes(p.t));
@@ -1172,7 +1200,7 @@ void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::Mai
     cfg.n_full   = cfg.n_prefix+cfg.n_suffix;
 
     io.img_emb       = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.hidden,         cfg.n_img);
-    io.lang_ids      = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_lang);
+    io.lang_emb      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.hidden,         cfg.n_lang);
     io.state         = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.max_state_dim);
     io.x0            = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.max_action_dim, cfg.n_suffix);
     io.mask_prefill  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.n_prefix, cfg.n_prefix);
@@ -1181,7 +1209,7 @@ void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::Mai
     io.mask_pfx_only = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.n_prefix, cfg.n_suffix);
     io.pos_full      = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
     io.pos_rebased   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
-    for (ggml_tensor * t : {io.img_emb, io.lang_ids, io.state, io.x0,
+    for (ggml_tensor * t : {io.img_emb, io.lang_emb, io.state, io.x0,
                             io.mask_prefill, io.pos_prefill, io.mask_full,
                             io.mask_pfx_only, io.pos_full, io.pos_rebased}) {
         ggml_set_input(t);
@@ -1189,7 +1217,7 @@ void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::Mai
 
     const float lang_scale = std::sqrt(static_cast<float>(cfg.hidden));
     ggml_tensor * img_emb_scaled  = ggml_scale(ctx, io.img_emb, lang_scale);
-    ggml_tensor * lang_emb_scaled = ggml_scale(ctx, ggml_get_rows(ctx, m->E_lang, io.lang_ids), lang_scale);
+    ggml_tensor * lang_emb_scaled = ggml_scale(ctx, io.lang_emb, lang_scale);
     ggml_tensor * state_emb       = ggml_reshape_2d(ctx, linear(ctx, m->Wstate, m->bstate, io.state), cfg.hidden, 1);
     ggml_tensor * prefix_embs     = ggml_concat(ctx, ggml_concat(ctx, img_emb_scaled, lang_emb_scaled, 1), state_emb, 1);
 
@@ -1219,8 +1247,13 @@ void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::Mai
     std::vector<ggml_tensor *> xk_cache(cfg.n_layers, nullptr);
     std::vector<ggml_tensor *> xv_cache(cfg.n_layers, nullptr);
     for (int li=0; li<cfg.n_layers; ++li) {
-        if (!expert_self_attn(cfg, li))
-            expert_cross_kv(ctx, m->expert_layers[li], K[li], V[li], cfg, &xk_cache[li], &xv_cache[li]);
+        if (expert_self_attn(cfg, li))
+            continue;
+        expert_cross_kv(ctx, m->expert_layers[li], K[li], V[li], cfg, &xk_cache[li], &xv_cache[li]);
+        if (m->is_cuda) {
+            xk_cache[li] = ggml_cast(ctx, xk_cache[li], GGML_TYPE_F16);
+            xv_cache[li] = ggml_cast(ctx, xv_cache[li], GGML_TYPE_F16);
+        }
     }
 
     const float dt = -1.f/static_cast<float>(cfg.num_steps);
@@ -1273,14 +1306,12 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         return {};
     }
 
-    // The language tokens index E_lang via ggml_get_rows, which does not bound
-    // its indices. Reject any token id outside the embedding table before the
-    // gather so an out-of-range id cannot read past the weights.
-    const int64_t vocab_rows = m->E_lang ? m->E_lang->ne[1] : 0;
+    // Reject any token id outside the embedding table before the gather so an
+    // out-of-range id cannot read past the host table.
     for (int i=0; i<in.n_lang; ++i) {
-        if (in.lang_tokens[i] < 0 || in.lang_tokens[i] >= vocab_rows) {
+        if (in.lang_tokens[i] < 0 || in.lang_tokens[i] >= m->n_vocab) {
             std::fprintf(stderr, "vla: lang_tokens[%d]=%d out of vocab range [0, %lld)\n",
-                         i, in.lang_tokens[i], (long long) vocab_rows);
+                         i, in.lang_tokens[i], (long long) m->n_vocab);
             return {};
         }
     }
@@ -1314,36 +1345,26 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         const int64_t s = m->vit_scale, c4 = H * s * s, K = m->vit_n_tokens;
         const auto t_vision_begin = clock::now();
 
-        // Graph A: SigLIP ViT (conv patch-embed -> +pos -> layers -> post_ln), plain sequential positions.
+        // SigLIP ViT (conv patch-embed -> +pos -> layers -> post_ln -> pixel shuffle -> connector), plain sequential positions.
         ggml_context * VC = m->vision_scratch.reset(size_t(256)*1024*1024);
         if (!VC) { std::fprintf(stderr, "vla(smolvla): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, m->vit_image, m->vit_image, 3); ggml_set_input(t_px);
         ggml_tensor * hv = m->vit.embed_conv(VC, t_px, m->vit_patch, grid);
         for (const EncBlockW & w : m->vit.enc.blk)
             hv = build_siglip_layer(VC, m->vit.enc.cfg, w, hv, n_patches);
-        ggml_tensor * post_ln = layer_norm(VC, hv, m->vit.post_ln_w, m->vit.post_ln_b, m->vit.enc.cfg.ln_eps);
-        ggml_set_output(post_ln);
-        ggml_cgraph * gA = ggml_new_graph_custom(VC, 8192, false);
-        ggml_build_forward_expand(gA, post_ln);
-        if (!m->vision_scratch.alloc(m->backend, gA)) {
-            std::fprintf(stderr, "vla(smolvla): vision gallocr A alloc failed\n");
-            return {};
-        }
-
-        // Graph B: pixel-shuffle connector, a single bias-free matmul (c4 -> hidden).
-        ggml_context * MC = m->connector_scratch.reset(size_t(64)*1024*1024);
-        if (!MC) { std::fprintf(stderr, "vla(smolvla): ggml_init(connector ctx) failed\n"); return {}; }
-        ggml_tensor * t_shuf = ggml_new_tensor_2d(MC, GGML_TYPE_F32, c4, K); ggml_set_input(t_shuf);
-        ggml_tensor * img_embeds = ggml_mul_mat(MC, m->mm_fc, t_shuf);
+        ggml_tensor * shuf = layer_norm(VC, hv, m->vit.post_ln_w, m->vit.post_ln_b, m->vit.enc.cfg.ln_eps);
+        shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_3d(VC, shuf, H*s, grid/s, grid), 0, 2, 1, 3));
+        shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_3d(VC, shuf, c4, grid/s, grid/s), 0, 2, 1, 3));
+        ggml_tensor * img_embeds = ggml_mul_mat(VC, m->mm_fc, ggml_reshape_2d(VC, shuf, c4, K));
         ggml_set_output(img_embeds);
-        ggml_cgraph * gB = ggml_new_graph(MC);
-        ggml_build_forward_expand(gB, img_embeds);
-        if (!m->connector_scratch.alloc(m->backend, gB)) {
-            std::fprintf(stderr, "vla(smolvla): vision gallocr B alloc failed\n");
+        ggml_cgraph * gA = ggml_new_graph_custom(VC, 8192, false);
+        ggml_build_forward_expand(gA, img_embeds);
+        if (!m->vision_scratch.alloc(m->backend, gA)) {
+            std::fprintf(stderr, "vla(smolvla): vision gallocr alloc failed\n");
             return {};
         }
 
-        std::vector<float> chw, post_host((size_t) H * n_patches), shuf_host((size_t) c4*K);
+        std::vector<float> chw;
         bool vok = true;
         for (int v=0; v<n_views && vok; ++v) {
             if (!preprocess_image_chw("smolvla", in.images[v], m->vit_image, chw)) {
@@ -1353,14 +1374,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
             graph_unique_names(gA);
             if (ggml_backend_graph_compute(m->backend, gA) != GGML_STATUS_SUCCESS) {
-                std::fprintf(stderr, "vla(smolvla): vision compute A failed (view %d)\n", v); vok = false; break;
-            }
-            ggml_backend_tensor_get(post_ln, post_host.data(), 0, ggml_nbytes(post_ln));
-            pixel_shuffle_hf(post_host.data(), shuf_host.data(), H, grid, s);
-            ggml_backend_tensor_set(t_shuf, shuf_host.data(), 0, ggml_nbytes(t_shuf));
-            graph_unique_names(gB);
-            if (ggml_backend_graph_compute(m->backend, gB) != GGML_STATUS_SUCCESS) {
-                std::fprintf(stderr, "vla(smolvla): connector compute failed (view %d)\n", v); vok = false; break;
+                std::fprintf(stderr, "vla(smolvla): vision compute failed (view %d)\n", v); vok = false; break;
             }
             ggml_backend_tensor_get(img_embeds, img_emb_pre.data()+size_t(v)*per_view_n, 0, ggml_nbytes(img_embeds));
         }
@@ -1436,6 +1450,15 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
 
     std::vector<int32_t> lang_host(n_lang, 0);
     std::memcpy(lang_host.data(), in.lang_tokens, in.n_lang*sizeof(int32_t));
+    std::vector<float> lang_emb_host(size_t(n_lang)*cfg.hidden);
+    if (m->E_lang.empty()) {
+        if (!m->gst.fetch_rows_f32("token_embd.weight", lang_host, lang_emb_host.data(), cfg.hidden))
+            return {};
+    } else {
+        for (int64_t i=0; i<n_lang; ++i)
+            ggml_bf16_to_fp32_row(m->E_lang.data()+size_t(lang_host[i])*cfg.hidden,
+                                  lang_emb_host.data()+size_t(i)*cfg.hidden, cfg.hidden);
+    }
 
     const int64_t state_pos       = n_img+in.n_lang;
     const int64_t suffix_pos_base = state_pos+1;
@@ -1479,7 +1502,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     }
 
     ggml_backend_tensor_set(io->img_emb,       img_emb_pre.data(),    0, img_emb_n * sizeof(float));
-    ggml_backend_tensor_set(io->lang_ids,      lang_host.data(),      0, lang_host.size()*sizeof(int32_t));
+    ggml_backend_tensor_set(io->lang_emb,      lang_emb_host.data(),  0, lang_emb_host.size()*sizeof(float));
     ggml_backend_tensor_set(io->state,         state_host.data(),     0, cfg.max_state_dim*sizeof(float));
     ggml_backend_tensor_set(io->x0,            noise_host.data(),     0, noise_host.size()*sizeof(float));
     ggml_backend_tensor_set(io->mask_prefill,  mask_prefill_host.data(),     0, mask_prefill_host.size()     * sizeof(float));
