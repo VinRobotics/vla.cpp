@@ -24,9 +24,9 @@ pip install ./bindings/python
 
 This builds `libvla.so` with CMake and puts it inside the package, so nothing
 else needs to be on the library path. You need a C++17 compiler and network
-access (CMake fetches llama.cpp). The build is CPU only (Metal on macOS) and
-leaves out Octo. It uses `GGML_NATIVE=OFF`, so the wheel runs on other machines
-(on x86 it needs AVX2).
+access (CMake fetches llama.cpp). The build is CPU only (Metal on macOS). It
+uses `GGML_NATIVE=OFF`, so the wheel runs on other machines (on x86 it needs
+AVX2).
 `pip wheel ./bindings/python -w dist` gives you the wheel file. With
 `python -m build`, pass `--wheel`: the sdist does not include the C++ sources.
 
@@ -48,7 +48,7 @@ Fedora and RHEL.
 
 | | |
 |---|---|
-| `load(ckpt, mmproj=None, config=None)` | `mmproj` only for SmolVLA, pi0, pi0.5 |
+| `load(ckpt_path, mmproj_path=None, config_path=None)` | every arch ignores `mmproj_path`; the `runtime` block of `config_path` sets the precision options |
 | `Model.predict(images, tokens, state=None, noise=None, ...)` | `images` is one HWC array or a sequence |
 | `Model.config` | resolved hyper-parameters |
 | `Model.last_stats()` | per-phase timings, needs `timing=TIMING_PHASE` |

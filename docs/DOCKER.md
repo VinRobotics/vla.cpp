@@ -92,10 +92,6 @@ YAML
 docker compose -f eval/docker-compose.yml -f /tmp/vla-compose.override.yml up -d server
 ```
 
-> **π0 note**: π0 needs a separate `mmproj` vision GGUF. Pass both files:
-> `--bind tcp://*:5555 /models/mmproj-....gguf /models/ckpt.gguf`.
-> See the [README model table](../README.md#models) for details.
-
 ### 4. Run a LIBERO evaluation episode
 
 ```bash

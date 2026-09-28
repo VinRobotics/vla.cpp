@@ -20,13 +20,40 @@ via OpenCL and the Hexagon backend.
 
 ---
 
+## Prebuilt binaries
+
+Each [release](https://github.com/VinRobotics/vla.cpp/releases) has a
+`vla.cpp-<tag>-<platform>.tar.gz` with `vla-cli`, `vla-bench`, `vla-server`,
+`vlm-server`, `libvla` and `vla.h`:
+
+| Platform | Needs |
+|---|---|
+| `linux-x86_64-cpu` | AVX2 (Haswell or newer) |
+| `linux-x86_64-cuda-12.8` | AVX2; sm_75/80/86/89/90/120 |
+| `linux-x86_64-cuda-13.4` | AVX2; sm_75/80/86/89/90/120, driver 580 or newer |
+| `linux-aarch64-cpu` | ARMv8.2-A with dotprod and fp16 (Cortex-A76, Neoverse N1 or newer) |
+| `linux-aarch64-cuda-13.4` | sm_87 (Orin), sm_110 (Thor), sm_121 (DGX Spark); a CUDA 13 driver |
+| `macos-arm64-metal` | `brew install protobuf zeromq` |
+
+The Linux tarballs are built on Ubuntu 24.04 and do not load on an older glibc
+such as Ubuntu 22.04 or JetPack 6. Apart from the CUDA runtime and ZeroMQ, they
+carry every library they use. `vla-server` and `vlm-server` need
+`sudo apt install libzmq5`. For a CUDA tarball, also extract the matching
+`cudart-vla.cpp-<tag>-<platform>.tar.gz` in the same place unless the CUDA
+runtime is already installed; it drops `libcudart`, `libcublas` and `libcublasLt`
+next to the binaries. There are no Windows builds yet; see
+[docs/backend/hexagon-windows.md](docs/backend/hexagon-windows.md) to build
+from source. The Docker image is covered in [docs/DOCKER.md](docs/DOCKER.md).
+
+---
+
 ## Build the server
 
 ### Prerequisites
 
 - CMake ≥ 3.22
 - A C++17 compiler (GCC 11+ or Clang 14+)
-- CUDA 12.x (optional - required only for CUDA GPU builds)
+- CUDA 12.x or 13.x (optional - required only for CUDA GPU builds)
 - Intel oneAPI 2025.x + GPU compute runtime (optional - only for Intel GPU
   builds, see [docs/backend/sycl.md](docs/backend/sycl.md))
 - OpenVINO 2026.x runtime (optional - only for Intel CPU/GPU/NPU builds via
@@ -49,6 +76,8 @@ Identify your machine CUDA architecture:
 | Hopper | H100, H200 | `90` |
 | Blackwell (consumer) | RTX 50-series | `120` |
 | Blackwell (datacenter) | B100, B200, GB200 | `100` |
+| Blackwell (Jetson) | Jetson Thor | `110` |
+| Blackwell (DGX Spark) | GB10 | `121` |
 
 Then configure and build. CMake fetches and pins `llama.cpp` automatically (no patch, no submodule):
 
@@ -71,6 +100,15 @@ If CMake cannot find CUDA, point the environment at it explicitly:
 export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
+
+`-DVLA_BUILD_SERVER=OFF -DVLA_SPM=OFF` builds `vla-cli`, `vla-bench` and
+`libvla` without protobuf, ZeroMQ or SentencePiece, so none of the apt packages
+above are needed. Without SentencePiece, pass Octo `--tokens` instead of `--text`.
+
+`cmake --install build --prefix <dir>` copies the binaries, libraries and
+`share/vla/tokenize_prompt.py` into `<dir>`; the result does not need the build
+tree. `pip install ./bindings/python` builds the Python bindings, see
+[bindings/python/README.md](bindings/python/README.md).
 
 Check [docs/backend](docs/backend) for compiling `vla.cpp` on other platforms.
 WSL2, Apple Silicon, and Intel GPU are all tested.
@@ -98,12 +136,28 @@ pip install -U "huggingface_hub[cli]" transformers
 an image, and an instruction, and it prints the action chunk. Handy for
 smoke-testing a GGUF or scripting a quick inference.
 
-There is no tokenizer in the C++ core, so `--text` calls
-`scripts/tokenize_prompt.py` with the tokenizer the architecture was trained on
-(`VLA_PYTHON` picks the interpreter, `VLA_TOKENIZE_SCRIPT` the script). Pass
-`--tokens 1,100,200,2` instead if you already have ids.
+`--text` builds the same prompt the eval client sends for that arch.
+It is tokenized in-process when the GGUF carries a SentencePiece
+tokenizer (Octo, or pi0, pi0.5 and OpenVLA-OFT after
+`scripts/add_tokenizer_to_gguf.py --in model.gguf --out model-tok.gguf`).
+Otherwise it calls `scripts/tokenize_prompt.py` with the tokenizer the
+architecture was trained on, looking in `scripts/` next to `vla-cli`, then
+`share/vla`, then the source tree (`VLA_PYTHON` picks the interpreter,
+`VLA_TOKENIZE_SCRIPT` overrides the script). Pass `--tokens 1,100,200,2` instead
+if you already have ids.
 `--pretty` prints one action row per line;
-`--state` sets proprioception (defaults to zeros).
+`--state` sets proprioception (defaults to zeros). pi0.5 puts the state into its
+prompt, so pi0.5 `--text` needs `--state`.
+
+`-hf` takes `user/repo`, `user/repo:path/in/repo.gguf`, or `user/repo:tag`,
+where the tag is any part of the file path (case-insensitive, like `:Q8_0`).
+The BitVLA and GR00T N1.7 repos hold one GGUF per LIBERO suite. When more than
+one file matches, `-hf` lists them and stops, so pick one:
+
+```bash
+./build/vla-cli -hf vrfai/gr00tn1d7-libero-gguf:libero_object/gr00tn1d7-libero-object.gguf ...
+./build/vla-cli -hf vrfai/gr00tn1d7-libero-gguf:object ...
+```
 
 For the design overview see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), for the long-running path see
@@ -156,16 +210,20 @@ vla-server: bound to tcp://*:5555. ready.
 
 Use `--bind` to change the address and port. Stop the server with `Ctrl-C`.
 
-`vla-server` also takes `-hf user/repo[:file.gguf]` in place of a checkpoint path.
+`vla-server` also takes `-hf user/repo[:file.gguf|:tag]` in place of a checkpoint path.
 
-Precision flags (`vla-server --help` for the full list).
-The fastest configuration per model, with measured latency and success rate, is
-in [`CHANGELOG.md`](CHANGELOG.md):
+Runtime flags, the same on `vla-server`, `vla-cli` and `vla-bench` (`--help` for
+the full list). On `vla-server` and `vla-cli`, the `runtime` block of a
+`--config` JSON sets them too, and the command line wins. The fastest
+configuration per model, with measured latency and success rate, is in
+[`CHANGELOG.md`](CHANGELOG.md):
 
-- `--weight-dtype f32|bf16` - resident dtype for GEMM weights.
+- `--weight-dtype f32|bf16|f16` - resident dtype for GEMM weights.
 - `--act-dtype f32|bf16` - activation dtype; needs CUDA and bf16 weights.
 - `--flash-attn` - faster on the larger towers, but changes numerics.
 - `--mm-prec default|f32` - matmul accumulation precision.
+- `--num-steps N` - flow-matching solver steps for π0, π0.5, SmolVLA, Evo-1,
+  GR00T and VLA-JEPA (default: the checkpoint's). The other archs refuse it.
 
 
 Environment knobs that apply to every arch:
@@ -173,6 +231,10 @@ Environment knobs that apply to every arch:
 - `VLA_N_THREADS` - CPU backend thread count, default core count capped at 16.
 - `VLA_DEVICE` - GPU ordinal for CUDA and SYCL builds, default 0.
 - `VLA_CACHE` - where `-hf` stores checkpoints, default `~/.cache/vla`.
+
+Checkpoints that carry stats for several datasets need the one to un-normalize
+with, for example `VLA_OCTO_UNNORM_DATASET=libero_object` for the Octo LIBERO
+GGUF, which ships four.
 
 ---
 
@@ -242,16 +304,22 @@ python scripts/convert_smolvla_to_gguf.py \
 
 ### Quantization
 
-The shipped GGUFs are bf16. `scripts/quantize_gguf.py` repacks the LM-backbone weight
-matrices to a smaller type and copies everything else unchanged; the loader keeps the
-packed weights and lets `ggml_mul_mat` dequantize at compute, so the file just loads and
-runs like the bf16 one.
+Most shipped GGUFs are BF16. π0.5, Octo and TurboVLA ship F32, and GR00T N1.5
+and N1.6 are mostly F32. `scripts/quantize_gguf.py` repacks the LM-backbone weight
+matrices to a smaller type and copies everything else unchanged. The loader keeps
+the packed weights, so the file loads and runs like the original.
 
 ```bash
 python scripts/quantize_gguf.py --in model-bf16.gguf --out model-q8_0.gguf --type Q8_0
 ```
 
-`Q8_0` is near-lossless and roughly halves the LM. `Q4_0` is 4-bit for a bigger cut.
+The packed matmuls do not dequantize to float first. ggml quantizes the
+activations to 8 bits and runs integer dot products on the blocks
+(`vec_dot_q8_0_q8_0` on CPU, the MMQ kernels on CUDA), so a Q8_0 LM is int8
+compute, not BF16.
+
+`Q8_0` is near-lossless and roughly halves the LM against BF16. `Q4_0` is 4-bit for
+a bigger cut (`--type` also takes `Q4_1`, `Q5_0`, `Q5_1`).
 Embeddings, the output head, norms and the action expert stay float; pass `--vision` to
 pack the vision tower too (smaller, but more accuracy loss).
 
@@ -298,6 +366,13 @@ episodes per model, terminated episodes counted as failures:
 | SmolVLA    |  4 |  90.5% |
 | π0         | 32 |  87.5% |
 | GR00T N1.6 | 16 |  86.5% |
+
+This table was measured before three numeric fixes. On 100 paired
+LIBERO-Object episodes, before and after, π0 goes from 83 to 90 successes,
+SmolVLA from 90 to 92 and GR00T N1.7 from 97 to 99; see
+[CHANGELOG.md](CHANGELOG.md). The published TurboVLA GGUF has no DINOv3 final
+norm (`vit.norm`) and no longer loads; re-convert it with
+`scripts/convert_turbovla_to_gguf.py`.
 
 Success rate belongs to the checkpoint, not the engine;
 `vla_predict_check` in [CONTRIBUTING.md](CONTRIBUTING.md) is how a

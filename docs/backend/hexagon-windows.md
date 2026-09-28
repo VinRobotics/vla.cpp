@@ -77,7 +77,7 @@ The build script sets up the Visual Studio shell, the compiler flags llama.cpp's
 .\scripts\build_windows_snapdragon.ps1 -Backend cpu    -LlamaDir <llama.cpp>
 ```
 
-Each build goes into `build-wos-<backend>`, with every binary and DLL in `build-wos-<backend>\bin`. `-NoServer` skips `vla-server`, Octo and their protobuf and ZeroMQ dependencies.
+Each build goes into `build-wos-<backend>`, with every binary and DLL in `build-wos-<backend>\bin`. `-NoServer` skips `vla-server`, SentencePiece and their protobuf and ZeroMQ dependencies, so Octo `--text` needs `--tokens` there.
 
 `-LlamaDir` points the build at an existing llama.cpp checkout through `FETCHCONTENT_SOURCE_DIR_LLAMA`. Without it, the `b11223` pin in `CMakeLists.txt` applies, which was not tested here.
 

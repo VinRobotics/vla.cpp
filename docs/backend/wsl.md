@@ -90,7 +90,7 @@ cache and that `nvcc` was on `PATH` at configure time.
 
 ## Run a model
 
-SmolVLA ships a combined GGUF plus a separate `mmproj` vision tower (see
+SmolVLA ships as one GGUF with its vision tower (see
 [Models](../../README.md#models); GGUF published
 [here](https://huggingface.co/collections/vrfai/vlacpp-model-bundles)).
 
