@@ -470,11 +470,21 @@ bool load_config(const gguf_reader & g, TurboVlaModelArch & m) {
     I("period_token_id", m.period_id);       I("question_token_id", m.question_id);
     if (g.has("turbovla.rope_theta"))
         m.rope_theta = g.f32("turbovla.rope_theta");
+    bool ok = std::isfinite(m.rope_theta) && m.rope_theta > 0.f && m.image_size <= 4096;
+    for (int64_t v : { m.hidden, m.n_views, m.image_size, m.patch, m.vit_dim, m.vit_layers, m.vit_heads,
+                       m.bert_dim, m.bert_layers, m.bert_heads, m.vocab, m.fusion_layers, m.fusion_heads,
+                       m.enh_heads, m.dec_layers, m.dec_heads, m.horizon, m.action_dim, m.state_dim,
+                       m.n_state_tok, m.text_len_max })
+        ok = ok && v >= 1;
+    if (!ok) {
+        std::fprintf(stderr, "vla(turbovla): inconsistent dimensions in GGUF metadata\n");
+        return false;
+    }
     int64_t fhd = m.fusion_dim / m.fusion_heads;
     U("fusion_head_dim", fhd);
     m.fusion_dim = fhd * m.fusion_heads;
 
-    if (m.image_size % m.patch || m.vit_dim % m.vit_heads || (m.vit_dim / m.vit_heads) % 4 ||
+    if (m.fusion_dim < 1 || m.image_size % m.patch || m.vit_dim % m.vit_heads || (m.vit_dim / m.vit_heads) % 4 ||
         m.bert_dim % m.bert_heads || m.hidden % m.enh_heads || m.hidden % m.dec_heads) {
         std::fprintf(stderr, "vla(turbovla): inconsistent dimensions in GGUF metadata\n");
         return false;
@@ -681,7 +691,7 @@ bool load_weights(TurboVlaModelArch & m, gguf_reader & g) {
     if (m.vocab != m.word_emb->ne[1] || m.text_len_max > m.bert_max_pos ||
         m.patch_w->ne[0] != 3*m.patch*m.patch || (m.reg_tok && m.reg_tok->ne[1] != m.n_reg) ||
         ggml_nelements(m.view_emb) != m.hidden*m.n_views || m.act_q->ne[1] != m.horizon ||
-        m.dec[0].cross_qkv_w->ne[1] != 3*m.hidden) {
+        m.act_q->type != GGML_TYPE_F32 || m.dec[0].cross_qkv_w->ne[1] != 3*m.hidden) {
         std::fprintf(stderr, "vla(turbovla): tensor shapes disagree with GGUF metadata\n");
         return false;
     }

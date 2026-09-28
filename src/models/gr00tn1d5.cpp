@@ -94,7 +94,7 @@ namespace {
 bool load_config(const gguf_reader & g, Gr00tN1d5ModelArch & m, Config & cfg) {
     auto U  = [&](const char * k, int64_t & dst) { if (g.has(k)) dst = (int64_t) g.u32(k); };
     auto F  = [&](const char * k, float & dst)   { if (g.has(k)) dst = g.f32(k); };
-    auto fk = [&](const char * s) { static char b[64]; std::snprintf(b, sizeof(b), "gr00t_n1_5.%s", s); return b; };
+    auto fk = [&](const char * s) { thread_local char b[64]; std::snprintf(b, sizeof(b), "gr00t_n1_5.%s", s); return b; };
 
     U(fk("vit_hidden"     ), m.vit.enc.cfg.hidden);
     U(fk("vit_layers"     ), m.vit_layers);
@@ -139,6 +139,13 @@ bool load_config(const gguf_reader & g, Gr00tN1d5ModelArch & m, Config & cfg) {
     if (g.has(fk("lm_rope_theta")))
         m.lm.cfg.rope.freq_base = (float) g.f64(fk("lm_rope_theta"));
 
+    if (m.vit.enc.cfg.heads <= 0 || m.patch_size <= 0 ||
+        (m.image_size/m.patch_size)*(m.image_size/m.patch_size) != m.n_img_tokens) {
+        std::fprintf(stderr, "vla(gr00tn1d5): vit_heads %lld, image %lld / patch %lld do not give n_img_tokens %lld\n",
+                     (long long) m.vit.enc.cfg.heads, (long long) m.image_size, (long long) m.patch_size,
+                     (long long) m.n_img_tokens);
+        return false;
+    }
     m.vit.enc.cfg.head_dim = m.vit.enc.cfg.hidden/m.vit.enc.cfg.heads;
     m.vlsa.cfg.hidden      = m.bb_embed_dim;
     m.vlsa.cfg.ln_eps      = m.dit.cfg.ln_eps;

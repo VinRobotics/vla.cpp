@@ -290,7 +290,7 @@ count on top of the host copy made during loading.
 | GR00T N1.6 | 9.16 → 7.99 GB | 4,930 ms, 7.9e-3 | 3,473 ms, 8.5e-3 | 6,509 ms, 6.6e-3 |
 | VLA-JEPA | 4.57 → 3.24 GB | 745 ms, 2.5e-2 | 1,477 ms, 4.9e-2 | 2,979 ms, 5.2e-2 |
 
-SmolVLA's CPU Q8_0 run keeps its float weights at F16; the other rows keep the CPU default, BF16. The π0 Q8_0 result on the GPU (0.27) is far worse than the same file on the CPU, and was not investigated. Evo-1's Q8_0 file fails to load on every backend, including the CPU, with a `ggml_view` assertion; that is an arch bug, not a Snapdragon one.
+SmolVLA's CPU Q8_0 run keeps its float weights at F16; the other rows keep the CPU default, BF16. The π0 Q8_0 result on the GPU (0.27) is far worse than the same file on the CPU, and was not investigated. Evo-1's Q8_0 file failed to load on every backend with a `ggml_view` assertion; it now loads on the CPU and the NPU. The Adreno GPU refuses one made by the old quantizer, because ggml-opencl ignores view offsets on quantized weights; requantize with the current `scripts/quantize_gguf.py`, which keeps the action expert float.
 
 ## Observations
 

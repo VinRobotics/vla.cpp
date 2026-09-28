@@ -96,7 +96,7 @@ namespace {
 bool load_config(const gguf_reader & g, Gr00tN1d6ModelArch & m, Config & cfg) {
     auto U  = [&](const char * k, int64_t & dst) { if (g.has(k)) dst = (int64_t) g.u32(k); };
     auto F  = [&](const char * k, float & dst)   { if (g.has(k)) dst = g.f32(k); };
-    auto fk = [&](const char * s) { static char b[64]; std::snprintf(b, sizeof(b), "gr00t_n1_6.%s", s); return b; };
+    auto fk = [&](const char * s) { thread_local char b[64]; std::snprintf(b, sizeof(b), "gr00t_n1_6.%s", s); return b; };
 
     U(fk("vit_hidden"       ), m.vit.enc.cfg.hidden);
     U(fk("vit_layers"       ), m.vit_layers);
@@ -142,6 +142,11 @@ bool load_config(const gguf_reader & g, Gr00tN1d6ModelArch & m, Config & cfg) {
     if (g.has(fk("lm_rope_theta")))
         m.lm.cfg.rope.freq_base = (float) g.f64(fk("lm_rope_theta"));
 
+    if (m.vit.enc.cfg.heads <= 0 || m.attend_text_every_n <= 0) {
+        std::fprintf(stderr, "vla(gr00tn1d6): vit_heads %lld and attend_text_every_n_blocks %lld must be positive\n",
+                     (long long) m.vit.enc.cfg.heads, (long long) m.attend_text_every_n);
+        return false;
+    }
     m.vit.enc.cfg.head_dim = m.vit.enc.cfg.hidden/m.vit.enc.cfg.heads;
     m.lm.cfg.rope.n_dims   = (int) m.lm.cfg.head_dim;
 

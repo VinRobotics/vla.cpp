@@ -282,10 +282,10 @@ ggml_tensor * build_internvit_view(ggml_context * C, const Evo1ModelArch & m, gg
 }
 
 ggml_tensor * inproj_split_w(ggml_context * C, ggml_tensor * Win, int64_t E, int64_t k) {
-    return ggml_cont(C, ggml_view_2d(C, Win, E, E, Win->nb[1], (size_t) k * E * E * ggml_element_size(Win)));
+    return ggml_view_2d(C, Win, Win->ne[0], E, Win->nb[1], (size_t) k * E * Win->nb[1]);
 }
 ggml_tensor * inproj_split_b(ggml_context * C, ggml_tensor * bin, int64_t E, int64_t k) {
-    return ggml_cont(C, ggml_view_1d(C, bin, E, (size_t) k * E * ggml_element_size(bin)));
+    return ggml_view_1d(C, bin, E, (size_t) k * E * bin->nb[0]);
 }
 
 bool load_config(const gguf_reader & g, Evo1ModelArch & m, Config & cfg) {
@@ -448,6 +448,14 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
         w.f1w = mk_mm(N("ff1.weight")); w.f1b = mk_f32(N("ff1.bias"));
         w.f2w = mk_mm(N("ff2.weight")); w.f2b = mk_f32(N("ff2.bias"));
         ok &= w.n1w && w.n1b && w.n2w && w.n2b && w.Win && w.bin && w.Wo && w.bo && w.f1w && w.f1b && w.f2w && w.f2b;
+#ifdef GGML_USE_OPENCL
+        if (ok && ggml_is_quantized(w.Win->type) &&
+            std::strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(ggml_backend_get_device(m->backend))), "OpenCL") == 0) {
+            std::fprintf(stderr, "vla(evo1): %s is %s; OpenCL cannot split a quantized attn_in, requantize with attn_in kept float\n",
+                         N("attn_in.weight"), ggml_type_name(w.Win->type));
+            return nullptr;
+        }
+#endif
     }
     m->norm_out_w = mk_f32("aex.norm_out.weight"); m->norm_out_b = mk_f32("aex.norm_out.bias");
     m->seq_pool_w = mk_mm("aex.seq_pool.weight");  m->seq_pool_b = mk_f32("aex.seq_pool.bias");
@@ -793,7 +801,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos));
     }
     { std::vector<float> mk((size_t) SEQ * SEQ); const float NEG = -std::numeric_limits<float>::infinity();
-      for (int64_t q=0; q<SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) mk[q * SEQ+kv] = (kv <= q && attn_ok[kv]) ? 0.0f : NEG;
+      for (int64_t q=0; q<SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) mk[q * SEQ+kv] = (kv == q || (kv <= q && attn_ok[kv])) ? 0.0f : NEG;
       ggml_backend_tensor_set(t_lmmask, mk.data(), 0, ggml_nbytes(t_lmmask)); }
     ggml_backend_tensor_set(t_state, state_norm.data(), 0, ggml_nbytes(t_state));
     ggml_backend_tensor_set(t_x, x_init.data(), 0, ggml_nbytes(t_x));

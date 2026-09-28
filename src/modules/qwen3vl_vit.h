@@ -160,9 +160,11 @@ inline void vit_rope_tables(const std::vector<int64_t> & row, const std::vector<
 }
 
 // Bilinear resample of the pretrained position table onto gh x gw.
-inline void interp_pos_embed(const std::vector<float> & table, int64_t num_side, int64_t hidden,
+inline bool interp_pos_embed(const std::vector<float> & table, int64_t num_side, int64_t hidden,
                              const std::vector<int64_t> & row, const std::vector<int64_t> & col, int64_t gh, int64_t gw,
                              std::vector<float> & out) {
+    if (num_side <= 0 || (int64_t) table.size() != num_side*num_side*hidden)
+        return false;
     const int64_t S = (int64_t) row.size();
     out.assign((size_t) S * hidden, 0.0f);
     auto src_coord = [&](int64_t k, int64_t g) -> double { return (g <= 1) ? 0.0 : (double) k * (double)(num_side-1)/(double)(g-1); };
@@ -180,6 +182,7 @@ inline void interp_pos_embed(const std::vector<float> & table, int64_t num_side,
         for (int64_t c=0; c<hidden; ++c)
             out[s * hidden+c] = (float)(c00*T00[c]+c01*T01[c]+c10*T10[c]+c11*T11[c]);
     }
+    return true;
 }
 
 // HWC to flat patches. No resize: the view must already be side x side.

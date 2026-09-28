@@ -123,7 +123,7 @@ namespace {
 bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
     auto U = [&](const char * k, int64_t & dst) { if (g.has(k)) dst = (int64_t) g.u32(k); };
     auto F = [&](const char * k, float & dst)   { if (g.has(k)) dst = g.f32(k); };
-    auto fk = [&](const char * s) { static char b[64]; std::snprintf(b, sizeof(b), "gr00t_n1_7.%s", s); return b; };
+    auto fk = [&](const char * s) { thread_local char b[64]; std::snprintf(b, sizeof(b), "gr00t_n1_7.%s", s); return b; };
     U(fk("vit_hidden"), m.vit_hidden); U(fk("vit_layers"), m.vit_layers); U(fk("vit_heads"), m.vit_heads); U(fk("vit_inter"), m.vit_inter);
     U(fk("patch_size"), m.patch_size); U(fk("temporal_patch_size"), m.temporal_patch); U(fk("spatial_merge_size"), m.spatial_merge);
     U(fk("vit_num_position_embeddings"), m.vit_num_pos); U(fk("vit_patch_flat"), m.vit_patch_flat); U(fk("vit_merged_dim"), m.vit_merged_dim);
@@ -144,6 +144,11 @@ bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
         (m.image_target_size/m.patch_size)%m.spatial_merge != 0) {
         std::fprintf(stderr, "vla(gr00tn1d7): image %lld / patch %lld / merge %lld do not divide evenly\n",
                      (long long) m.image_target_size, (long long) m.patch_size, (long long) m.spatial_merge);
+        return false;
+    }
+    if (m.vit_heads <= 0 || m.attend_text_every_n <= 0 || m.vit_patch_flat != 3*m.temporal_patch*m.patch_size*m.patch_size) {
+        std::fprintf(stderr, "vla(gr00tn1d7): vit_heads %lld, attend_text_every_n_blocks %lld or vit_patch_flat %lld is inconsistent\n",
+                     (long long) m.vit_heads, (long long) m.attend_text_every_n, (long long) m.vit_patch_flat);
         return false;
     }
 
@@ -211,7 +216,8 @@ bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
     }
 
     cfg = Config{};
-    cfg.n_img = 64; cfg.n_lang = m.max_seq_len; cfg.n_state = 1;
+    cfg.n_img = (m.image_target_size/m.patch_size/m.spatial_merge)*(m.image_target_size/m.patch_size/m.spatial_merge);
+    cfg.n_lang = m.max_seq_len; cfg.n_state = 1;
     cfg.n_suffix = m.action_horizon; cfg.max_state_dim = m.max_state_dim; cfg.max_action_dim = m.action_dim;
     cfg.real_state_dim = m.max_state_dim; cfg.real_action_dim = m.action_dim;
     cfg.hidden = m.lm_hidden; cfg.n_q_heads = m.n_q; cfg.n_kv_heads = m.n_kv; cfg.head_dim = m.lm_head_dim; cfg.n_layers = m.lm_layers;
@@ -328,7 +334,9 @@ bool Gr00tN1d7ModelArch::build_caches() {
     if (pos_table.empty() || (int64_t) pos_table.size() != vit_num_pos * vit_hidden) {
         std::fprintf(stderr, "vla(gr00tn1d7): build_caches: vit.pos_embd unreadable\n"); return false;
     }
-    interp_pos_embed(pos_table, num_side, vit_hidden, c_grow, c_gcol, grid, grid, c_pos_interp);
+    if (!interp_pos_embed(pos_table, num_side, vit_hidden, c_grow, c_gcol, grid, grid, c_pos_interp)) {
+        std::fprintf(stderr, "vla(gr00tn1d7): build_caches: vit_num_position_embeddings %lld is not a square\n", (long long) vit_num_pos); return false;
+    }
 
     c_tau.assign((size_t) num_steps, {}); c_tproj.assign((size_t) num_steps, {});
     for (int64_t s=0; s<num_steps; ++s) {
@@ -505,7 +513,8 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     ggml_tensor * eagle = nullptr, * vl_embs = nullptr;
     std::vector<ggml_tensor*> lm_h_dump, vlsa_dump;
     const MainKey mkey{ SEQ, n_img, SEQ_TXT, num_steps, inject_deepstack };
-    const bool built = mg.ensure(backend, mkey, (size_t) 256*1024*1024,
+    const size_t main_nodes = 65536 + (size_t) num_steps*64*(dit_layers+1);
+    const bool built = mg.ensure(backend, mkey, main_nodes*ggml_tensor_overhead() + ggml_graph_overhead_custom(main_nodes, false),
                                  [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
     ggml_tensor * t_embeds = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);          ggml_set_input(t_embeds);
     ggml_tensor * t_pos    = ggml_new_tensor_1d(C, GGML_TYPE_I32, 4*SEQ);         ggml_set_input(t_pos);
@@ -605,7 +614,7 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     gio.t_ds[0]=t_ds[0]; gio.t_ds[1]=t_ds[1]; gio.t_ds[2]=t_ds[2];
     gio.t_img_idx=t_img_idx; gio.t_txt_idx=t_txt_idx; gio.t_tau=t_tau; gio.t_tproj=t_tproj; gio.actions=actions;
 
-    ggml_cgraph * gf = ggml_new_graph_custom(C, 65536, false);
+    ggml_cgraph * gf = ggml_new_graph_custom(C, main_nodes, false);
     ggml_build_forward_expand(gf, actions);
     return gf;
     });
