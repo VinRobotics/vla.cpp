@@ -272,9 +272,8 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     ggml_tensor*final_norm=ggml_mul(C,ggml_rms_norm(C,lout[lm_layers-1],lm_rms_eps),lm_out_norm);
 
     std::vector<ggml_tensor*> cond(head_blocks);
-    for(int i=0;i<head_blocks-1;++i)
-        cond[i]=lout[i];
-    cond[head_blocks-1]=final_norm;
+    for(int i=0;i<head_blocks;++i)
+        cond[i]=i+1==lm_layers?final_norm:lout[i];
 
     ggml_tensor*t_state=ggml_new_tensor_1d(C,GGML_TYPE_F32,proprio_dim); ggml_set_input(t_state);
     ggml_tensor*pf=ggml_add(C,ggml_mul_mat(C,pp_fc1w,t_state),pp_fc1b); pf=ggml_gelu_erf(C,pf);
