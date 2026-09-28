@@ -452,6 +452,7 @@ def main() -> int:
         loaded = OctoModelPt.load_pretrained_from_jax(model_id, step=args.step, skip_keys_regex=".*hf_model")
     m = loaded["octo_model"]
     sd = m.state_dict()
+    OCTO_META["ckpt_format"] = ckpt_format
 
     window_size = _resolve_window_size(m, args.ckpt, model_id, args.window_size)
     print(f"window_size = {window_size} (from "

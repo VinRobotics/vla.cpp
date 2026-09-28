@@ -68,6 +68,7 @@ constexpr uint32_t kReplaySeed = 20260921u;
 struct OctoRuntime {
     ggml_backend_t backend = nullptr;
     std::unordered_map<std::string, ggml_tensor *> by_name;
+    bool pytorch_ckpt = false;
 
     // One cache per camera: the views differ in side and token count, so they
     // cannot share a graph.
@@ -373,6 +374,7 @@ bool load_config(const gguf_reader& g, OctoModelArch& m) {
     m.max_action      = scalar_key(g, "octo.diffusion.max_action");
     m.pad_id          = g.has("octo.tokenizer.pad_id") ? (int32_t) g.u32("octo.tokenizer.pad_id") : 0;
     m.head_type       = g.has("octo.action.head_type") ? g.str("octo.action.head_type") : "diffusion";
+    m.rt.pytorch_ckpt = g.str("octo.ckpt_format") == "pytorch";
     detect_proprio(g, m.has_proprio, m.proprio_in_dim);
 
     if (m.has_proprio && m.proprio_in_dim != 1 && m.proprio_in_dim != 256) {
@@ -444,7 +446,7 @@ bool is_stem_conv_weight(const char * name) {
            std::strstr(name, ".conv.weight") != nullptr;
 }
 
-void standardize_conv_weight(float * w, int64_t oc, int64_t n) {
+void standardize_conv_weight(float * w, int64_t oc, int64_t n, bool pytorch) {
     for (int64_t o=0; o<oc; ++o) {
         float * row = w+o*n;
 
@@ -459,7 +461,8 @@ void standardize_conv_weight(float * w, int64_t oc, int64_t n) {
             var += d*d;
         }
 
-        const float inv = 1.0f/std::sqrt((float) (var/(double) n)+1e-10f);
+        const float v   = (float) (var/(double) n);
+        const float inv = pytorch ? 1.0f/std::sqrt(v+1e-10f) : 1.0f/(std::sqrt(v)+1e-5f);
         for (int64_t i=0; i<n; ++i)
             row[i] = ((float) row[i]-(float) mean)*inv;
     }
@@ -490,7 +493,7 @@ bool load_weights(OctoModelArch& m, gguf_reader& g) {
         row.resize((size_t) ggml_nelements(t));
         ggml_backend_tensor_get(t, row.data(), 0, ggml_nbytes(t));
         // ggml ne = [kw, kh, in, out]: one contiguous block per output channel.
-        standardize_conv_weight(row.data(), t->ne[3], t->ne[0]*t->ne[1]*t->ne[2]);
+        standardize_conv_weight(row.data(), t->ne[3], t->ne[0]*t->ne[1]*t->ne[2], m.rt.pytorch_ckpt);
         ggml_backend_tensor_set(t, row.data(), 0, ggml_nbytes(t));
     }
     return true;
@@ -502,6 +505,15 @@ std::vector<float> tensor_to_vec(const ggml_tensor * t) {
     std::vector<float> out((size_t) ggml_nelements(t));
     ggml_backend_tensor_get(t, out.data(), 0, ggml_nbytes(t));
     return out;
+}
+
+ggml_tensor * conv_2d_f32(ggml_context * C, ggml_tensor * w, ggml_tensor * x, int stride, int pad) {
+    ggml_tensor * col = ggml_im2col(C, w, x, stride, stride, pad, pad, 1, 1, true, GGML_TYPE_F32);
+    ggml_tensor * y   = ggml_mul_mat(C,
+        ggml_reshape_2d(C, col, col->ne[0], col->ne[3]*col->ne[2]*col->ne[1]),
+        ggml_reshape_2d(C, w, w->ne[0]*w->ne[1]*w->ne[2], w->ne[3]));
+    y = ggml_reshape_4d(C, y, col->ne[1], col->ne[2], col->ne[3], w->ne[3]);
+    return ggml_cont(C, ggml_permute(C, y, 0, 1, 3, 2));
 }
 
 // SmallStem16 for one camera view: four standardized-conv + GroupNorm + ReLU
@@ -557,9 +569,9 @@ bool run_obs_tokenizer_graph(OctoRuntime& rt,
             if (!cw || !cb || !gw || !gb)
                 return nullptr;
 
-            x = ggml_conv_2d(C, cw, x, 2, 2, 1, 1, 1, 1);
+            x = conv_2d_f32(C, cw, x, 2, 1);
             x = ggml_add(C, x, cb);
-            x = ggml_group_norm(C, x, 32, 1e-5f);
+            x = ggml_group_norm(C, x, 32, rt.pytorch_ckpt ? 1e-5f : 1e-6f);
             x = ggml_add(C, ggml_mul(C, x, gw), gb);
             x = ggml_relu(C, x);
         }
@@ -572,7 +584,7 @@ bool run_obs_tokenizer_graph(OctoRuntime& rt,
         if (!pw || !pb || !jw || !jb || !pos_r)
             return nullptr;
 
-        ggml_tensor * patch = ggml_add(C, ggml_conv_2d(C, pw, x, 1, 1, 0, 0, 1, 1), pb);
+        ggml_tensor * patch = ggml_add(C, conv_2d_f32(C, pw, x, 1, 0), pb);
         ggml_tensor * tok   = ggml_cont(C, ggml_reshape_3d(C,
             ggml_cont(C, ggml_permute(C, patch, 1, 2, 0, 3)), kPatchEmbed, n_tok, steps));
 
@@ -643,16 +655,21 @@ bool run_proprio_tokenizer_graph(OctoRuntime& rt,
         ggml_tensor * thresholds_r = rt.weight("octo.obs.proprio.bin_thresholds");
         if (!thresholds_r)
             return false;
-        // torch.bucketize: the index is the count of boundaries <= x.
         const std::vector<float> thresholds = tensor_to_vec(thresholds_r);
-        const int n_thresh = (int) thresholds.size();
+        if (thresholds.size() != (size_t) in_dim+1) {
+            std::fprintf(stderr, "vla(octo): octo.obs.proprio.bin_thresholds has %zu entries, expected %d\n",
+                         thresholds.size(), in_dim+1);
+            return false;
+        }
+        const float lo      = thresholds.front();
+        const float hi      = thresholds.back();
+        const bool  uniform = std::fabs((thresholds[1]-lo)-(hi-lo)/in_dim) < 1e-3f*(hi-lo)/in_dim;
         for (int t=0; t<steps; ++t) {
             for (int d=0; d<n_dims; ++d) {
                 const float v = proprio_norm[(size_t) t*n_dims+d];
-                int bucket = 0;
-                while (bucket < n_thresh && thresholds[(size_t) bucket] <= v)
-                    ++bucket;
-                bucket = std::min(bucket, in_dim-1);
+                int bucket = (int) (std::upper_bound(thresholds.begin(), thresholds.end(), v)-thresholds.begin())-1;
+                if (bucket < 0 || bucket >= in_dim)
+                    bucket = uniform && v >= hi ? in_dim-1 : 0;
                 tokens_in[((size_t) t*n_dims+d)*in_dim+bucket] = 1.0f;
             }
         }
@@ -1052,6 +1069,13 @@ void build_transformer_mask(const OctoSeqLayout& layout, std::vector<float>& mas
     }
 }
 
+ggml_tensor * octo_gelu(ggml_context * C, ggml_tensor * x, bool erf) {
+    if (erf)
+        return ggml_gelu_erf(C, x);
+    ggml_tensor * z = ggml_add(C, x, ggml_scale(C, ggml_mul(C, ggml_mul(C, x, x), x), 0.044715f));
+    return ggml_mul(C, x, ggml_sigmoid(C, ggml_scale(C, z, 2.0f*0.7978845608028654f)));
+}
+
 // 12 pre-norm encoder blocks over the assembled sequence. Only the readout rows
 // are gathered back out; everything else the blocks compute is intermediate.
 bool run_transformer_graph(OctoRuntime& rt,
@@ -1120,7 +1144,8 @@ bool run_transformer_graph(OctoRuntime& rt,
             ggml_tensor * residual = ggml_add(C, x, linear(C, blk_w[i][4], blk_w[i][5], merged));
 
             ggml_tensor * n2 = layer_norm(C, residual, blk_w[i][6], blk_w[i][7], ln_eps);
-            x = ggml_add(C, residual, ffn_gelu_erf(C, blk_w[i][8], blk_w[i][9], blk_w[i][10], blk_w[i][11], n2));
+            ggml_tensor * mlp = octo_gelu(C, linear(C, blk_w[i][8], blk_w[i][9], n2), rt.pytorch_ckpt);
+            x = ggml_add(C, residual, linear(C, blk_w[i][10], blk_w[i][11], mlp));
         }
 
         ggml_tensor * output = layer_norm(C, x, out_w, out_b, ln_eps);
@@ -1452,7 +1477,8 @@ bool run_l1_action_head_graph(OctoRuntime& rt,
         ggml_tensor * attn_out = linear(C, o_w, o_b, merged);
         ggml_tensor * y        = layer_norm(C, attn_out, norm_w, norm_b, ln_eps);
         // The residual is onto attn_out, before the norm, as in MAPHead.
-        ggml_tensor * emb = ggml_add(C, attn_out, ffn_gelu_erf(C, ffn_up_w, ffn_up_b, ffn_down_w, ffn_down_b, y));
+        ggml_tensor * h   = octo_gelu(C, linear(C, ffn_up_w, ffn_up_b, y), rt.pytorch_ckpt);
+        ggml_tensor * emb = ggml_add(C, attn_out, linear(C, ffn_down_w, ffn_down_b, h));
 
         ggml_tensor * mean_raw = linear(C, mean_w, mean_b, emb);
         ggml_tensor * out = ggml_scale(C, ggml_tanh(C, ggml_scale(C, mean_raw, 1.0f/max_action)), max_action);
@@ -1735,7 +1761,7 @@ bool run_pipeline(OctoModelArch& m, const OctoFrame& f,
         for (int t=0; t<n_steps; ++t) {
             for (int d=0; d<kProprioTokens; ++d) {
                 const float raw = d < (int) f.proprio_raw.size() ? f.proprio_raw[(size_t) d] : 0.0f;
-                proprio_norm[(size_t) t*kProprioTokens+d] = (raw-mean[(size_t) d])/stdv[(size_t) d];
+                proprio_norm[(size_t) t*kProprioTokens+d] = (raw-mean[(size_t) d])/(stdv[(size_t) d]+1e-8f);
             }
         }
         if (!run_proprio_tokenizer_graph(rt, proprio_norm, (int) m.proprio_in_dim, n_steps,
