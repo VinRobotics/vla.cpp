@@ -577,11 +577,14 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         for (int j=0; j<in.n_lang; ++j)
             input_ids.push_back(in.lang_tokens[j]);
     } else {
+        constexpr int32_t tok_image=1906, tok_dash=12, tok_digit0=15, tok_colon=25, tok_space=220, tok_newline=198;
         for (int64_t v=0; v<n_views; ++v) {
-            input_ids.push_back((int32_t) img_start_id);
-            for (int64_t k=0; k<num_image_token; ++k)
-                input_ids.push_back((int32_t) img_ctx_id);
-            input_ids.push_back((int32_t) img_end_id);
+            input_ids.insert(input_ids.end(), {tok_image, tok_dash});
+            for (char c : std::to_string(v+1))
+                input_ids.push_back(tok_digit0+(c-'0'));
+            input_ids.insert(input_ids.end(), {tok_colon, tok_space, (int32_t) img_start_id});
+            input_ids.insert(input_ids.end(), (size_t) num_image_token, (int32_t) img_ctx_id);
+            input_ids.insert(input_ids.end(), {(int32_t) img_end_id, tok_newline});
         }
         for (int j=0; j<in.n_lang; ++j)
             input_ids.push_back(in.lang_tokens[j]);
@@ -638,14 +641,8 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     }
 
     std::vector<float> state_norm(per_a, 0.0f);
-    for (int64_t i=0; i<per_a; ++i) {
+    for (int64_t i=0; i<std::min(real_state_dim, per_a); ++i) {
         const float lo = state_min[i], hi = state_max[i];
-        // The converter zero-pads stats past real_state_dim, so lo == hi == 0 there
-        // and the affine below would map anything to -1.
-        if (hi <= lo) {
-            state_norm[i] = 0.0f;
-            continue;
-        }
         const float sv = in.state ? in.state[i] : 0.0f;
         float xn = 2.0f * (sv-lo)/(hi-lo+norm_eps_denom)-1.0f;
         if (xn < -1.0f)
