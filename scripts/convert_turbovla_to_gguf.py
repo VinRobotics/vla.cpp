@@ -54,9 +54,8 @@ KEY_TEXT_PROJ = "text_encoder.text_projection"
 # values are needed: the fine-tuned weights ship inside the TurboVLA checkpoint.
 DINOV3_VITB16 = {"rope_theta": 100.0, "num_register_tokens": 4, "num_attention_heads": 12}
 
-# Tensors the runtime never reads: DINOv3's final norm (TurboVLA taps
-# hidden_states[-1], before it), BERT's pooler, and the MAE mask token.
-UNUSED = (f"{PREFIX_VIT}.norm.", f"{PREFIX_TEXT}.pooler.", f"{PREFIX_VIT}.embeddings.mask_token")
+# Tensors the runtime never reads: BERT's pooler and the MAE mask token.
+UNUSED = (f"{PREFIX_TEXT}.pooler.", f"{PREFIX_VIT}.embeddings.mask_token")
 
 
 class TrackedTensors(dict):
@@ -308,6 +307,9 @@ def write_vision_encoder(writer: gguf.GGUFWriter, tensors: dict, dims: TurboVLAD
         add_tensor(writer, f"vit.blk.{i}.fc1.bias", b_fc1)
         add_tensor(writer, f"vit.blk.{i}.fc2.weight", w_fc2)
         add_tensor(writer, f"vit.blk.{i}.fc2.bias", b_fc2)
+
+    add_tensor(writer, "vit.norm.weight", tensors[f"{root}.norm.weight"])
+    add_tensor(writer, "vit.norm.bias", tensors[f"{root}.norm.bias"])
 
 
 def write_text_encoder(writer: gguf.GGUFWriter, tensors: dict, dims: TurboVLADims) -> None:

@@ -129,6 +129,7 @@ struct TurboVlaModelArch : public ModelArchBase {
 
     ggml_tensor *patch_w = nullptr, *patch_b = nullptr, *cls_tok = nullptr, *reg_tok = nullptr;
     std::vector<VitLayerW> vit;
+    ggml_tensor *vit_norm_w = nullptr, *vit_norm_b = nullptr;
     ggml_tensor *vp_in_w = nullptr, *vp_in_b = nullptr, *vp_fc1_w = nullptr, *vp_fc1_b = nullptr;
     ggml_tensor *vp_fc2_w = nullptr, *vp_fc2_b = nullptr, *vp_skip_w = nullptr;
     ggml_tensor *vp_out_w = nullptr, *vp_out_b = nullptr, *view_emb = nullptr;
@@ -359,10 +360,12 @@ ggml_cgraph * TurboVlaModelArch::build(ggml_context * C, IO & io, ggml_tensor * 
         x = ggml_add(C, x, ffn_gelu_erf(C, l.fc1_w, l.fc1_b, l.fc2_w, l.fc2_b,
                                         layer_norm(C, x, l.ln2_w, l.ln2_b, kLnEps)));
     }
-    // TurboVLA reads hidden_states[-1], which is before DINOv3's final norm
-    // (models/vision_encoder.py:109), then drops the CLS and register tokens.
+    // TurboVLA reads hidden_states[-1] (models/vision_encoder.py:109), which is
+    // after DINOv3's final norm in the transformers it was trained with, then
+    // drops the CLS and register tokens. The norm is per token.
     x = ggml_view_3d(C, x, vit_dim, NP, nv, x->nb[1], x->nb[2], (size_t) (1 + n_reg)*x->nb[1]);
     x = ggml_reshape_2d(C, ggml_cont(C, x), vit_dim, VS);
+    x = layer_norm(C, x, vit_norm_w, vit_norm_b, kLnEps);
 
     // VisionProjection, then one learned embedding per camera.
     ggml_tensor * mlp = linear(C, vp_fc1_w, vp_fc1_b, layer_norm(C, x, vp_in_w, vp_in_b, kLnEps));
@@ -583,6 +586,13 @@ bool load_weights(TurboVlaModelArch & m, gguf_reader & g) {
         w.fc2_w = L.gemm("%s", N(f, i, "fc2.weight").c_str());
         w.fc2_b = L.f32("%s", N(f, i, "fc2.bias").c_str());
     }
+    if (gguf_find_tensor(g.gctx, "vit.norm.weight") < 0) {
+        std::fprintf(stderr, "vla(turbovla): GGUF has no DINOv3 final norm (vit.norm); re-convert it with "
+                             "scripts/convert_turbovla_to_gguf.py\n");
+        return false;
+    }
+    m.vit_norm_w = L.f32("vit.norm.weight");
+    m.vit_norm_b = L.f32("vit.norm.bias");
 
     m.vp_in_w   = L.f32("vit_proj.input_norm.weight");
     m.vp_in_b   = L.f32("vit_proj.input_norm.bias");
