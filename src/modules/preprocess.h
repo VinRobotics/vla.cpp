@@ -21,7 +21,6 @@
 
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <vector>
 
 namespace vla {
@@ -30,24 +29,6 @@ namespace vla {
 // size with real data, else it runs past the buffer.
 inline bool view_is_side(const void * data, int w, int h, int64_t side) {
     return data != nullptr && (int64_t) w == side && (int64_t) h == side;
-}
-
-// IDEFICS3/SmolVLM pixel-shuffle (space-to-depth), c-innermost channel order.
-// src [embed, n_patches] row-major (patch p, channel e) -> dst [embed*s^2, (grid/s)^2].
-inline void pixel_shuffle_hf(const float * src, float * dst,
-                             int64_t embed, int64_t grid, int64_t s) {
-    const int64_t g2 = grid/s, c4 = embed * s * s;
-    for (int64_t h2=0; h2<g2; ++h2)
-        for (int64_t w2=0; w2<g2; ++w2) {
-            const int64_t t = h2*g2+w2;
-            for (int64_t hs=0; hs<s; ++hs)
-                for (int64_t ws=0; ws<s; ++ws) {
-                    const int64_t p    = (h2*s+hs)*grid+(w2*s+ws);
-                    const int64_t base = (hs * s+ws)*embed;
-                    std::memcpy(dst+t * c4+base, src+p * embed,
-                                (size_t) embed * sizeof(float));
-                }
-        }
 }
 
 inline bool view_ok(const char * arch, const ImageView & v, int64_t side) {
@@ -107,22 +88,6 @@ inline bool preprocess_image_patches(const char * arch, const ImageView & v, int
                         out[t*pd+ph*ps*3+pw*3+ch] = px(row*ps+ph, col*ps+pw, ch)*2.0f-1.0f;
         }
     return true;
-}
-
-// c-outermost channel order, the inverse layout to pixel_shuffle_hf above.
-inline void pixel_shuffle_back(const float * src, int64_t grid, int64_t hidden, int64_t r, float * dst) {
-    const int64_t g2 = grid/r, c4 = hidden*r*r;
-    for (int64_t y=0; y<g2; ++y)
-        for (int64_t x=0; x<g2; ++x) {
-            const int64_t t = y*g2+x;
-            for (int64_t c=0; c<hidden; ++c)
-                for (int64_t i=0; i<r; ++i)
-                    for (int64_t j=0; j<r; ++j) {
-                        const int64_t pp = (r*y+i)*grid+(r*x+j);
-                        const int64_t cp = c*r*r+i*r+j;
-                        dst[t*c4+cp] = src[pp*hidden+c];
-                    }
-        }
 }
 
 }  // namespace vla

@@ -141,16 +141,6 @@ inline ggml_tensor* tower(ggml_context*C, ggml_tensor*pix, ggml_tensor*pw, ggml_
     return x;
 }
 
-// HWC to CHW planar with per-channel mean/std: ImageNet for DINOv2, 0.5 for SigLIP.
-inline void normalize_tower(const ImageView& v, int64_t S, const float mean[3], const float std_[3], std::vector<float>& out){
-    out.assign((size_t)3*S*S,0.0f);
-    for(int64_t h=0;h<S;++h) for(int64_t w=0;w<S;++w) for(int64_t c=0;c<3;++c){
-        float px = (v.format==PixelFormat::U8) ? ((const uint8_t*)v.data)[(h*S+w)*3+c]/255.0f
-                                               : ((const float*)v.data)[(h*S+w)*3+c];
-        out[c*S*S+h*S+w] = (px-mean[c])/std_[c];
-    }
-}
-
 inline ggml_tensor* DualTower::encode(ggml_backend_t backend, graph_cache<int64_t,VisIO> & cache, const Inputs & in, const char * tag) const {
     const int64_t S=image_size, n_views=in.n_images;
     // towers read S*S*3 per view; reject any view that is not exactly SxS.
@@ -165,7 +155,6 @@ inline ggml_tensor* DualTower::encode(ggml_backend_t backend, graph_cache<int64_
     // ImageNet constants as bf16 rounds them (0.485 -> 0.484375). The reference
     // preprocesses in bf16, so these are the values it actually sees.
     static const float DMEAN[3]={0.484375f,0.455078125f,0.40625f}, DSTD[3]={0.228515625f,0.2236328125f,0.224609375f};
-    static const float SMEAN[3]={0.5f,0.5f,0.5f}, SSTD[3]={0.5f,0.5f,0.5f};
 
     const size_t max_nodes=(size_t)64*(d_layers+s_layers+1)*n_views+1024;
     const bool built=cache.ensure(backend,n_views,ggml_tensor_overhead()*max_nodes+ggml_graph_overhead_custom(max_nodes,false),
@@ -190,8 +179,8 @@ inline ggml_tensor* DualTower::encode(ggml_backend_t backend, graph_cache<int64_
     VisIO&io=cache.io();
     std::vector<float> dbuf, sbuf;
     for(int v=0;v<n_views;++v){
-        normalize_tower(in.images[v],S,DMEAN,DSTD,dbuf); ggml_backend_tensor_set(io.px_d[v],dbuf.data(),0,ggml_nbytes(io.px_d[v]));
-        normalize_tower(in.images[v],S,SMEAN,SSTD,sbuf); ggml_backend_tensor_set(io.px_s[v],sbuf.data(),0,ggml_nbytes(io.px_s[v]));
+        preprocess_image_chw(tag,in.images[v],S,DMEAN,DSTD,dbuf); ggml_backend_tensor_set(io.px_d[v],dbuf.data(),0,ggml_nbytes(io.px_d[v]));
+        preprocess_image_chw(tag,in.images[v],S,sbuf); ggml_backend_tensor_set(io.px_s[v],sbuf.data(),0,ggml_nbytes(io.px_s[v]));
     }
     graph_unique_names(cache.graph());
     if(ggml_backend_graph_compute(backend,cache.graph())!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(%s): vision compute failed\n",tag); return nullptr; }

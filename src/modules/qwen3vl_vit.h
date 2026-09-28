@@ -22,6 +22,7 @@
 #include "loader.h"
 #include "layers/rope.h"
 #include "model.h"
+#include "modules/preprocess.h"
 #include "scratch_ctx.h"
 
 #include "ggml.h"
@@ -31,7 +32,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -215,11 +215,8 @@ inline bool interp_pos_embed(const std::vector<float> & table, int64_t num_side,
 inline bool preprocess_image_patches(const char * arch, const ImageView & v, int64_t side, int64_t ps, int64_t tps,
                                      const std::vector<int64_t> & row, const std::vector<int64_t> & col,
                                      std::vector<float> & out) {
-    if (v.w != (int) side || v.h != (int) side || !v.data) {
-        std::fprintf(stderr, "vla(%s): image view is %dx%d, expected %lldx%lld\n",
-                     arch, v.w, v.h, (long long) side, (long long) side);
+    if (!view_ok(arch, v, side))
         return false;
-    }
     const int64_t S = (int64_t) row.size(), pf = 3*tps * ps * ps;
     out.assign((size_t) pf * S, 0.0f);
     auto px = [&](int64_t r, int64_t c, int64_t ch) -> float {
