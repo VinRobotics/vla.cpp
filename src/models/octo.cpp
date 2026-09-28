@@ -798,6 +798,16 @@ bool run_t5_encoder_graph(OctoRuntime& rt,
         std::fprintf(stderr, "vla(octo): T5 encoder expected %d input_ids/attention_mask\n", seq);
         return false;
     }
+    const ggml_tensor * te = rt.weight("octo.t5.tok_embd.weight");
+    if (!te)
+        return false;
+    for (int i=0; i<seq; ++i) {
+        if (input_ids[(size_t) i] < 0 || input_ids[(size_t) i] >= te->ne[1]) {
+            std::fprintf(stderr, "vla(octo): lang_tokens[%d]=%d out of vocab range [0, %lld)\n",
+                         i, input_ids[(size_t) i], (long long) te->ne[1]);
+            return false;
+        }
+    }
 
     std::vector<int32_t> bucket_idx((size_t) seq*seq);
     std::vector<float>   padmask((size_t) seq*seq);
@@ -1557,7 +1567,8 @@ bool resolve_stats_block(const nlohmann::json& j, const std::string& dataset_key
 // Parses octo.dataset_statistics once and caches the blocks on `rt`: it is a
 // JSON blob in the metadata, ~25 datasets wide for the pretrain checkpoint, and
 // re-reading 21 floats out of it per request is pure overhead.
-bool ensure_stats(OctoRuntime& rt, gguf_reader& g, const std::string& dataset_key_in, int64_t action_dim) {
+bool ensure_stats(OctoRuntime& rt, gguf_reader& g, const std::string& dataset_key_in, int64_t action_dim,
+                  bool need_proprio) {
     if (rt.stats_loaded && rt.stats_key == dataset_key_in)
         return true;
 
@@ -1581,27 +1592,35 @@ bool ensure_stats(OctoRuntime& rt, gguf_reader& g, const std::string& dataset_ke
 
     const auto& act = (*block)["action"];
     OctoRuntime::ActionStats a;
-    a.mean = act.at("mean").get<std::vector<float>>();
-    a.stdv = act.at("std").get<std::vector<float>>();
-    for (bool b : act.at("mask").get<std::vector<bool>>())
-        a.mask.push_back(b ? 1 : 0);
+    OctoRuntime::ProprioStats pr;
+    bool has_pr = false;
+    try {
+        a.mean = act.at("mean").get<std::vector<float>>();
+        a.stdv = act.at("std").get<std::vector<float>>();
+        if (act.contains("mask")) {
+            for (bool b : act["mask"].get<std::vector<bool>>())
+                a.mask.push_back(b ? 1 : 0);
+        } else {
+            a.mask.assign(a.mean.size(), 1);
+        }
+        if (need_proprio && block->contains("proprio")) {
+            const auto& p = (*block)["proprio"];
+            pr.mean = p.at("mean").get<std::vector<float>>();
+            pr.stdv = p.at("std").get<std::vector<float>>();
+            has_pr = true;
+        }
+    } catch (const nlohmann::json::exception& e) {
+        std::fprintf(stderr, "vla(octo): bad dataset_statistics: %s\n", e.what());
+        return false;
+    }
     if (a.mask.size() != (size_t) action_dim || a.mean.size() != (size_t) action_dim ||
         a.stdv.size() != (size_t) action_dim) {
         std::fprintf(stderr, "vla(octo): dataset_statistics/action is not %lld-dim\n", (long long) action_dim);
         return false;
     }
-
-    OctoRuntime::ProprioStats pr;
-    bool has_pr = false;
-    if (block->contains("proprio")) {
-        const auto& p = (*block)["proprio"];
-        pr.mean = p.at("mean").get<std::vector<float>>();
-        pr.stdv = p.at("std").get<std::vector<float>>();
-        if (pr.mean.size() != (size_t) kProprioTokens || pr.stdv.size() != (size_t) kProprioTokens) {
-            std::fprintf(stderr, "vla(octo): dataset_statistics/proprio is not %d-dim\n", kProprioTokens);
-            return false;
-        }
-        has_pr = true;
+    if (has_pr && (pr.mean.size() != (size_t) kProprioTokens || pr.stdv.size() != (size_t) kProprioTokens)) {
+        std::fprintf(stderr, "vla(octo): dataset_statistics/proprio is not %d-dim\n", kProprioTokens);
+        return false;
     }
 
     rt.action_stats      = std::move(a);
@@ -1690,7 +1709,7 @@ bool run_pipeline(OctoModelArch& m, const OctoFrame& f,
     const int window_size  = (int) m.window_size;
     const int action_total = (int) (m.action_horizon*m.action_dim);
     const int n_proprio    = m.has_proprio ? kProprioTokens : 0;
-    if (!ensure_stats(rt, m.io, "", m.action_dim))
+    if (!ensure_stats(rt, m.io, "", m.action_dim, m.has_proprio))
         return false;
 
     // Cold start: history is filled with copies of the one live frame and every
