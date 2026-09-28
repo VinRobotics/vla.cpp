@@ -178,14 +178,11 @@ bool text_ok(const std::string & s) {
 
 // Ask scripts/tokenize_prompt.py for the ids, using the tokenizer the arch was
 // trained with. Returns "" and explains on stderr.
-std::string tokenize_text(const std::string & ckpt, const std::string & text) {
+std::string tokenize_text(const std::string & ckpt, const std::string & text, size_t n_views,
+                          const std::vector<float> & state) {
     Arch arch;
     if (!detect_arch_from_ckpt(ckpt, &arch)) {
         std::fprintf(stderr, "vla-cli: cannot detect the arch of %s for --text\n", ckpt.c_str());
-        return "";
-    }
-    if (arch == Arch::GR00T_N1_6 || arch == Arch::VLA_JEPA) {
-        std::fprintf(stderr, "vla-cli: --text is not supported for %s; pass --tokens\n", arch_slug(arch));
         return "";
     }
     if (!text_ok(text)) {
@@ -219,7 +216,15 @@ std::string tokenize_text(const std::string & ckpt, const std::string & text) {
 #endif
     const std::string interp = (py && *py) ? std::string(py) : std::string(def_py);
     std::string cmd = q + interp + q + " " + q + script + q + " --arch " + arch_slug(arch) +
-                      " --text " + q + esc + q;
+                      " --views " + std::to_string(n_views) + " --text " + q + esc + q;
+    if (!state.empty()) {
+        cmd += " --state=";
+        for (size_t i=0; i<state.size(); ++i) {
+            char num[32];
+            std::snprintf(num, sizeof(num), "%s%.9g", i ? "," : "", state[i]);
+            cmd += num;
+        }
+    }
 #ifdef _WIN32
     // cmd /c strips the first and last quote of the line; give it a pair to eat.
     cmd = "\"" + cmd + "\"";
@@ -240,10 +245,7 @@ std::string tokenize_text(const std::string & ckpt, const std::string & text) {
 #else
     if (pclose(fp) != 0) {
 #endif
-        std::fprintf(stderr,
-                     "vla-cli: tokenizing failed. Install the client extras with\n"
-                     "         pip install -e \".[client]\"\n"
-                     "         (VLA_PYTHON selects a different interpreter)\n");
+        std::fprintf(stderr, "vla-cli: tokenizing failed, see above (VLA_PYTHON selects a different interpreter)\n");
         return "";
     }
     while (!out.empty() && (out.back() == '\n' || out.back() == '\r'))
@@ -258,12 +260,13 @@ void usage(const char * prog) {
         "          [--config c.json] [precision flags]\n"
         "  --mmproj   ignored; every arch bundles its vision tower in the ckpt GGUF\n"
         "  --ckpt     model checkpoint GGUF\n"
-        "  -hf        HuggingFace repo, user/repo[:file.gguf], cached under $VLA_CACHE\n"
+        "  -hf        HuggingFace repo, user/repo[:file.gguf|:tag], cached under $VLA_CACHE\n"
         "  --image    image file, repeat for multi-view (decoded via stb_image)\n"
         "  --text     instruction; tokenized by scripts/tokenize_prompt.py (needs\n"
         "             transformers), or in-process for Octo, whose vocab is in the GGUF\n"
         "  --tokens   language token ids, comma-separated, if you tokenized already\n"
-        "  --state    proprioception floats, comma-separated (default zeros)\n"
+        "  --state    proprioception floats, comma-separated (default zeros); pi05\n"
+        "             --text needs it, since the state is part of the prompt\n"
         "  --pretty   print one action row (max_action_dim values) per line\n"
         "  --config   policy config.json; its \"runtime\" block sets the flags below,\n"
         "             and flags given here win\n"
@@ -341,12 +344,14 @@ int main(int argc, char ** argv) {
     std::vector<int32_t> attn;   // Octo only; empty leaves Inputs::attention_mask null.
     std::vector<float>   state;
 
+    if (!parse_floats(state_s, state))
+        return 1;
     if (octo_ckpt(ckpt) && !text_s.empty()) {
         if (!octo_tokens(ckpt, text_s, lang, attn))
             return 1;
     } else {
         if (!text_s.empty()) {
-            tokens_s = tokenize_text(ckpt, text_s);
+            tokens_s = tokenize_text(ckpt, text_s, image_paths.size(), state);
             if (tokens_s.empty())
                 return 1;
             std::fprintf(stderr, "vla-cli: --text tokenized to %s\n", tokens_s.c_str());
@@ -354,8 +359,6 @@ int main(int argc, char ** argv) {
         if (!parse_ints(tokens_s, lang))
             return 1;
     }
-    if (!parse_floats(state_s, state))
-        return 1;
     if (lang.empty()) {
         std::fprintf(stderr, "vla-cli: --tokens parsed to nothing\n");
         return 1;
