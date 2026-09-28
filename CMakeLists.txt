@@ -32,6 +32,11 @@ if(_vla_accel_n GREATER 0 AND GGML_BACKEND_DL)
         "GGML_BACKEND_DL=ON is not supported with ${_vla_accel}: the backend is "
         "built as a module and src/backend.h links its init directly.")
 endif()
+foreach(_flag GGML_VULKAN GGML_HIP GGML_MUSA GGML_CANN GGML_WEBGPU)
+    if(${_flag})
+        message(WARNING "${_flag}=ON reaches vlm-server through llama only; src/backend.h has no ${_flag} path, so the VLA archs run on CPU.")
+    endif()
+endforeach()
 
 set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS    ON  CACHE BOOL "" FORCE)
@@ -293,7 +298,7 @@ endif()
 # headers for the backend vtable, hence the private include.
 if(GGML_HEXAGON OR GGML_OPENCL)
     target_sources(vla_core PRIVATE src/backend_fallback.cpp)
-    target_include_directories(vla_core PRIVATE ${llama_SOURCE_DIR}/ggml/src)
+    target_include_directories(vla_core SYSTEM PRIVATE ${llama_SOURCE_DIR}/ggml/src)
     if(GGML_HEXAGON)
         target_compile_definitions(vla_core PUBLIC GGML_USE_HEXAGON)
     else()
@@ -304,13 +309,11 @@ endif()
 add_library(vlm_core ${VLA_CORE_LIB_TYPE}
     src/vlm/engine.cpp
 )
-target_include_directories(vlm_core
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    PRIVATE
-        ${llama_SOURCE_DIR}/common
-        ${llama_SOURCE_DIR}/tools/mtmd
-        ${llama_SOURCE_DIR}/vendor
+target_include_directories(vlm_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(vlm_core SYSTEM PRIVATE
+    ${llama_SOURCE_DIR}/common
+    ${llama_SOURCE_DIR}/tools/mtmd
+    ${llama_SOURCE_DIR}/vendor
 )
 target_link_libraries(vlm_core PUBLIC llama ggml mtmd llama-common)
 
@@ -434,8 +437,10 @@ if(GGML_CUDA)
     list(APPEND VLA_FIRST_PARTY_TARGETS bitvla_cuda_kernels vla_cuda_ops)
 endif()
 
+option(VLA_WERROR "Treat warnings in first-party code as errors" OFF)
 foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)
-    target_compile_options(${tgt} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
+    target_compile_options(${tgt} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra $<$<BOOL:${VLA_WERROR}>:-Werror>>)
 endforeach()
 
 # llama.cpp sends its DLLs to <build>/bin, and Windows has no rpath: a binary
