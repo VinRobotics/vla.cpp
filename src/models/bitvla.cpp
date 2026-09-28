@@ -27,6 +27,8 @@
 #include "backend.h"
 #include "gguf_reader.h"
 #include "scratch_ctx.h"
+#include "layers/norm.h"
+#include "modules/preprocess.h"
 
 #ifdef VLA_BITVLA_CUDA_KERNELS
 #include "kernels/bitvla/bitvla_lm_cuda.h"
@@ -102,7 +104,6 @@ struct BitvlaModelArch : public ModelArchBase {
     BitvlaModelArch() : ModelArchBase(Arch::BITVLA) {}
     ~BitvlaModelArch() override;
 
-    std::string           gguf_path;
     gguf_reader           emb_reader{"bitvla"};   // stays open for per-step token-embedding row fetches
     std::vector<float>    stop_embed;   // cached constant stop-token embedding row
     ggml_backend_t        backend     = nullptr;
@@ -173,20 +174,13 @@ ggml_tensor * act_quant(ggml_context * C, ggml_tensor * x) {
 }
 
 ggml_tensor * bit_linear(ggml_context * C, ggml_tensor * W, ggml_tensor * b, ggml_tensor * x) {
-    ggml_tensor * y = ggml_mul_mat(C, W, act_quant(C, x));
-    return b ? ggml_add(C, y, b) : y;
-}
-ggml_tensor * layernorm(ggml_context * C, ggml_tensor * x, ggml_tensor * w, ggml_tensor * b, float eps) {
-    return ggml_add(C, ggml_mul(C, ggml_norm(C, x, eps), w), b);
-}
-ggml_tensor * rmsnorm(ggml_context * C, ggml_tensor * x, ggml_tensor * w, float eps) {
-    return ggml_mul(C, ggml_rms_norm(C, x, eps), w);
+    return linear(C, W, b, act_quant(C, x));
 }
 
 ggml_tensor * build_vit_layer(ggml_context * C, const VitLayerW & w, ggml_tensor * x,
                                int64_t seq, int64_t heads, int64_t head_dim, int64_t hidden, float ln_eps) {
     const float scale = 1.0f/std::sqrt((float) head_dim);
-    ggml_tensor * x1 = layernorm(C, x, w.ln1w, w.ln1b, ln_eps);
+    ggml_tensor * x1 = layer_norm(C, x, w.ln1w, w.ln1b, ln_eps);
     ggml_tensor * q  = bit_linear(C, w.Wq, w.bq, x1);
     ggml_tensor * k  = bit_linear(C, w.Wk, w.bk, x1);
     ggml_tensor * v  = bit_linear(C, w.Wv, w.bv, x1);
@@ -198,7 +192,7 @@ ggml_tensor * build_vit_layer(ggml_context * C, const VitLayerW & w, ggml_tensor
     ggml_tensor * y  = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, att), 0, 2, 1, 3)), hidden, seq);
     ggml_tensor * o  = bit_linear(C, w.Wo, w.bo, y);
     ggml_tensor * h1 = ggml_add(C, x, o);
-    ggml_tensor * x2 = layernorm(C, h1, w.ln2w, w.ln2b, ln_eps);
+    ggml_tensor * x2 = layer_norm(C, h1, w.ln2w, w.ln2b, ln_eps);
     ggml_tensor * f1 = ggml_gelu(C, bit_linear(C, w.Wfc1, w.bfc1, x2));
     ggml_tensor * f2 = bit_linear(C, w.Wfc2, w.bfc2, f1);
     return ggml_add(C, h1, f2);
@@ -209,7 +203,7 @@ ggml_tensor * build_lm_layer(ggml_context * C, const BitvlaModelArch & m, const 
     const int64_t hd = m.lm_head_dim, n_q = m.lm_q, n_kv = m.lm_kv, hq = n_q * hd;
     const float scale = 1.0f/std::sqrt((float) hd);
 
-    ggml_tensor * hn = rmsnorm(C, h, w.attn_norm, m.lm_rms_eps);
+    ggml_tensor * hn = rms_norm(C, h, w.attn_norm, m.lm_rms_eps);
     ggml_tensor * qp = bit_linear(C, w.Wq, nullptr, hn);
     ggml_tensor * kp = bit_linear(C, w.Wk, nullptr, hn);
     ggml_tensor * vp = bit_linear(C, w.Wv, nullptr, hn);
@@ -228,16 +222,16 @@ ggml_tensor * build_lm_layer(ggml_context * C, const BitvlaModelArch & m, const 
     ggml_tensor * att= ggml_soft_max_ext(C, kq,  nullptr, scale, 0.0f);
     ggml_tensor * kqv= ggml_mul_mat(C, V, att);
     ggml_tensor * mer= ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), hq, seq);
-    ggml_tensor * sub= rmsnorm(C, mer, w.attn_sub_norm, m.lm_rms_eps);
+    ggml_tensor * sub= rms_norm(C, mer, w.attn_sub_norm, m.lm_rms_eps);
     ggml_tensor * o  = bit_linear(C, w.Wo, nullptr, sub);
     ggml_tensor * h1 = ggml_add(C, h, o);
 
-    ggml_tensor * h2 = rmsnorm(C, h1, w.ffn_norm, m.lm_rms_eps);
+    ggml_tensor * h2 = rms_norm(C, h1, w.ffn_norm, m.lm_rms_eps);
     ggml_tensor * g  = bit_linear(C, w.Wgate, nullptr, h2);
     ggml_tensor * u  = bit_linear(C, w.Wup,   nullptr, h2);
     ggml_tensor * gsq= ggml_sqr(C, ggml_relu(C, g));
     ggml_tensor * gu = ggml_mul(C, gsq, u);
-    ggml_tensor * fsub= rmsnorm(C, gu, w.ffn_sub_norm, m.lm_rms_eps);
+    ggml_tensor * fsub= rms_norm(C, gu, w.ffn_sub_norm, m.lm_rms_eps);
     ggml_tensor * dn = bit_linear(C, w.Wdown, nullptr, fsub);
     return ggml_add(C, h1, dn);
 }
@@ -600,7 +594,6 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
         std::printf("vla(bitvla): note - mmproj '%s' is ignored (the BitSigLIP-L vision tower is bundled in the combined GGUF)\n", mmproj_path.c_str());
 
     auto m = std::make_unique<BitvlaModelArch>();
-    m->gguf_path   = ckpt_path;
     m->matmul_type = opts.weight_dtype.value_or(GGML_TYPE_F32);
 
     gguf_reader g("bitvla");
@@ -654,13 +647,11 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
     auto mk_f32 = [&](const char * name) { return L.f32 ("%s", name); };
     auto mk_bit = [&](const char * name) { return L.typed(m->packed_int2 ? GGML_TYPE_I8 : m->matmul_type, "%s", name); };
 
-    bool ok = true;
-
     m->vit_patch_w = mk_mm("vit.patch_embd.weight");
     m->vit_patch_b = mk_f32("vit.patch_embd.bias");
     m->vit_pos     = mk_f32("vit.pos_embd.weight");
     m->vit.resize(m->vit_layers);
-    for (int64_t i=0; i<m->vit_layers && ok; ++i) {
+    for (int64_t i=0; i<m->vit_layers; ++i) {
         char p[64]; auto N = [&](const char * s) { std::snprintf(p, sizeof(p), "vit.blk.%lld.%s", (long long) i, s); return p; };
         auto & w = m->vit[i];
         w.ln1w=mk_f32(N("ln1.weight")); w.ln1b=mk_f32(N("ln1.bias"));
@@ -671,7 +662,6 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
         w.Wo=mk_bit(N("attn_o.weight")); w.bo=mk_f32(N("attn_o.bias"));
         w.Wfc1=mk_bit(N("fc1.weight")); w.bfc1=mk_f32(N("fc1.bias"));
         w.Wfc2=mk_bit(N("fc2.weight")); w.bfc2=mk_f32(N("fc2.bias"));
-        ok &= w.ln1w&&w.ln1b&&w.ln2w&&w.ln2b&&w.Wq&&w.bq&&w.Wk&&w.bk&&w.Wv&&w.bv&&w.Wo&&w.bo&&w.Wfc1&&w.bfc1&&w.Wfc2&&w.bfc2;
     }
 
     m->mm_l1_w=mk_mm("mm.linear_1.weight"); m->mm_l1_b=mk_f32("mm.linear_1.bias");
@@ -682,7 +672,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
 
     m->lm_output_norm = mk_f32("lm.output_norm.weight");
     m->lm.resize(m->lm_layers);
-    for (int64_t i=0; i<m->lm_layers && ok; ++i) {
+    for (int64_t i=0; i<m->lm_layers; ++i) {
         char p[64]; auto N = [&](const char * s) { std::snprintf(p, sizeof(p), "lm.blk.%lld.%s", (long long) i, s); return p; };
         auto & w = m->lm[i];
         w.attn_norm     = mk_f32(N("attn_norm.weight"));
@@ -697,8 +687,6 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
         } else {
             w.Wgate=mk_mm(N("ffn_gate.weight")); w.Wup=mk_mm(N("ffn_up.weight"));
         }
-        ok &= w.attn_norm&&w.attn_sub_norm&&w.ffn_norm&&w.ffn_sub_norm&&w.Wq&&w.Wk&&w.Wv&&w.Wo&&w.Wdown&&
-              (m->packed_int2 ? (w.Wgate_up != nullptr) : (w.Wgate && w.Wup));
     }
 
     m->ah_ln1_w =mk_f32("aex.head.ln1.weight"); m->ah_ln1_b =mk_f32("aex.head.ln1.bias");
@@ -709,17 +697,6 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
     m->ah_b1_w  =mk_mm ("aex.head.blk.1.fc.weight"); m->ah_b1_b  =mk_f32("aex.head.blk.1.fc.bias");
     m->ah_ln2_w =mk_f32("aex.head.ln2.weight"); m->ah_ln2_b =mk_f32("aex.head.ln2.bias");
     m->ah_fc2_w =mk_mm ("aex.head.fc2.weight"); m->ah_fc2_b =mk_f32("aex.head.fc2.bias");
-
-    ok &= m->vit_patch_w&&m->vit_patch_b&&m->vit_pos&&m->mm_l1_w&&m->mm_l1_b&&m->mm_l2_w&&m->mm_l2_b&&
-          m->pp_fc1_w&&m->pp_fc1_b&&m->pp_fc2_w&&m->pp_fc2_b&&m->lm_output_norm&&
-          m->ah_ln1_w&&m->ah_ln1_b&&m->ah_fc1_w&&m->ah_fc1_b&&
-          m->ah_b0_ln_w&&m->ah_b0_ln_b&&m->ah_b0_w&&m->ah_b0_b&&
-          m->ah_b1_ln_w&&m->ah_b1_ln_b&&m->ah_b1_w&&m->ah_b1_b&&
-          m->ah_ln2_w&&m->ah_ln2_b&&m->ah_fc2_w&&m->ah_fc2_b;
-    if (!ok) {
-        std::fprintf(stderr, "vla(bitvla): weight tensor setup failed\n");
-        return nullptr;
-    }
 
     if (!L.upload(m->backend, &m->weight_buf))
         return nullptr;
@@ -1168,11 +1145,8 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         const auto t_v0 = clk::now();
         for (int64_t v=0; v<n_views; ++v) {
             const ImageView & iv = in.images[v];
-            if (iv.w != (int) H || iv.h != (int) H) {
-                std::fprintf(stderr, "vla(bitvla): image view %lld size %dx%d ≠ expected %lldx%lld\n",
-                             (long long) v, iv.w, iv.h, (long long) H, (long long) H);
+            if (!view_ok("bitvla", iv, H))
                 return {};
-            }
 
             for (int64_t pi=0; pi<H/P; ++pi)
             for (int64_t pj=0; pj<H/P; ++pj) {
@@ -1203,19 +1177,14 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
                 std::vector<uint16_t> patches_bf16((size_t) N * patch_flat);
                 for (size_t i=0; i<patches_bf16.size(); ++i)
                     patches_bf16[i] = f32_to_bf16_u16(patches[i]);
-                std::vector<uint16_t> img_bf16((size_t) N * hidden_l);
+                std::vector<ggml_bf16_t> img_bf16((size_t) N * hidden_l);
                 if (cudaMemcpy(d_vit_patches, patches_bf16.data(), patches_bf16.size()*sizeof(uint16_t), cudaMemcpyHostToDevice) != cudaSuccess ||
                     bitvla_vit_cuda_forward(vit_cuda_ctx, d_vit_patches, d_vit_img_embeds,  0) != 0 ||
-                    cudaMemcpy(img_bf16.data(), d_vit_img_embeds, img_bf16.size()*sizeof(uint16_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
+                    cudaMemcpy(img_bf16.data(), d_vit_img_embeds, img_bf16.size()*sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
                     std::fprintf(stderr, "vla(bitvla): CUDA ViT forward failed (view %lld)\n", (long long) v);
                     return {};
                 }
-                float* dst = img_embeds_host.data()+(size_t) v * N * hidden_l;
-                for (size_t i=0; i<img_bf16.size(); ++i) {
-                    uint32_t u = ((uint32_t) img_bf16[i]) << 16;
-                    float f; std::memcpy(&f, &u, 4);
-                    dst[i] = f;
-                }
+                ggml_bf16_to_fp32_row(img_bf16.data(), img_embeds_host.data()+(size_t) v * N * hidden_l, (int64_t) img_bf16.size());
             } else
 #endif
             {
@@ -1414,7 +1383,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         std::vector<int32_t> aids(n_action);
         for (int64_t i=0; i<n_action; ++i)
             aids[i] = (int32_t) (seq-2-n_action+i);
-        std::vector<uint16_t> out_bf16((size_t) n_action * hidden_l);
+        std::vector<ggml_bf16_t> out_bf16((size_t) n_action * hidden_l);
         if (cudaMemcpy(d_inputs_embeds, in_bf16.data(), in_bf16.size()*sizeof(uint16_t), cudaMemcpyHostToDevice) != cudaSuccess ||
             bitvla_lm_cuda_forward(lm_cuda_ctx, d_inputs_embeds, d_last_hidden, (int) seq,  0) != 0 ||
             cudaMemcpy(d_action_ids, aids.data(), n_action * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess) {
@@ -1422,16 +1391,12 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
             return {};
         }
         bitvla_gather_rows_bf16(d_last_hidden, d_action_hidden, d_action_ids, (int) n_action, (int) hidden_l,  0);
-        if (cudaMemcpy(out_bf16.data(), d_action_hidden, out_bf16.size()*sizeof(uint16_t), cudaMemcpyDeviceToHost) != cudaSuccess ||
+        if (cudaMemcpy(out_bf16.data(), d_action_hidden, out_bf16.size()*sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost) != cudaSuccess ||
             cudaGetLastError() != cudaSuccess) {
             std::fprintf(stderr, "vla(bitvla): CUDA LM forward failed\n");
             return {};
         }
-        for (size_t i=0; i<out_bf16.size(); ++i) {
-            uint32_t u = ((uint32_t) out_bf16[i]) << 16;
-            float f; std::memcpy(&f, &u, 4);
-            last_hidden_at_actions[i] = f;
-        }
+        ggml_bf16_to_fp32_row(out_bf16.data(), last_hidden_at_actions.data(), (int64_t) out_bf16.size());
     } else
 #endif
     {
@@ -1445,7 +1410,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         for (int64_t L=0; L<lm_layers; ++L) {
             h = build_lm_layer(ctx, *this, lm[L], h, positions, seq);
         }
-        ggml_tensor * h_norm = rmsnorm(ctx, h, lm_output_norm, lm_rms_eps);
+        ggml_tensor * h_norm = rms_norm(ctx, h, lm_output_norm, lm_rms_eps);
         ggml_set_name(h_norm, "last_hidden");
 
         ggml_tensor * action_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_action);
@@ -1497,19 +1462,19 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, in_dim, chunk);
         ggml_set_name(x, "x");
 
-        ggml_tensor * ln1 = layernorm(ctx, x, ah_ln1_w, ah_ln1_b, ah_ln_eps);
+        ggml_tensor * ln1 = layer_norm(ctx, x, ah_ln1_w, ah_ln1_b, ah_ln_eps);
         ggml_tensor * fc1 = ggml_add(ctx, ggml_mul_mat(ctx, ah_fc1_w, ln1), ah_fc1_b);
         ggml_tensor * h   = ggml_relu(ctx, fc1);
 
-        ggml_tensor * b0_ln = layernorm(ctx, h, ah_b0_ln_w, ah_b0_ln_b, ah_ln_eps);
+        ggml_tensor * b0_ln = layer_norm(ctx, h, ah_b0_ln_w, ah_b0_ln_b, ah_ln_eps);
         ggml_tensor * b0    = ggml_add(ctx, ggml_mul_mat(ctx, ah_b0_w, b0_ln), ah_b0_b);
         h = ggml_add(ctx, h, ggml_relu(ctx, b0));
 
-        ggml_tensor * b1_ln = layernorm(ctx, h, ah_b1_ln_w, ah_b1_ln_b, ah_ln_eps);
+        ggml_tensor * b1_ln = layer_norm(ctx, h, ah_b1_ln_w, ah_b1_ln_b, ah_ln_eps);
         ggml_tensor * b1    = ggml_add(ctx, ggml_mul_mat(ctx, ah_b1_w, b1_ln), ah_b1_b);
         h = ggml_add(ctx, h, ggml_relu(ctx, b1));
 
-        ggml_tensor * ln2 = layernorm(ctx, h, ah_ln2_w, ah_ln2_b, ah_ln_eps);
+        ggml_tensor * ln2 = layer_norm(ctx, h, ah_ln2_w, ah_ln2_b, ah_ln_eps);
         ggml_tensor * y   = ggml_add(ctx, ggml_mul_mat(ctx, ah_fc2_w, ln2), ah_fc2_b);
         ggml_set_name(y, "y");
 

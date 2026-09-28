@@ -61,7 +61,6 @@ const Shape kShapes[] = {
     {"vit.qkvo   ", 1152, 1152, 1},
     {"vit.fc1    ", 4304, 1152, 1},
     {"vit.fc2    ", 1152, 4352, 1},
-    {"head.qkv   ", 3840, 2560, 3},
 };
 
 float bf16_to_f32(__nv_bfloat16 h) {
@@ -122,7 +121,6 @@ int run_shape(const Shape& sh, int M, int nt, bool& ok) {
   BOTH(1152, 1152, 1)
   BOTH(4304, 1152, 1)
   BOTH(1152, 4352, 1)
-  BOTH(3840, 2560, 3)
 #undef BOTH
   CUDA_OK(cudaDeviceSynchronize());
   CUDA_OK(cudaGetLastError());
@@ -170,7 +168,6 @@ int run_shape(const Shape& sh, int M, int nt, bool& ok) {
       TIME_ONE(1152, 1152, 1)
       TIME_ONE(4304, 1152, 1)
       TIME_ONE(1152, 4352, 1)
-      TIME_ONE(3840, 2560, 3)
 #undef TIME_ONE
       cudaEventRecord(e1);
       cudaEventSynchronize(e1);

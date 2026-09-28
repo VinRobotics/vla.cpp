@@ -50,16 +50,20 @@ inline void pixel_shuffle_hf(const float * src, float * dst,
         }
 }
 
-// HWC to CHW planar in [-1, 1], the SigLIP convention used by SmolVLA, pi0, pi0.5
-// and GR00T N1.5. No resize: the view must already be side x side. arch only
-// labels the error.
+inline bool view_ok(const char * arch, const ImageView & v, int64_t side) {
+    if (view_is_side(v.data, v.w, v.h, side))
+        return true;
+    std::fprintf(stderr, "vla(%s): image view is %dx%d, expected %lldx%lld\n",
+                 arch, v.w, v.h, (long long) side, (long long) side);
+    return false;
+}
+
+// HWC to CHW planar with per-channel mean/std. No resize: the view must
+// already be side x side. arch only labels the error.
 inline bool preprocess_image_chw(const char * arch, const ImageView & v, int64_t side,
-                                 std::vector<float> & out) {
-    if (v.w != (int) side || v.h != (int) side || !v.data) {
-        std::fprintf(stderr, "vla(%s): image view is %dx%d, expected %lldx%lld\n",
-                     arch, v.w, v.h, (long long) side, (long long) side);
+                                 const float mean[3], const float std_[3], std::vector<float> & out) {
+    if (!view_ok(arch, v, side))
         return false;
-    }
     out.assign((size_t) 3*side * side, 0.0f);
     for (int64_t h=0; h<side; ++h)
         for (int64_t w=0; w<side; ++w)
@@ -69,18 +73,22 @@ inline bool preprocess_image_chw(const char * arch, const ImageView & v, int64_t
                     px = ((const uint8_t *) v.data)[(h * side+w)*3+c]/255.0f;
                 else
                     px = ((const float  *) v.data)[(h * side+w)*3+c];
-                out[c * side * side+h * side+w] = px*2.0f-1.0f;
+                out[c * side * side+h * side+w] = (px-mean[c])/std_[c];
             }
     return true;
 }
 
+// [-1, 1], the SigLIP convention used by SmolVLA, pi0, pi0.5 and GR00T N1.5.
+inline bool preprocess_image_chw(const char * arch, const ImageView & v, int64_t side,
+                                 std::vector<float> & out) {
+    static const float half[3] = {0.5f, 0.5f, 0.5f};
+    return preprocess_image_chw(arch, v, side, half, half, out);
+}
+
 inline bool preprocess_image_patches(const char * arch, const ImageView & v, int64_t side, int64_t ps,
                                      std::vector<float> & out) {
-    if (v.w != (int) side || v.h != (int) side || !v.data) {
-        std::fprintf(stderr, "vla(%s): image view is %dx%d, expected %lldx%lld\n",
-                     arch, v.w, v.h, (long long) side, (long long) side);
+    if (!view_ok(arch, v, side))
         return false;
-    }
     const int64_t grid = side/ps, pd = 3*ps*ps, np = grid*grid;
     out.assign((size_t) pd*np, 0.0f);
 
