@@ -139,7 +139,7 @@ inline ggml_tensor * gemma_attn(
 inline ggml_tensor * gemma_mlp(ggml_context * ctx, const GemmaLayerW & w, ggml_tensor * x_norm, ggml_type at) {
     ggml_tensor * gate = mm_act(ctx, w.Wgate, x_norm, at);
     ggml_tensor * up   = mm_act(ctx, w.Wup,   x_norm, at);
-    return mm_act(ctx, w.Wdown, ggml_mul(ctx, gelu(ctx, gate), up), at);
+    return mm_act(ctx, w.Wdown, geglu(ctx, gate, up), at);
 }
 
 inline ggml_tensor * gemma_layer(

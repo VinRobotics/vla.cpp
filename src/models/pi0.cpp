@@ -50,6 +50,8 @@ struct Pi0ModelArch : public ModelArchBase {
     ggml_backend_t        backend     = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_context *        ctx_weights = nullptr;
+    ggml_context *        ctx_const   = nullptr;
+    ggml_backend_buffer_t const_buf   = nullptr;
     scratch_ctx           vision_scratch;
 
     struct MainKey {
@@ -61,7 +63,6 @@ struct Pi0ModelArch : public ModelArchBase {
     struct MainIO {
         ggml_tensor *t_image_emb=nullptr,*t_lang_emb=nullptr,*t_prefix_pos=nullptr,*t_state=nullptr;
         ggml_tensor *t_x0=nullptr,*t_suffix_pos=nullptr,*t_full_mask=nullptr,*x_final=nullptr;
-        std::vector<ggml_tensor*> t_time;
     };
     graph_cache<MainKey, MainIO> main_graph;
     // Opened once at load: reopening per predict re-parses the whole GGUF header.
@@ -81,6 +82,8 @@ struct Pi0ModelArch : public ModelArchBase {
     ggml_tensor * W_at1 = nullptr, * b_at1 = nullptr;
     ggml_tensor * W_at2 = nullptr, * b_at2 = nullptr;
     ggml_tensor * W_aout = nullptr,* b_aout = nullptr;
+
+    std::vector<ggml_tensor *> t_time;
 
     std::vector<float> state_mean, state_std, action_mean, action_std;
 
@@ -131,7 +134,7 @@ ggml_tensor * build_embed_suffix(ggml_context * ctx, const Pi0ModelArch & m,
                                  ggml_tensor * state, ggml_tensor * x, ggml_tensor * time_bcast) {
     const ggml_type at = m.act_type;
     ggml_tensor * state_emb       = ggml_add(ctx, mm_act(ctx, m.W_sp,  as_type(ctx, state, at), at), m.b_sp);
-    // x is the F32 flow-matching state; time_bcast is an F32 input tensor. Both
+    // x is the F32 flow-matching state; time_bcast is an F32 tensor. Both
     // enter the expert in the activation dtype, and ggml_concat needs them to agree.
     ggml_tensor * action_emb      = ggml_add(ctx, mm_act(ctx, m.W_ain, as_type(ctx, x, at), at), m.b_ain);
     ggml_tensor * action_time_in  = ggml_concat(ctx, action_emb, as_type(ctx, time_bcast, at), 0);
@@ -163,6 +166,10 @@ Pi0ModelArch::~Pi0ModelArch() {
         ggml_backend_buffer_free(weight_buf);
     if (ctx_weights)
         ggml_free(ctx_weights);
+    if (const_buf)
+        ggml_backend_buffer_free(const_buf);
+    if (ctx_const)
+        ggml_free(ctx_const);
     if (backend)
         ggml_backend_free(backend);
 }
@@ -242,6 +249,31 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
 
     if (!load_stats(g, *m))
         return nullptr;
+
+    {
+        ggml_init_params p = { (size_t) cfg.num_steps*ggml_tensor_overhead(), nullptr, true };
+        m->ctx_const = ggml_init(p);
+        if (!m->ctx_const) {
+            std::fprintf(stderr, "vla(pi0): ggml_init(ctx_const) failed\n");
+            return nullptr;
+        }
+        m->t_time.resize(cfg.num_steps);
+        for (ggml_tensor * & t : m->t_time)
+            t = ggml_new_tensor_2d(m->ctx_const, GGML_TYPE_F32, cfg.expert_h, cfg.n_suffix);
+        m->const_buf = alloc_weights(m->ctx_const, m->backend);
+        if (!m->const_buf) {
+            std::fprintf(stderr, "vla(pi0): alloc_weights(time embeddings) failed\n");
+            return nullptr;
+        }
+        const float dt = -1.0f/(float) cfg.num_steps;
+        std::vector<float> tile((size_t) cfg.expert_h * cfg.n_suffix);
+        for (int s=0; s<cfg.num_steps; ++s) {
+            const std::vector<float> tv = sinusoidal_time_emb(1.0f+(float) s * dt, cfg.expert_h, cfg.min_period, cfg.max_period);
+            for (int64_t c=0; c<cfg.n_suffix; ++c)
+                std::memcpy(tile.data()+c * cfg.expert_h, tv.data(), cfg.expert_h * sizeof(float));
+            ggml_backend_tensor_set(m->t_time[s], tile.data(), 0, ggml_nbytes(m->t_time[s]));
+        }
+    }
     std::printf("vla(pi0): model loaded (n_threads=%d)\n", m->n_threads);
     return m;
 }
@@ -263,7 +295,6 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     const float   dt        = -1.0f/(float) num_steps;
     const bool    fa        = flash_attn_enabled();
 
-    std::vector<float> img_emb_host;
     int64_t n_img_tokens = 0;
     if (in.precomputed_img_emb) {
         if (in.n_img_views < 1) {
@@ -271,53 +302,12 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
             return {};
         }
         n_img_tokens = (int64_t) in.n_img_views*cfg.n_img;
-        img_emb_host.assign(in.precomputed_img_emb,
-                            in.precomputed_img_emb+(size_t) n_img_tokens * hidden_pl);
     } else {
         if (in.n_images < 1 || !in.images) {
             std::fprintf(stderr, "vla(pi0): predict: no images and no precomputed_img_emb\n");
             return {};
         }
-        const int64_t K = vis.n_tokens, H = hidden_pl, grid = vis.image_size/vis.patch_size;
-        n_img_tokens = (int64_t) in.n_images*K;
-        img_emb_host.assign((size_t) in.n_images*K * H, 0.0f);
-
-        ggml_context * VC = vision_scratch.reset((size_t) 128*1024*1024);
-        if (!VC) { std::fprintf(stderr, "vla(pi0): ggml_init(vision ctx) failed\n"); return {}; }
-        ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vis.image_size, vis.image_size, 3); ggml_set_input(t_px);
-        // patch embed (conv_2d) stays F32; the tower runs in the activation dtype
-        ggml_tensor * h = as_type(VC, vis.vit.embed_conv(VC, t_px, vis.patch_size, grid), act_type);
-        for (const EncBlockW & w : vis.vit.enc.blk)
-            h = build_siglip_layer(VC, w, h, K, vis.vit.enc.cfg, act_type);
-        h = layer_norm(VC, h, vis.vit.post_ln_w, vis.vit.post_ln_b, vis.vit.enc.cfg.ln_eps);
-        // PaliGemma projector: linear (+ optional bias), then 1/sqrt(hidden) scale (matches clip.cpp siglip.cpp).
-        ggml_tensor * proj = mm_act(VC, vis.proj_w, h, act_type);
-        if (vis.proj_b)
-            proj = ggml_add(VC, proj, vis.proj_b);
-        // read back to the host as F32
-        ggml_tensor * vit_emb = as_type(VC, ggml_scale(VC, proj, 1.0f/std::sqrt((float) proj->ne[0])), GGML_TYPE_F32);
-        ggml_set_output(vit_emb);
-
-        ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
-        ggml_build_forward_expand(vg, vit_emb);
-
-        if (!vision_scratch.alloc(backend, vg)) {
-            std::fprintf(stderr, "vla(pi0): vision gallocr alloc failed\n");
-            return {};
-        }
-        const auto tv0 = clk::now();
-        std::vector<float> chw;
-        for (int v=0; v<in.n_images; ++v) {
-            if (!preprocess_image_chw("pi0", in.images[v], vis.image_size, chw)) { return {}; }
-            ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
-            graph_unique_names(vg);
-            if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
-                std::fprintf(stderr, "vla(pi0): vision compute failed (view %d)\n", v);
-                return {};
-            }
-            ggml_backend_tensor_get(vit_emb, img_emb_host.data()+(size_t) v * K * H, 0, ggml_nbytes(vit_emb));
-        }
-        stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now()-tv0).count();
+        n_img_tokens = (int64_t) in.n_images*vis.n_tokens;
     }
 
     if (in.n_lang < 1 || !in.lang_tokens) {
@@ -347,11 +337,6 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     ggml_tensor * t_x0        = ggml_new_tensor_2d(C, GGML_TYPE_F32, max_ad, chunk);           ggml_set_input(t_x0);
     ggml_tensor * t_suffix_pos= ggml_new_tensor_1d(C, GGML_TYPE_I32, n_suf);                   ggml_set_input(t_suffix_pos);
     ggml_tensor * t_full_mask = ggml_new_tensor_2d(C, GGML_TYPE_F32, n_total, n_suf);          ggml_set_input(t_full_mask);
-    std::vector<ggml_tensor *> t_time(num_steps);
-    for (int s=0; s<num_steps; ++s) {
-        t_time[s] = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_ex, chunk);
-        ggml_set_input(t_time[s]);
-    }
 
     const float lang_scale = (float) std::sqrt((double) hidden_pl);
     ggml_tensor * prefix_embs = as_type(C,
@@ -392,7 +377,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
 
     gio.t_image_emb=t_image_emb; gio.t_lang_emb=t_lang_emb; gio.t_prefix_pos=t_prefix_pos;
     gio.t_state=t_state; gio.t_x0=t_x0; gio.t_suffix_pos=t_suffix_pos;
-    gio.t_full_mask=t_full_mask; gio.t_time=t_time; gio.x_final=x_final;
+    gio.t_full_mask=t_full_mask; gio.x_final=x_final;
 
     ggml_cgraph * gf = ggml_new_graph_custom(C, max_nodes, false);
     ggml_build_forward_expand(gf, x_final);
@@ -406,9 +391,52 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     ggml_tensor * t_prefix_pos = gio.t_prefix_pos, * t_state = gio.t_state, * t_x0 = gio.t_x0;
     ggml_tensor * t_suffix_pos = gio.t_suffix_pos, * t_full_mask = gio.t_full_mask;
     ggml_tensor * x_final = gio.x_final;
-    std::vector<ggml_tensor*> & t_time = gio.t_time;
 
-    ggml_backend_tensor_set(t_image_emb, img_emb_host.data(), 0, ggml_nbytes(t_image_emb));
+    if (in.precomputed_img_emb) {
+        ggml_backend_tensor_set(t_image_emb, in.precomputed_img_emb, 0, ggml_nbytes(t_image_emb));
+    } else {
+        const int64_t K = vis.n_tokens, H = hidden_pl, grid = vis.image_size/vis.patch_size;
+        ggml_context * VC = vision_scratch.reset((size_t) 128*1024*1024);
+        if (!VC) { std::fprintf(stderr, "vla(pi0): ggml_init(vision ctx) failed\n"); return {}; }
+        ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vis.image_size, vis.image_size, 3); ggml_set_input(t_px);
+        // patch embed (conv_2d) stays F32; the tower runs in the activation dtype
+        ggml_tensor * h = as_type(VC, vis.vit.embed_conv(VC, t_px, vis.patch_size, grid), act_type);
+        for (const EncBlockW & w : vis.vit.enc.blk)
+            h = build_siglip_layer(VC, w, h, K, vis.vit.enc.cfg, act_type);
+        h = layer_norm(VC, h, vis.vit.post_ln_w, vis.vit.post_ln_b, vis.vit.enc.cfg.ln_eps);
+        // PaliGemma projector: linear (+ optional bias), then 1/sqrt(hidden) scale (matches clip.cpp siglip.cpp).
+        ggml_tensor * proj = mm_act(VC, vis.proj_w, h, act_type);
+        if (vis.proj_b)
+            proj = ggml_add(VC, proj, vis.proj_b);
+        ggml_tensor * vit_emb = as_type(VC, ggml_scale(VC, proj, 1.0f/std::sqrt((float) proj->ne[0])), GGML_TYPE_F32);
+        ggml_set_output(vit_emb);
+
+        ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
+        ggml_build_forward_expand(vg, vit_emb);
+
+        if (!vision_scratch.alloc(backend, vg)) {
+            std::fprintf(stderr, "vla(pi0): vision gallocr alloc failed\n");
+            return {};
+        }
+        const auto tv0 = clk::now();
+        std::vector<float> chw;
+        for (int v=0; v<in.n_images; ++v) {
+            if (!preprocess_image_chw("pi0", in.images[v], vis.image_size, chw)) { return {}; }
+            ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
+            graph_unique_names(vg);
+            if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
+                std::fprintf(stderr, "vla(pi0): vision compute failed (view %d)\n", v);
+                return {};
+            }
+            ggml_tensor * dst = ggml_view_2d(VC, t_image_emb, H, K, t_image_emb->nb[1], (size_t) v * K * t_image_emb->nb[1]);
+            if (ggml_backend_view_init(dst) != GGML_STATUS_SUCCESS) {
+                std::fprintf(stderr, "vla(pi0): image embedding view failed (view %d)\n", v);
+                return {};
+            }
+            ggml_backend_tensor_copy(vit_emb, dst);
+        }
+        stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now()-tv0).count();
+    }
     ggml_backend_tensor_set(t_lang_emb,  lang_rows.data(),    0, ggml_nbytes(t_lang_emb));
     {
         std::vector<int32_t> pp(n_prefix); for (int64_t i=0; i<n_prefix; ++i) pp[i] = (int32_t) i;
@@ -446,15 +474,6 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
             }
         ggml_backend_tensor_set(t_full_mask, mk.data(), 0, ggml_nbytes(t_full_mask));
     }
-    for (int s=0; s<num_steps; ++s) {
-        const float timestep = 1.0f+(float) s * dt;
-        const std::vector<float> tv = sinusoidal_time_emb(timestep, hidden_ex, cfg.min_period, cfg.max_period);
-        std::vector<float> tile((size_t) hidden_ex * chunk);
-        for (int64_t c=0; c<chunk; ++c)
-            std::memcpy(tile.data()+c * hidden_ex, tv.data(), hidden_ex * sizeof(float));
-        ggml_backend_tensor_set(t_time[s], tile.data(), 0, ggml_nbytes(t_time[s]));
-    }
-
     graph_unique_names(gf);
     const auto ti0 = clk::now();
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
