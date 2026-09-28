@@ -19,86 +19,26 @@
 #include "modules/dual_tower.h"
 
 #include "ggml.h"
-#include "ggml-cpu.h"
 #include "ggml-backend.h"
 #include "backend.h"
-#include "gguf.h"
 #include "gguf_reader.h"
 #include "scratch_ctx.h"
+#include "layers/attn.h"
 #include "layers/embed.h"
-#include "env_flag.h"
+#include "layers/linear.h"
+#include "layers/norm.h"
+#include "layers/rope.h"
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace vla {
 namespace {
-
-bool parse_stats(const std::string & js, int64_t want, std::vector<float> & q01,
-                 std::vector<float> & q99, std::vector<uint8_t> & mask, std::string & suite) {
-    auto find_key = [&](size_t from, const std::string & key) -> size_t {
-        const std::string pat = "\"" + key + "\"";
-        return js.find(pat, from);
-    };
-
-    const char * env = std::getenv("VLA_ADAPTER_UNNORM_KEY");
-    size_t suite_pos;
-    if (env) {
-        suite = env;
-        suite_pos = find_key(0, suite);
-    }
-    else {
-        size_t b = js.find('{'); size_t q = js.find('"', b);
-        size_t qe = js.find('"', q+1);
-        suite = js.substr(q+1, qe-q-1); suite_pos = q;
-    }
-    if (suite_pos == std::string::npos) {
-        std::fprintf(stderr, "vla(vla_adapter): suite '%s' not in stats\n", suite.c_str());
-        return false;
-    }
-    size_t act = find_key(suite_pos, "action");
-    if (act == std::string::npos)
-        return false;
-    auto read_arr = [&](const std::string & key, std::vector<float> & out) -> bool {
-        size_t k = find_key(act, key); if (k == std::string::npos) return false;
-        size_t lb = js.find('[', k); size_t rb = js.find(']', lb);
-        if (lb == std::string::npos || rb == std::string::npos)
-            return false;
-        out.clear(); size_t p = lb+1;
-        while (p < rb) {
-            while (p < rb && (js[p] == ',' || js[p] == ' ' || js[p] == '\n' || js[p] == '\t' || js[p] == '\r'))
-                ++p;
-            if (p >= rb)
-                break;
-            bool t = (js.compare(p, 4, "true") == 0), f = (js.compare(p, 5, "false") == 0);
-            if (t || f) {
-                out.push_back(t ? 1.0f : 0.0f);
-                p += t ? 4 : 5;
-            }
-            else {
-                out.push_back(std::strtof(js.c_str()+p, nullptr));
-                while (p < rb && js[p] != ',')
-                    ++p;
-            }
-        }
-        return true;
-    };
-    std::vector<float> mk;
-    if (!read_arr("q01", q01) || !read_arr("q99", q99))
-        return false;
-    if (!read_arr("mask", mk))
-        mk.assign(want, 1.0f);
-    mask.assign(mk.size(), 1); for (size_t i=0; i<mk.size(); ++i) mask[i] = mk[i] != 0.0f ? 1 : 0;
-    return (int64_t) q01.size() == want && (int64_t) q99.size() == want;
-}
 
 struct LMLayerW  { ggml_tensor *attn_norm,*Wq,*bq,*Wk,*bk,*Wv,*bv,*Wo,*ffn_norm,*Wg,*Wu,*Wd; };
 struct HeadBlkW  { ggml_tensor *Wq,*bq,*Wks,*bks,*Wvs,*bvs,*Wka,*bka,*Wva,*bva,*Wkt,*bkt,*Wvt,*bvt,*Wo,*bo,*flnw,*flnb,*flw,*flb; float rg; };
@@ -136,11 +76,7 @@ struct VlaAdapterModelArch : public ModelArchBase {
     ggml_backend_buffer_t weight_buf = nullptr;
     ggml_type mt = GGML_TYPE_BF16;
 
-    int64_t d_hidden=1024,d_layers=23,d_heads=16,d_head_dim=64,d_inter=4096;
-    int64_t s_hidden=1152,s_layers=26,s_heads=16,s_head_dim=72,s_inter=4304;
-    int64_t image_size=224,patch_size=14,n_patches=256,proj_mid=8704,vdim=2176;
-    float   vit_ln_eps=1e-6f;
-    int64_t lm_hidden=896,lm_layers=24,n_q=14,n_kv=2,lm_head_dim=64,lm_inter=4864,vocab=151936;
+    int64_t lm_hidden=896,lm_layers=24,n_q=14,n_kv=2,lm_head_dim=64,vocab=151936;
     float   lm_rope_base=1e6f, lm_rms_eps=1e-6f;
     int64_t chunk=8,action_dim=7,proprio_dim=8,num_tokens=64,head_blocks=24,head_heads=8,head_dim=112;
     float   head_rope_base=1e4f, head_ln_eps=1e-5f;
@@ -151,32 +87,10 @@ struct VlaAdapterModelArch : public ModelArchBase {
     ggml_tensor *h_ln1w,*h_ln1b,*h_fc1w,*h_fc1b,*h_ln2w,*h_ln2b,*h_fc2w,*h_fc2b;
     ggml_tensor *pp_fc1w,*pp_fc1b,*pp_fc2w,*pp_fc2b; std::vector<HeadBlkW> hblk;
 
-    std::vector<float> q01,q99; std::vector<uint8_t> unnorm_mask; std::string suite;
+    Q99Stats act_stats;
 
     std::vector<float> predict(const Inputs& in) override;
 };
-
-namespace {
-
-// Interleaved rotation, paired with the half-split frequency table in fill_cs, so
-// a rotation pair gets two different angles. The reference does the same
-// (action_heads.py:163 vs :137-140) and the weights were trained on it. Leave it.
-static ggml_tensor* hrot(ggml_context*C, ggml_tensor*x, int64_t HD){
-    int64_t L=x->ne[1],H=x->ne[2];
-    ggml_tensor*xp=ggml_reshape_4d(C,x,2,HD/2,L,H);
-    ggml_tensor*ev=ggml_cont(C,ggml_view_4d(C,xp,1,HD/2,L,H,xp->nb[1],xp->nb[2],xp->nb[3],0));
-    ggml_tensor*od=ggml_cont(C,ggml_view_4d(C,xp,1,HD/2,L,H,xp->nb[1],xp->nb[2],xp->nb[3],xp->nb[0]));
-    return ggml_reshape_3d(C,ggml_concat(C,ggml_scale(C,od,-1.0f),ev,0),HD,L,H);
-}
-static ggml_tensor* hheads(ggml_context*C, ggml_tensor*p, int64_t HD, int64_t NH){
-    return ggml_cont(C,ggml_permute(C,ggml_reshape_3d(C,p,HD,NH,p->ne[1]),0,2,1,3));
-}
-static ggml_tensor* hrope(ggml_context*C, ggml_tensor*x, ggml_tensor*cs, ggml_tensor*sn, int64_t HD){
-    ggml_tensor*c=ggml_reshape_3d(C,cs,HD,x->ne[1],1),*s=ggml_reshape_3d(C,sn,HD,x->ne[1],1);
-    return ggml_add(C,ggml_mul(C,x,c),ggml_mul(C,hrot(C,x,HD),s));
-}
-
-}
 
 std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path,
                                                   const std::string& ckpt_path,
@@ -197,16 +111,10 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
 
     auto U=[&](const char*k,int64_t&d){ if(g.has(k)) d=(int64_t)g.u32(k); };
     auto F=[&](const char*k,float&d){ if(g.has(k)) d=g.f32(k); };
-    U("vla_adapter.vit.dino.hidden",m->d_hidden); U("vla_adapter.vit.dino.layers",m->d_layers);
-    U("vla_adapter.vit.dino.heads",m->d_heads); U("vla_adapter.vit.dino.head_dim",m->d_head_dim); U("vla_adapter.vit.dino.inter",m->d_inter);
-    U("vla_adapter.vit.sig.hidden",m->s_hidden); U("vla_adapter.vit.sig.layers",m->s_layers);
-    U("vla_adapter.vit.sig.heads",m->s_heads); U("vla_adapter.vit.sig.head_dim",m->s_head_dim); U("vla_adapter.vit.sig.inter",m->s_inter);
-    U("vla_adapter.vit.image_size",m->image_size); U("vla_adapter.vit.patch_size",m->patch_size);
-    U("vla_adapter.vit.n_patches",m->n_patches); F("vla_adapter.vit.ln_eps",m->vit_ln_eps);
-    U("vla_adapter.vit.proj_mid",m->proj_mid); U("vla_adapter.vit.vdim",m->vdim);
+    m->vis.read_config(g, "vla_adapter");
     U("vla_adapter.lm.hidden",m->lm_hidden); U("vla_adapter.lm.layers",m->lm_layers);
     U("vla_adapter.lm.q_heads",m->n_q); U("vla_adapter.lm.kv_heads",m->n_kv); U("vla_adapter.lm.head_dim",m->lm_head_dim);
-    U("vla_adapter.lm.inter",m->lm_inter); U("vla_adapter.lm.vocab",m->vocab);
+    U("vla_adapter.lm.vocab",m->vocab);
     F("vla_adapter.lm.rope_theta",m->lm_rope_base); F("vla_adapter.lm.rms_eps",m->lm_rms_eps);
     U("vla_adapter.action.chunk",m->chunk); U("vla_adapter.action.action_dim",m->action_dim);
     U("vla_adapter.action.proprio_dim",m->proprio_dim); U("vla_adapter.action.num_tokens",m->num_tokens);
@@ -223,12 +131,12 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
     }
 
     if (g.has("vla_adapter.statistics_json")) {
-        if (!parse_stats(g.str("vla_adapter.statistics_json"), m->action_dim, m->q01, m->q99, m->unnorm_mask, m->suite))
+        if (!m->act_stats.parse(g.str("vla_adapter.statistics_json"), "VLA_ADAPTER_UNNORM_KEY", "vla_adapter", m->action_dim))
             {
                 std::fprintf(stderr, "vla(vla_adapter): failed to parse statistics_json\n");
                 return nullptr;
             }
-        std::printf("vla(vla_adapter): unnorm suite = %s (q99 dim %zu)\n", m->suite.c_str(), m->q99.size());
+        std::printf("vla(vla_adapter): unnorm suite = %s (q99 dim %zu)\n", m->act_stats.suite.c_str(), m->act_stats.q99.size());
     }
 
     {
@@ -241,14 +149,11 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
 
     ggml_init_params wp = { (size_t)64*1024*1024, nullptr, true };
     m->ctx_weights = ggml_init(wp);
-    bool ok = true;
     WeightLoader L("vla_adapter", g, m->ctx_weights, m->mt);
     auto mm  = [&](const char * n) { return L.gemm("%s", n); };
     auto f32 = [&](const char * n) { return L.f32("%s", n); };
-    char nm[96];
-    auto P=[&](const char*fmt,int i){ std::snprintf(nm,sizeof(nm),fmt,i); return (const char*)nm; };
 
-    m->vis.declare(L, m->d_layers, m->s_layers);
+    m->vis.declare(L);
 
     m->token_embd=mm("token_embd.weight"); m->action_queries=mm("action_queries.weight"); m->lm_out_norm=f32("lm.output_norm.weight");
     m->lm.resize(m->lm_layers);
@@ -273,12 +178,10 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
         w.Wva=mm(N("v_adapter.weight")); w.bva=f32(N("v_adapter.bias")); w.Wkt=mm(N("k_task.weight")); w.bkt=f32(N("k_task.bias"));
         w.Wvt=mm(N("v_task.weight")); w.bvt=f32(N("v_task.bias")); w.Wo=mm(N("o_proj.weight")); w.bo=f32(N("o_proj.bias"));
         w.flnw=f32(N("ffn_ln.weight")); w.flnb=f32(N("ffn_ln.bias")); w.flw=mm(N("ffn_lin.weight")); w.flb=f32(N("ffn_lin.bias"));
-        std::vector<float> gv=g.read_f32(N("gating")); w.rg = gv.empty()?0.0f:std::tanh(gv[0]); }
-    (void)P;
-    if(!ok){
-        std::fprintf(stderr,"vla(vla_adapter): weight setup failed\n");
-        return nullptr;
-    }
+        std::vector<float> gv=g.read_f32(N("gating"));
+        if(gv.empty())
+            return nullptr;
+        w.rg=std::tanh(gv[0]); }
 
     if (!L.upload(m->backend, &m->weight_buf))
         return nullptr;
@@ -288,67 +191,27 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
 
     m->cfg.n_suffix = m->chunk; m->cfg.max_action_dim = m->action_dim;
     m->cfg.real_action_dim = m->action_dim; m->cfg.real_state_dim = m->proprio_dim;
-    m->cfg.max_state_dim = m->proprio_dim; m->cfg.n_img = m->n_patches; m->cfg.hidden = m->lm_hidden;
+    m->cfg.max_state_dim = m->proprio_dim; m->cfg.n_img = m->vis.n_patches; m->cfg.hidden = m->lm_hidden;
     m->cfg.n_lang = 512;
     return m;
-}
-
-namespace {
-
 }
 
 std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     using clock = std::chrono::steady_clock;
     const auto t0 = clock::now();
     stats = Stats{};
-    const int64_t S=image_size, NP=n_patches, HC=lm_hidden, HD=head_dim, NH=head_heads;
+    const int64_t NP=vis.n_patches, HC=lm_hidden, HD=head_dim, NH=head_heads;
     const int64_t n_views = in.n_images;
     if (in.precomputed_img_emb) { std::fprintf(stderr, "vla(vla_adapter): precomputed_img_emb is not supported; the DINOv2+SigLIP tower is baked into the GGUF, pass raw images\n"); return {}; }
     if (in.n_lang < 1 || !in.lang_tokens) { std::fprintf(stderr, "vla(vla_adapter): need >=1 lang token\n"); return {}; }
     if (n_views < 1) { std::fprintf(stderr, "vla(vla_adapter): need >=1 image view\n"); return {}; }
     if (!in.images) { std::fprintf(stderr, "vla(vla_adapter): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
-    // towers read S*S*3 per view; reject any view that is not exactly SxS.
-    for (int64_t v=0; v<n_views; ++v) {
-        const ImageView& iv = in.images[v];
-        if (!view_is_side(iv.data, iv.w, iv.h, S)) {
-            std::fprintf(stderr, "vla(vla_adapter): image view %lld is %dx%d, expected %lldx%lld\n",
-                         (long long) v, iv.w, iv.h, (long long) S, (long long) S);
-            return {};
-        }
-    }
-    // ImageNet constants as bf16 rounds them (0.485 -> 0.484375). The reference
-    // preprocesses in bf16, so these are the values it actually sees.
-    static const float DMEAN[3]={0.484375f,0.455078125f,0.40625f}, DSTD[3]={0.228515625f,0.2236328125f,0.224609375f};
-    static const float SMEAN[3]={0.5f,0.5f,0.5f}, SSTD[3]={0.5f,0.5f,0.5f};
 
     std::vector<float> proj_host((size_t)HC*NP*n_views);
     {
         const auto tv=clock::now();
-        const size_t max_nodes=(size_t)64*(d_layers+s_layers+1)*n_views+1024;
-        ggml_context*C=vision_scratch.reset(ggml_tensor_overhead()*max_nodes+ggml_graph_overhead_custom(max_nodes,false));
-        std::vector<ggml_tensor*> px_d(n_views), px_s(n_views);
-        std::vector<ggml_tensor*> cmb(n_views);
-        for(int v=0; v<n_views; ++v){
-            px_d[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(px_d[v]);
-            px_s[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(px_s[v]);
-            ggml_tensor*pd=tower(C,px_d[v],vis.d_patch_w,vis.d_patch_b,vis.d_pos,vis.d_cls,vis.d_reg,vis.dvit,d_hidden,d_heads,d_head_dim,d_inter,patch_size,vit_ln_eps,true);
-            ggml_tensor*ps=tower(C,px_s[v],vis.s_patch_w,vis.s_patch_b,vis.s_pos,nullptr,nullptr,vis.svit,s_hidden,s_heads,s_head_dim,s_inter,patch_size,vit_ln_eps,false);
-            cmb[v]=ggml_concat(C,pd,ps,0);
-        }
-        ggml_tensor*allp=cmb[0]; for(int v=1;v<n_views;++v) allp=ggml_concat(C,allp,cmb[v],1);
-        ggml_tensor*ph=ggml_add(C,ggml_mul_mat(C,vis.pj_fc1w,allp),vis.pj_fc1b); ph=ggml_gelu_erf(C,ph);
-        ph=ggml_add(C,ggml_mul_mat(C,vis.pj_fc2w,ph),vis.pj_fc2b); ph=ggml_gelu_erf(C,ph);
-        ggml_tensor*proj=ggml_add(C,ggml_mul_mat(C,vis.pj_fc3w,ph),vis.pj_fc3b); ggml_set_output(proj);
-        ggml_cgraph*vg=ggml_new_graph_custom(C,max_nodes,false); ggml_build_forward_expand(vg,proj);
-        if(!vision_scratch.alloc(backend,vg)){ std::fprintf(stderr,"vla(vla_adapter): vision gallocr failed\n"); return {}; }
-        std::vector<float> dbuf, sbuf;
-        for(int v=0;v<n_views;++v){
-            normalize_tower(in.images[v],S,DMEAN,DSTD,dbuf); ggml_backend_tensor_set(px_d[v],dbuf.data(),0,ggml_nbytes(px_d[v]));
-            normalize_tower(in.images[v],S,SMEAN,SSTD,sbuf); ggml_backend_tensor_set(px_s[v],sbuf.data(),0,ggml_nbytes(px_s[v]));
-        }
-        graph_unique_names(vg);
-        if(ggml_backend_graph_compute(backend,vg)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(vla_adapter): vision compute failed\n"); return {}; }
-        ggml_backend_tensor_get(proj,proj_host.data(),0,proj_host.size()*sizeof(float));
+        if(!vis.encode(backend,vision_scratch,in,"vla_adapter",proj_host))
+            return {};
         stats.ms_vision = std::chrono::duration<float,std::milli>(clock::now()-tv).count();
     }
 
@@ -425,20 +288,20 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     auto [cK,sK]=cs_tensor(NPATCH);
 
     ggml_tensor*t_x0=ggml_new_tensor_2d(C,GGML_TYPE_F32,action_dim*HC,chunk); ggml_set_input(t_x0);
-    ggml_tensor*hx=ggml_relu(C,ggml_add(C,ggml_mul_mat(C,h_fc1w,LN(C,t_x0,h_ln1w,h_ln1b,head_ln_eps)),h_fc1b));
+    ggml_tensor*hx=ggml_relu(C,linear(C,h_fc1w,h_fc1b,layer_norm(C,t_x0,h_ln1w,h_ln1b,head_ln_eps)));
     const float hsc=1.0f/std::sqrt((float)HD);
     for(int i=0;i<head_blocks;++i){ const auto&w=hblk[i];
 
         ggml_tensor*ht=ggml_cont(C,ggml_view_2d(C,cond[i],HC,NPATCH,cond[i]->nb[1],0));
         ggml_tensor*ha=ggml_cont(C,ggml_view_2d(C,cond[i],HC,num_tokens,cond[i]->nb[1],(NPATCH+NUM_PROMPT_TOKENS)*cond[i]->nb[1]));
         ggml_tensor*had=ggml_concat(C,ha,pvec,1);
-        auto lin=[&](ggml_tensor*Wt,ggml_tensor*bt,ggml_tensor*inp){ return ggml_add(C,ggml_mul_mat(C,Wt,inp),bt); };
-        ggml_tensor*q=hrope(C,hheads(C,lin(w.Wq,w.bq,hx),HD,NH),cT,sT,HD);
-        ggml_tensor*kse=hrope(C,hheads(C,lin(w.Wks,w.bks,hx),HD,NH),cT,sT,HD);
-        ggml_tensor*vse=lin(w.Wvs,w.bvs,hx);
-        ggml_tensor*kad=hrope(C,hheads(C,lin(w.Wka,w.bka,had),HD,NH),cA,sA,HD); ggml_tensor*vad=lin(w.Wva,w.bva,had);
-        ggml_tensor*kta=hrope(C,hheads(C,lin(w.Wkt,w.bkt,ht),HD,NH),cK,sK,HD); ggml_tensor*vta=lin(w.Wvt,w.bvt,ht);
-        auto tov=[&](ggml_tensor*pp){ int64_t L=pp->ne[1]; return ggml_cont(C,ggml_permute(C,ggml_reshape_3d(C,pp,HD,NH,L),1,2,0,3)); };
+        auto qk=[&](ggml_tensor*p,ggml_tensor*cs,ggml_tensor*sn){ return rope_pairwise(C,to_heads(C,p,HD,NH,p->ne[1]),cs,sn,HD); };
+        auto tov=[&](ggml_tensor*p){ return to_heads_v(C,p,HD,NH,p->ne[1]); };
+        ggml_tensor*q=qk(linear(C,w.Wq,w.bq,hx),cT,sT);
+        ggml_tensor*kse=qk(linear(C,w.Wks,w.bks,hx),cT,sT);
+        ggml_tensor*vse=linear(C,w.Wvs,w.bvs,hx);
+        ggml_tensor*kad=qk(linear(C,w.Wka,w.bka,had),cA,sA); ggml_tensor*vad=linear(C,w.Wva,w.bva,had);
+        ggml_tensor*kta=qk(linear(C,w.Wkt,w.bkt,ht),cK,sK); ggml_tensor*vta=linear(C,w.Wvt,w.bvt,ht);
         ggml_tensor*Vs=tov(vse),*Va=tov(vad),*VT=tov(vta);
         ggml_tensor*ss2=ggml_mul_mat(C,kse,q),*sa=ggml_mul_mat(C,kad,q),*sr=ggml_mul_mat(C,kta,q);
         ggml_prec_set_acc(ss2,GGML_PREC_F32); ggml_prec_set_acc(sa,GGML_PREC_F32); ggml_prec_set_acc(sr,GGML_PREC_F32);
@@ -448,13 +311,10 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         ggml_tensor*Vc=ggml_concat(C,ggml_concat(C,Vs,Va,0),VT,0);
         ggml_tensor*kqv=ggml_mul_mat(C,Vc,attn);
         ggml_tensor*mg=ggml_reshape_2d(C,ggml_cont(C,ggml_permute(C,kqv,0,2,1,3)),HC,chunk);
-        ggml_tensor*out=lin(w.Wo,w.bo,mg);
-        ggml_tensor*res=ggml_add(C,out,hx);
-        ggml_tensor*ln=LN(C,res,w.flnw,w.flnb,head_ln_eps);
-        hx=ggml_relu(C,ggml_add(C,ggml_mul_mat(C,w.flw,ln),w.flb));
+        ggml_tensor*res=ggml_add(C,linear(C,w.Wo,w.bo,mg),hx);
+        hx=ggml_relu(C,linear(C,w.flw,w.flb,layer_norm(C,res,w.flnw,w.flnb,head_ln_eps)));
     }
-    ggml_tensor*xn=LN(C,hx,h_ln2w,h_ln2b,head_ln_eps);
-    ggml_tensor*norm_actions=ggml_add(C,ggml_mul_mat(C,h_fc2w,xn),h_fc2b); ggml_set_output(norm_actions);
+    ggml_tensor*norm_actions=linear(C,h_fc2w,h_fc2b,layer_norm(C,hx,h_ln2w,h_ln2b,head_ln_eps)); ggml_set_output(norm_actions);
 
     gio.t_ids=t_ids; gio.t_proj=t_proj; gio.t_pos=t_pos; gio.t_mask=t_mask;
     gio.t_state=t_state; gio.t_x0=t_x0; gio.norm_actions=norm_actions;
@@ -494,14 +354,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(t_x0,zx.data(),0,ggml_nbytes(t_x0));
     }
 
-    auto fill_cs=[&](ggml_tensor*cc,ggml_tensor*ss,int64_t Lh){ std::vector<float> cb(HD*Lh),sb(HD*Lh); const int64_t half=HD/2;
-        for(int64_t t=0;t<Lh;++t) for(int64_t mi=0;mi<HD;++mi){
-            int64_t j=mi%half;
-            double inv=1.0/std::pow((double)head_rope_base,(2.0*j)/(double)HD);
-            double a=(double)t*inv;
-            cb[t*HD+mi]=(float)std::cos(a);
-            sb[t*HD+mi]=(float)std::sin(a);
-        }
+    auto fill_cs=[&](ggml_tensor*cc,ggml_tensor*ss,int64_t Lh){ std::vector<float> cb,sb; rope_pairwise_table(HD,Lh,head_rope_base,cb,sb);
         ggml_backend_tensor_set(cc,cb.data(),0,ggml_nbytes(cc)); ggml_backend_tensor_set(ss,sb.data(),0,ggml_nbytes(ss)); };
     fill_cs(cT,sT,chunk); fill_cs(cA,sA,num_tokens+1); fill_cs(cK,sK,NPATCH);
 
@@ -511,11 +364,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     ggml_backend_tensor_get(norm_actions,na.data(),0,na.size()*sizeof(float));
     stats.ms_inference = std::chrono::duration<float,std::milli>(clock::now()-ti).count();
 
-    const int64_t W = cfg.max_action_dim>0 ? cfg.max_action_dim : action_dim;
-    std::vector<float> out((size_t)chunk*W,0.0f);
-    for(int64_t c=0;c<chunk;++c) for(int64_t d=0;d<action_dim;++d){ float v=na[c*action_dim+d];
-        bool msk = (d<(int64_t)unnorm_mask.size()) ? unnorm_mask[d]!=0 : true;
-        out[c*W+d] = (msk && !q01.empty()) ? 0.5f*(v+1.0f)*(q99[d]-q01[d]+1e-8f)+q01[d] : v; }
+    std::vector<float> out=act_stats.unnorm(na,chunk,action_dim,cfg.max_action_dim>0 ? cfg.max_action_dim : action_dim);
     stats.ms_total = std::chrono::duration<float,std::milli>(clock::now()-t0).count();
     return out;
 }

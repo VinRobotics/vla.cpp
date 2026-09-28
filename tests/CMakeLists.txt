@@ -20,6 +20,7 @@ add_test(NAME vision_common COMMAND test_vision_common)
 
 add_executable(test_rope_conventions test_rope_conventions.cpp)
 target_include_directories(test_rope_conventions PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_rope_conventions PRIVATE ggml)
 target_compile_options(test_rope_conventions PRIVATE -Wall -Wextra)
 add_test(NAME rope_conventions COMMAND test_rope_conventions)
 
