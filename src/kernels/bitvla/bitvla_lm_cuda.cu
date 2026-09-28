@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 extern "C" void bitlinear_int8xint2_m(int8_t* A, int8_t* B, __nv_bfloat16* out,
@@ -132,6 +133,7 @@ __global__ void softmax_scaled_bf16_kernel(__nv_bfloat16* __restrict__ inout,
     }
     __syncthreads();
     const float max_v = smem[0];
+    __syncthreads();
 
     float s_sum = 0.0f;
     for (int i=tid; i<S; i += BLOCK) {
@@ -156,18 +158,6 @@ __global__ void softmax_scaled_bf16_kernel(__nv_bfloat16* __restrict__ inout,
         float v = expf(__bfloat162float(r[i])*scale-max_v)*inv_sum;
         r[i] = __float2bfloat16(v);
     }
-}
-
-__global__ void squared_relu_mul_bf16_kernel(const __nv_bfloat16* g,
-                                              const __nv_bfloat16* u,
-                                              __nv_bfloat16* out, int N) {
-    const int i = (int)(blockIdx.x*blockDim.x+threadIdx.x);
-    if (i >= N)
-        return;
-    float gv = __bfloat162float(g[i]);
-    if (gv < 0.0f)
-        gv = 0.0f;
-    out[i] = __float2bfloat16(gv * gv * __bfloat162float(u[i]));
 }
 
 __global__ void add_bf16_kernel(const __nv_bfloat16* a, const __nv_bfloat16* b,
@@ -240,11 +230,6 @@ extern "C" void bitvla_softmax_scaled_bf16(__nv_bfloat16* inout, float scale,
     constexpr int B = 256;
     softmax_scaled_bf16_kernel<B><<<dim3(n_rows, 1, 1), dim3(B, 1, 1), 0, stream>>>(inout, scale, S);
 }
-extern "C" void bitvla_squared_relu_mul_bf16(const __nv_bfloat16* g, const __nv_bfloat16* u,
-                                              __nv_bfloat16* out, int N, cudaStream_t stream) {
-    constexpr int B = 256;
-    squared_relu_mul_bf16_kernel<<<dim3((N+B-1)/B, 1, 1), dim3(B, 1, 1), 0, stream>>>(g, u, out, N);
-}
 extern "C" void bitvla_add_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b,
                                  __nv_bfloat16* out, int N, cudaStream_t stream) {
     constexpr int B = 256;
@@ -277,7 +262,7 @@ extern "C" void bitvla_gather_rows_bf16(const __nv_bfloat16* in, __nv_bfloat16* 
     return -1; } } while (0)
 #define CUDA_OKV(call) do { cudaError_t e = (call); if (e != cudaSuccess) { \
     std::fprintf(stderr, "vla(bitvla_lm_cuda): %s @ %s:%d\n", cudaGetErrorString(e), __FILE__, __LINE__); \
-    return nullptr; } } while (0)
+    bitvla_lm_cuda_free(ctx); return nullptr; } } while (0)
 
 struct bitvla_lm_cuda_ctx {
     int hidden, n_q, n_kv, head_dim, ffn, n_layers, max_seq;
@@ -578,6 +563,7 @@ __global__ void layernorm_bias_bf16_kernel(const __nv_bfloat16* __restrict__ x,
     }
     __syncthreads();
     const float mean = smem[0]/(float)K;
+    __syncthreads();
 
     float vsum = 0.0f;
     for (int k=tid; k<K; k += BLOCK) {
@@ -630,14 +616,6 @@ __global__ void add_bias_bf16_kernel(const __nv_bfloat16* x, const __nv_bfloat16
     out[i] = __float2bfloat16(__bfloat162float(x[i])+__bfloat162float(bias[k]));
 }
 
-__global__ void zero_tail_bf16_kernel(__nv_bfloat16* x, int total_cols, int start_col) {
-    const int m = (int)blockIdx.x;
-    const int k = (int)(start_col+blockIdx.y*blockDim.x+threadIdx.x);
-    if (k >= total_cols)
-        return;
-    x[(size_t)m * total_cols+k] = __float2bfloat16(0.0f);
-}
-
 extern "C" void bitvla_layernorm_bf16(const __nv_bfloat16* x, const __nv_bfloat16* w,
                                        const __nv_bfloat16* b, __nv_bfloat16* out,
                                        float eps, int M, int K, cudaStream_t stream) {
@@ -654,15 +632,6 @@ extern "C" void bitvla_add_bias_bf16(const __nv_bfloat16* x, const __nv_bfloat16
     constexpr int B = 256;
     const int n_kb = (K+B-1)/B;
     add_bias_bf16_kernel<<<dim3(M, n_kb, 1), dim3(B, 1, 1), 0, stream>>>(x, bias, out, M, K);
-}
-extern "C" void bitvla_zero_tail_bf16(__nv_bfloat16* x, int M, int total_cols,
-                                       int start_col, cudaStream_t stream) {
-    if (start_col >= total_cols)
-        return;
-    constexpr int B = 128;
-    const int len = total_cols-start_col;
-    const int n_kb = (len+B-1)/B;
-    zero_tail_bf16_kernel<<<dim3(M, n_kb, 1), dim3(B, 1, 1), 0, stream>>>(x, total_cols, start_col);
 }
 
 extern "C" int bitvla_lm_cuda_forward(bitvla_lm_cuda_ctx* ctx,
@@ -720,5 +689,6 @@ extern "C" int bitvla_lm_cuda_forward(bitvla_lm_cuda_ctx* ctx,
         cudaStreamSynchronize(stream);
         dump_to_file("lm_final", d_out);
     }
+    CUDA_OK(cudaGetLastError());
     return 0;
 }

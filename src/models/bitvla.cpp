@@ -133,7 +133,7 @@ struct BitvlaModelArch : public ModelArchBase {
     std::vector<VitLayerW> vit;
     ggml_tensor *mm_l1_w = nullptr, *mm_l1_b = nullptr, *mm_l2_w = nullptr, *mm_l2_b = nullptr;
     ggml_tensor *pp_fc1_w = nullptr, *pp_fc1_b = nullptr, *pp_fc2_w = nullptr, *pp_fc2_b = nullptr;
-    ggml_tensor *embed_tokens = nullptr, *lm_output_norm = nullptr;
+    ggml_tensor *lm_output_norm = nullptr;
     std::vector<LmLayerW> lm;
     ggml_tensor *ah_ln1_w = nullptr, *ah_ln1_b = nullptr, *ah_fc1_w = nullptr, *ah_fc1_b = nullptr;
     ggml_tensor *ah_b0_ln_w = nullptr, *ah_b0_ln_b = nullptr, *ah_b0_w = nullptr, *ah_b0_b = nullptr;
@@ -151,6 +151,7 @@ struct BitvlaModelArch : public ModelArchBase {
     bool                 cuda_vit_ready = false;
 
     std::vector<void*>   cpu_kept_ptrs;
+    int                  cuda_dev = 0;
 
     __nv_bfloat16* d_inputs_embeds = nullptr;
     __nv_bfloat16* d_last_hidden   = nullptr;
@@ -391,6 +392,11 @@ bool load_config(const gguf_reader & g, BitvlaModelArch & m, Config & cfg) {
                      (long long) m.lm_q, (long long) m.lm_head_dim, (long long) m.lm_hidden);
         return false;
     }
+    if (m.vit_heads <= 0 || m.vit_head_dim <= 0 || m.vit_heads*m.vit_head_dim != m.vit_hidden) {
+        std::fprintf(stderr, "vla(bitvla): vit heads %lld x head_dim %lld does not match hidden %lld\n",
+                     (long long) m.vit_heads, (long long) m.vit_head_dim, (long long) m.vit_hidden);
+        return false;
+    }
 
     const std::string js = g.str("bitvla.statistics_json");
     if (js.empty()) {
@@ -551,6 +557,8 @@ static int8_t* pack_and_upload_fused(const std::vector<const float*>& wptrs,
 
 BitvlaModelArch::~BitvlaModelArch() {
 #ifdef VLA_BITVLA_CUDA_KERNELS
+    if (lm_cuda_ctx || !cuda_devptrs.empty())
+        cudaSetDevice(cuda_dev);
     if (lm_cuda_ctx)
         bitvla_lm_cuda_free(lm_cuda_ctx);
     if (vit_cuda_ctx)
@@ -603,9 +611,11 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
     }
     if (!load_config(g, *m, m->cfg))
         return nullptr;
+    if (m->packed_int2)
+        m->matmul_type = GGML_TYPE_F32;
 
     // Keep one reader open for the per-step token-embedding fetches (token_embd
-    // stays on disk under int2 packing) and cache the constant stop-token row,
+    // stays on disk) and cache the constant stop-token row,
     // so predict() no longer re-opens and re-parses the GGUF twice per call.
     if (!m->emb_reader.open(ckpt_path))
         return nullptr;
@@ -670,7 +680,6 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
     m->pp_fc1_w=mk_f32("aex.proprio.fc1.weight"); m->pp_fc1_b=mk_f32("aex.proprio.fc1.bias");
     m->pp_fc2_w=mk_f32("aex.proprio.fc2.weight"); m->pp_fc2_b=mk_f32("aex.proprio.fc2.bias");
 
-    m->embed_tokens   = m->packed_int2 ? nullptr : mk_mm("token_embd.weight");
     m->lm_output_norm = mk_f32("lm.output_norm.weight");
     m->lm.resize(m->lm_layers);
     for (int64_t i=0; i<m->lm_layers && ok; ++i) {
@@ -702,7 +711,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
     m->ah_fc2_w =mk_mm ("aex.head.fc2.weight"); m->ah_fc2_b =mk_f32("aex.head.fc2.bias");
 
     ok &= m->vit_patch_w&&m->vit_patch_b&&m->vit_pos&&m->mm_l1_w&&m->mm_l1_b&&m->mm_l2_w&&m->mm_l2_b&&
-          m->pp_fc1_w&&m->pp_fc1_b&&m->pp_fc2_w&&m->pp_fc2_b&&(m->embed_tokens||m->packed_int2)&&m->lm_output_norm&&
+          m->pp_fc1_w&&m->pp_fc1_b&&m->pp_fc2_w&&m->pp_fc2_b&&m->lm_output_norm&&
           m->ah_ln1_w&&m->ah_ln1_b&&m->ah_fc1_w&&m->ah_fc1_b&&
           m->ah_b0_ln_w&&m->ah_b0_ln_b&&m->ah_b0_w&&m->ah_b0_b&&
           m->ah_b1_ln_w&&m->ah_b1_ln_b&&m->ah_b1_w&&m->ah_b1_b&&
@@ -731,25 +740,40 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
 
 #ifdef VLA_BITVLA_CUDA_KERNELS
 
-    if ((m->packed_int2 || m->matmul_type == GGML_TYPE_F32) && !vla::env_flag("VLA_BITVLA_NO_CUDA_LM")) {
+    const ggml_tensor * quantized = nullptr;
+    for (ggml_tensor * t = ggml_get_first_tensor(m->ctx_weights); t && !quantized; t = ggml_get_next_tensor(m->ctx_weights, t))
+        if (ggml_is_quantized(t->type))
+            quantized = t;
+    if (quantized)
+        std::fprintf(stderr, "vla(bitvla): %s is quantized; the CUDA path needs F32 weights\n", ggml_get_name(quantized));
+
+    if (m->matmul_type == GGML_TYPE_F32 && !quantized && !vla::env_flag("VLA_BITVLA_NO_CUDA_LM")) {
         int dev_count = 0;
-        if (cudaGetDeviceCount(&dev_count) == cudaSuccess && dev_count > 0) {
-            cudaSetDevice(0);
+        m->cuda_dev = vla::backend_device_index();
+        if (cudaGetDeviceCount(&dev_count) == cudaSuccess && m->cuda_dev < dev_count &&
+            cudaSetDevice(m->cuda_dev) == cudaSuccess) {
+            cudaGetLastError();
 
             // The ladder kernels dereference the scale pointer unconditionally, so
             // a missing sidecar is a device-side OOB read, not a soft failure.
-            bool scales_ok = true;
+            bool weights_ok = true;
 
             auto load_bit = [&](ggml_tensor * t, int64_t N, int64_t K) -> std::pair<int8_t*, float*> {
+                const size_t want = m->packed_int2 ? (size_t) (N*K/4) : (size_t) (N*K)*sizeof(float);
+                if (ggml_nbytes(t) != want) {
+                    std::fprintf(stderr, "vla(bitvla): %s is %zu bytes, expected %zu\n", ggml_get_name(t), ggml_nbytes(t), want);
+                    weights_ok = false;
+                    return { nullptr, nullptr };
+                }
                 if (m->packed_int2) {
                     int8_t * dp = upload_int8((const uint8_t*) t->data, ggml_nbytes(t), m->cuda_devptrs);
                     std::string nm = ggml_get_name(t);
                     std::string sn = nm.substr(0, nm.size()-7) + ".scale";
                     std::vector<float> sc = g.read_f32(sn.c_str());
-                    if (sc.empty()) {
-                        std::fprintf(stderr, "vla(bitvla): int2 tensor %s has no %s sidecar\n",
+                    if (sc.size() != 1) {
+                        std::fprintf(stderr, "vla(bitvla): int2 tensor %s needs a 1-element %s sidecar\n",
                                      nm.c_str(), sn.c_str());
-                        scales_ok = false;
+                        weights_ok = false;
                         return { dp, nullptr };
                     }
                     float * dws = upload_f32_scales(sc.data(), (int) sc.size(), m->cuda_devptrs);
@@ -766,7 +790,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                 (int) m->lm_inter, (int) m->lm_layers, m->lm_rope_base, m->lm_rms_eps, max_seq);
             if (m->lm_cuda_ctx) {
                 bool pack_ok = true;
-                for (int64_t L=0; L<m->lm_layers && pack_ok && scales_ok; ++L) {
+                for (int64_t L=0; L<m->lm_layers && pack_ok && weights_ok; ++L) {
                     bitvla_lm_layer_cuda lyr{};
 
                     lyr.attn_norm_w     = upload_bf16_from_f32((const float*) m->lm[L].attn_norm->data,     m->lm_hidden, m->cuda_devptrs);
@@ -799,15 +823,20 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                     }
 
                     if (m->packed_int2) {
-                        lyr.gate_up_packed = upload_int8((const uint8_t*) m->lm[L].Wgate_up->data, ggml_nbytes(m->lm[L].Wgate_up), m->cuda_devptrs);
                         const std::string sn = "lm.blk." + std::to_string(L) + ".ffn_gate_up.scale";
                         std::vector<float> sc = g.read_f32(sn.c_str());
-                        if (sc.empty()) {
-                            std::fprintf(stderr, "vla(bitvla): missing %s\n", sn.c_str());
-                            scales_ok = false;
+                        if (ggml_nbytes(m->lm[L].Wgate_up) != (size_t) (2*m->lm_inter*m->lm_hidden/4) || sc.size() != 2) {
+                            std::fprintf(stderr, "vla(bitvla): lm.blk.%lld.ffn_gate_up weight or its 2-element %s is malformed\n",
+                                         (long long) L, sn.c_str());
+                            weights_ok = false;
                         } else {
+                            lyr.gate_up_packed = upload_int8((const uint8_t*) m->lm[L].Wgate_up->data, ggml_nbytes(m->lm[L].Wgate_up), m->cuda_devptrs);
                             lyr.gate_up_ws = upload_f32_scales(sc.data(), (int) sc.size(), m->cuda_devptrs);
                         }
+                    } else if (ggml_nbytes(m->lm[L].Wgate) != (size_t) (m->lm_inter*m->lm_hidden)*sizeof(float) ||
+                               ggml_nbytes(m->lm[L].Wup)   != (size_t) (m->lm_inter*m->lm_hidden)*sizeof(float)) {
+                        std::fprintf(stderr, "vla(bitvla): lm.blk.%lld ffn_gate/ffn_up size mismatch\n", (long long) L);
+                        weights_ok = false;
                     } else {
                         std::vector<float> ws2;
                         lyr.gate_up_packed = pack_and_upload_fused(
@@ -823,11 +852,12 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                         lyr.down_ws = r.second;
                     }
                     bitvla_lm_cuda_set_layer(m->lm_cuda_ctx, (int) L, &lyr);
+                    pack_ok = cudaGetLastError() == cudaSuccess;
                 }
-                if (!scales_ok) {
-                    std::fprintf(stderr, "vla(bitvla): int2 scale sidecars incomplete; refusing the CUDA LM\n");
+                if (!weights_ok) {
+                    std::fprintf(stderr, "vla(bitvla): LM weights or int2 scale sidecars invalid; refusing the CUDA LM\n");
                 }
-                if (pack_ok && scales_ok) {
+                if (pack_ok && weights_ok) {
                     __nv_bfloat16* onorm = upload_bf16_from_f32((const float*) m->lm_output_norm->data, m->lm_hidden, m->cuda_devptrs);
                     bitvla_lm_cuda_set_output_norm(m->lm_cuda_ctx, onorm);
 
@@ -838,6 +868,8 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                         lm_ce = cudaMalloc(&m->d_action_hidden, (size_t) (m->num_actions_chunk*m->action_dim)*m->lm_hidden*sizeof(__nv_bfloat16));
                     if (lm_ce == cudaSuccess)
                         lm_ce = cudaMalloc(&m->d_action_ids,    (size_t) (m->num_actions_chunk*m->action_dim)*sizeof(int32_t));
+                    if (lm_ce == cudaSuccess)
+                        lm_ce = cudaGetLastError();
                     // only enable the CUDA LM once every work buffer is really allocated.
                     if (lm_ce != cudaSuccess) {
                         std::fprintf(stderr, "vla(bitvla): CUDA LM buffer alloc failed (%s); using CPU LM\n",
@@ -865,6 +897,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                         (int) m->vit_inter,  (int) m->n_patches, patch_flat,
                         m->vit_ln_eps, mm_out);
                     if (m->vit_cuda_ctx) {
+                        cudaGetLastError();
                         bool vit_ok = true;
                         for (int64_t L=0; L<m->vit_layers && vit_ok; ++L) {
                             bitvla_vit_layer_cuda vl{};
@@ -913,6 +946,9 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                                     vl.fc2_ws = r.second;
                                 }
                                 vl.fc2_b = upload_bf16_from_f32((const float*) m->vit[L].bfc2->data, m->vit_hidden, m->cuda_devptrs);
+                            } else if (ggml_nbytes(m->vit[L].Wfc2) != (size_t) (m->vit_hidden*m->vit_inter)*sizeof(float)) {
+                                std::fprintf(stderr, "vla(bitvla): vit.blk.%lld.fc2.weight size mismatch\n", (long long) L);
+                                weights_ok = false;
                             } else {
                                 const float* W = (const float*) m->vit[L].Wfc2->data;
                                 std::vector<int8_t> tern;
@@ -932,9 +968,9 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                                 vl.fc2_b      = upload_bf16_from_f32((const float*) m->vit[L].bfc2->data, m->vit_hidden, m->cuda_devptrs);
                             }
                             bitvla_vit_cuda_set_layer(m->vit_cuda_ctx, (int) L, &vl);
+                            vit_ok = weights_ok && cudaGetLastError() == cudaSuccess;
                         }
                         if (vit_ok) {
-
                             __nv_bfloat16* pe_w   = upload_bf16_from_f32((const float*) m->vit_patch_w->data, m->vit_hidden*patch_flat, m->cuda_devptrs);
                             __nv_bfloat16* pe_b   = upload_bf16_from_f32((const float*) m->vit_patch_b->data, m->vit_hidden, m->cuda_devptrs);
                             __nv_bfloat16* pos_e  = upload_bf16_from_f32((const float*) m->vit_pos->data,     m->n_patches*m->vit_hidden, m->cuda_devptrs);
@@ -946,8 +982,11 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                             __nv_bfloat16* mm_b2 = upload_bf16_from_f32((const float*) m->mm_l2_b->data, mm_out,                 m->cuda_devptrs);
                             bitvla_vit_cuda_set_mmproj(m->vit_cuda_ctx, mm_W1, mm_b1, mm_W2, mm_b2);
 
-                            cudaMalloc(&m->d_vit_patches,    (size_t) m->n_patches*patch_flat * sizeof(__nv_bfloat16));
-                            cudaMalloc(&m->d_vit_img_embeds, (size_t) m->n_patches*mm_out     * sizeof(__nv_bfloat16));
+                            vit_ok = cudaMalloc(&m->d_vit_patches,    (size_t) m->n_patches*patch_flat * sizeof(__nv_bfloat16)) == cudaSuccess &&
+                                     cudaMalloc(&m->d_vit_img_embeds, (size_t) m->n_patches*mm_out     * sizeof(__nv_bfloat16)) == cudaSuccess &&
+                                     cudaGetLastError() == cudaSuccess;
+                        }
+                        if (vit_ok) {
                             m->cuda_vit_ready = true;
                             const size_t vit_packed_bytes = (size_t) m->vit_layers*(
                                 4*(size_t) m->vit_hidden*m->vit_hidden/4 +
@@ -958,6 +997,8 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                         } else {
                             bitvla_vit_cuda_free(m->vit_cuda_ctx);
                             m->vit_cuda_ctx = nullptr;
+                            cudaFree(m->d_vit_patches); cudaFree(m->d_vit_img_embeds);
+                            m->d_vit_patches = nullptr; m->d_vit_img_embeds = nullptr;
                             std::printf("vla(bitvla): CUDA ViT packing failed; falling back to CPU vision\n");
                         }
                     } else {
@@ -972,7 +1013,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                 std::fprintf(stderr, "vla(bitvla): bitvla_lm_cuda_init failed; falling back to CPU LM\n");
             }
         } else {
-            std::printf("vla(bitvla): no CUDA device - using CPU LM forward\n");
+            std::printf("vla(bitvla): CUDA device %d unavailable (%d visible) - using CPU LM forward\n", m->cuda_dev, dev_count);
         }
     }
 
@@ -1038,6 +1079,7 @@ std::unique_ptr<ModelArchBase> bitvla_create(const std::string& mmproj_path,
                 }
                 std::memcpy(copy, t->data, nb);
                 t->data = copy;
+                t->buffer = nullptr;
                 m->cpu_kept_ptrs.push_back(copy);
                 bytes_kept += nb;
             }
@@ -1068,6 +1110,15 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
     const auto t_start = clk::now();
     stats = Stats{};
     const bool timing_phase = (in.timing_detail == TimingDetail::PHASE);
+#ifdef VLA_BITVLA_CUDA_KERNELS
+    if (cuda_lm_ready || cuda_vit_ready) {
+        if (cudaSetDevice(cuda_dev) != cudaSuccess) {
+            std::fprintf(stderr, "vla(bitvla): cudaSetDevice(%d) failed\n", cuda_dev);
+            return {};
+        }
+        cudaGetLastError();
+    }
+#endif
 
     const char* _dump_dir = std::getenv("VLA_BITVLA_DUMP_DIR");
     auto _dump_bin = [&](const char* name, const float* data, size_t nelem) {
@@ -1152,11 +1203,13 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
                 std::vector<uint16_t> patches_bf16((size_t) N * patch_flat);
                 for (size_t i=0; i<patches_bf16.size(); ++i)
                     patches_bf16[i] = f32_to_bf16_u16(patches[i]);
-                cudaMemcpy(d_vit_patches, patches_bf16.data(), patches_bf16.size()*sizeof(uint16_t), cudaMemcpyHostToDevice);
-                int rc = bitvla_vit_cuda_forward(vit_cuda_ctx, d_vit_patches, d_vit_img_embeds,  0);
-                if (rc != 0) { std::fprintf(stderr, "vla(bitvla): CUDA ViT forward failed (view %lld)\n", (long long) v); return {}; }
                 std::vector<uint16_t> img_bf16((size_t) N * hidden_l);
-                cudaMemcpy(img_bf16.data(), d_vit_img_embeds, img_bf16.size()*sizeof(uint16_t), cudaMemcpyDeviceToHost);
+                if (cudaMemcpy(d_vit_patches, patches_bf16.data(), patches_bf16.size()*sizeof(uint16_t), cudaMemcpyHostToDevice) != cudaSuccess ||
+                    bitvla_vit_cuda_forward(vit_cuda_ctx, d_vit_patches, d_vit_img_embeds,  0) != 0 ||
+                    cudaMemcpy(img_bf16.data(), d_vit_img_embeds, img_bf16.size()*sizeof(uint16_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
+                    std::fprintf(stderr, "vla(bitvla): CUDA ViT forward failed (view %lld)\n", (long long) v);
+                    return {};
+                }
                 float* dst = img_embeds_host.data()+(size_t) v * N * hidden_l;
                 for (size_t i=0; i<img_bf16.size(); ++i) {
                     uint32_t u = ((uint32_t) img_bf16[i]) << 16;
@@ -1271,6 +1324,13 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         std::fprintf(stderr, "vla(bitvla): seq=%lld > lm_max_pos=%lld\n", (long long) seq, (long long) lm_max_pos);
         return {};
     }
+#ifdef VLA_BITVLA_CUDA_KERNELS
+    if (cuda_lm_ready && seq > cuda_max_seq && (packed_int2 || !weight_buf)) {
+        std::fprintf(stderr, "vla(bitvla): seq=%lld > CUDA LM max_seq=%d and no CPU LM weights to fall back on\n",
+                     (long long) seq, cuda_max_seq);
+        return {};
+    }
+#endif
     // Both LM paths index the action slots as seq-2-n_action+i and neither
     // ggml_get_rows nor the CUDA gather bound-checks, so a short sequence would
     // read out of bounds and come back as plausible hidden states.
@@ -1284,13 +1344,22 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
 
     if (full_prefix) {
 
-        std::vector<int32_t> ids(in.lang_tokens, in.lang_tokens+n_lang_in);
-        for (int32_t id : ids) {
+        std::vector<int32_t> ids;
+        std::vector<int64_t> pos;
+        for (int64_t i=0; i<n_lang_in; ++i) {
+            const int32_t id = in.lang_tokens[i];
+            if (id == image_token_id || id == proprio_pad_id)
+                continue;
             if (id < 0 || id >= vocab_size) {
                 std::fprintf(stderr, "vla(bitvla): prompt token %d out of vocab\n", id); return {};
             }
+            ids.push_back(id);
+            pos.push_back(i);
         }
-        if (!emb_reader.fetch_rows_f32("token_embd.weight", ids, inputs_embeds.data(), hidden_l)) return {};
+        std::vector<float> rows(ids.size()*(size_t) hidden_l);
+        if (!emb_reader.fetch_rows_f32("token_embd.weight", ids, rows.data(), hidden_l)) return {};
+        for (size_t k=0; k<pos.size(); ++k)
+            std::memcpy(inputs_embeds.data()+(size_t) pos[k]*hidden_l, rows.data()+k*hidden_l, (size_t) hidden_l*sizeof(float));
 
         int64_t k_img = 0;
         for (int64_t i=0; i<n_lang_in; ++i) {
@@ -1342,19 +1411,22 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         std::vector<uint16_t> in_bf16((size_t) seq * hidden_l);
         for (size_t i=0; i<in_bf16.size(); ++i)
             in_bf16[i] = f32_to_bf16_u16(inputs_embeds[i]);
-        cudaMemcpy(d_inputs_embeds, in_bf16.data(), in_bf16.size()*sizeof(uint16_t), cudaMemcpyHostToDevice);
-
-        int rc = bitvla_lm_cuda_forward(lm_cuda_ctx, d_inputs_embeds, d_last_hidden, (int) seq,  0);
-        if (rc != 0) { std::fprintf(stderr, "vla(bitvla): CUDA LM forward failed\n"); return {}; }
-
         std::vector<int32_t> aids(n_action);
         for (int64_t i=0; i<n_action; ++i)
             aids[i] = (int32_t) (seq-2-n_action+i);
-        cudaMemcpy(d_action_ids, aids.data(), n_action * sizeof(int32_t), cudaMemcpyHostToDevice);
-        bitvla_gather_rows_bf16(d_last_hidden, d_action_hidden, d_action_ids, (int) n_action, (int) hidden_l,  0);
-
         std::vector<uint16_t> out_bf16((size_t) n_action * hidden_l);
-        cudaMemcpy(out_bf16.data(), d_action_hidden, out_bf16.size()*sizeof(uint16_t), cudaMemcpyDeviceToHost);
+        if (cudaMemcpy(d_inputs_embeds, in_bf16.data(), in_bf16.size()*sizeof(uint16_t), cudaMemcpyHostToDevice) != cudaSuccess ||
+            bitvla_lm_cuda_forward(lm_cuda_ctx, d_inputs_embeds, d_last_hidden, (int) seq,  0) != 0 ||
+            cudaMemcpy(d_action_ids, aids.data(), n_action * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess) {
+            std::fprintf(stderr, "vla(bitvla): CUDA LM forward failed\n");
+            return {};
+        }
+        bitvla_gather_rows_bf16(d_last_hidden, d_action_hidden, d_action_ids, (int) n_action, (int) hidden_l,  0);
+        if (cudaMemcpy(out_bf16.data(), d_action_hidden, out_bf16.size()*sizeof(uint16_t), cudaMemcpyDeviceToHost) != cudaSuccess ||
+            cudaGetLastError() != cudaSuccess) {
+            std::fprintf(stderr, "vla(bitvla): CUDA LM forward failed\n");
+            return {};
+        }
         for (size_t i=0; i<out_bf16.size(); ++i) {
             uint32_t u = ((uint32_t) out_bf16[i]) << 16;
             float f; std::memcpy(&f, &u, 4);

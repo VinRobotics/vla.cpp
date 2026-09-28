@@ -48,7 +48,7 @@ static void gelu_erf_bf16(const __nv_bfloat16* in, __nv_bfloat16* out, int N, cu
     return -1; } } while (0)
 #define CUDA_OKV(call) do { cudaError_t e = (call); if (e != cudaSuccess) { \
     std::fprintf(stderr, "vla(bitvla_vit_cuda): %s @ %s:%d\n", cudaGetErrorString(e), __FILE__, __LINE__); \
-    return nullptr; } } while (0)
+    bitvla_vit_cuda_free(ctx); return nullptr; } } while (0)
 
 struct bitvla_vit_cuda_ctx {
     int n_layers, hidden, n_heads, head_dim, ffn, n_patches, patch_flat, mm_out;
@@ -316,5 +316,6 @@ int bitvla_vit_cuda_forward(bitvla_vit_cuda_ctx* ctx,
         return -1;
     }
     bitvla_add_bias_bf16(d_out, ctx->mm_b2, d_out, seq, M, stream);
+    CUDA_OK(cudaGetLastError());
     return 0;
 }
