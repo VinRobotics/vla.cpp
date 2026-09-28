@@ -48,7 +48,7 @@ constexpr float   EPS = 1e-5f;
 ggml_tensor * build_chain(ggml_context * C, ggml_tensor * x, ggml_tensor * w_norm,
                           ggml_tensor * W, ggml_tensor * bias, ggml_tensor * bias2, ggml_type at) {
     ggml_tensor * h = vla::as_type(C, x, at);
-    h = ggml_mul(C, ggml_rms_norm(C, h, EPS), w_norm);   // RMS_NORM (+ MUL, F32 weight)
+    h = ggml_add(C, ggml_mul(C, ggml_rms_norm(C, h, EPS), w_norm), h);   // RMS_NORM (+ MUL, F32 weight, + ADD, BF16 x BF16)
     h = ggml_add(C, vla::mm_act(C, W, ggml_reshape_3d(C, h, K, M/2, 2), at),
                  ggml_reshape_3d(C, vla::mm_act(C, W, h, at), N, M/2, 2));
     h = ggml_add(C, ggml_add(C, h, bias), bias2);        // ADD, F32 bias

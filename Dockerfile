@@ -45,7 +45,12 @@ RUN set -eux; \
     cmake --build build -j"${JOBS:-$(nproc)}" --target vla-server vla-cli; \
     mkdir /app; \
     cp build/vla-server build/vla-cli /app/; \
-    cp -P build/*.so* build/bin/*.so* /app/
+    cp -P build/*.so* build/bin/*.so* /app/; \
+    cp LICENSE.md /app/; \
+    cp build/_deps/llama-src/LICENSE /app/LICENSE.llama.cpp; \
+    cp build/_deps/llama-src/licenses/LICENSE-jsonhpp /app/LICENSE.jsonhpp; \
+    cp build/_deps/sentencepiece-src/LICENSE /app/LICENSE.sentencepiece; \
+    cp build/_deps/sentencepiece-src/third_party/darts_clone/LICENSE /app/LICENSE.darts_clone
 
 FROM ${BACKEND}-run
 

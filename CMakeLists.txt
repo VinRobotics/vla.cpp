@@ -57,13 +57,11 @@ if(GGML_CUDA)
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_cuda_ext_hook.py <SOURCE_DIR>)
 
     find_package(CUDAToolkit REQUIRED)
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        # SASS per supported GPU, PTX only for the newest arch so future cards JIT.
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND "$ENV{CUDAARCHS}" STREQUAL "")
+        # SASS per supported GPU, sm_90 PTX so future cards JIT.
         set(_vla_cuda_archs 80-real 86-real 87-real 89-real 90-real)
-        set(_vla_cuda_ptx 90-virtual)
         if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
             list(APPEND _vla_cuda_archs 100-real 120-real)
-            set(_vla_cuda_ptx 120-virtual)
         else()
             message(WARNING
                 "CUDA ${CUDAToolkit_VERSION} < 12.8: omitting Blackwell sm_100/sm_120. "
@@ -75,7 +73,7 @@ if(GGML_CUDA)
         if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
             list(APPEND _vla_cuda_archs 110-real)
         endif()
-        set(CMAKE_CUDA_ARCHITECTURES ${_vla_cuda_archs} ${_vla_cuda_ptx}
+        set(CMAKE_CUDA_ARCHITECTURES ${_vla_cuda_archs} 90-virtual
             CACHE STRING "" FORCE)
     endif()
     set(GGML_CUDA_FA_QUANTS "f16-f16" CACHE STRING "")
@@ -440,6 +438,10 @@ add_executable(vla-bench
 target_link_libraries(vla-bench PRIVATE vla_core)
 
 install(TARGETS vla COMPONENT libvla)
+install(FILES LICENSE.md ${llama_SOURCE_DIR}/licenses/LICENSE-jsonhpp
+    DESTINATION ${CMAKE_INSTALL_DOCDIR} COMPONENT libvla)
+install(FILES ${llama_SOURCE_DIR}/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}
+    RENAME LICENSE.llama.cpp COMPONENT libvla)
 install(TARGETS vla_core vla-cli vla-bench)
 install(FILES scripts/tokenize_prompt.py DESTINATION ${CMAKE_INSTALL_DATADIR}/vla)
 if(VLA_BUILD_SERVER)

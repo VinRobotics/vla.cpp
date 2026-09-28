@@ -66,12 +66,17 @@ jobs:
 
       - name: package
         run: |
-          out="vla.cpp-${{ github.ref_name }}-${{ matrix.name }}"
+          out="vla.cpp-${GITHUB_REF_NAME//\//-}-${{ matrix.name }}"
           mkdir -p "$out/scripts"
           for b in $BINARIES; do cp "build/$b" "$out/"; done
           cp -P build/*.so* build/bin/*.so* "$out/"
           ldd "$out/vla-server" | awk '/libgomp|libprotobuf/ {print $3}' | xargs cp -L -t "$out/"
           cp /usr/share/doc/libprotobuf32t64/copyright "$out/LICENSE.protobuf"
+          cp /usr/share/doc/libgomp1/copyright "$out/LICENSE.libgomp"
+          cp build/_deps/llama-src/LICENSE "$out/LICENSE.llama.cpp"
+          cp build/_deps/llama-src/licenses/LICENSE-jsonhpp "$out/LICENSE.jsonhpp"
+          cp build/_deps/sentencepiece-src/LICENSE "$out/LICENSE.sentencepiece"
+          cp build/_deps/sentencepiece-src/third_party/darts_clone/LICENSE "$out/LICENSE.darts_clone"
           cp include/vla.h LICENSE.md README.md "$out/"
           # vla-cli --text finds this in scripts/ next to itself.
           cp scripts/tokenize_prompt.py "$out/scripts/"
@@ -79,7 +84,7 @@ jobs:
 
       - name: smoke
         run: |
-          out="vla.cpp-${{ github.ref_name }}-${{ matrix.name }}"
+          out="vla.cpp-${GITHUB_REF_NAME//\//-}-${{ matrix.name }}"
           mv build build.moved
           ldd "$out"/vl*-* "$out"/*.so* > ldd.txt
           if grep -v libcuda.so.1 ldd.txt | grep 'not found'; then exit 1; fi
@@ -88,7 +93,7 @@ jobs:
       - name: cuda runtime
         if: matrix.cuda
         run: |
-          out="vla.cpp-${{ github.ref_name }}-${{ matrix.name }}"
+          out="vla.cpp-${GITHUB_REF_NAME//\//-}-${{ matrix.name }}"
           mkdir cudart
           cp -L /usr/local/cuda/lib64/lib{cudart,cublas,cublasLt}.so."${CUDA_VERSION%%.*}" cudart/
           tar -czf "cudart-$out.tar.gz" --transform "s,^cudart,$out," cudart
@@ -97,27 +102,33 @@ jobs:
         with:
           name: ${{ matrix.name }}
           path: '*.tar.gz'
+          if-no-files-found: error
 
   macos:
     runs-on: macos-15
+    env:
+      BINARIES: vla-cli vla-bench
     steps:
       - uses: actions/checkout@v7
 
       - name: deps
-        run: brew install cmake zeromq cppzmq protobuf
+        run: brew install cmake
 
       - name: build
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON -DGGML_NATIVE=OFF \
+            -DVLA_BUILD_SERVER=OFF -DVLA_SPM=OFF \
             -DCMAKE_INSTALL_RPATH='@loader_path' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
           cmake --build build -j"$(sysctl -n hw.ncpu)" --target $BINARIES vla
 
       - name: package
         run: |
-          out="vla.cpp-${{ github.ref_name }}-macos-arm64-metal"
+          out="vla.cpp-${GITHUB_REF_NAME//\//-}-macos-arm64-metal"
           mkdir -p "$out/scripts"
           for b in $BINARIES; do cp "build/$b" "$out/"; done
           cp -a build/*.dylib build/bin/*.dylib "$out/"
+          cp build/_deps/llama-src/LICENSE "$out/LICENSE.llama.cpp"
+          cp build/_deps/llama-src/licenses/LICENSE-jsonhpp "$out/LICENSE.jsonhpp"
           cp include/vla.h LICENSE.md README.md "$out/"
           cp scripts/tokenize_prompt.py "$out/scripts/"
           # Metal needs the shader library next to the binary.
@@ -126,9 +137,10 @@ jobs:
 
       - name: smoke
         run: |
-          out="vla.cpp-${{ github.ref_name }}-macos-arm64-metal"
+          out="vla.cpp-${GITHUB_REF_NAME//\//-}-macos-arm64-metal"
           mv build build.moved
           otool -L "$out"/vl*-* "$out"/*.dylib
+          if otool -L "$out"/vl*-* "$out"/*.dylib | grep -E '/opt/homebrew|/usr/local/'; then exit 1; fi
           for lib in $(otool -L "$out"/vl*-* "$out"/*.dylib | awk '/@rpath\//{print $1}' | sort -u); do
             test -e "$out/${lib#@rpath/}" || { echo "missing $lib"; exit 1; }
           done
@@ -138,6 +150,7 @@ jobs:
         with:
           name: macos-arm64-metal
           path: '*.tar.gz'
+          if-no-files-found: error
 
   docker:
     runs-on: ubuntu-24.04
@@ -156,7 +169,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: image name
-        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "REF=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -165,7 +180,7 @@ jobs:
             CUDA_ARCH=75-real;80-real;86-real;89-real;90;120-real
             GGML_NATIVE=OFF
           tags: |
-            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:${{ env.REF }}
             ${{ env.IMAGE }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

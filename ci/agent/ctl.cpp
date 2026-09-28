@@ -159,6 +159,9 @@ int main(int argc, char** argv) {
         std::string jexpr = jobs.empty() ? "$(getconf _NPROCESSORS_ONLN)" : jobs;
         std::string prelude = rest("--prelude");             // shell run first, e.g. CUDA exports (Jetson)
         std::string script = "set -e; " + (prelude.empty() ? std::string() : prelude + " ") +
+            "t=$(bash scripts/llama_tag.sh); "
+            "grep -qx \"VLA_LLAMA_TAG:STRING=$t\" build/CMakeCache.txt 2>/dev/null || "
+            "rm -rf build/CMakeCache.txt build/_deps; "
             "cmake -B build -DCMAKE_BUILD_TYPE=Release " + flags + "; "
             "cmake --build build -j" + jexpr;
         auto* e = req.mutable_exec();
