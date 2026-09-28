@@ -63,6 +63,32 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Fixed
 
+- π0 fed its image tokens to the language model scaled by 1/sqrt(2048). Every
+  reference, including the lerobot v0.4.4 code that trained the shipped
+  checkpoint, feeds the raw projector output. On 100 paired LIBERO-Object
+  episodes π0 goes from 83 to 90 successes. π0.5 dropped the same scale and
+  its undo, a rounding-level change.
+- TurboVLA skipped DINOv3's final LayerNorm, which the checkpoint was trained
+  through, so its actions were off by up to 0.47. It now matches the PyTorch
+  reference to 9e-6. The converter writes `vit.norm`, and a GGUF without it
+  fails to load with a message to re-convert (the published one needs that).
+- Octo now matches the JAX reference it was trained with: tanh GELU (flax's
+  default) instead of erf, JAX GroupNorm and StdConv epsilons, F32 im2col in
+  the stem, and discretized proprio bins that were off by one. Readout is within
+  2e-6 of JAX on CPU.
+- The Qwen3-VL patch mergers used tanh GELU where the reference uses erf, which
+  moved GR00T N1.7 and VLA-JEPA vision features by up to 4e-3. GR00T N1.7 goes
+  from 97 to 99 on 100 paired LIBERO-Object episodes.
+- SmolVLA rounded its F32 cross-attention k/v projections to BF16. With them
+  kept in F32 it goes from 90 to 92 on 100 paired episodes.
+- The eval client sent VLA-Adapter raw proprio where the reference normalizes it
+  with q01/q99 bounds, and mapped constant GR00T state dims to -1 where the
+  reference uses 0. VLA-Adapter is unchanged on LIBERO-Object (298 vs 295 of 300
+  paired episodes, not significant) but now sees the inputs it was trained on.
+- Evo-1's fallback prompt lacked the `Image-N:` prefixes, and its constant state
+  dims were normalized differently from the reference. BitVLA truncated f32 to
+  bf16 instead of rounding to nearest even, and its legacy unpacked path
+  under-scaled every BitLinear.
 - `--flash-attn` never reached the GR00T N1.5 and N1.6 towers, and the shared
   encoder's flash path aborted with more than one view. Both are wired now; on
   CUDA the flash path is within 5e-3 of the default for both archs. The default
@@ -186,6 +212,16 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Changed
 
+- Faster predict with byte-identical actions, measured on an RTX 5090 (min over
+  interleaved rounds): π0.5 -14%, TurboVLA -15%, SmolVLA -12%, GR00T N1.6 -11%,
+  Octo -9%, GR00T N1.7 -8%, π0 -7%, VLA-Adapter -6%, GR00T N1.5 -5%, VLA-JEPA
+  -5%, OpenVLA-OFT and Evo-1 -3%. π0.5's adaRMS and the DiT heads' timestep
+  conditioning are computed once at load, GR00T keeps only the selected
+  embodiment's projectors resident (1.2 GiB less VRAM), SmolVLA widens its
+  weights to F32 at load instead of on every call (0.7 GiB more VRAM), TurboVLA
+  caches the encoded instruction, and vision outputs stay on the device.
+- About 1300 lines of per-arch copies now use the shared `src/layers` and
+  `src/modules` code, byte-identical for every arch.
 - The Docker image is multi-stage (devel to runtime) and the published one
   covers sm_75 to sm_121 with `GGML_NATIVE=OFF`, instead of sm_89 only. CUDA 13.4
   is a build-arg for drivers 580 and newer.
