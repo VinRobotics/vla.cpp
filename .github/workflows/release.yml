@@ -1,19 +1,14 @@
-# Tagged binaries and a container image. build.yml already compiles all of this
-# on every push; this is the same work with the artifacts kept.
+# Tagged binaries and a container image. A tag push publishes them; a manual
+# run builds the same artifacts on the chosen ref and publishes nothing.
 name: release
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Tag to build (dry run, nothing is published)
-        required: true
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 env:
   BINARIES: vla-server vlm-server vla-cli vla-bench
@@ -21,59 +16,82 @@ env:
 jobs:
   linux:
     runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: linux-x86_64-cpu
-            cmake: -DGGML_CUDA=OFF
-            cuda: false
             runner: ubuntu-24.04
-          - name: linux-x86_64-cuda
-            cmake: -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="75;86;89;120"
+            image: ubuntu:24.04
+            cmake: -DGGML_CUDA=OFF
+          - name: linux-x86_64-cuda-12.8
+            runner: ubuntu-24.04
+            image: nvidia/cuda:12.8.1-devel-ubuntu24.04
+            cmake: -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="75-real;80-real;86-real;89-real;90;120-real"
             cuda: true
+          - name: linux-x86_64-cuda-13.4
             runner: ubuntu-24.04
-          # Jetson and other aarch64 boards. Native arm64 runner, CPU only: the
-          # hosted images carry no CUDA for arm64, so a Jetson GPU build still
-          # has to happen on the device.
+            image: nvidia/cuda:13.4.1-devel-ubuntu24.04
+            cmake: -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="75-real;80-real;86-real;89-real;90;120-real"
+            cuda: true
           - name: linux-aarch64-cpu
-            cmake: -DGGML_CUDA=OFF
-            cuda: false
             runner: ubuntu-24.04-arm
+            image: ubuntu:24.04
+            cmake: -DGGML_CUDA=OFF -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16
+          - name: linux-aarch64-cuda-13.4
+            runner: ubuntu-24.04-arm
+            image: nvidia/cuda:13.4.1-devel-ubuntu24.04
+            cmake: -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="87-real;110-real;121-real" -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16
+            cuda: true
     steps:
-      - uses: actions/checkout@v7
-
       - name: deps
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            build-essential cmake git ca-certificates pkg-config \
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            build-essential cmake git ca-certificates pkg-config python3 \
             libzmq3-dev cppzmq-dev libprotobuf-dev protobuf-compiler
 
-      - name: cuda toolkit
-        if: matrix.cuda
-        run: |
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends cuda-toolkit-12-8
-          echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v7
 
       - name: build
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake }}
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            ${{ matrix.cuda && '-DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined -DGGML_CUDA_NCCL=OFF' || '' }} ${{ matrix.cmake }}
           cmake --build build -j"$(nproc)" --target $BINARIES vla
 
       - name: package
         run: |
           out="vla.cpp-${{ github.ref_name }}-${{ matrix.name }}"
-          mkdir -p "$out"
+          mkdir -p "$out/scripts"
           for b in $BINARIES; do cp "build/$b" "$out/"; done
-          cp build/libvla.so "$out/"
+          cp -P build/*.so* build/bin/*.so* "$out/"
+          ldd "$out/vla-server" | awk '/libgomp|libprotobuf/ {print $3}' | xargs cp -L -t "$out/"
+          cp /usr/share/doc/libprotobuf32t64/copyright "$out/LICENSE.protobuf"
           cp include/vla.h LICENSE.md README.md "$out/"
           # vla-cli --text runs this; VLA_TOKENIZE_SCRIPT points at it.
-          mkdir -p "$out/scripts" && cp scripts/tokenize_prompt.py "$out/scripts/"
+          cp scripts/tokenize_prompt.py "$out/scripts/"
           tar -czf "$out.tar.gz" "$out"
+
+      - name: smoke
+        run: |
+          out="vla.cpp-${{ github.ref_name }}-${{ matrix.name }}"
+          mv build build.moved
+          ldd "$out"/vl*-* "$out"/*.so* > ldd.txt
+          if grep -v libcuda.so.1 ldd.txt | grep 'not found'; then exit 1; fi
+          LD_LIBRARY_PATH=/usr/local/cuda/compat "$out/vla-cli" --help
+
+      - name: cuda runtime
+        if: matrix.cuda
+        run: |
+          out="vla.cpp-${{ github.ref_name }}-${{ matrix.name }}"
+          mkdir cudart
+          cp -L /usr/local/cuda/lib64/lib{cudart,cublas,cublasLt}.so."${CUDA_VERSION%%.*}" cudart/
+          tar -czf "cudart-$out.tar.gz" --transform "s,^cudart,$out," cudart
 
       - uses: actions/upload-artifact@v7
         with:
@@ -90,20 +108,31 @@ jobs:
 
       - name: build
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON -DGGML_NATIVE=OFF \
+            -DCMAKE_INSTALL_RPATH='@loader_path' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
           cmake --build build -j"$(sysctl -n hw.ncpu)" --target $BINARIES vla
 
       - name: package
         run: |
           out="vla.cpp-${{ github.ref_name }}-macos-arm64-metal"
-          mkdir -p "$out"
+          mkdir -p "$out/scripts"
           for b in $BINARIES; do cp "build/$b" "$out/"; done
-          cp build/libvla.dylib "$out/"
+          cp -a build/*.dylib build/bin/*.dylib "$out/"
           cp include/vla.h LICENSE.md README.md "$out/"
-          mkdir -p "$out/scripts" && cp scripts/tokenize_prompt.py "$out/scripts/"
+          cp scripts/tokenize_prompt.py "$out/scripts/"
           # Metal needs the shader library next to the binary.
           find build -name 'default.metallib' -exec cp {} "$out/" \;
           tar -czf "$out.tar.gz" "$out"
+
+      - name: smoke
+        run: |
+          out="vla.cpp-${{ github.ref_name }}-macos-arm64-metal"
+          mv build build.moved
+          otool -L "$out"/vl*-* "$out"/*.dylib
+          for lib in $(otool -L "$out"/vl*-* "$out"/*.dylib | awk '/@rpath\//{print $1}' | sort -u); do
+            test -e "$out/${lib#@rpath/}" || { echo "missing $lib"; exit 1; }
+          done
+          "$out/vla-cli" --help
 
       - uses: actions/upload-artifact@v7
         with:
@@ -112,11 +141,16 @@ jobs:
 
   docker:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
     steps:
+      - name: free disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -126,7 +160,10 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: .
-          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          push: ${{ github.event_name == 'push' }}
+          build-args: |
+            CUDA_ARCH=75-real;80-real;86-real;89-real;90;120-real
+            GGML_NATIVE=OFF
           tags: |
             ${{ env.IMAGE }}:${{ github.ref_name }}
             ${{ env.IMAGE }}:latest
@@ -135,8 +172,10 @@ jobs:
 
   publish:
     needs: [linux, macos, docker]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       # Tarballs only. The docker job also leaves a .dockerbuild build record
       # artifact behind, and pulling that one fails the whole download.

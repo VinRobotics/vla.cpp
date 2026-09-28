@@ -6,6 +6,24 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 
+- Release tarballs that run off the CI runner: every shared library ships next
+  to the binaries with an `$ORIGIN` (`@loader_path`) rpath, builds use
+  `GGML_NATIVE=OFF`, and a smoke step checks `ldd`/`otool -L` and runs
+  `vla-cli --help` with the build tree moved away. New
+  `linux-x86_64-cuda-13.4` and `linux-aarch64-cuda-13.4` (sm_87, sm_110,
+  sm_121) tarballs, each with a `cudart-*.tar.gz`; the x86 CUDA list gains sm_80
+  and sm_90. `vla-server` still needs `libzmq5` from the system; the aarch64 CUDA
+  build needs glibc 2.39 and a CUDA 13 driver, so not JetPack 6.
+- `cmake --install` installs the binaries and libraries with a relocatable
+  `$ORIGIN/../lib` rpath, and `bindings/python` builds a self-contained wheel
+  with scikit-build-core (`pip install ./bindings/python`).
+- `vla-cli` takes the precision flags and `--config`, like `vla-server`.
+- `-hf user/repo:sub/dir/file.gguf` and llama.cpp-style `:Q8_0` tags. A repo
+  with several GGUFs lists them instead of picking the largest, and only GGUFs
+  are downloaded.
+- `vla-cli --text` builds each arch's real prompt (pi0.5 digitizes `--state`
+  into it, OpenVLA-OFT appends its empty token, VLA-Adapter uses its chat
+  template), matching the eval client token for token.
 - **Snapdragon X on Windows on Arm: Hexagon NPU, Adreno GPU and CPU.**
   - `-DGGML_HEXAGON=ON` and `-DGGML_OPENCL=ON` build natively with Visual
     Studio's Clang; `scripts/build_windows_snapdragon.ps1` drives the build,
@@ -168,6 +186,12 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Changed
 
+- The Docker image is multi-stage (devel to runtime) and the published one
+  covers sm_75 to sm_121 with `GGML_NATIVE=OFF`, instead of sm_89 only. CUDA 13.4
+  is a build-arg for drivers 580 and newer.
+- A missing `--config` file is an error instead of being ignored.
+- Release workflow tokens are least-privilege, and a manual run builds without
+  publishing.
 - llama.cpp pinned at `b11223`, up from `b10331` (via `b10729`). Brings the
   IM2COL+MatMul to native-convolution fusion, the `RELU`/`NEG`/`SQR` translators
   the local patch no longer adds, CUDA RMS_NORM+SCALE fusion, fixes for a

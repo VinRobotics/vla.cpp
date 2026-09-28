@@ -22,7 +22,9 @@ below.
 ### Prerequisites
 
 - [Docker Compose](https://docs.docker.com/compose/) v2.24+
-- NVIDIA GPU with proprietary driver ≥ 535.
+- NVIDIA driver 525 or newer. The default image is CUDA 12.9, which runs on
+  older 12.x drivers under CDI. With `--gpus all` on a GeForce card the
+  driver has to be 575 or newer; see [Known issues](#known-issues).
 - CDI GPU access for Docker (`devices: - nvidia.com/gpu=all`). See
   [CUDA GPU access](#cuda-gpu-access) for runtime setup details.
 
@@ -51,10 +53,16 @@ Build args accepted by the server `Dockerfile`:
 
 | Arg | Default | Notes |
 |-----|---------|-------|
-| `BACKEND` | `cuda` | `cuda` or `cpu` |
-| `CUDA_ARCH` | `120` in Compose, `89` in the `Dockerfile` | Blackwell; `89` for RTX40, `87` for Orin, `86` for RTX30 |
-| `BASE_IMAGE` | `nvidia/cuda:12.9.1-devel-ubuntu24.04` | Set to `ubuntu:24.04` when building a CPU image |
+| `BACKEND` | `cuda` | `cuda` or `cpu`. `cpu` builds and runs on `ubuntu:24.04` |
+| `CUDA_VERSION` | `12.9.1` | Picks the `nvidia/cuda` `-devel` build and `-runtime` run images. `13.4.1` needs driver 580 or newer |
+| `CUDA_ARCH` | `120` in Compose, `75-real;80-real;86-real;89-real;90;120-real;121-real` in the `Dockerfile` | One arch builds much faster: `86` RTX30, `89` RTX40, `90` H100, `87` Orin, `120` RTX50 |
+| `GGML_NATIVE` | `ON` | Tunes the CPU code for the build machine. `OFF` gives a portable image |
 | `JOBS` | `nproc` | Lower if nvcc segfaults on flash-attn kernels |
+
+The build runs in a `-devel` stage. The final image holds only `vla-server`,
+`vla-cli` and their libraries in `/app`, on the matching `-runtime` base.
+A local build is tuned for the CPU it was built on. The published image is
+built with `GGML_NATIVE=OFF` and runs on any x86-64 CPU with AVX2.
 
 Override the arch from the environment, `CUDA_ARCH=89 docker compose -f eval/docker-compose.yml build server`,
 or per build, `docker compose -f eval/docker-compose.yml build --build-arg CUDA_ARCH=89 server`.
@@ -132,9 +140,7 @@ server image with `BACKEND=cpu`:
 ### 1. Build the server image for CPU
 
 ```bash
-docker build -t vla-cpp-cpu \
-    --build-arg BACKEND=cpu \
-    --build-arg BASE_IMAGE=ubuntu:24.04 .
+docker build -t vla-cpp-cpu --build-arg BACKEND=cpu .
 ```
 
 ### 2. Download the model
@@ -220,7 +226,8 @@ via hostname `server`.
 
 The server service in `eval/docker-compose.yml` uses CDI
 (`devices: - nvidia.com/gpu=all`). This works when:
-1. The NVIDIA proprietary driver is installed (≥ 535).
+1. The NVIDIA proprietary driver is installed (525 or newer for the default
+   CUDA 12.9 image, 580 or newer for `CUDA_VERSION=13.4.1`).
 2. A CDI-enabled container runtime is available (containerd ≥ 1.7,
    cri-o ≥ 1.29, or Docker with `nvidia-ctk` from `nvidia-container-toolkit`
    ≥ 1.15 to generate `/etc/cdi/nvidia.yaml`).
@@ -246,12 +253,13 @@ docker run --rm --gpus all -p5555:5555 \
     vla-cpp-server --bind tcp://*:5555 /models/model.gguf
 ```
 
+Each release also publishes this image, built for CUDA 12.9 and sm_75 to sm_120:
+`ghcr.io/vinrobotics/vla.cpp:<tag>` or `:latest`.
+
 ### Server only (CPU)
 
 ```bash
-docker build -t vla-cpp-cpu \
-    --build-arg BACKEND=cpu \
-    --build-arg BASE_IMAGE=ubuntu:24.04 .
+docker build -t vla-cpp-cpu --build-arg BACKEND=cpu .
 
 docker run --rm -p5555:5555 \
     -v /tmp/smolvla-models:/models:ro \
@@ -275,7 +283,8 @@ docker run --rm -it --network host \
 
 | Issue | Workaround |
 |-------|-----------|
-| `Unsupported gpu architecture 'compute_120'` with CUDA < 12.8 | Use CUDA 12.8+ for `sm_120`, or set `CUDA_ARCH=89` for RTX40-series compatibility |
+| `Unsupported gpu architecture 'compute_121'` (or `compute_120`) | `CUDA_VERSION` is too old for the arch list: 121 needs 12.9, 120 needs 12.8. Use the default `12.9.1`, or pass a `CUDA_ARCH` without them |
+| `unsatisfied condition: cuda>=12.9` (or `cuda>=13.4`) with `--gpus all` | The container toolkit waives this check only for datacenter and workstation cards. On GeForce, update the driver, use CDI, or add `-e NVIDIA_DISABLE_REQUIRE=1` (driver 525+ for the default image, 580+ for `CUDA_VERSION=13.4.1`) |
 | NumPy 2.x: `module 'numpy' has no attribute 'core'` | `Dockerfile.client` pins `numpy==1.26.4` and patches accelerate |
 | `lerobot` pulls GPU torch | `Dockerfile.client` re-pins `torch==2.5.1` (CPU) after installing lerobot |
 | LIBERO data files not found | Editable install (`-e`) keeps `bddl_files/` / `init_files/` / `assets/` accessible at runtime |
@@ -283,7 +292,7 @@ docker run --rm -it --network host \
 | `pandas` segfaults on import | Pin `pandas==2.0.3` (last NumPy 1.x-compatible release) |
 | MuJoCo 3.x: robosuite init fails | Pin `mujoco<3.0` (2.3.7 known-good) |
 | `nvidia-container-toolkit` not installed | Use CDI (`devices: - nvidia.com/gpu=all`) instead of `runtime: nvidia` |
-| CPU-only: no GPU available | Use the CPU-only `docker build` / `docker run` flow above, or maintain a Compose override that removes `devices: - nvidia.com/gpu=all` and builds with `BACKEND=cpu` plus `BASE_IMAGE=ubuntu:24.04` |
+| CPU-only: no GPU available | Use the CPU-only `docker build` / `docker run` flow above, or maintain a Compose override that removes `devices: - nvidia.com/gpu=all` and builds with `BACKEND=cpu` |
 
 ---
 
@@ -292,9 +301,9 @@ docker run --rm -it --network host \
 The Docker evaluation stack provides a reproducible two-container workflow for
 vla.cpp:
 
-1. **Server** — upstream `Dockerfile`, compiles `vla-server` with GPU by default
-   in Compose or with a CPU backend in the standalone CPU flow.
-2. **Client** — `eval/Dockerfile.client`, Python simulation stack with pinned
+1. **Server**: root `Dockerfile`, builds `vla-server` for CUDA by default or
+   for CPU with `BACKEND=cpu`, and ships it on a runtime-only base.
+2. **Client**: `eval/Dockerfile.client`, Python simulation stack with pinned
    dependency versions (NumPy 1.x, MuJoCo 2.x, Pandas 2.0.x).
 3. **CDI** is the GPU access path used by the checked-in Compose file.
 4. **CPU-only** mode works without any GPU through the standalone Docker commands
