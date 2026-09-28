@@ -249,6 +249,10 @@ TurboVLA and Octo ship F32 GGUFs, so their "CPU BF16" column is the F32 default.
 | TurboVLA | 7.1e-3 | 6.0e-4 | 1.1e-6 |
 | Octo-Small | 0 | 5.2e-4 | 8.2e-4 |
 
+The GR00T N1.5 and N1.6 rows predate flash attention reaching their towers.
+Hexagon turns it on by default, so both now run it there; they were not
+re-measured.
+
 † Against the CPU BF16 run. An F32 reference for π0.5 needs more memory than the 8 GB budget.
 
 The accelerators are often closer to F32 than the CPU running the same F16 weights. ggml's CPU matmul converts activations to the weight's type (F16 here), while HTP and Adreno keep them in F32.

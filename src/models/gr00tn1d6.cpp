@@ -147,6 +147,7 @@ bool load_config(const gguf_reader & g, Gr00tN1d6ModelArch & m, Config & cfg) {
     }
     m.vit.enc.cfg.head_dim = m.vit.enc.cfg.hidden/m.vit.enc.cfg.heads;
     m.lm.cfg.rope.n_dims   = (int) m.lm.cfg.head_dim;
+    m.vit.enc.cfg.flash_attn = m.lm.cfg.flash_attn = flash_attn_enabled();
 
     m.aex.embodiment_id = 20;
     if (!resolve_embodiment("gr00tn1d6", g.str(fk("embodiment_id_mapping")), "gr1", m.max_embodiments, m.aex.embodiment_id))

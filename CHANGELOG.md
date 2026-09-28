@@ -45,6 +45,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Fixed
 
+- `--flash-attn` never reached the GR00T N1.5 and N1.6 towers, and the shared
+  encoder's flash path aborted with more than one view. Both are wired now; on
+  CUDA the flash path is within 5e-3 of the default for both archs. The default
+  path is unchanged.
 - vla-server no longer dies on a bad request. An out-of-vocab Octo token, 9 to
   16 OpenVLA-OFT or VLA-Adapter views, a BitVLA prompt past 1024 tokens, or Octo
   stats without a mask each abort the process today; they now get an error

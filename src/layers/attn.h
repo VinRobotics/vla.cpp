@@ -53,7 +53,7 @@ inline ggml_tensor * flash_attention(ggml_context * C, ggml_tensor * Q, ggml_ten
 
     ggml_tensor * o = ggml_flash_attn_ext(C, Q, kf, vf, mask, scale, 0.0f, 0.0f);
     ggml_prec_set_acc(o, GGML_PREC_F32);
-    return ggml_reshape_2d(C, o, o->ne[0]*o->ne[1], o->ne[2]*o->ne[3]);
+    return ggml_reshape_3d(C, o, o->ne[0]*o->ne[1], o->ne[2], o->ne[3]);
 }
 
 }
