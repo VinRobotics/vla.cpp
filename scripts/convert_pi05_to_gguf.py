@@ -23,7 +23,6 @@ import numpy as np
 from safetensors import safe_open
 
 from gguf_blocks import (
-    lerobot_stats,
     norm_eps,
     pi_root,
     probe_paligemma_vision,
@@ -157,7 +156,7 @@ def main() -> int:
         "--dataset-stats",
         type=Path,
         default=None,
-        help="Path to a LIBERO dataset meta/stats.json for MEAN_STD norm stats"
+        help="Path to a LIBERO dataset meta/stats.json for QUANTILES norm stats"
     )
     ap.add_argument(
         "--dataset-repo",
@@ -177,8 +176,9 @@ def main() -> int:
         raise SystemExit(f"config.json type is {cfg_json.get('type')!r}, expected 'pi05'")
     norm_map = cfg_json.get("normalization_mapping") or {}
     norm_mode = norm_map.get("ACTION", "QUANTILES")
-    if norm_mode not in ("QUANTILES", "MEAN_STD") or norm_map.get("STATE", "QUANTILES") != norm_mode:
-        raise SystemExit(f"unsupported pi05 normalization_mapping {norm_map}")
+    if norm_mode != "QUANTILES" or norm_map.get("STATE", "QUANTILES") != norm_mode:
+        raise SystemExit(f"unsupported pi05 normalization_mapping {norm_map}: only QUANTILES is supported, "
+                         f"the state prompt is always binned with q01/q99")
 
     cfg = dict(GEMMA_2B, **GEMMA_300M)
     cfg["paligemma_variant"]     = str(cfg_json.get("paligemma_variant", "gemma_2b"))
@@ -247,19 +247,15 @@ def main() -> int:
           f"heads={v['vit_heads']} image={v['image_size']} patch={v['patch_size']} "
           f"tokens={v['n_img_tokens']} ln_eps={v['vit_ln_eps']:g}")
 
-    if norm_mode == "MEAN_STD":
-        print("loading normalizer stats...")
-        stats = lerobot_stats(sf, ckpt, cfg["real_state_dim"], cfg["real_action_dim"], norm_map)
-    else:
-        print("loading dataset normalizer stats...")
-        stats = _load_dataset_stats(
-            args.dataset_stats,
-            args.dataset_repo,
-            cfg["real_state_dim"],
-            cfg["real_action_dim"]
-        )
-        print(f"  state_q01[:3]={stats['state_q01'][:3]}  state_q99[:3]={stats['state_q99'][:3]}")
-        print(f"  action_q01[:3]={stats['action_q01'][:3]}  action_q99[:3]={stats['action_q99'][:3]}  (QUANTILES)")
+    print("loading dataset normalizer stats...")
+    stats = _load_dataset_stats(
+        args.dataset_stats,
+        args.dataset_repo,
+        cfg["real_state_dim"],
+        cfg["real_action_dim"]
+    )
+    print(f"  state_q01[:3]={stats['state_q01'][:3]}  state_q99[:3]={stats['state_q99'][:3]}")
+    print(f"  action_q01[:3]={stats['action_q01'][:3]}  action_q99[:3]={stats['action_q99'][:3]}  (QUANTILES)")
 
     writer = open_writer(out, ARCH)
     write_pi_kv(writer, KV, cfg, adarms=True)

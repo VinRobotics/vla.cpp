@@ -44,6 +44,8 @@ Env overrides: BIND_ADDR, CLIENT_ADDR, BITVLA_TOKENIZER, GR00T_N1_6_TOKENIZER,
                PALIGEMMA_TOKENIZER (pi0/pi05), TURBOVLA_STATS, VLA_JEPA_STATS,
                TASK_IDS (default "0 1 2 3 4 5 6 7 8 9"),
                SERVER_BIN (prebuilt vla-server; setting it skips the build),
+               VLA_JEPA_PYTHON (python for the vla_jepa client; it needs LIBERO and
+                                transformers>=5.4, default is the LIBERO venv),
                VLA_FIXED_NOISE_SEED (client-side noise, for paired A/B runs)
 EOF
 }
@@ -99,6 +101,7 @@ SERVER_BIN="${SERVER_BIN:-${REPO_ROOT}/build/vla-server}"
 TASK_IDS="${TASK_IDS:-0 1 2 3 4 5 6 7 8 9}"
 PALIGEMMA_TOKENIZER="${PALIGEMMA_TOKENIZER:-}"
 VENV_PY="${REPO_ROOT}/eval/sim/libero/libero_uv/.venv/bin/python"
+VLA_JEPA_PYTHON="${VLA_JEPA_PYTHON:-${VENV_PY}}"
 CLIENT="${REPO_ROOT}/eval/client/run_sim_client_direct.py"
 BIND_ADDR="${BIND_ADDR:-tcp://*:5555}"
 CLIENT_ADDR="${CLIENT_ADDR:-tcp://localhost:5555}"
@@ -298,6 +301,10 @@ run_model() {
     shift 4
     local server_args=("$@")
     local client_extra=()
+    local client_py="${VENV_PY}"
+    if [[ "${arch}" == vla_jepa ]]; then
+        client_py="${VLA_JEPA_PYTHON}"
+    fi
 
     # bitvla auto-loads tokenizer + dataset_statistics.json from the GGUF repo on
     # the Hub; only pass --tokenizer when BITVLA_TOKENIZER overrides with a local dir.
@@ -360,7 +367,7 @@ run_model() {
 
     for task_id in ${TASK_IDS}; do
         echo "[${arch}] task_id=${task_id}  episodes=${N_EPISODES}"
-        "${VENV_PY}" "${CLIENT}" \
+        "${client_py}" "${CLIENT}" \
             --arch "${arch}" \
             --vla-addr "${CLIENT_ADDR}" \
             --task "${TASK_SUITE}" \
@@ -517,14 +524,16 @@ fi
 
 if should_run vla_jepa; then
     jepa_stats="${VLA_JEPA_STATS:-${MODELS_ROOT}/vla-jepa-libero}"
-    if [[ -f "${jepa_stats}/policy_preprocessor_step_3_normalizer_processor.safetensors" ]]; then
+    if [[ ! -f "${jepa_stats}/policy_preprocessor_step_3_normalizer_processor.safetensors" ]]; then
+        echo "[skip] vla_jepa: policy_{pre,post}processor safetensors not found in ${jepa_stats}; set VLA_JEPA_STATS to override"
+    elif ! "${VLA_JEPA_PYTHON}" -c 'import sys, transformers as t; sys.exit(tuple(int(x) for x in t.__version__.split(".")[:2]) < (5, 4))'; then
+        echo "[skip] vla_jepa: the client needs transformers>=5.4, which ${VLA_JEPA_PYTHON} lacks; set VLA_JEPA_PYTHON to a python with LIBERO and transformers>=5.4"
+    else
         run_model vla_jepa \
             "${MODELS_ROOT}/vla-jepa-libero" \
             "${N_ACTION_STEPS_VLA_JEPA}" \
             "${jepa_stats}" \
             "${MODELS_ROOT}/vla-jepa-libero/vla-jepa.gguf"
-    else
-        echo "[skip] vla_jepa: policy_{pre,post}processor safetensors not found in ${jepa_stats}; set VLA_JEPA_STATS to override"
     fi
 fi
 

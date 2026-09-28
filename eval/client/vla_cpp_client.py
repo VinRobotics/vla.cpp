@@ -203,6 +203,7 @@ class VlaCppClient:
         self._step = 0
         self._episode = 0
         self._last_response = None
+        self._noise_len = None
 
         if n_action_steps < 1:
             raise ValueError(f"n_action_steps must be >= 1, got {n_action_steps}")
@@ -954,10 +955,9 @@ class VlaCppClient:
     _EVO1_IMG_CTX           = "<IMG_CONTEXT>"
     _EVO1_NUM_IMAGE_TOKEN   = 256
     _EVO1_MAX_TEXT_LENGTH   = 1024
-    _FIXED_NOISE_LEN = {
-        "smolvla": 50 * 32, "pi0": 50 * 32, "pi05": 50 * 32, "evo1": 50 * 24,
-        "gr00t_n1_5": 16 * 32, "gr00t_n1_6": 50 * 128, "gr00t_n1_7": 40 * 132,
-        "vla_jepa": 7 * 7, "octo": 4 * 7,
+    _FIXED_NOISE_ARCHS = {
+        "smolvla", "pi0", "pi05", "evo1", "gr00t_n1_5", "gr00t_n1_6", "gr00t_n1_7",
+        "vla_jepa", "octo",
     }
 
     def _maybe_add_fixed_noise(self, req) -> None:
@@ -969,9 +969,16 @@ class VlaCppClient:
         verifiable: same inputs plus same noise must give the same actions.
         """
         seed = os.environ.get("VLA_FIXED_NOISE_SEED")
-        n = self._FIXED_NOISE_LEN.get(self.arch)
-        if seed is None or not n:
+        if seed is None or self.arch not in self._FIXED_NOISE_ARCHS:
             return
+        if self._noise_len is None:
+            self.sock.send(req.SerializeToString())
+            r = self.pb.PredictResponse()
+            r.ParseFromString(self.sock.recv())
+            if r.error:
+                raise RuntimeError(f"vla-server error: {r.error}")
+            self._noise_len = r.chunk_size * r.action_dim
+        n = self._noise_len
         # Vary per step but reproducibly, so a replay of the same episode sends
         # the same sequence of noise vectors.
         rng = np.random.default_rng([int(seed), self._episode, self._step])
