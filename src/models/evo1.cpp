@@ -76,6 +76,7 @@ struct Evo1ModelArch : public ModelArchBase {
     struct MainIO {
         ggml_tensor *t_embeds=nullptr,*t_pos=nullptr,*t_lmmask=nullptr,*t_qmask=nullptr;
         ggml_tensor *t_state=nullptr,*t_x=nullptr,*t_amask=nullptr,*x_action=nullptr;
+        std::vector<int32_t> lm_ok;
     };
     graph_cache<MainKey, MainIO> main_graph;
     ggml_backend_buffer_t weight_buf  = nullptr;
@@ -595,7 +596,17 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     const int64_t SEQ = max_text_length;
 
     std::vector<float> inputs_embeds((size_t) SEQ * lm_hidden);
-    if (!io.fetch_rows_f32("token_embd.weight", input_ids, inputs_embeds.data(), lm_hidden)) return {};
+    {
+        std::vector<int32_t> uniq(input_ids);
+        std::sort(uniq.begin(), uniq.end());
+        uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
+        std::vector<float> rows(uniq.size() * lm_hidden);
+        if (!io.fetch_rows_f32("token_embd.weight", uniq, rows.data(), lm_hidden)) return {};
+        for (int64_t p=0; p<SEQ; ++p) {
+            const size_t r = std::lower_bound(uniq.begin(), uniq.end(), input_ids[p])-uniq.begin();
+            std::memcpy(inputs_embeds.data()+p * lm_hidden, rows.data()+r * lm_hidden, lm_hidden * sizeof(float));
+        }
+    }
     {
         int64_t img_idx = 0;
         for (int64_t p=0; p<SEQ; ++p) {
@@ -672,6 +683,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_tensor * t_state    = ggml_new_tensor_1d(C, GGML_TYPE_F32, per_a);              ggml_set_input(t_state);
     ggml_tensor * t_x        = ggml_new_tensor_1d(C, GGML_TYPE_F32, action_dim);         ggml_set_input(t_x);
     ggml_tensor * t_amask    = ggml_new_tensor_1d(C, GGML_TYPE_F32, per_a);              ggml_set_input(t_amask);
+    ggml_set_output(t_pos); ggml_set_output(t_lmmask); ggml_set_output(t_qmask); ggml_set_output(t_amask);
 
     const ggml_type at = act_type;
 
@@ -763,21 +775,22 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_tensor * t_amask = gio.t_amask, * x_action = gio.x_action;
 
     ggml_backend_tensor_set(t_embeds, inputs_embeds.data(), 0, ggml_nbytes(t_embeds));
-    {
+    if (gio.lm_ok != attn_ok) {
         std::vector<int32_t> pp(SEQ);
         for (int64_t i=0; i<SEQ; ++i)
             pp[i] = (int32_t) i;
         ggml_backend_tensor_set(t_pos, pp.data(), 0, ggml_nbytes(t_pos));
+        { std::vector<float> mk((size_t) SEQ * SEQ); const float NEG = -std::numeric_limits<float>::infinity();
+          for (int64_t q=0; q<SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) mk[q * SEQ+kv] = (kv == q || (kv <= q && attn_ok[kv])) ? 0.0f : NEG;
+          ggml_backend_tensor_set(t_lmmask, mk.data(), 0, ggml_nbytes(t_lmmask)); }
+        { std::vector<float> am(per_a, 0.0f); for (int64_t i=0; i<real_action_dim && i<per_a; ++i) am[i] = 1.0f;
+          ggml_backend_tensor_set(t_amask, am.data(), 0, ggml_nbytes(t_amask)); }
+        { std::vector<float> qm(SEQ, 0.0f); for (int64_t p=0; p<SEQ; ++p) qm[p] = attn_ok[p] ? 1.0f : 0.0f;
+          ggml_backend_tensor_set(t_qmask, qm.data(), 0, ggml_nbytes(t_qmask)); }
+        gio.lm_ok = attn_ok;
     }
-    { std::vector<float> mk((size_t) SEQ * SEQ); const float NEG = -std::numeric_limits<float>::infinity();
-      for (int64_t q=0; q<SEQ; ++q) for (int64_t kv = 0; kv < SEQ; ++kv) mk[q * SEQ+kv] = (kv == q || (kv <= q && attn_ok[kv])) ? 0.0f : NEG;
-      ggml_backend_tensor_set(t_lmmask, mk.data(), 0, ggml_nbytes(t_lmmask)); }
     ggml_backend_tensor_set(t_state, state_norm.data(), 0, ggml_nbytes(t_state));
     ggml_backend_tensor_set(t_x, x_init.data(), 0, ggml_nbytes(t_x));
-    { std::vector<float> am(per_a, 0.0f); for (int64_t i=0; i<real_action_dim && i<per_a; ++i) am[i] = 1.0f;
-      ggml_backend_tensor_set(t_amask, am.data(), 0, ggml_nbytes(t_amask)); }
-    { std::vector<float> qm(SEQ, 0.0f); for (int64_t p=0; p<SEQ; ++p) qm[p] = attn_ok[p] ? 1.0f : 0.0f;
-      ggml_backend_tensor_set(t_qmask, qm.data(), 0, ggml_nbytes(t_qmask)); }
 
     graph_unique_names(gf);
     const auto tc0 = std::chrono::steady_clock::now();

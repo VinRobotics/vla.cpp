@@ -105,7 +105,8 @@ struct DualTower {
         pj_fc3w = L.gemm("vis.proj.fc3.weight"); pj_fc3b = L.f32("vis.proj.fc3.bias");
     }
 
-    bool encode(ggml_backend_t backend, scratch_ctx & scratch, const Inputs & in, const char * tag, std::vector<float> & proj_out) const;
+    struct VisIO { std::vector<ggml_tensor*> px_d, px_s; ggml_tensor*proj=nullptr; };
+    ggml_tensor* encode(ggml_backend_t backend, graph_cache<int64_t,VisIO> & cache, const Inputs & in, const char * tag) const;
 };
 
 inline ggml_tensor* vit_block(ggml_context*C, const ViTLayerW&w, ggml_tensor*x, int64_t N, int64_t hidden, int64_t heads, int64_t hd, float eps, bool ls){
@@ -150,7 +151,7 @@ inline void normalize_tower(const ImageView& v, int64_t S, const float mean[3], 
     }
 }
 
-inline bool DualTower::encode(ggml_backend_t backend, scratch_ctx & scratch, const Inputs & in, const char * tag, std::vector<float> & proj_out) const {
+inline ggml_tensor* DualTower::encode(ggml_backend_t backend, graph_cache<int64_t,VisIO> & cache, const Inputs & in, const char * tag) const {
     const int64_t S=image_size, n_views=in.n_images;
     // towers read S*S*3 per view; reject any view that is not exactly SxS.
     for (int64_t v=0; v<n_views; ++v) {
@@ -158,7 +159,7 @@ inline bool DualTower::encode(ggml_backend_t backend, scratch_ctx & scratch, con
         if (!view_is_side(iv.data, iv.w, iv.h, S)) {
             std::fprintf(stderr, "vla(%s): image view %lld is %dx%d, expected %lldx%lld\n",
                          tag, (long long) v, iv.w, iv.h, (long long) S, (long long) S);
-            return false;
+            return nullptr;
         }
     }
     // ImageNet constants as bf16 rounds them (0.485 -> 0.484375). The reference
@@ -167,30 +168,34 @@ inline bool DualTower::encode(ggml_backend_t backend, scratch_ctx & scratch, con
     static const float SMEAN[3]={0.5f,0.5f,0.5f}, SSTD[3]={0.5f,0.5f,0.5f};
 
     const size_t max_nodes=(size_t)64*(d_layers+s_layers+1)*n_views+1024;
-    ggml_context*C=scratch.reset(ggml_tensor_overhead()*max_nodes+ggml_graph_overhead_custom(max_nodes,false));
-    std::vector<ggml_tensor*> px_d(n_views), px_s(n_views), cmb(n_views);
-    for(int v=0; v<n_views; ++v){
-        px_d[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(px_d[v]);
-        px_s[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(px_s[v]);
-        ggml_tensor*pd=tower(C,px_d[v],d_patch_w,d_patch_b,d_pos,d_cls,d_reg,dvit,d_hidden,d_heads,d_head_dim,patch_size,ln_eps,true);
-        ggml_tensor*ps=tower(C,px_s[v],s_patch_w,s_patch_b,s_pos,nullptr,nullptr,svit,s_hidden,s_heads,s_head_dim,patch_size,ln_eps,false);
-        cmb[v]=ggml_concat(C,pd,ps,0);
-    }
-    ggml_tensor*allp=cmb[0]; for(int v=1;v<n_views;++v) allp=ggml_concat(C,allp,cmb[v],1);
-    ggml_tensor*ph=ggml_gelu_erf(C,linear(C,pj_fc1w,pj_fc1b,allp));
-    ph=ggml_gelu_erf(C,linear(C,pj_fc2w,pj_fc2b,ph));
-    ggml_tensor*proj=linear(C,pj_fc3w,pj_fc3b,ph); ggml_set_output(proj);
-    ggml_cgraph*vg=ggml_new_graph_custom(C,max_nodes,false); ggml_build_forward_expand(vg,proj);
-    if(!scratch.alloc(backend,vg)){ std::fprintf(stderr,"vla(%s): vision gallocr failed\n",tag); return false; }
+    const bool built=cache.ensure(backend,n_views,ggml_tensor_overhead()*max_nodes+ggml_graph_overhead_custom(max_nodes,false),
+                                  [&](ggml_context*C, VisIO&io)->ggml_cgraph*{
+        io.px_d.resize(n_views); io.px_s.resize(n_views);
+        std::vector<ggml_tensor*> cmb(n_views);
+        for(int v=0; v<n_views; ++v){
+            io.px_d[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(io.px_d[v]);
+            io.px_s[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(io.px_s[v]);
+            ggml_tensor*pd=tower(C,io.px_d[v],d_patch_w,d_patch_b,d_pos,d_cls,d_reg,dvit,d_hidden,d_heads,d_head_dim,patch_size,ln_eps,true);
+            ggml_tensor*ps=tower(C,io.px_s[v],s_patch_w,s_patch_b,s_pos,nullptr,nullptr,svit,s_hidden,s_heads,s_head_dim,patch_size,ln_eps,false);
+            cmb[v]=ggml_concat(C,pd,ps,0);
+        }
+        ggml_tensor*allp=cmb[0]; for(int v=1;v<n_views;++v) allp=ggml_concat(C,allp,cmb[v],1);
+        ggml_tensor*ph=ggml_gelu_erf(C,linear(C,pj_fc1w,pj_fc1b,allp));
+        ph=ggml_gelu_erf(C,linear(C,pj_fc2w,pj_fc2b,ph));
+        io.proj=linear(C,pj_fc3w,pj_fc3b,ph); ggml_set_output(io.proj);
+        ggml_cgraph*vg=ggml_new_graph_custom(C,max_nodes,false); ggml_build_forward_expand(vg,io.proj);
+        return vg;
+    });
+    if(!built){ std::fprintf(stderr,"vla(%s): vision gallocr failed\n",tag); return nullptr; }
+    VisIO&io=cache.io();
     std::vector<float> dbuf, sbuf;
     for(int v=0;v<n_views;++v){
-        normalize_tower(in.images[v],S,DMEAN,DSTD,dbuf); ggml_backend_tensor_set(px_d[v],dbuf.data(),0,ggml_nbytes(px_d[v]));
-        normalize_tower(in.images[v],S,SMEAN,SSTD,sbuf); ggml_backend_tensor_set(px_s[v],sbuf.data(),0,ggml_nbytes(px_s[v]));
+        normalize_tower(in.images[v],S,DMEAN,DSTD,dbuf); ggml_backend_tensor_set(io.px_d[v],dbuf.data(),0,ggml_nbytes(io.px_d[v]));
+        normalize_tower(in.images[v],S,SMEAN,SSTD,sbuf); ggml_backend_tensor_set(io.px_s[v],sbuf.data(),0,ggml_nbytes(io.px_s[v]));
     }
-    graph_unique_names(vg);
-    if(ggml_backend_graph_compute(backend,vg)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(%s): vision compute failed\n",tag); return false; }
-    ggml_backend_tensor_get(proj,proj_out.data(),0,proj_out.size()*sizeof(float));
-    return true;
+    graph_unique_names(cache.graph());
+    if(ggml_backend_graph_compute(backend,cache.graph())!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(%s): vision compute failed\n",tag); return nullptr; }
+    return io.proj;
 }
 
 struct Q99Stats {

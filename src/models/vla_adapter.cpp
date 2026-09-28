@@ -59,7 +59,7 @@ struct VlaAdapterModelArch : public ModelArchBase {
     ggml_backend_t backend = nullptr;
     int n_threads = default_cpu_threads();
     ggml_context * ctx_weights = nullptr;
-    scratch_ctx vision_scratch;
+    graph_cache<int64_t, DualTower::VisIO> vision_graph;
 
     struct MainKey {
         int64_t seq=-1, n_views=-1, nprompt=-1;
@@ -71,6 +71,7 @@ struct VlaAdapterModelArch : public ModelArchBase {
         ggml_tensor *t_ids=nullptr,*t_proj=nullptr,*t_pos=nullptr,*t_mask=nullptr;
         ggml_tensor *t_state=nullptr,*t_x0=nullptr,*norm_actions=nullptr;
         ggml_tensor *cT=nullptr,*sT=nullptr,*cA=nullptr,*sA=nullptr,*cK=nullptr,*sK=nullptr;
+        bool consts=false;
     };
     graph_cache<MainKey, MainIO> main_graph;
     ggml_backend_buffer_t weight_buf = nullptr;
@@ -207,10 +208,11 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     if (n_views < 1) { std::fprintf(stderr, "vla(vla_adapter): need >=1 image view\n"); return {}; }
     if (!in.images) { std::fprintf(stderr, "vla(vla_adapter): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
 
-    std::vector<float> proj_host((size_t)HC*NP*n_views);
+    ggml_tensor*proj=nullptr;
     {
         const auto tv=clock::now();
-        if(!vis.encode(backend,vision_scratch,in,"vla_adapter",proj_host))
+        proj=vis.encode(backend,vision_graph,in,"vla_adapter");
+        if(!proj)
             return {};
         stats.ms_vision = std::chrono::duration<float,std::milli>(clock::now()-tv).count();
     }
@@ -247,8 +249,8 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     ggml_tensor*t_proj=ggml_new_tensor_2d(C,GGML_TYPE_F32,HC,NPATCH); ggml_set_input(t_proj);
     ggml_tensor*mm_seq=ggml_concat(C,ggml_concat(C,e0,t_proj,1),erest,1);
 
-    ggml_tensor*t_pos=ggml_new_tensor_1d(C,GGML_TYPE_I32,SEQ); ggml_set_input(t_pos);
-    ggml_tensor*t_mask=ggml_new_tensor_2d(C,GGML_TYPE_F32,SEQ,SEQ); ggml_set_input(t_mask);
+    ggml_tensor*t_pos=ggml_new_tensor_1d(C,GGML_TYPE_I32,SEQ); ggml_set_input(t_pos); ggml_set_output(t_pos);
+    ggml_tensor*t_mask=ggml_new_tensor_2d(C,GGML_TYPE_F32,SEQ,SEQ); ggml_set_input(t_mask); ggml_set_output(t_mask);
     const float lsc=1.0f/std::sqrt((float)lm_head_dim);
     std::vector<ggml_tensor*> lout(lm_layers); ggml_tensor*x=mm_seq;
     for(int i=0;i<lm_layers;++i){ const auto&l=lm[i];
@@ -279,15 +281,15 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     pf=ggml_add(C,ggml_mul_mat(C,pp_fc2w,pf),pp_fc2b); ggml_tensor*pvec=ggml_reshape_2d(C,pf,HC,1);
 
     auto cs_tensor=[&](int64_t Lh)->std::pair<ggml_tensor*,ggml_tensor*>{
-        ggml_tensor*cc=ggml_new_tensor_2d(C,GGML_TYPE_F32,HD,Lh); ggml_set_input(cc);
-        ggml_tensor*ss=ggml_new_tensor_2d(C,GGML_TYPE_F32,HD,Lh); ggml_set_input(ss);
+        ggml_tensor*cc=ggml_new_tensor_2d(C,GGML_TYPE_F32,HD,Lh); ggml_set_input(cc); ggml_set_output(cc);
+        ggml_tensor*ss=ggml_new_tensor_2d(C,GGML_TYPE_F32,HD,Lh); ggml_set_input(ss); ggml_set_output(ss);
         return {cc,ss};
     };
     auto [cT,sT]=cs_tensor(chunk);
     auto [cA,sA]=cs_tensor(num_tokens+1);
     auto [cK,sK]=cs_tensor(NPATCH);
 
-    ggml_tensor*t_x0=ggml_new_tensor_2d(C,GGML_TYPE_F32,action_dim*HC,chunk); ggml_set_input(t_x0);
+    ggml_tensor*t_x0=ggml_new_tensor_2d(C,GGML_TYPE_F32,action_dim*HC,chunk); ggml_set_input(t_x0); ggml_set_output(t_x0);
     ggml_tensor*hx=ggml_relu(C,linear(C,h_fc1w,h_fc1b,layer_norm(C,t_x0,h_ln1w,h_ln1b,head_ln_eps)));
     const float hsc=1.0f/std::sqrt((float)HD);
     for(int i=0;i<head_blocks;++i){ const auto&w=hblk[i];
@@ -338,25 +340,24 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
           ids[NPROMPT+i]=1;
       ids[NPROMPT+num_tokens]=(int32_t)stop_id;
       ggml_backend_tensor_set(t_ids,ids.data(),0,ggml_nbytes(t_ids)); }
-    ggml_backend_tensor_set(t_proj,proj_host.data(),0,ggml_nbytes(t_proj));
-    {
+    if(!ggml_are_same_shape(proj,t_proj)){ std::fprintf(stderr,"vla(vla_adapter): projector output does not match the LM width\n"); return {}; }
+    ggml_backend_tensor_copy(proj,t_proj);
+    if(!gio.consts){
         std::vector<int32_t> pp(SEQ);
         for(int64_t i=0;i<SEQ;++i)
             pp[i]=(int32_t)i;
         ggml_backend_tensor_set(t_pos,pp.data(),0,ggml_nbytes(t_pos));
-    }
-    { std::vector<float> mk; build_causal_mask(SEQ, mk);
-      ggml_backend_tensor_set(t_mask,mk.data(),0,ggml_nbytes(t_mask)); }
-    { std::vector<float> sv(proprio_dim,0.0f); for(int64_t i=0;i<proprio_dim && in.state;++i) sv[i]=in.state[i];
-      ggml_backend_tensor_set(t_state,sv.data(),0,ggml_nbytes(t_state)); }
-    {
+        std::vector<float> mk; build_causal_mask(SEQ, mk);
+        ggml_backend_tensor_set(t_mask,mk.data(),0,ggml_nbytes(t_mask));
         std::vector<float> zx((size_t)action_dim*HC*chunk,0.0f);
         ggml_backend_tensor_set(t_x0,zx.data(),0,ggml_nbytes(t_x0));
+        auto fill_cs=[&](ggml_tensor*cc,ggml_tensor*ss,int64_t Lh){ std::vector<float> cb,sb; rope_pairwise_table(HD,Lh,head_rope_base,cb,sb);
+            ggml_backend_tensor_set(cc,cb.data(),0,ggml_nbytes(cc)); ggml_backend_tensor_set(ss,sb.data(),0,ggml_nbytes(ss)); };
+        fill_cs(cT,sT,chunk); fill_cs(cA,sA,num_tokens+1); fill_cs(cK,sK,NPATCH);
+        gio.consts=true;
     }
-
-    auto fill_cs=[&](ggml_tensor*cc,ggml_tensor*ss,int64_t Lh){ std::vector<float> cb,sb; rope_pairwise_table(HD,Lh,head_rope_base,cb,sb);
-        ggml_backend_tensor_set(cc,cb.data(),0,ggml_nbytes(cc)); ggml_backend_tensor_set(ss,sb.data(),0,ggml_nbytes(ss)); };
-    fill_cs(cT,sT,chunk); fill_cs(cA,sA,num_tokens+1); fill_cs(cK,sK,NPATCH);
+    { std::vector<float> sv(proprio_dim,0.0f); for(int64_t i=0;i<proprio_dim && in.state;++i) sv[i]=in.state[i];
+      ggml_backend_tensor_set(t_state,sv.data(),0,ggml_nbytes(t_state)); }
 
     graph_unique_names(gf);
     if(ggml_backend_graph_compute(backend,gf)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(vla_adapter): main compute failed\n"); return {}; }

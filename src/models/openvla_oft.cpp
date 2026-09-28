@@ -56,7 +56,7 @@ struct OpenVlaOftModelArch : public ModelArchBase {
     ggml_backend_t backend = nullptr;
     int n_threads = default_cpu_threads();
     ggml_context * ctx_weights = nullptr;
-    scratch_ctx vision_scratch;
+    graph_cache<int64_t, DualTower::VisIO> vision_graph;
 
     struct MainKey {
         int64_t seq=-1, n_views=-1, n_lang=-1;
@@ -66,6 +66,7 @@ struct OpenVlaOftModelArch : public ModelArchBase {
     };
     struct MainIO {
         ggml_tensor *t_ids=nullptr,*t_state=nullptr,*t_proj=nullptr,*act0=nullptr,*t_pos=nullptr,*norm_actions=nullptr;
+        bool consts=false;
     };
     graph_cache<MainKey, MainIO> main_graph;
     ggml_backend_buffer_t weight_buf = nullptr;
@@ -195,10 +196,11 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     if (!in.images) { std::fprintf(stderr, "vla(openvla_oft): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
 
     const int64_t NPATCH = NP * n_views;
-    std::vector<float> proj_host((size_t)HC*NPATCH);
+    ggml_tensor*proj=nullptr;
     {
         const auto tv=clock::now();
-        if(!vis.encode(backend,vision_scratch,in,"openvla_oft",proj_host))
+        proj=vis.encode(backend,vision_graph,in,"openvla_oft");
+        if(!proj)
             return {};
         stats.ms_vision = std::chrono::duration<float,std::milli>(clock::now()-tv).count();
     }
@@ -239,14 +241,14 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     ggml_tensor*t_proj=ggml_new_tensor_2d(C,GGML_TYPE_F32,HC,NPATCH); ggml_set_input(t_proj);
     ggml_tensor*patches=ggml_concat(C,t_proj,pvec,1);
 
-    ggml_tensor*act0=ggml_new_tensor_2d(C,GGML_TYPE_F32,HC,n_act); ggml_set_input(act0);
+    ggml_tensor*act0=ggml_new_tensor_2d(C,GGML_TYPE_F32,HC,n_act); ggml_set_input(act0); ggml_set_output(act0);
 
     ggml_tensor*seq=ggml_concat(C,bos,patches,1);
     seq=ggml_concat(C,seq,rest,1);
     seq=ggml_concat(C,seq,act0,1);
     seq=ggml_concat(C,seq,stop,1);
 
-    ggml_tensor*t_pos=ggml_new_tensor_1d(C,GGML_TYPE_I32,SEQ); ggml_set_input(t_pos);
+    ggml_tensor*t_pos=ggml_new_tensor_1d(C,GGML_TYPE_I32,SEQ); ggml_set_input(t_pos); ggml_set_output(t_pos);
     const float lsc=1.0f/std::sqrt((float)lm_head_dim);
     ggml_tensor*x=seq;
     for(int i=0;i<lm_layers;++i){ const auto&l=lm[i];
@@ -300,19 +302,19 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
           ids[i]=in.lang_tokens[i];
       ids[L]=(int32_t)stop_id;
       ggml_backend_tensor_set(t_ids,ids.data(),0,ggml_nbytes(t_ids)); }
-    ggml_backend_tensor_set(t_proj,proj_host.data(),0,ggml_nbytes(t_proj));
-    {
+    if(!ggml_are_same_shape(proj,t_proj)){ std::fprintf(stderr,"vla(openvla_oft): projector output does not match the LM width\n"); return {}; }
+    ggml_backend_tensor_copy(proj,t_proj);
+    if(!gio.consts){
         std::vector<int32_t> pp(SEQ);
         for(int64_t i=0;i<SEQ;++i)
             pp[i]=(int32_t)i;
         ggml_backend_tensor_set(t_pos,pp.data(),0,ggml_nbytes(t_pos));
+        std::vector<float> z((size_t)HC*n_act,0.0f);
+        ggml_backend_tensor_set(act0,z.data(),0,ggml_nbytes(act0));
+        gio.consts=true;
     }
     { std::vector<float> sv(proprio_dim,0.0f); for(int64_t i=0;i<proprio_dim && in.state;++i) sv[i]=in.state[i];
       ggml_backend_tensor_set(t_state,sv.data(),0,ggml_nbytes(t_state)); }
-    {
-        std::vector<float> z((size_t)HC*n_act,0.0f);
-        ggml_backend_tensor_set(act0,z.data(),0,ggml_nbytes(act0));
-    }
 
     graph_unique_names(gf);
     if(ggml_backend_graph_compute(backend,gf)!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(openvla_oft): main compute failed\n"); return {}; }
