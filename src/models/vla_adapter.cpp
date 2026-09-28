@@ -304,6 +304,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     const int64_t S=image_size, NP=n_patches, HC=lm_hidden, HD=head_dim, NH=head_heads;
     const int64_t n_views = in.n_images;
     if (in.precomputed_img_emb) { std::fprintf(stderr, "vla(vla_adapter): precomputed_img_emb is not supported; the DINOv2+SigLIP tower is baked into the GGUF, pass raw images\n"); return {}; }
+    if (in.n_lang < 1 || !in.lang_tokens) { std::fprintf(stderr, "vla(vla_adapter): need >=1 lang token\n"); return {}; }
     if (n_views < 1) { std::fprintf(stderr, "vla(vla_adapter): need >=1 image view\n"); return {}; }
     if (!in.images) { std::fprintf(stderr, "vla(vla_adapter): n_images=%d but the images pointer is null\n", in.n_images); return {}; }
     // towers read S*S*3 per view; reject any view that is not exactly SxS.
@@ -323,7 +324,8 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     std::vector<float> proj_host((size_t)HC*NP*n_views);
     {
         const auto tv=clock::now();
-        ggml_context*C=vision_scratch.reset((size_t)64*1024*1024);
+        const size_t max_nodes=(size_t)64*(d_layers+s_layers+1)*n_views+1024;
+        ggml_context*C=vision_scratch.reset(ggml_tensor_overhead()*max_nodes+ggml_graph_overhead_custom(max_nodes,false));
         std::vector<ggml_tensor*> px_d(n_views), px_s(n_views);
         std::vector<ggml_tensor*> cmb(n_views);
         for(int v=0; v<n_views; ++v){
@@ -337,7 +339,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         ggml_tensor*ph=ggml_add(C,ggml_mul_mat(C,vis.pj_fc1w,allp),vis.pj_fc1b); ph=ggml_gelu_erf(C,ph);
         ph=ggml_add(C,ggml_mul_mat(C,vis.pj_fc2w,ph),vis.pj_fc2b); ph=ggml_gelu_erf(C,ph);
         ggml_tensor*proj=ggml_add(C,ggml_mul_mat(C,vis.pj_fc3w,ph),vis.pj_fc3b); ggml_set_output(proj);
-        ggml_cgraph*vg=ggml_new_graph_custom(C,16384,false); ggml_build_forward_expand(vg,proj);
+        ggml_cgraph*vg=ggml_new_graph_custom(C,max_nodes,false); ggml_build_forward_expand(vg,proj);
         if(!vision_scratch.alloc(backend,vg)){ std::fprintf(stderr,"vla(vla_adapter): vision gallocr failed\n"); return {}; }
         std::vector<float> dbuf, sbuf;
         for(int v=0;v<n_views;++v){

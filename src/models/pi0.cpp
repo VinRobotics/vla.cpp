@@ -282,6 +282,10 @@ bool load_config(const gguf_reader & g, Config & cfg) {
     cfg.n_lang          = g.u32("pi0.tokenizer_max_length");
     cfg.min_period      = g.f64("pi0.min_period");
     cfg.max_period      = g.f64("pi0.max_period");
+    if (cfg.num_steps < 1 || cfg.num_steps > 1000) {
+        std::fprintf(stderr, "vla(pi0): num_steps %d out of range [1, 1000]\n", cfg.num_steps);
+        return false;
+    }
 
     cfg.n_state         = 1;
     cfg.n_img           = 256;
@@ -411,6 +415,13 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
         vu("pi0.patch_size", m->vit_patch_size); vu("pi0.n_img_tokens", m->vit_n_tokens);
         if (g.has("pi0.vit_ln_eps"))
             m->vit_ln_eps = g.f32("pi0.vit_ln_eps");
+        if (m->vit_patch_size <= 0 || m->vit_heads <= 0 || m->vit_hidden % m->vit_heads ||
+            m->vit_image_size % m->vit_patch_size) {
+            std::fprintf(stderr, "vla(pi0): bad vit geometry (image %lld patch %lld hidden %lld heads %lld)\n",
+                         (long long) m->vit_image_size, (long long) m->vit_patch_size,
+                         (long long) m->vit_hidden, (long long) m->vit_heads);
+            return nullptr;
+        }
         const int64_t grid = m->vit_image_size/m->vit_patch_size;
         if (grid * grid != m->vit_n_tokens || m->vit_n_tokens != cfg.n_img) {
             std::fprintf(stderr, "vla(pi0): vit geometry mismatch (grid^2=%lld n_img_tokens=%lld cfg.n_img=%lld)\n",
@@ -474,6 +485,10 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     std::vector<float> img_emb_host;
     int64_t n_img_tokens = 0;
     if (in.precomputed_img_emb) {
+        if (in.n_img_views < 1) {
+            std::fprintf(stderr, "vla(pi0): precomputed_img_emb set but n_img_views=%d\n", in.n_img_views);
+            return {};
+        }
         n_img_tokens = (int64_t) in.n_img_views*cfg.n_img;
         img_emb_host.assign(in.precomputed_img_emb,
                             in.precomputed_img_emb+(size_t) n_img_tokens * hidden_pl);
@@ -542,7 +557,9 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
 
     // Prefix + expert graph depends only on the token counts and step count.
     const MainKey mkey{ n_img_tokens, n_lang, num_steps };
-    const bool built = main_graph.ensure(backend, mkey, (size_t) 64*1024*1024,
+    const size_t max_nodes = (size_t) 64*n_layers*(num_steps+1) + 1024;
+    const bool built = main_graph.ensure(backend, mkey,
+                                         ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false),
                                          [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
     ggml_tensor * t_image_emb = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_img_tokens); ggml_set_input(t_image_emb);
     ggml_tensor * t_lang_emb  = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_lang);       ggml_set_input(t_lang_emb);
@@ -600,7 +617,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
     gio.t_state=t_state; gio.t_x0=t_x0; gio.t_suffix_pos=t_suffix_pos;
     gio.t_full_mask=t_full_mask; gio.t_time=t_time; gio.x_final=x_final;
 
-    ggml_cgraph * gf = ggml_new_graph_custom(C,  16384,  false);
+    ggml_cgraph * gf = ggml_new_graph_custom(C, max_nodes, false);
     ggml_build_forward_expand(gf, x_final);
     return gf;
     });

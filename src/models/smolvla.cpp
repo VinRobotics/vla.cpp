@@ -471,6 +471,12 @@ bool load_config_from_json(const std::string & path, Config & cfg) {
         std::fprintf(stderr, "vla: failed to parse %s: %s\n", path.c_str(), e.what());
         return false;
     }
+    for (const char * k : {"adapt_to_pi_aloha", "add_image_special_tokens"}) {
+        if (j.contains(k) && j[k].is_boolean() && j[k].get<bool>()) {
+            std::fprintf(stderr, "vla(smolvla): %s=true in %s is not supported\n", k, path.c_str());
+            return false;
+        }
+    }
 
     cfg.hidden        = 960;
     cfg.n_q_heads     = 15;
@@ -998,6 +1004,11 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
         }
         std::printf("vla: config = %s\n", cfg_path.c_str());
     }
+    if (m->cfg.num_steps < 1 || m->cfg.num_steps > 1000) {
+        std::fprintf(stderr, "vla(smolvla): num_steps %d out of range [1, 1000]\n", m->cfg.num_steps);
+        delete m;
+        return nullptr;
+    }
 
     {
         const Backend b = backend_init("vla", default_cpu_threads());
@@ -1024,6 +1035,15 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
             m->vit_ln_eps = gst.get_f32("smolvla.vit_ln_eps");
     }
     {
+        if (m->vit_patch <= 0 || m->vit_scale <= 0 || m->vit_heads <= 0 ||
+            m->vit_image % m->vit_patch || (m->vit_image/m->vit_patch) % m->vit_scale ||
+            m->vit_hidden % m->vit_heads) {
+            std::fprintf(stderr, "vla(smolvla): bad vit geometry (image %lld patch %lld shuffle %lld hidden %lld heads %lld)\n",
+                         (long long) m->vit_image, (long long) m->vit_patch, (long long) m->vit_scale,
+                         (long long) m->vit_hidden, (long long) m->vit_heads);
+            delete m;
+            return nullptr;
+        }
         const int64_t grid = m->vit_image/m->vit_patch;
         const int64_t k = grid/m->vit_scale;
         if (k * k != m->vit_n_tokens) {
@@ -1210,7 +1230,7 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
     m->expert_layers.resize(cfg.n_layers);
     for (int i=0; i<cfg.n_layers; ++i) {
         ExpertLayerW & w = m->expert_layers[i];
-        w.is_self_attn = (i%cfg.self_attn_every_n == 0);
+        w.is_self_attn = cfg.self_attn_every_n > 0 && i%cfg.self_attn_every_n == 0;
         w.Wln_in   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.expert_h);
         w.Wq       = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h, cfg.q_full_dim);
         if (w.is_self_attn) {
@@ -1389,8 +1409,9 @@ bool build_compute_graph(SmolVLAModelArch* m, int n_views) {
 
     cfg.n_img = cfg_model.n_img*int64_t(n_views);
 
+    const size_t max_nodes = size_t(64)*cfg.n_layers*(cfg.num_steps+1) + 1024;
     ggml_init_params gparams = {
-         size_t(64)*1024*1024,
+         ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false),
          nullptr,
          true,
     };
@@ -1488,7 +1509,7 @@ bool build_compute_graph(SmolVLAModelArch* m, int n_views) {
 
     ggml_set_output(x_t);
 
-    ggml_cgraph * gf = ggml_new_graph_custom(ctx,  16384,  false);
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, max_nodes, false);
     ggml_build_forward_expand(gf, x_t);
 
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(m->backend);
@@ -1780,8 +1801,10 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         return out;
     }
 
+    const size_t max_nodes = size_t(64)*cfg.n_layers*(cfg.num_steps+1) + 1024;
     ggml_init_params gparams = {
-         size_t(64)*1024*1024,
+         ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false) +
+         ggml_graph_overhead_custom(4096, false),
          nullptr,
          true,
     };
@@ -1995,7 +2018,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     }
 
     {
-        ggml_cgraph * gf = ggml_new_graph_custom(ctx,  16384,  false);
+        ggml_cgraph * gf = ggml_new_graph_custom(ctx, max_nodes, false);
         ggml_build_forward_expand(gf, x_t);
         graph_unique_names(gf);
         const auto t0 = clock::now();
