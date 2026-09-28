@@ -244,6 +244,9 @@ def main() -> int:
         if done or trunc:
             obs, _info = env.reset()
 
+    if args.backend == "vla-cpp" and inner is not None:
+        inner._last_response = None
+
     # The PyTorch server times select_action internally (see
     # pytorch_ref/utils/service.py). Drop the samples accumulated during warmup
     # so the compiled variants aren't charged for their first-call compilation.
@@ -278,6 +281,7 @@ def main() -> int:
         if args.backend == "vla-cpp" and inner is not None:
             r = inner._last_response
             if r is not None:
+                inner._last_response = None
                 server_latencies.append({
                     "total":     r.latency_ms_total,
                     "vision":    r.latency_ms_vision,

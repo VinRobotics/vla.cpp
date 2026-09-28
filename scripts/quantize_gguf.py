@@ -32,6 +32,7 @@ import gguf
 # tower stays float too by default; add --vision to pack it as well.
 SKIP = (
     "token_embd",
+    "tok_embd",
     "output.weight",
     "patch_embd",
     "norm",
@@ -40,13 +41,16 @@ SKIP = (
     "cls",
     "action",
     "state",
-    "expert",
+    "aex.",
+    "ah.",
+    "act.",
+    "octo.head",
     "dit",
     "adaln",
     "ada_",
     "time"
 )
-SKIP_VISION = ("vit", "vision")
+SKIP_VISION = ("vit", "vision", "vis.d.", "vis.s.", "octo.obs.")
 
 # Block size per row (ne0 must divide this). Only the types the gguf writer can
 # pack are offered; Q8_0 is near-lossless, Q4_0/Q4_1 are 4-bit.
@@ -93,10 +97,8 @@ def main() -> None:
     for name, f in r.fields.items():
         if name in meta:
             continue
-        if f.types and f.types[0] == gguf.GGUFValueType.ARRAY:
-            w.add_array(name, f.contents())
-        else:
-            w.add_key_value(name, f.contents(), f.types[0])
+        sub = f.types[-1] if f.types[0] == gguf.GGUFValueType.ARRAY else None
+        w.add_key_value(name, f.contents(), f.types[0], sub_type=sub)
 
     qtype = getattr(gguf.GGMLQuantizationType, args.type)
     F32, BF16 = gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.BF16

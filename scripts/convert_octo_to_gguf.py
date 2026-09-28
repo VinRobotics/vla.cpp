@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 import gguf
+from gguf_common import add_f32
 
 ARCH = "octo"
 MODEL_ID = "hf://rail-berkeley/octo-small-1.5"
@@ -88,10 +89,6 @@ def _add_meta(writer: gguf.GGUFWriter, key: str, value: Any) -> None:
         writer.add_float32(full, value)
     else:
         raise TypeError(f"unsupported metadata {full}={value!r}")
-
-
-def _f32(t: torch.Tensor) -> np.ndarray:
-    return t.detach().to(dtype=torch.float32, device="cpu").contiguous().numpy()
 
 
 def _embed_tokenizer(writer: gguf.GGUFWriter, tokenizer_name: str = "t5-base") -> None:
@@ -466,6 +463,11 @@ def main() -> int:
     OCTO_META["action.head_type"] = head_type
     OCTO_META["action.horizon"] = int(head_cfg["kwargs"]["action_horizon"])
     OCTO_META["action.dim"] = int(head_cfg["kwargs"]["action_dim"])
+    OCTO_META["diffusion.steps"] = int(head_cfg["kwargs"].get("diffusion_steps", 20))
+    OCTO_META["diffusion.max_action"] = float(head_cfg["kwargs"].get("max_action", 5.0))
+    mc = m.config["model"]
+    if not (mc.get("repeat_task_tokens") and mc.get("use_correct_attention")) or mc.get("readouts") != {"action": 1}:
+        raise SystemExit("vla.cpp Octo needs repeat_task_tokens, use_correct_attention and readouts={'action': 1}")
     print(f"action head: {head_cfg['name']} -> head_type={head_type} "
           f"horizon={OCTO_META['action.horizon']} dim={OCTO_META['action.dim']}")
 
@@ -523,7 +525,7 @@ def main() -> int:
     rows = []
     for src, dst in sorted(mapped.items(), key=lambda kv: kv[1]):
         tensor = sd[src]
-        writer.add_tensor(dst, _f32(tensor), raw_dtype=gguf.GGMLQuantizationType.F32)
+        add_f32(writer, dst, tensor)
         rows.append({"state_dict": src, "gguf": dst, "shape": list(tensor.shape)})
         print(f"map {src} {tuple(tensor.shape)} -> {dst}")
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +43,8 @@ def add(writer: gguf.GGUFWriter, name: str, t: torch.Tensor) -> None:
         writer.add_tensor(name, t.contiguous().cpu().numpy(), raw_dtype=F32)
     elif t.dtype == torch.bfloat16:
         writer.add_tensor(name, bf16_u16(t), raw_shape=list(t.shape), raw_dtype=BF16)
+    elif t.dtype == torch.float16:
+        writer.add_tensor(name, t.contiguous().cpu().numpy().astype(np.float32), raw_dtype=F32)
     else:
         raise NotImplementedError(f"unsupported dtype {t.dtype} for {name}")
 
@@ -87,9 +90,19 @@ def load_safetensors(ckpt: Path, keep: tuple[str, ...] | None = None) -> dict[st
 
 def load_pt_module(path: Path) -> dict[str, torch.Tensor]:
 
-    sd = torch.load(str(path), map_location="cpu", weights_only=False)
+    sd = torch.load(str(path), map_location="cpu", weights_only=True)
     pfx = "module."
     return {(k[len(pfx):] if k.startswith(pfx) else k): v.contiguous() for k, v in sd.items()}
+
+def find_sidecar(ckpt: Path, stem: str) -> Path:
+
+    cands = sorted(
+        ckpt.glob(f"{stem}--*checkpoint.pt"),
+        key=lambda p: int(m.group(1)) if (m := re.search(r"--(\d+)_checkpoint\.pt$", p.name)) else -1,
+    )
+    if not cands:
+        raise SystemExit(f"no {stem}--*checkpoint.pt in {ckpt}")
+    return cands[-1]
 
 def read_json(path: Path) -> dict:
     if not path.exists():

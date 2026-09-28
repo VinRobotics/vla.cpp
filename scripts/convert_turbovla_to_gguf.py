@@ -28,16 +28,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import numpy as np
 import torch
 from safetensors import safe_open
 
 import gguf
-
-F32 = gguf.GGMLQuantizationType.F32
-BF16 = gguf.GGMLQuantizationType.BF16
+from gguf_common import add as add_tensor, finish, kv_prefix, max_layer, open_writer
 
 ARCH = "turbovla"
+kv = kv_prefix(ARCH)
 
 
 # Prefixes used by official TurboVLA checkpoints (without a "model." prefix).
@@ -52,41 +50,9 @@ KEY_VIEW_EMB = "view_embedding"
 KEY_TEXT_PROJ = "text_encoder.text_projection"
 
 
-def kv_prefix(name: str) -> str:
-    return f"{ARCH}.{name}"
-
-
-def bf16_u16(t: torch.Tensor) -> np.ndarray:
-    return t.contiguous().view(torch.uint16).cpu().numpy()
-
-
-def add_tensor(writer: gguf.GGUFWriter, name: str, t: torch.Tensor) -> None:
-    """Add tensor with preserved dtype."""
-    if t.dtype == torch.float32:
-        writer.add_tensor(name, t.contiguous().cpu().numpy(), raw_dtype=F32)
-    elif t.dtype == torch.bfloat16:
-        writer.add_tensor(name, bf16_u16(t), raw_shape=list(t.shape), raw_dtype=BF16)
-    elif t.dtype == torch.float16:
-        writer.add_tensor(name, t.contiguous().cpu().numpy().astype(np.float32), raw_dtype=F32)
-    else:
-        raise NotImplementedError(f"unsupported dtype {t.dtype} for {name}")
-
-
-def max_layer(keys: set[str], pfx: str) -> int:
-    """Count number of layers with given prefix."""
-    m = -1
-    for k in keys:
-        if k.startswith(pfx):
-            try:
-                m = max(m, int(k[len(pfx):].split(".", 1)[0]))
-            except ValueError:
-                pass
-    return m + 1
-
-
 # facebook/dinov3-vitb16-pretrain-lvd1689m is gated, but only these architecture
 # values are needed: the fine-tuned weights ship inside the TurboVLA checkpoint.
-DINOV3_VITB16 = {"rope_theta": 100.0, "num_register_tokens": 4}
+DINOV3_VITB16 = {"rope_theta": 100.0, "num_register_tokens": 4, "num_attention_heads": 12}
 
 # Tensors the runtime never reads: DINOv3's final norm (TurboVLA taps
 # hidden_states[-1], before it), BERT's pooler, and the MAE mask token.
@@ -108,7 +74,7 @@ class TrackedTensors(dict):
 def load_checkpoint(ckpt: Path) -> tuple[TrackedTensors, dict]:
     """Return (state dict, TurboVLA model_config) from a .pth or a directory."""
     if ckpt.is_file():
-        blob = torch.load(str(ckpt), map_location="cpu", weights_only=False)
+        blob = torch.load(str(ckpt), map_location="cpu", weights_only=True)
         if not isinstance(blob, dict) or "model_state_dict" not in blob:
             raise SystemExit(f"{ckpt} is not a TurboVLA checkpoint (no model_state_dict)")
         state = blob["model_state_dict"]
@@ -232,6 +198,9 @@ class TurboVLADims:
             )
         if int(self.dinov3_cfg.get("num_register_tokens", self.num_register_tokens)) != self.num_register_tokens:
             raise SystemExit("DINOv3 config num_register_tokens disagrees with checkpoint weights")
+        self.vit_heads = int(self.dinov3_cfg.get("num_attention_heads", 0))
+        if self.vit_heads <= 0 or self.vit_dim % self.vit_heads:
+            raise SystemExit("DINOv3 config num_attention_heads is missing or does not divide the ViT width")
 
         word_emb = self._get(f"{PREFIX_TEXT}.embeddings.word_embeddings.weight")
         self.vocab_size = int(word_emb.shape[0])
@@ -508,7 +477,7 @@ def write_text_groups(writer: gguf.GGUFWriter, text_cfg: dict) -> None:
     sees token ids, so the table is keyed by them.
     """
     groups = text_cfg.get("padding_length_by_instruction") or {}
-    writer.add_uint32(kv_prefix("text_groups.count"), len(groups))
+    writer.add_uint32(kv("text_groups.count"), len(groups))
     if not groups:
         return
     from transformers import AutoTokenizer
@@ -520,9 +489,9 @@ def write_text_groups(writer: gguf.GGUFWriter, text_cfg: dict) -> None:
         ids += [int(t) for t in seq]
         lengths.append(len(seq))
         pad_to.append(int(length))
-    writer.add_array(kv_prefix("text_groups.tokens"), ids)
-    writer.add_array(kv_prefix("text_groups.lengths"), lengths)
-    writer.add_array(kv_prefix("text_groups.pad_to"), pad_to)
+    writer.add_array(kv("text_groups.tokens"), ids)
+    writer.add_array(kv("text_groups.lengths"), lengths)
+    writer.add_array(kv("text_groups.pad_to"), pad_to)
 
 
 def verify_consumed_tensors(tensors: TrackedTensors) -> None:
@@ -563,17 +532,21 @@ def main() -> int:
     dims = TurboVLADims(tensors, keys, cfg_json, dinov3_cfg)
     print(f"  Detected: {dims}")
 
-    print(f"Writing GGUF to {out}...")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    writer = gguf.GGUFWriter(str(out), ARCH)
+    text_cfg = cfg_json.get("text", {})
+    inter_cfg = cfg_json.get("interaction", {})
+    if (inter_cfg.get("residual_style", "normalized") != "normalized"
+            or inter_cfg.get("padding_strategy", "key_padding_mask") != "key_padding_mask"
+            or text_cfg.get("zero_padded_tokens", False)
+            or not text_cfg.get("sub_sentence_present", True)):
+        raise SystemExit("unsupported TurboVLA variant: the runtime implements residual_style=normalized, "
+                         "padding_strategy=key_padding_mask, zero_padded_tokens=false, sub_sentence_present=true")
 
-    kv = kv_prefix
-    writer.add_string(kv("architecture"), ARCH)
+    writer = open_writer(out, ARCH)
     writer.add_uint32(kv("hidden"), dims.hidden_dim)
     writer.add_uint32(kv("vit_dim"), dims.vit_dim)
     writer.add_uint32(kv("vit_layers"), dims.vit_layers)
-    writer.add_uint32(kv("vit_head_dim"), 64)
-    writer.add_uint32(kv("vit_heads"), 12)
+    writer.add_uint32(kv("vit_head_dim"), dims.vit_dim // dims.vit_heads)
+    writer.add_uint32(kv("vit_heads"), dims.vit_heads)
     writer.add_uint32(kv("text_dim"), dims.text_dim)
     writer.add_uint32(kv("text_layers"), dims.text_layers)
     writer.add_uint32(kv("text_head_dim"), 64)
@@ -608,7 +581,6 @@ def main() -> int:
     # TurboVLA's BERT wrapper uses these exact punctuation IDs when it creates
     # sub-sentence attention masks. Persist them so the GGUF runtime does not
     # silently depend on a tokenizer installation.
-    text_cfg = cfg_json.get("text", {})
     model_name = text_cfg.get("model_name_or_path", "bert-base-uncased")
     if model_name not in ("bert-base-uncased", "google-bert/bert-base-uncased"):
         raise SystemExit(
@@ -650,14 +622,7 @@ def main() -> int:
         print("  Verifying tensor consumption...")
         verify_consumed_tensors(tensors)
 
-    writer.write_header_to_file()
-    writer.write_kv_data_to_file()
-    writer.write_tensors_to_file()
-    writer.close()
-
-    size_mb = out.stat().st_size / (1024 * 1024)
-    print(f"  Done! Output: {out} ({size_mb:.1f} MiB)")
-    return 0
+    return finish(writer, out)
 
 
 if __name__ == "__main__":

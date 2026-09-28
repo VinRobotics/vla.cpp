@@ -137,13 +137,13 @@ def main() -> int:
     cfg["mlp_head_hidden"] = int(cfg_json.get("hidden_dim", 1024))
     cfg["num_inference_timesteps"] = int(cfg_json.get("num_inference_timesteps", NUM_INFERENCE_TIMESTEPS))
     cfg["image_size"]      = int(cfg_json.get("image_size", VIT["image_size"]))
-    cfg["dit_heads"]       = DIT_HEADS
+    cfg["dit_heads"]       = int(cfg_json.get("num_heads", DIT_HEADS))
     cfg["proj_ln_eps"]     = PROJ_LN_EPS
     if cfg["action_dim"] != cfg["horizon"] * cfg["per_action_dim"]:
         raise SystemExit(f"action_dim {cfg['action_dim']} != horizon*per_action_dim {cfg['horizon']*cfg['per_action_dim']}")
 
     print(f"loading {pt_path} ...")
-    module = torch.load(pt_path, map_location="cpu", weights_only=False)["module"]
+    module = torch.load(pt_path, map_location="cpu", weights_only=True)["module"]
     keys = set(module.keys())
     print(f"  {len(module)} tensors")
 

@@ -23,7 +23,9 @@ import numpy as np
 from safetensors import safe_open
 
 from gguf_blocks import (
+    lerobot_stats,
     norm_eps,
+    pi_root,
     probe_paligemma_vision,
     write_decoder_blocks,
     write_paligemma_vision,
@@ -89,11 +91,11 @@ PROJ_SUFFIXES = [
     "action_out_proj.bias",
 ]
 
-def _write_adarms_blocks(writer, sf, n_layers: int) -> None:
+def _write_adarms_blocks(writer, sf, aex: str, n_layers: int) -> None:
 
     for i in range(n_layers):
         for src_suf, dst_suf in AEX_MAP:
-            add(writer, f"aex.blk.{i}.{dst_suf}", sf.get_tensor(f"{PFX_AEX}.layers.{i}.{src_suf}"))
+            add(writer, f"aex.blk.{i}.{dst_suf}", sf.get_tensor(f"{aex}.layers.{i}.{src_suf}"))
 
 def _load_dataset_stats(
     stats_json: Optional[Path],
@@ -173,6 +175,10 @@ def main() -> int:
     cfg_json = read_json(ckpt / "config.json")
     if cfg_json.get("type") != ARCH:
         raise SystemExit(f"config.json type is {cfg_json.get('type')!r}, expected 'pi05'")
+    norm_map = cfg_json.get("normalization_mapping") or {}
+    norm_mode = norm_map.get("ACTION", "QUANTILES")
+    if norm_mode not in ("QUANTILES", "MEAN_STD") or norm_map.get("STATE", "QUANTILES") != norm_mode:
+        raise SystemExit(f"unsupported pi05 normalization_mapping {norm_map}")
 
     cfg = dict(GEMMA_2B, **GEMMA_300M)
     cfg["paligemma_variant"]     = str(cfg_json.get("paligemma_variant", "gemma_2b"))
@@ -190,22 +196,25 @@ def main() -> int:
     cfg["rope_theta"]            = ROPE_THETA
     cfg["rms_norm_eps"]          = RMS_NORM_EPS
     cfg["norm_eps"]              = norm_eps(ckpt)
+    cfg["norm_mode"]             = norm_mode.lower()
 
     print(f"opening {sf_path}")
     sf = safe_open(sf_path, framework="pt")
     keys = set(sf.keys())
+    root = pi_root(keys)
+    vlm, head, aex = root + PFX_VLM, root + PFX_VLM_HEAD, root + PFX_AEX
 
-    n_layers_vlm = max_layer(keys, f"{PFX_VLM}.layers.")
-    n_layers_aex = max_layer(keys, f"{PFX_AEX}.layers.")
+    n_layers_vlm = max_layer(keys, f"{vlm}.layers.")
+    n_layers_aex = max_layer(keys, f"{aex}.layers.")
     if n_layers_vlm <= 0:
         raise SystemExit("cannot find PaliGemma language-model layers in checkpoint")
     if n_layers_aex != n_layers_vlm:
         raise SystemExit(f"layer count mismatch: VLM={n_layers_vlm} expert={n_layers_aex}")
     cfg["n_layers"] = n_layers_vlm
 
-    q0    = sf.get_slice(f"{PFX_VLM}.layers.0.self_attn.q_proj.weight").get_shape()
-    kv0   = sf.get_slice(f"{PFX_VLM}.layers.0.self_attn.k_proj.weight").get_shape()
-    gate0 = sf.get_slice(f"{PFX_VLM}.layers.0.mlp.gate_proj.weight").get_shape()
+    q0    = sf.get_slice(f"{vlm}.layers.0.self_attn.q_proj.weight").get_shape()
+    kv0   = sf.get_slice(f"{vlm}.layers.0.self_attn.k_proj.weight").get_shape()
+    gate0 = sf.get_slice(f"{vlm}.layers.0.mlp.gate_proj.weight").get_shape()
     if q0[1] != cfg["hidden"]:
         raise SystemExit(f"hidden mismatch: cfg={cfg['hidden']} ckpt={q0[1]}")
     if q0[0] != cfg["n_q_heads"] * cfg["head_dim"]:
@@ -215,15 +224,15 @@ def main() -> int:
     if gate0[0] != cfg["intermediate"]:
         raise SystemExit(f"intermediate mismatch: cfg={cfg['intermediate']} ckpt={gate0[0]}")
 
-    ada0 = sf.get_slice(f"{PFX_AEX}.layers.0.input_layernorm.dense.weight").get_shape()
+    ada0 = sf.get_slice(f"{aex}.layers.0.input_layernorm.dense.weight").get_shape()
     if ada0 != [3 * cfg["expert_h"], cfg["expert_h"]]:
         raise SystemExit(f"expert adaRMS dense shape {ada0} != [3*expert_h, expert_h] "
                          f"{[3*cfg['expert_h'], cfg['expert_h']]}")
-    aex_o0 = sf.get_slice(f"{PFX_AEX}.layers.0.self_attn.o_proj.weight").get_shape()
+    aex_o0 = sf.get_slice(f"{aex}.layers.0.self_attn.o_proj.weight").get_shape()
     if aex_o0 != [cfg["expert_h"], cfg["n_q_heads"] * cfg["head_dim"]]:
         raise SystemExit(f"expert o_proj shape {aex_o0} unexpected")
 
-    cfg["vocab_size"] = int(sf.get_slice(PFX_VLM_HEAD).get_shape()[0])
+    cfg["vocab_size"] = int(sf.get_slice(head).get_shape()[0])
 
     print(f"resolved cfg: hidden={cfg['hidden']} n_layers={cfg['n_layers']} "
           f"expert_h={cfg['expert_h']} vocab={cfg['vocab_size']} chunk={cfg['chunk_size']} "
@@ -231,35 +240,40 @@ def main() -> int:
           f"real_action={cfg['real_action_dim']} max_len={cfg['tokenizer_max_length']} "
           f"norm_eps={cfg['norm_eps']:g}")
 
-    cfg["vit"] = probe_paligemma_vision(sf, keys, cfg_json, PFX_VIS_CANDIDATES, PFX_MMP_CANDIDATES)
+    cfg["vit"] = probe_paligemma_vision(sf, keys, cfg_json, [root + p for p in PFX_VIS_CANDIDATES],
+                                        [root + p for p in PFX_MMP_CANDIDATES])
     v = cfg["vit"]
     print(f"vision: SigLIP hidden={v['vit_hidden']} layers={v['vit_layers']} "
           f"heads={v['vit_heads']} image={v['image_size']} patch={v['patch_size']} "
           f"tokens={v['n_img_tokens']} ln_eps={v['vit_ln_eps']:g}")
 
-    print("loading dataset normalizer stats...")
-    stats = _load_dataset_stats(
-        args.dataset_stats,
-        args.dataset_repo,
-        cfg["real_state_dim"],
-        cfg["real_action_dim"]
-    )
-    print(f"  state_q01[:3]={stats['state_q01'][:3]}  state_q99[:3]={stats['state_q99'][:3]}")
-    print(f"  action_q01[:3]={stats['action_q01'][:3]}  action_q99[:3]={stats['action_q99'][:3]}  (QUANTILES)")
+    if norm_mode == "MEAN_STD":
+        print("loading normalizer stats...")
+        stats = lerobot_stats(sf, ckpt, cfg["real_state_dim"], cfg["real_action_dim"], norm_map)
+    else:
+        print("loading dataset normalizer stats...")
+        stats = _load_dataset_stats(
+            args.dataset_stats,
+            args.dataset_repo,
+            cfg["real_state_dim"],
+            cfg["real_action_dim"]
+        )
+        print(f"  state_q01[:3]={stats['state_q01'][:3]}  state_q99[:3]={stats['state_q99'][:3]}")
+        print(f"  action_q01[:3]={stats['action_q01'][:3]}  action_q99[:3]={stats['action_q99'][:3]}  (QUANTILES)")
 
     writer = open_writer(out, ARCH)
     write_pi_kv(writer, KV, cfg, adarms=True)
 
-    add(writer, "token_embd.weight",      sf.get_tensor(PFX_VLM_HEAD))
-    add(writer, "vlm.output_norm.weight", sf.get_tensor(f"{PFX_VLM}.norm.weight"))
-    write_decoder_blocks(writer, sf.get_tensor, PFX_VLM, "vlm", cfg["n_layers"])
+    add(writer, "token_embd.weight",      sf.get_tensor(head))
+    add(writer, "vlm.output_norm.weight", sf.get_tensor(f"{vlm}.norm.weight"))
+    write_decoder_blocks(writer, sf.get_tensor, vlm, "vlm", cfg["n_layers"])
 
-    add(writer, "aex.output_norm.weight", sf.get_tensor(f"{PFX_AEX}.norm.dense.weight"))
-    add(writer, "aex.output_norm.bias",   sf.get_tensor(f"{PFX_AEX}.norm.dense.bias"))
-    _write_adarms_blocks(writer, sf, cfg["n_layers"])
+    add(writer, "aex.output_norm.weight", sf.get_tensor(f"{aex}.norm.dense.weight"))
+    add(writer, "aex.output_norm.bias",   sf.get_tensor(f"{aex}.norm.dense.bias"))
+    _write_adarms_blocks(writer, sf, aex, cfg["n_layers"])
 
     for suf in PROJ_SUFFIXES:
-        add(writer, suf, sf.get_tensor(suf))
+        add(writer, suf, sf.get_tensor(root + suf))
 
     write_paligemma_vision(writer, sf, cfg["vit"])
 

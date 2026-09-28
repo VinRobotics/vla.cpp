@@ -172,6 +172,8 @@ class VlaCppClient:
         self.sock = self.ctx.socket(zmq.REQ)
         self.sock.setsockopt(zmq.LINGER, 0)
         self.sock.setsockopt(zmq.RCVTIMEO, recv_timeout_ms)
+        self.sock.setsockopt(zmq.REQ_RELAXED, 1)
+        self.sock.setsockopt(zmq.REQ_CORRELATE, 1)
         self.sock.connect(vla_addr)
         print(f"vla-cpp-direct[arch={arch}]: connected to {vla_addr}", flush=True)
 
@@ -381,6 +383,13 @@ class VlaCppClient:
             q01 = self._gr00t_quantile(action_stats, modalities, "q01")
             q99 = self._gr00t_quantile(action_stats, modalities, "q99")
             act_dim = int(q01.size)
+            state_stats = blob[key]["state"]
+            state_keys, state_dims = self._gr00t_modality_layout(state_stats)
+            state_cols = {}
+            s_off = 0
+            for m, dim in zip(state_keys, state_dims):
+                state_cols[m] = slice(s_off, s_off + dim)
+                s_off += dim
 
             # Checkpoints trained with use_relative_action predict, for the
             # modalities listed in meta/relative_stats.json, the offset from the
@@ -401,7 +410,7 @@ class VlaCppClient:
                 horizon = min(len(rel_stats[m]["min"]) for m in rel_names)
                 q01_t = np.tile(q01, (horizon, 1)).astype(np.float32)
                 q99_t = np.tile(q99, (horizon, 1)).astype(np.float32)
-                is_rel = np.zeros(act_dim, dtype=bool)
+                rel_cols = []
                 off = 0
                 for m, dim in zip(modalities, mod_dims):
                     if m in rel_stats:
@@ -419,13 +428,18 @@ class VlaCppClient:
                             raise ValueError(
                                 f"relative stats for {m!r} are {a.shape[1]}-wide, "
                                 f"statistics say {dim}")
+                        sc = state_cols.get(m)
+                        if sc is None or sc.stop - sc.start != dim:
+                            raise ValueError(
+                                f"relative modality {m!r} needs a {dim}-wide state.{m}, "
+                                f"state statistics have {list(zip(state_keys, state_dims))}")
                         q01_t[:, off:off + dim] = a
                         q99_t[:, off:off + dim] = b
-                        is_rel[off:off + dim] = True
+                        rel_cols.append((slice(off, off + dim), sc))
                     off += dim
                 rng_t = (q99_t - q01_t).astype(np.float32)
 
-                def _unnorm(chunk_132, q01_t=q01_t, rng_t=rng_t, is_rel=is_rel,
+                def _unnorm(chunk_132, q01_t=q01_t, rng_t=rng_t, rel_cols=tuple(rel_cols),
                             act_dim=act_dim, horizon=horizon):
                     n = min(len(chunk_132), horizon)
                     norm = np.clip(chunk_132[:n, :act_dim].astype(np.float32), -1.0, 1.0)
@@ -434,7 +448,9 @@ class VlaCppClient:
                     if ref is None:
                         raise RuntimeError("relative actions need the observation state; "
                                            "none was recorded for this request")
-                    raw[:, is_rel] += np.asarray(ref, dtype=np.float32)[:act_dim][is_rel]
+                    ref = np.asarray(ref, dtype=np.float32)
+                    for a_cols, s_cols in rel_cols:
+                        raw[:, a_cols] += ref[s_cols]
                     return raw.astype(np.float32)
             else:
                 rng = (q99 - q01).astype(np.float32)
@@ -456,8 +472,6 @@ class VlaCppClient:
                   f"relative={rel_names or 'none'}]",
                   flush=True)
 
-            state_stats = blob[key]["state"]
-            state_keys, state_dims = self._gr00t_modality_layout(state_stats)
             self._gr00t_state_keys = tuple(state_keys)
             self._gr00t_state_dims = tuple(state_dims)
             s_q01 = self._gr00t_quantile(state_stats, state_keys, "q01")
@@ -1094,33 +1108,31 @@ class VlaCppClient:
         return (np.array(resp.action_chunk, dtype=np.float32)
                   .reshape(resp.chunk_size, resp.action_dim))
 
+    def _oft_image(self, observations: dict[str, Any], key: str) -> np.ndarray:
+        if key not in observations:
+            raise KeyError(f"image key '{key}' missing; got {list(observations.keys())}")
+        img = observations[key]
+        if isinstance(img, torch.Tensor):
+            img = img.numpy()
+        img = np.asarray(img, dtype=np.float32)
+        if img.ndim != 3 or img.shape[0] != 3:
+            raise ValueError(f"{key}: expected CHW float [3, H, W], got {img.shape}")
+        img_u8 = np.clip(np.transpose(img, (1, 2, 0)) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        if img_u8.shape[0] != self.image_size or img_u8.shape[1] != self.image_size:
+            img_u8 = np.array(Image.fromarray(img_u8, mode="RGB").resize(
+                (self.image_size, self.image_size), resample=Image.LANCZOS), dtype=np.uint8)
+        h, w = img_u8.shape[:2]
+        s = 0.9 ** 0.5
+        new_h, new_w = int(round(h * s)), int(round(w * s))
+        off_h, off_w = (h - new_h) // 2, (w - new_w) // 2
+        cropped = img_u8[off_h:off_h + new_h, off_w:off_w + new_w]
+        img_u8 = np.array(Image.fromarray(cropped, mode="RGB").resize(
+            (w, h), resample=Image.BILINEAR), dtype=np.uint8)
+        return np.ascontiguousarray(img_u8, dtype=np.uint8)
+
     def _predict_chunk_bitvla(self, observations: dict[str, Any]) -> np.ndarray:
 
-        images_u8: list[np.ndarray] = []
-        for key in self.image_keys[:BITVLA_N_VIEWS]:
-            if key not in observations:
-                raise KeyError(f"image key '{key}' missing; got {list(observations.keys())}")
-            img = observations[key]
-            if isinstance(img, torch.Tensor):
-                img = img.numpy()
-            img = np.asarray(img, dtype=np.float32)
-            if img.ndim != 3 or img.shape[0] != 3:
-                raise ValueError(f"{key}: expected CHW float [3, H, W], got {img.shape}")
-            img_u8 = np.clip(np.transpose(img, (1, 2, 0)) * 255.0 + 0.5, 0, 255).astype(np.uint8)
-
-            if img_u8.shape[0] != self.image_size or img_u8.shape[1] != self.image_size:
-                img_u8 = np.array(Image.fromarray(img_u8, mode="RGB").resize(
-                    (self.image_size, self.image_size), resample=Image.LANCZOS),
-                    dtype=np.uint8)
-
-            h, w = img_u8.shape[:2]
-            s = 0.9 ** 0.5
-            new_h, new_w = int(round(h * s)), int(round(w * s))
-            off_h, off_w = (h - new_h) // 2, (w - new_w) // 2
-            cropped = img_u8[off_h:off_h + new_h, off_w:off_w + new_w]
-            img_u8 = np.array(Image.fromarray(cropped, mode="RGB").resize(
-                (w, h), resample=Image.BILINEAR), dtype=np.uint8)
-            images_u8.append(np.ascontiguousarray(img_u8, dtype=np.uint8))
+        images_u8 = [self._oft_image(observations, k) for k in self.image_keys[:BITVLA_N_VIEWS]]
 
         s = observations["observation.state"]
         if isinstance(s, torch.Tensor):
@@ -1167,28 +1179,7 @@ class VlaCppClient:
         return chunk
 
     def _predict_chunk_vla_adapter(self, observations: dict[str, Any]) -> np.ndarray:
-        images_u8: list[np.ndarray] = []
-        for key in self.image_keys[:VLA_ADAPTER_N_VIEWS]:
-            if key not in observations:
-                raise KeyError(f"image key '{key}' missing; got {list(observations.keys())}")
-            img = observations[key]
-            if isinstance(img, torch.Tensor):
-                img = img.numpy()
-            img = np.asarray(img, dtype=np.float32)
-            if img.ndim != 3 or img.shape[0] != 3:
-                raise ValueError(f"{key}: expected CHW float [3, H, W], got {img.shape}")
-            img_u8 = np.clip(np.transpose(img, (1, 2, 0)) * 255.0 + 0.5, 0, 255).astype(np.uint8)
-            if img_u8.shape[0] != self.image_size or img_u8.shape[1] != self.image_size:
-                img_u8 = np.array(Image.fromarray(img_u8, mode="RGB").resize(
-                    (self.image_size, self.image_size), resample=Image.LANCZOS), dtype=np.uint8)
-            h, w = img_u8.shape[:2]
-            s = 0.9 ** 0.5
-            new_h, new_w = int(round(h * s)), int(round(w * s))
-            off_h, off_w = (h - new_h) // 2, (w - new_w) // 2
-            cropped = img_u8[off_h:off_h + new_h, off_w:off_w + new_w]
-            img_u8 = np.array(Image.fromarray(cropped, mode="RGB").resize(
-                (w, h), resample=Image.BILINEAR), dtype=np.uint8)
-            images_u8.append(np.ascontiguousarray(img_u8, dtype=np.uint8))
+        images_u8 = [self._oft_image(observations, k) for k in self.image_keys[:VLA_ADAPTER_N_VIEWS]]
 
         st = observations["observation.state"]
         if isinstance(st, torch.Tensor):
@@ -1227,28 +1218,7 @@ class VlaCppClient:
         return chunk
 
     def _predict_chunk_openvla_oft(self, observations: dict[str, Any]) -> np.ndarray:
-        images_u8: list[np.ndarray] = []
-        for key in self.image_keys[:OPENVLA_OFT_N_VIEWS]:
-            if key not in observations:
-                raise KeyError(f"image key '{key}' missing; got {list(observations.keys())}")
-            img = observations[key]
-            if isinstance(img, torch.Tensor):
-                img = img.numpy()
-            img = np.asarray(img, dtype=np.float32)
-            if img.ndim != 3 or img.shape[0] != 3:
-                raise ValueError(f"{key}: expected CHW float [3, H, W], got {img.shape}")
-            img_u8 = np.clip(np.transpose(img, (1, 2, 0)) * 255.0 + 0.5, 0, 255).astype(np.uint8)
-            if img_u8.shape[0] != self.image_size or img_u8.shape[1] != self.image_size:
-                img_u8 = np.array(Image.fromarray(img_u8, mode="RGB").resize(
-                    (self.image_size, self.image_size), resample=Image.LANCZOS), dtype=np.uint8)
-            h, w = img_u8.shape[:2]
-            s = 0.9 ** 0.5
-            new_h, new_w = int(round(h * s)), int(round(w * s))
-            off_h, off_w = (h - new_h) // 2, (w - new_w) // 2
-            cropped = img_u8[off_h:off_h + new_h, off_w:off_w + new_w]
-            img_u8 = np.array(Image.fromarray(cropped, mode="RGB").resize(
-                (w, h), resample=Image.BILINEAR), dtype=np.uint8)
-            images_u8.append(np.ascontiguousarray(img_u8, dtype=np.uint8))
+        images_u8 = [self._oft_image(observations, k) for k in self.image_keys[:OPENVLA_OFT_N_VIEWS]]
 
         st = observations["observation.state"]
         if isinstance(st, torch.Tensor):

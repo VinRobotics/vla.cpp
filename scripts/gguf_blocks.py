@@ -85,6 +85,9 @@ def write_siglip_tower(
 
     add_n(writer, "vit.post_ln.weight", g(f"{root}.post_layernorm.weight")); add_n(writer, "vit.post_ln.bias", g(f"{root}.post_layernorm.bias"))
 
+def pi_root(keys) -> str:
+    return "model." if "model.paligemma_with_expert.paligemma.lm_head.weight" in keys else ""
+
 def probe_paligemma_vision(sf, keys, cfg_json: dict, vis_candidates, mmp_candidates) -> dict:
 
     vis = next((p for p in vis_candidates if f"{p}.embeddings.patch_embedding.weight" in keys), None)
@@ -125,7 +128,7 @@ def write_pi_kv(writer, kv, cfg: dict, adarms: bool = False) -> None:
     if adarms:
         writer.add_bool  (kv("use_adarms_expert"),      True)
         writer.add_uint32(kv("adarms_cond_dim"),        cfg["expert_h"])
-        writer.add_string(kv("norm_mode"),              "quantiles")
+        writer.add_string(kv("norm_mode"),              cfg["norm_mode"])
     writer.add_float64 (kv("min_period"),               cfg["min_period"])
     writer.add_float64 (kv("max_period"),               cfg["max_period"])
     writer.add_float64 (kv("rope_theta"),               cfg["rope_theta"])
@@ -335,12 +338,12 @@ def load_processor_stats(ckpt: Path, meta_json: str, registry: str, key: str, di
 
     meta_path = ckpt / meta_json
     if not meta_path.exists():
-        print(f"  stats: {meta_json} missing - using identity for {key}")
+        print(f"  stats: {meta_json} missing")
         return None
     try:
         meta = json.loads(meta_path.read_text())
     except Exception as e:
-        print(f"  stats: {meta_json} parse failed ({e}) - using identity for {key}")
+        print(f"  stats: {meta_json} parse failed ({e})")
         return None
 
     state_file = None
@@ -349,28 +352,67 @@ def load_processor_stats(ckpt: Path, meta_json: str, registry: str, key: str, di
             state_file = step.get("state_file")
             break
     if not state_file:
-        print(f"  stats: no {registry} step in {meta_json} - using identity for {key}")
+        print(f"  stats: no {registry} step in {meta_json}")
         return None
 
     sf_path = ckpt / state_file
     if not sf_path.is_file():
-        print(f"  stats: {sf_path.name} referenced by {meta_json} but missing - using identity for {key}")
+        print(f"  stats: {sf_path.name} referenced by {meta_json} but missing")
         return None
 
     with safe_open(str(sf_path), framework="pt") as f:
         keys = set(f.keys())
         mk, sk = f"{key}.mean", f"{key}.std"
         if mk not in keys or sk not in keys:
-            print(f"  stats: {sf_path.name} lacks {mk}/{sk} - using identity for {key}")
+            print(f"  stats: {sf_path.name} lacks {mk}/{sk}")
             return None
         mean = f.get_tensor(mk).float().numpy().reshape(-1)
         std  = f.get_tensor(sk).float().numpy().reshape(-1)
 
     if mean.size != dim or std.size != dim:
-        print(f"  stats: {mk} dim mismatch ({mean.size} vs {dim}) in {sf_path.name} - using identity")
+        print(f"  stats: {mk} dim mismatch ({mean.size} vs {dim}) in {sf_path.name}")
         return None
     print(f"  stats: loaded {key} from {sf_path.name} ({mk}/{sk})")
     return mean.astype(np.float32, copy=False), std.astype(np.float32, copy=False)
+
+def lerobot_stats(sf, ckpt: Path, state_dim: int, action_dim: int, norm_map: dict) -> dict[str, np.ndarray]:
+
+    out = identity_stats(state_dim, action_dim)
+    keys = set(sf.keys())
+
+    def _legacy(pfx: str, dim: int):
+        mk, sk = f"{pfx}.mean", f"{pfx}.std"
+        if mk not in keys or sk not in keys:
+            return None
+        mean = sf.get_tensor(mk).float().numpy().reshape(-1)
+        std  = sf.get_tensor(sk).float().numpy().reshape(-1)
+        if mean.size != dim or std.size != dim:
+            print(f"  stats: legacy {mk} dim mismatch ({mean.size} vs {dim})")
+            return None
+        print(f"  stats: loaded {pfx} from model.safetensors [legacy]")
+        return mean.astype(np.float32, copy=False), std.astype(np.float32, copy=False)
+
+    feats = (
+        ("STATE", "state", "policy_preprocessor.json", "normalizer_processor", "observation.state", state_dim,
+         ("normalize_inputs.buffer_observation_state",)),
+        ("ACTION", "action", "policy_postprocessor.json", "unnormalizer_processor", "action", action_dim,
+         ("unnormalize_outputs.buffer_action", "normalize_targets.buffer_action")),
+    )
+    for ftype, dst, meta_json, registry, key, dim, legacy in feats:
+        mode = norm_map.get(ftype, "MEAN_STD")
+        if mode == "IDENTITY":
+            continue
+        if mode != "MEAN_STD":
+            raise SystemExit(f"normalization_mapping {ftype}={mode} is not supported (MEAN_STD or IDENTITY only)")
+        got = load_processor_stats(ckpt, meta_json, registry, key, dim)
+        for pfx in legacy:
+            if got is None:
+                got = _legacy(pfx, dim)
+        if got is None:
+            raise SystemExit(f"no {key} mean/std in {meta_json} or model.safetensors ({', '.join(legacy)}); "
+                             f"refusing to bake identity stats for MEAN_STD {ftype}")
+        out[f"{dst}_mean"], out[f"{dst}_std"] = got
+    return out
 
 def identity_stats(state_dim: int, action_dim: int) -> dict[str, np.ndarray]:
     return {

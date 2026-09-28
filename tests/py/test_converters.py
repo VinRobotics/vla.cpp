@@ -348,6 +348,44 @@ def test_turbovla_converter_remap():
     } <= set(tensors.keys_read)
 
 
+def test_quantize_skip_names():
+    import importlib
+    Q = importlib.import_module("quantize_gguf")
+    default = Q.SKIP + Q.SKIP_VISION
+    keep = [
+        "aex.blk.0.attn_q.weight", "aex.vlsa.0.ff0.weight", "aex.head.fc1.weight", "aex.seq_pool.weight",
+        "ah.act_enc.l2.weight", "act.dec.0.fc1.weight", "octo.head.diffusion.reverse.out.weight",
+        "octo.t5.tok_embd.weight", "vis.d.blk.0.qkv.weight", "vis.s.blk.0.fc1.weight",
+        "octo.obs.primary.proj.weight",
+    ]
+    pack = [
+        "vlm.blk.0.attn_q.weight", "lm.blk.0.ffn_up.weight", "octo.t5.blk.0.attn_q.weight",
+        "text.encoder.layer.0.attention.self.query.weight", "mm.fc1.weight", "vis.proj.fc1.weight",
+    ]
+    for n in keep:
+        assert not Q.eligible(n, (64, 64), "Q8_0", default), n
+    for n in pack:
+        assert Q.eligible(n, (64, 64), "Q8_0", default), n
+    assert Q.eligible("vis.d.blk.0.qkv.weight", (64, 64), "Q8_0", Q.SKIP)
+
+
+def test_find_sidecar():
+    import tempfile
+    from gguf_common import find_sidecar
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        try:
+            find_sidecar(d, "action_head")
+            raise AssertionError("missing sidecar must exit")
+        except SystemExit:
+            pass
+        (d / "action_head--checkpoint.pt").touch()
+        assert find_sidecar(d, "action_head").name == "action_head--checkpoint.pt"
+        for step in (5000, 30000, 10000):
+            (d / f"action_head--{step}_checkpoint.pt").touch()
+        assert find_sidecar(d, "action_head").name == "action_head--30000_checkpoint.pt"
+
+
 def test_every_converter_imports():
     # every converter must resolve against the two shared modules
     import importlib
