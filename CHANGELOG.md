@@ -18,6 +18,14 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   `$ORIGIN/../lib` rpath, and `bindings/python` builds a self-contained wheel
   with scikit-build-core (`pip install ./bindings/python`).
 - `vla-cli` takes the precision flags and `--config`, like `vla-server`.
+- The tokenizer can live in the GGUF, as in llama.cpp:
+  `scripts/add_tokenizer_to_gguf.py` embeds the SentencePiece model for π0,
+  π0.5 and OpenVLA-OFT, and `vla-cli --text` then builds the prompt in-process
+  with no Python. Otherwise it falls back to `tokenize_prompt.py`, which it now
+  finds next to its own binary or under `share/vla`.
+- `--num-steps N` (or `runtime.num_steps`) overrides the solver step count at
+  load for π0, π0.5, SmolVLA, Evo-1, GR00T N1.5/N1.6/N1.7 and VLA-JEPA; archs
+  that do not read it refuse it. `VLA_NUM_STEPS` still works as a fallback.
 - `-hf user/repo:sub/dir/file.gguf` and llama.cpp-style `:Q8_0` tags. A repo
   with several GGUFs lists them instead of picking the largest, and only GGUFs
   are downloaded.
@@ -226,6 +234,8 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   covers sm_75 to sm_121 with `GGML_NATIVE=OFF`, instead of sm_89 only. CUDA 13.4
   is a build-arg for drivers 580 and newer.
 - A missing `--config` file is an error instead of being ignored.
+- Octo is always built. `VLA_OCTO` is renamed `VLA_SPM` and only controls the
+  SentencePiece tokenizer; the old name still works with a warning.
 - Release workflow tokens are least-privilege, and a manual run builds without
   publishing.
 - llama.cpp pinned at `b11223`, up from `b10331` (via `b10729`). Brings the
