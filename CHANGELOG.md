@@ -118,11 +118,29 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Changed
 
-- llama.cpp pinned at `b10729`, up from `b10331`. Brings OpenVINO 2026.3.1, the
-  IM2COL+MatMul to native-convolution fusion, and the `RELU`/`NEG`/`SQR`
-  translators, which the local patch no longer has to add. Byte-identical on the
-  CPU backend for all eleven archs. The build.yml cache key now reads the tag out
-  of `CMakeLists.txt` instead of repeating it.
+- llama.cpp pinned at `b11223`, up from `b10331` (via `b10729`). Brings the
+  IM2COL+MatMul to native-convolution fusion, the `RELU`/`NEG`/`SQR` translators
+  the local patch no longer adds, CUDA RMS_NORM+SCALE fusion, fixes for a
+  divergent `__syncthreads` in the f16 flash-attention kernel and races in
+  mmf/mmid, and Metal and OpenCL correctness fixes. All thirteen archs are
+  byte-identical on CUDA (sm_120) against `b10729`. The
+  `ggml_mul_mat_set_prec`/`ggml_flash_attn_ext_set_prec` calls moved to
+  `ggml_prec_set_acc`, which writes the same op params. The build.yml cache key
+  now reads the tag out of `CMakeLists.txt` instead of repeating it.
+- The default CUDA architecture list is set before ggml is configured, so
+  ggml-cuda and the in-tree kernels build the same set, and it gains sm_110
+  (Jetson Thor, CUDA 13) and sm_121 (DGX Spark, CUDA 12.9). Only the f16 flash
+  attention vector kernels are built (`GGML_CUDA_FA_QUANTS=f16-f16`).
+- SentencePiece `v0.2.1`, which fixes a heap overflow on a malformed
+  normalization model. Octo loads that model from GGUF bytes.
+- OpenVINO 2026.4 in `scripts/install_ov.sh`, with newer Intel GPU and NPU
+  drivers on Ubuntu 24.04. Every downloaded archive and package is now
+  checksummed, including the NPU driver, level-zero and IGC packages.
+- The release macOS job runs on `macos-15`; `macos-14` runners are retired.
+- Python tooling: transformers 5.x is supported (the client needs `>=5.4` for
+  the VLA-JEPA processor), the client extra gains the modules it imports
+  (`torchvision`, `protobuf`, `opencv-python-headless`), and both pyprojects use
+  an SPDX license string.
 - `src/models/dit_common.h` is gone. It redefined six `vla::` functions that
   `src/layers/` already had, with both copies linked into `vla_core`. Every
   includer used only `sinusoidal_time_emb` or `build_causal_mask`, so they now
