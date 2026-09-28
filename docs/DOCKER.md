@@ -155,7 +155,7 @@ docker run -d --name vla-cpp-server -p 5555:5555 \
     vla-cpp-cpu --bind tcp://*:5555 /models/smolvla-libero.gguf
 ```
 
-Verify with `docker logs vla-cpp-server` — look for `vla-server: bound to tcp://*:5555. ready.`
+Verify with `docker logs vla-cpp-server` and look for `vla-server: bound to tcp://*:5555. ready.`
 
 ### 4. Run a LIBERO evaluation episode
 

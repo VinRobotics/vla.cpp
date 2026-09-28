@@ -74,8 +74,8 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 - π0 fed its image tokens to the language model scaled by 1/sqrt(2048). Every
   reference, including the lerobot v0.4.4 code that trained the shipped
   checkpoint, feeds the raw projector output. On 100 paired LIBERO-Object
-  episodes π0 goes from 83 to 90 successes. π0.5 dropped the same scale and
-  its undo, a rounding-level change.
+  episodes π0 goes from 83 to 90 successes (McNemar p=0.17, not significant).
+  π0.5 dropped the same scale and its undo, a rounding-level change.
 - TurboVLA skipped DINOv3's final LayerNorm, which the checkpoint was trained
   through, so its actions were off by up to 0.47. It now matches the PyTorch
   reference to 9e-6. The converter writes `vit.norm`, and a GGUF without it
@@ -86,9 +86,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   2e-6 of JAX on CPU.
 - The Qwen3-VL patch mergers used tanh GELU where the reference uses erf, which
   moved GR00T N1.7 and VLA-JEPA vision features by up to 4e-3. GR00T N1.7 goes
-  from 97 to 99 on 100 paired LIBERO-Object episodes.
+  from 97 to 99 on 100 paired LIBERO-Object episodes (p=0.5, not significant).
 - SmolVLA rounded its F32 cross-attention k/v projections to BF16. With them
-  kept in F32 it goes from 90 to 92 on 100 paired episodes.
+  kept in F32 it goes from 90 to 92 on 100 paired episodes (p=0.63, not
+  significant).
 - The eval client sent VLA-Adapter raw proprio where the reference normalizes it
   with q01/q99 bounds, and mapped constant GR00T state dims to -1 where the
   reference uses 0. VLA-Adapter is unchanged on LIBERO-Object (298 vs 295 of 300
@@ -103,13 +104,13 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   path is unchanged.
 - vla-server no longer dies on a bad request. An out-of-vocab Octo token, 9 to
   16 OpenVLA-OFT or VLA-Adapter views, a BitVLA prompt past 1024 tokens, or Octo
-  stats without a mask each abort the process today; they now get an error
+  stats without a mask each aborted the process; they now get an error
   reply. Images are decoded as JPEG or PNG only, a request is capped at 64
   megapixels in total, precomputed embeddings at 16 views, and a port that is
   already in use exits with a message instead of SIGABRT after the model load.
-- vlm-server segfaulted on every start at `b11223`, read an uninitialized prompt
-  length, died on a chat-template exception, corrupted multi-turn prompts,
-  streamed invalid UTF-8, and handed network bytes to the ffmpeg image fallback.
+- vlm-server read an uninitialized prompt length, died on a chat-template
+  exception, corrupted multi-turn prompts, streamed invalid UTF-8, and handed
+  network bytes to the ffmpeg image fallback.
   All fixed; a full context now ends with `finish_reason="length"`.
 - Graph sizes follow the real node count in π0, π0.5, SmolVLA, OpenVLA-OFT,
   VLA-Adapter, VLA-JEPA and GR00T N1.7, so more views or `VLA_NUM_STEPS` no
@@ -141,10 +142,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 - `scripts/quantize_gguf.py` wrote array metadata as INT32, which broke Octo and
   TurboVLA, and packed the action experts and vision towers its skip list meant
   to keep float.
-- Converters: both lerobot key layouts for π0/π0.5, π0.5's normalization mapping,
-  legacy SmolVLA stats, head counts from config, `torch.load(weights_only=True)`
-  on third-party checkpoints (torch >= 2.6), and unsupported config variants are
-  refused.
+- Converters: both lerobot key layouts for π0/π0.5, legacy SmolVLA stats, head
+  counts from config and `torch.load(weights_only=True)` on third-party
+  checkpoints (torch >= 2.6). Unsupported config variants are refused, including
+  a π0.5 normalization mapping other than QUANTILES.
 - The eval client's REQ socket stayed stuck after one timeout, and the ALOHA
   prefetch could replay a chunk from an earlier observation.
 - A `scripts/quantize_gguf.py` file did not load for SmolVLA on any platform:
@@ -220,10 +221,12 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Changed
 
-- Faster predict with byte-identical actions, measured on an RTX 5090 (min over
-  interleaved rounds): π0.5 -14%, TurboVLA -15%, SmolVLA -12%, GR00T N1.6 -11%,
-  Octo -9%, GR00T N1.7 -8%, π0 -7%, VLA-Adapter -6%, GR00T N1.5 -5%, VLA-JEPA
-  -5%, OpenVLA-OFT and Evo-1 -3%. π0.5's adaRMS and the DiT heads' timestep
+- Faster predict, measured on an RTX 5090 at default flags against `7abe1b4`
+  (min over 5 interleaved rounds): SmolVLA -18%, π0.5 -16%, GR00T N1.6 and
+  TurboVLA -15%, VLA-Adapter -12%, π0, OpenVLA-OFT, GR00T N1.5 and N1.7 -9%,
+  VLA-JEPA -8%, Octo -7%, Evo-1 -6%. BitVLA is about 3% slower (20.2 ms to
+  20.8 ms), the cost of correct bf16 rounding. The speedups themselves leave
+  actions byte-identical. π0.5's adaRMS and the DiT heads' timestep
   conditioning are computed once at load, GR00T keeps only the selected
   embodiment's projectors resident (1.2 GiB less VRAM), SmolVLA widens its
   weights to F32 at load instead of on every call (0.7 GiB more VRAM), TurboVLA
@@ -231,13 +234,18 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 - About 1300 lines of per-arch copies now use the shared `src/layers` and
   `src/modules` code, byte-identical for every arch.
 - The Docker image is multi-stage (devel to runtime) and the published one
-  covers sm_75 to sm_121 with `GGML_NATIVE=OFF`, instead of sm_89 only. CUDA 13.4
+  covers sm_75 to sm_120 with `GGML_NATIVE=OFF`, instead of sm_89 only. CUDA 13.4
   is a build-arg for drivers 580 and newer.
 - A missing `--config` file is an error instead of being ignored.
 - Octo is always built. `VLA_OCTO` is renamed `VLA_SPM` and only controls the
   SentencePiece tokenizer; the old name still works with a warning.
 - Release workflow tokens are least-privilege, and a manual run builds without
   publishing.
+- The x86 CUDA 12.8 release tarball is now `linux-x86_64-cuda-12.8` (was
+  `linux-x86_64-cuda`); scripts that download it by name need the new suffix.
+- The macOS release tarball ships only `vla-cli` and `vla-bench`, without the
+  servers or the in-GGUF SentencePiece tokenizer, so it no longer needs Homebrew
+  protobuf or zeromq. `--text` there goes through `tokenize_prompt.py`.
 - llama.cpp pinned at `b11223`, up from `b10331` (via `b10729`). Brings the
   IM2COL+MatMul to native-convolution fusion, the `RELU`/`NEG`/`SQR` translators
   the local patch no longer adds, CUDA RMS_NORM+SCALE fusion, fixes for a
@@ -252,7 +260,8 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   (Jetson Thor, CUDA 13) and sm_121 (DGX Spark, CUDA 12.9). Only the f16 flash
   attention vector kernels are built (`GGML_CUDA_FA_QUANTS=f16-f16`).
 - SentencePiece `v0.2.1`, which fixes a heap overflow on a malformed
-  normalization model. Octo loads that model from GGUF bytes.
+  normalization model. `vla-cli --text` loads that model from GGUF bytes
+  (`src/tokenizer.cpp`).
 - OpenVINO 2026.4 in `scripts/install_ov.sh`, with newer Intel GPU and NPU
   drivers on Ubuntu 24.04. Every downloaded archive and package is now
   checksummed, including the NPU driver, level-zero and IGC packages.

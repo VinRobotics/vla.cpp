@@ -165,7 +165,7 @@ class Model:
 
 
 def load(ckpt_path: str, mmproj_path: str | None = None, config_path: str | None = None) -> Model:
-    """Load a checkpoint. mmproj_path is only needed for SmolVLA, pi0 and pi0.5."""
+    """Load a checkpoint. mmproj_path is accepted and ignored; every arch bundles its vision tower."""
     lib = _lib_handle()
     handle = lib.vla_model_load(
         mmproj_path.encode() if mmproj_path else None,

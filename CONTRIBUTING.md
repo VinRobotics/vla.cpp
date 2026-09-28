@@ -28,10 +28,12 @@ Any difference is a bug unless the change is meant to alter numerics, in which
 case say so in the commit message and back it with a LIBERO sweep.
 
 `VLA_IMG_SIZE` must match the model or `predict` returns empty: 512 for
-SmolVLA, 448 for Evo-1, 256 for GR00T N1.7 and VLA-JEPA, 224 for the rest. Other
-knobs: `VLA_BENCH_ITERS` (timing), `VLA_TIMING=phase`, `VLA_EXTRA_TOKEN` /
-`VLA_EXTRA_COUNT` (VLA-JEPA needs its `<embodied>` tokens), `VLA_N_THREADS`,
-`VLA_DEVICE`.
+SmolVLA, 448 for Evo-1, 256 for GR00T N1.7 and VLA-JEPA, 256 with 2 views for
+TurboVLA, 224 for the rest. Other knobs: `VLA_BENCH_ITERS` (timing),
+`VLA_TIMING=phase`, `VLA_EXTRA_TOKEN` / `VLA_EXTRA_COUNT` (VLA-JEPA needs its
+`<embodied>` tokens; Octo needs exactly 16 tokens, so
+`VLA_EXTRA_TOKEN=0 VLA_EXTRA_COUNT=10`), `VLA_OCTO_UNNORM_DATASET` (Octo, e.g.
+`libero_object`), `VLA_N_THREADS`, `VLA_DEVICE`.
 
 Checkpoints are at [huggingface.co/vrfai](https://huggingface.co/vrfai), or let
 the binaries fetch them:
@@ -42,7 +44,7 @@ the binaries fetch them:
 
 ## Adding an architecture
 
-Six sites, all mechanical. Every arch loads one GGUF with its vision tower
+Seven sites, all mechanical. Every arch loads one GGUF with its vision tower
 bundled; `mmproj_path` is accepted and ignored.
 
 1. `src/arch.h` - add to `enum class Arch`.
@@ -51,7 +53,10 @@ bundled; `mmproj_path` is accepted and ignored.
    `detect_arch_gguf`.
 4. `src/model.cpp` - map the string to the enum in the same function.
 5. `src/model.cpp` - add a `case` to the `model_load` switch.
-6. `CMakeLists.txt` - add `src/models/<name>.cpp` to `vla_core`.
+6. `src/model.cpp` - if the arch has no flow-matching solver, add it to the
+   `opts.num_steps` refusal list in `model_load`; if it has one, read the step
+   count with `resolve_num_steps`.
+7. `CMakeLists.txt` - add `src/models/<name>.cpp` to `vla_core`.
 
 Then write `src/models/<name>.cpp`. Before adding a helper, check `src/`:
 `gguf_reader.h` (tensor and KV reads), `loader.h` (weight upload and fusion),

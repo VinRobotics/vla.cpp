@@ -23,8 +23,8 @@ via OpenCL and the Hexagon backend.
 ## Prebuilt binaries
 
 Each [release](https://github.com/VinRobotics/vla.cpp/releases) has a
-`vla.cpp-<tag>-<platform>.tar.gz` with `vla-cli`, `vla-bench`, `vla-server`,
-`vlm-server`, `libvla` and `vla.h`:
+`vla.cpp-<tag>-<platform>.tar.gz` with `libvla` and `vla.h`. The Linux ones add
+`vla-cli`, `vla-bench`, `vla-server` and `vlm-server`:
 
 | Platform | Needs |
 |---|---|
@@ -33,7 +33,7 @@ Each [release](https://github.com/VinRobotics/vla.cpp/releases) has a
 | `linux-x86_64-cuda-13.4` | AVX2; sm_75/80/86/89/90/120, driver 580 or newer |
 | `linux-aarch64-cpu` | ARMv8.2-A with dotprod and fp16 (Cortex-A76, Neoverse N1 or newer) |
 | `linux-aarch64-cuda-13.4` | sm_87 (Orin), sm_110 (Thor), sm_121 (DGX Spark); a CUDA 13 driver |
-| `macos-arm64-metal` | `brew install protobuf zeromq` |
+| `macos-arm64-metal` | `vla-cli` and `vla-bench` only; `--text` uses `tokenize_prompt.py` |
 
 The Linux tarballs are built on Ubuntu 24.04 and do not load on an older glibc
 such as Ubuntu 22.04 or JetPack 6. Apart from the CUDA runtime and ZeroMQ, they
@@ -219,7 +219,8 @@ configuration per model, with measured latency and success rate, is in
 [`CHANGELOG.md`](CHANGELOG.md):
 
 - `--weight-dtype f32|bf16|f16` - resident dtype for GEMM weights.
-- `--act-dtype f32|bf16` - activation dtype; needs CUDA and bf16 weights.
+- `--act-dtype f32|bf16` - activation dtype; bf16 is π0 and Evo-1 only and
+  needs CUDA and bf16 weights.
 - `--flash-attn` - faster on the larger towers, but changes numerics.
 - `--mm-prec default|f32` - matmul accumulation precision.
 - `--num-steps N` - flow-matching solver steps for π0, π0.5, SmolVLA, Evo-1,
@@ -313,8 +314,8 @@ the packed weights, so the file loads and runs like the original.
 python scripts/quantize_gguf.py --in model-bf16.gguf --out model-q8_0.gguf --type Q8_0
 ```
 
-The packed matmuls do not dequantize to float first. ggml quantizes the
-activations to 8 bits and runs integer dot products on the blocks
+On CPU and CUDA the packed matmuls do not dequantize to float first. ggml
+quantizes the activations to 8 bits and runs integer dot products on the blocks
 (`vec_dot_q8_0_q8_0` on CPU, the MMQ kernels on CUDA), so a Q8_0 LM is int8
 compute, not BF16.
 
@@ -336,7 +337,8 @@ transport, no simulator, no claim about task success.
 
 RTX 5090, driver 595.84, CUDA 13.2, 24-core host, weights as shipped, 20 reps
 after 3 warmups, best of three sweeps, each model at its native input size and
-view count.
+view count. These numbers predate this release's predict speedups;
+[CHANGELOG.md](CHANGELOG.md) has the measured change per arch.
 
 | Model | Views | Input | min ms | p50 ms | p90 ms | vision ms |
 |---|--:|--:|--:|--:|--:|--:|
@@ -367,9 +369,12 @@ episodes per model, terminated episodes counted as failures:
 | π0         | 32 |  87.5% |
 | GR00T N1.6 | 16 |  86.5% |
 
-This table was measured before three numeric fixes. On 100 paired
-LIBERO-Object episodes, before and after, π0 goes from 83 to 90 successes,
-SmolVLA from 90 to 92 and GR00T N1.7 from 97 to 99; see
+This table predates every numeric change in this release, which moved the
+outputs of π0, π0.5, SmolVLA, GR00T N1.7, VLA-JEPA, Octo, TurboVLA, Evo-1 and
+BitVLA (Evo-1 only through its fallback prompt, which LIBERO runs do not use).
+Paired before and after runs on 100 LIBERO-Object episodes give π0 83 to 90
+successes, SmolVLA 90 to 92 and GR00T N1.7 97 to 99. None of these is
+statistically significant (McNemar p=0.17, 0.63 and 0.5); see
 [CHANGELOG.md](CHANGELOG.md). The published TurboVLA GGUF has no DINOv3 final
 norm (`vit.norm`) and no longer loads; re-convert it with
 `scripts/convert_turbovla_to_gguf.py`.
@@ -409,7 +414,7 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to prove a change is numerically
-neutral, and the six sites you touch to add an architecture.
+neutral, and the seven sites you touch to add an architecture.
 
 ---
 

@@ -59,7 +59,7 @@ inline int default_cpu_threads() {
  * (@ref detect_arch_from_ckpt) and routed to the corresponding factory.
  */
 enum class Arch {
-    SMOLVLA,    // Hugging Face SmolVLA (mmproj + LM + flow-matching head).
+    SMOLVLA,    // Hugging Face SmolVLA (SigLIP + LM + flow-matching head).
     PI0,        // Physical Intelligence pi0 (PaliGemma + flow-matching).
     PI05,       // PaliGemma-3B + SigLIP-So400m + Gemma-300m + FM.
     EVO1,       // MINT-SJTU Evo-1 (InternVL3 + cross-attention head).
@@ -105,9 +105,9 @@ public:
 };
 
 /**
- * @brief Build a SmolVLA model from its mmproj and checkpoint GGUFs.
- * @param mmproj_path Path to the vision-tower GGUF.
- * @param ckpt_path   Path to the LM+action-expert GGUF.
+ * @brief Build a SmolVLA model from its checkpoint GGUF.
+ * @param mmproj_path Ignored; the vision tower is bundled in @p ckpt_path.
+ * @param ckpt_path   Path to the vision+LM+action-expert GGUF.
  * @param config_path Optional JSON override; pass empty to use bundled config.
  * @return Owning pointer to the constructed model.
  */
@@ -117,7 +117,7 @@ std::unique_ptr<ModelArchBase> smolvla_create(const std::string& mmproj_path,
                                               const Options& opts);
 
 /**
- * @brief Build a pi0 model from its mmproj and checkpoint GGUFs.
+ * @brief Build a pi0 model from its checkpoint GGUF.
  * @copydetails smolvla_create
  */
 std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
@@ -126,7 +126,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
                                               const Options& opts);
 
 /**
- * @brief Build a pi0.5 model from its mmproj and checkpoint GGUFs.
+ * @brief Build a pi0.5 model from its checkpoint GGUF.
  * @copydetails smolvla_create
  */
 std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,

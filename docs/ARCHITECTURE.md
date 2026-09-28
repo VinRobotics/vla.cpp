@@ -69,10 +69,10 @@ llama.cpp is fetched by CMake `FetchContent` and pinned by `VLA_LLAMA_TAG` in
 `CMakeLists.txt`. Each arch picks a resident dtype for its GEMM weights
 (`--weight-dtype` overrides it), and a GGUF can be repacked to Q8_0/Q4_0 with
 `scripts/quantize_gguf.py`.
-The loader keeps packed weights packed, and ggml runs their matmuls as int8 dot
-products against 8-bit quantized activations. CPU thread count scales to the
-machine core count; the GPU backends run the towers and the transformer on the
-device.
+The loader keeps packed weights packed. On CPU and CUDA, ggml quantizes the
+activations to 8 bits and runs int8 dot products on the blocks. CPU thread count
+scales to the machine core count; the GPU backends run the towers and the
+transformer on the device.
 
 ## Adding an architecture
 
