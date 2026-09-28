@@ -404,11 +404,11 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
         for (const EncBlockW & w : vis.vit.enc.blk)
             h = build_siglip_layer(VC, w, h, K, vis.vit.enc.cfg, act_type);
         h = layer_norm(VC, h, vis.vit.post_ln_w, vis.vit.post_ln_b, vis.vit.enc.cfg.ln_eps);
-        // PaliGemma projector: linear (+ optional bias), then 1/sqrt(hidden) scale (matches clip.cpp siglip.cpp).
+        // PaliGemma projector: linear (+ optional bias).
         ggml_tensor * proj = mm_act(VC, vis.proj_w, h, act_type);
         if (vis.proj_b)
             proj = ggml_add(VC, proj, vis.proj_b);
-        ggml_tensor * vit_emb = as_type(VC, ggml_scale(VC, proj, 1.0f/std::sqrt((float) proj->ne[0])), GGML_TYPE_F32);
+        ggml_tensor * vit_emb = as_type(VC, proj, GGML_TYPE_F32);
         ggml_set_output(vit_emb);
 
         ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);

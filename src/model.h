@@ -132,8 +132,8 @@ struct Inputs {
     int              n_images;        ///< Number of @ref images.
 
     /// Pre-computed image embeddings, [n_img_views * n_img, hidden]; bypasses the
-    /// vision tower. Passed to the LM as-is, so the scale is arch-specific: pi0
-    /// expects the projector output times 1/sqrt(hidden), pi0.5 expects it raw.
+    /// vision tower. Passed to the LM as-is; pi0 and pi0.5 expect the raw
+    /// projector output.
     const float*     precomputed_img_emb = nullptr;
     int              n_img_views         = 0; ///< Number of views in
                                               ///  @ref precomputed_img_emb.
