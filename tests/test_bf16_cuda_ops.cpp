@@ -40,17 +40,18 @@ namespace {
 
 constexpr int64_t K = 128;   // reduction / feature dim
 constexpr int64_t M = 64;    // rows
-constexpr int64_t N = 96;    // output features
+constexpr int64_t N = 100;   // output features
 constexpr float   EPS = 1e-5f;
 
 // Builds the chain at `at`. Inputs are always F32 tensors; the BF16 run casts in
 // at the top and back out at the bottom, exactly as the models do.
 ggml_tensor * build_chain(ggml_context * C, ggml_tensor * x, ggml_tensor * w_norm,
-                          ggml_tensor * W, ggml_tensor * bias, ggml_type at) {
+                          ggml_tensor * W, ggml_tensor * bias, ggml_tensor * bias2, ggml_type at) {
     ggml_tensor * h = vla::as_type(C, x, at);
     h = ggml_mul(C, ggml_rms_norm(C, h, EPS), w_norm);   // RMS_NORM (+ MUL, F32 weight)
-    h = vla::mm_act(C, W, h, at);                        // MUL_MAT
-    h = ggml_add(C, h, bias);                            // ADD, F32 bias
+    h = ggml_add(C, vla::mm_act(C, W, ggml_reshape_3d(C, h, K, M/2, 2), at),
+                 ggml_reshape_3d(C, vla::mm_act(C, W, h, at), N, M/2, 2));
+    h = ggml_add(C, ggml_add(C, h, bias), bias2);        // ADD, F32 bias
     h = ggml_silu(C, h);                                 // UNARY SILU
     h = ggml_scale(C, h, 0.5f);                          // SCALE
     h = ggml_add(C, ggml_norm(C, h, EPS), h);            // NORM (+ ADD, BF16 x BF16)
@@ -70,9 +71,10 @@ std::vector<float> run(ggml_backend_t backend, ggml_type at,
     // typed-GEMM path; that mirrors a BF16 checkpoint.
     ggml_tensor * W      = ggml_new_tensor_2d(C, at, K, N);
     ggml_tensor * bias   = ggml_new_tensor_1d(C, GGML_TYPE_F32, N);
-    for (ggml_tensor * t : {x, w_norm, W, bias}) ggml_set_input(t);
+    ggml_tensor * bias2  = ggml_new_tensor_1d(C, GGML_TYPE_F32, N);
+    for (ggml_tensor * t : {x, w_norm, W, bias, bias2}) ggml_set_input(t);
 
-    ggml_tensor * out = build_chain(C, x, w_norm, W, bias, at);
+    ggml_tensor * out = build_chain(C, x, w_norm, W, bias, bias2, at);
     ggml_set_output(out);
 
     ggml_cgraph * gf = ggml_new_graph(C);
@@ -87,6 +89,7 @@ std::vector<float> run(ggml_backend_t backend, ggml_type at,
     ggml_backend_tensor_set(x,      hx.data(), 0, ggml_nbytes(x));
     ggml_backend_tensor_set(w_norm, hw.data(), 0, ggml_nbytes(w_norm));
     ggml_backend_tensor_set(bias,   hb.data(), 0, ggml_nbytes(bias));
+    ggml_backend_tensor_set(bias2,  hb.data()+N, 0, ggml_nbytes(bias2));
     if (at == GGML_TYPE_BF16) {
         std::vector<ggml_bf16_t> t(hW.size());
         ggml_fp32_to_bf16_row(hW.data(), t.data(), (int64_t) hW.size());
@@ -119,11 +122,11 @@ int main() {
     }
     vla::cuda_register_bf16_ops();
 
-    std::vector<float> hx((size_t) K*M), hw((size_t) K), hW((size_t) K*N), hb((size_t) N);
+    std::vector<float> hx((size_t) K*M), hw((size_t) K), hW((size_t) K*N), hb((size_t) N*2);
     for (size_t i = 0; i < hx.size(); ++i) hx[i] = ((float) ((i*37) % 23) - 11.0f) / 8.0f;
     for (size_t i = 0; i < hw.size(); ++i) hw[i] = 0.5f + ((float) ((i*11) % 7)) / 16.0f;
     for (size_t i = 0; i < hW.size(); ++i) hW[i] = ((float) ((i*53) % 19) - 9.0f) / 32.0f;
-    for (size_t i = 0; i < hb.size(); ++i) hb[i] = ((float) ((i*17) % 5) - 2.0f) / 16.0f;
+    for (size_t i = 0; i < hb.size(); ++i) hb[i] = ((float) ((i*17) % 7) - 3.0f) / 16.0f;
 
     const std::vector<float> ref = run(backend, GGML_TYPE_F32,  hx, hw, hW, hb);
     const std::vector<float> got = run(backend, GGML_TYPE_BF16, hx, hw, hW, hb);
