@@ -28,7 +28,7 @@ extern "C" void bitlinear_int8xint2_m(int8_t* A, int8_t* B, __nv_bfloat16* out,
                                        int M, int N, int K, cudaStream_t stream);
 extern "C" void bitvla_act_quant_cuda(const __nv_bfloat16* in, int8_t* out,
                                        float* scales,
-                                       int M, int K, cudaStream_t stream);
+                                       int M, int K, int ld_out, cudaStream_t stream);
 
 __global__ void gelu_erf_bf16_kernel(const __nv_bfloat16* in, __nv_bfloat16* out, int N) {
     const int i = (int)(blockIdx.x*blockDim.x+threadIdx.x);
@@ -84,7 +84,6 @@ struct bitvla_vit_cuda_ctx {
     __nv_bfloat16* d_attn_merged  = nullptr;
     __nv_bfloat16* d_o_out        = nullptr;
     __nv_bfloat16* d_fc1_dense    = nullptr;
-    __nv_bfloat16* d_fc1_padded   = nullptr;
     __nv_bfloat16* d_fc2_out      = nullptr;
     __nv_bfloat16* d_mm_h1        = nullptr;
 };
@@ -116,6 +115,7 @@ bitvla_vit_cuda_ctx* bitvla_vit_cuda_init(int n_layers, int hidden, int n_heads,
     CUDA_OKV(cudaMalloc(&ctx->d_h_norm,       (size_t) n_patches * hidden  * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_act_int8_h,   (size_t) n_patches * hidden));
     CUDA_OKV(cudaMalloc(&ctx->d_act_int8_ffn, (size_t) n_patches * ctx->ffn_pad));
+    CUDA_OKV(cudaMemset(ctx->d_act_int8_ffn, 0, (size_t) n_patches * ctx->ffn_pad));
     CUDA_OKV(cudaMalloc(&ctx->d_act_s,        (size_t) n_patches * sizeof(float)));
     CUDA_OKV(cudaMalloc(&ctx->d_q_proj,       (size_t) n_patches * hidden  * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_k_proj,       (size_t) n_patches * hidden  * bf16));
@@ -128,9 +128,6 @@ bitvla_vit_cuda_ctx* bitvla_vit_cuda_init(int n_layers, int hidden, int n_heads,
     CUDA_OKV(cudaMalloc(&ctx->d_attn_merged,  (size_t) n_patches * hidden  * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_o_out,        (size_t) n_patches * hidden  * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_fc1_dense,    (size_t) n_patches * ffn         * bf16));
-    CUDA_OKV(cudaMalloc(&ctx->d_fc1_padded,   (size_t) n_patches * ctx->ffn_pad*bf16));
-
-    CUDA_OKV(cudaMemset(ctx->d_fc1_padded, 0, (size_t) n_patches * ctx->ffn_pad*bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_fc2_out,      (size_t) n_patches * hidden  * bf16));
     CUDA_OKV(cudaMalloc(&ctx->d_mm_h1,        (size_t) n_patches * mm_out  * bf16));
     return ctx;
@@ -146,7 +143,7 @@ void bitvla_vit_cuda_free(bitvla_vit_cuda_ctx* ctx) {
     cudaFree(ctx->d_q_HShd); cudaFree(ctx->d_k_HShd); cudaFree(ctx->d_v_HShd);
     cudaFree(ctx->d_scores); cudaFree(ctx->d_attn_out); cudaFree(ctx->d_attn_merged);
     cudaFree(ctx->d_o_out);
-    cudaFree(ctx->d_fc1_dense); cudaFree(ctx->d_fc1_padded); cudaFree(ctx->d_fc2_out);
+    cudaFree(ctx->d_fc1_dense); cudaFree(ctx->d_fc2_out);
     cudaFree(ctx->d_mm_h1);
     delete ctx;
 }
@@ -178,7 +175,7 @@ static int run_vit_layer(bitvla_vit_cuda_ctx* ctx, int L, cudaStream_t stream) {
     const int hd  = ctx->head_dim, ffn = ctx->ffn, ffn_pad = ctx->ffn_pad;
 
     bitvla_layernorm_bf16(ctx->d_h, lr.ln1_w, lr.ln1_b, ctx->d_h_norm, ctx->ln_eps, seq, H, stream);
-    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, H, stream);
+    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, H, H, stream);
 
     bitlinear_int8xint2_m(ctx->d_act_int8_h, lr.q_packed, ctx->d_q_proj, ctx->d_act_s, lr.q_ws, seq, H, H, stream);
     bitvla_add_bias_bf16(ctx->d_q_proj, lr.q_b, ctx->d_q_proj, seq, H, stream);
@@ -225,14 +222,14 @@ static int run_vit_layer(bitvla_vit_cuda_ctx* ctx, int L, cudaStream_t stream) {
 
     bitvla_transpose_NshHd_to_sNhd_bf16(ctx->d_attn_out, ctx->d_attn_merged, n_heads, seq, hd, stream);
 
-    bitvla_act_quant_cuda(ctx->d_attn_merged, ctx->d_act_int8_h, ctx->d_act_s, seq, H, stream);
+    bitvla_act_quant_cuda(ctx->d_attn_merged, ctx->d_act_int8_h, ctx->d_act_s, seq, H, H, stream);
     bitlinear_int8xint2_m(ctx->d_act_int8_h, lr.o_packed, ctx->d_o_out, ctx->d_act_s, lr.o_ws, seq, H, H, stream);
     bitvla_add_bias_bf16(ctx->d_o_out, lr.o_b, ctx->d_o_out, seq, H, stream);
 
     bitvla_add_bf16(ctx->d_h, ctx->d_o_out, ctx->d_h, seq * H, stream);
 
     bitvla_layernorm_bf16(ctx->d_h, lr.ln2_w, lr.ln2_b, ctx->d_h_norm, ctx->ln_eps, seq, H, stream);
-    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, H, stream);
+    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, H, H, stream);
 
     bitlinear_int8xint2_m(ctx->d_act_int8_h, lr.fc1_packed, ctx->d_fc1_dense,
                           ctx->d_act_s, lr.fc1_ws, seq, ffn, H, stream);
@@ -240,14 +237,7 @@ static int run_vit_layer(bitvla_vit_cuda_ctx* ctx, int L, cudaStream_t stream) {
 
     bitvla_gelu_tanh_bf16(ctx->d_fc1_dense, ctx->d_fc1_dense, seq * ffn, stream);
 
-    cudaMemcpy2DAsync(
-        ctx->d_fc1_padded, (size_t) ffn_pad * sizeof(__nv_bfloat16),
-        ctx->d_fc1_dense,  (size_t) ffn     * sizeof(__nv_bfloat16),
-        (size_t) ffn * sizeof(__nv_bfloat16),
-        seq,
-        cudaMemcpyDeviceToDevice, stream);
-
-    bitvla_act_quant_cuda(ctx->d_fc1_padded, ctx->d_act_int8_ffn, ctx->d_act_s, seq, ffn_pad, stream);
+    bitvla_act_quant_cuda(ctx->d_fc1_dense, ctx->d_act_int8_ffn, ctx->d_act_s, seq, ffn, ffn_pad, stream);
     bitlinear_int8xint2_m(ctx->d_act_int8_ffn, lr.fc2_packed, ctx->d_fc2_out,
                           ctx->d_act_s, lr.fc2_ws, seq, H, ffn_pad, stream);
     bitvla_add_bias_bf16(ctx->d_fc2_out, lr.fc2_b, ctx->d_fc2_out, seq, H, stream);

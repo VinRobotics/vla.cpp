@@ -30,7 +30,7 @@ extern "C" void bitlinear_int8xint2_m(int8_t* A, int8_t* B, __nv_bfloat16* out,
                                        int M, int N, int K, cudaStream_t stream);
 extern "C" void bitvla_act_quant_cuda(const __nv_bfloat16* in, int8_t* out,
                                        float* scales,
-                                       int M, int K, cudaStream_t stream);
+                                       int M, int K, int ld_out, cudaStream_t stream);
 
 extern "C" void gate_up_fused_sqrelu_mul_bf16(const __nv_bfloat16* gu, __nv_bfloat16* out,
                                                int seq, int ffn, cudaStream_t stream);
@@ -407,7 +407,7 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
     bitvla_rmsnorm_bf16(ctx->d_h, lr.attn_norm_w, ctx->d_h_norm, ctx->rms_eps, seq, hidden, stream);
     l0_dump("L0_01_attn_norm", ctx->d_h_norm, (size_t)seq * hidden);
 
-    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hidden, stream);
+    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hidden, hidden, stream);
 
     __nv_bfloat16* q_dense = ctx->d_qkv;
     __nv_bfloat16* k_dense = ctx->d_qkv+(size_t)seq * hq;
@@ -475,7 +475,7 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
     bitvla_rmsnorm_bf16(ctx->d_attn_merged, lr.attn_sub_norm_w, ctx->d_h_norm, ctx->rms_eps, seq, hq, stream);
     l0_dump("L0_04_attn_sub_norm", ctx->d_h_norm, (size_t)seq * hq);
 
-    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hq, stream);
+    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hq, hq, stream);
     bitlinear_int8xint2_m(ctx->d_act_int8_h, lr.o_packed, ctx->d_o_out,
                           ctx->d_act_s, lr.o_ws, seq, hidden, hq, stream);
 
@@ -486,7 +486,7 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
 
     bitvla_rmsnorm_bf16(ctx->d_h, lr.ffn_norm_w, ctx->d_h_norm, ctx->rms_eps, seq, hidden, stream);
     l0_dump("L0_07_ffn_norm", ctx->d_h_norm, (size_t)seq * hidden);
-    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hidden, stream);
+    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hidden, hidden, stream);
 
     bitlinear_int8xint2_m(ctx->d_act_int8_h, lr.gate_up_packed, ctx->d_gate_up,
                           ctx->d_act_s, lr.gate_up_ws, seq, 2*ffn, hidden, stream);
@@ -498,7 +498,7 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
 
     l0_dump("L0_08_ffn_sub_norm", ctx->d_gate_sq_up, (size_t)seq * ffn);
 
-    bitvla_act_quant_cuda(ctx->d_gate_sq_up, ctx->d_act_int8_ffn, ctx->d_act_s, seq, ffn, stream);
+    bitvla_act_quant_cuda(ctx->d_gate_sq_up, ctx->d_act_int8_ffn, ctx->d_act_s, seq, ffn, ffn, stream);
     bitlinear_int8xint2_m(ctx->d_act_int8_ffn, lr.down_packed, ctx->d_down_out,
                           ctx->d_act_s, lr.down_ws, seq, hidden, ffn, stream);
     l0_dump("L0_09_down_out", ctx->d_down_out, (size_t)seq * hidden);

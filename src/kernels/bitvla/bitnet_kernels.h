@@ -386,7 +386,7 @@ static inline void launch_ladder_int8xint2_m_wide(
  * @tparam BLOCK_THREADS Threads per CTA; must be a multiple of 32.
  * @param in     bf16 activation matrix (M x K), device pointer. M is
  *               passed implicitly via @c blockIdx.x.
- * @param out    int8 quantised matrix (M x K), device pointer.
+ * @param out    int8 quantised matrix (M x ld_out), device pointer.
  * @param scales Per-row scales (length M), device pointer.
  * @param K      Row length.
  */
@@ -395,12 +395,12 @@ __global__ void act_quant_kernel(
     const __nv_bfloat16* __restrict__ in,
     int8_t* __restrict__ out,
     float* __restrict__ scales,
-    int K)
+    int K, int ld_out)
 {
     const int m   = (int)blockIdx.x;
     const int tid = (int)threadIdx.x;
     const __nv_bfloat16* row_in  = in  + m * K;
-    int8_t*              row_out = out+m * K;
+    int8_t*              row_out = out+m * ld_out;
 
     float local_max = 0.0f;
     for (int k=tid; k<K; k += BLOCK_THREADS) {

@@ -77,8 +77,8 @@ extern "C" void bitlinear_int8xint2_m(
 
 extern "C" void bitvla_act_quant_cuda(
     const __nv_bfloat16* in, int8_t* out, float* scales,
-    int M, int K, cudaStream_t stream)
+    int M, int K, int ld_out, cudaStream_t stream)
 {
     constexpr int BLOCK_THREADS = 256;
-    act_quant_kernel<BLOCK_THREADS><<<dim3(M, 1, 1), dim3(BLOCK_THREADS, 1, 1), 0, stream>>>(in, out, scales, K);
+    act_quant_kernel<BLOCK_THREADS><<<dim3(M, 1, 1), dim3(BLOCK_THREADS, 1, 1), 0, stream>>>(in, out, scales, K, ld_out);
 }
