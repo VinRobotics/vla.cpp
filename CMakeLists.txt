@@ -142,15 +142,11 @@ if(VLA_OCTO)
     endif()
     FetchContent_Declare(sentencepiece
         GIT_REPOSITORY https://github.com/google/sentencepiece
-        GIT_TAG        v0.2.0
+        GIT_TAG        v0.2.1
         GIT_SHALLOW    TRUE
         ${_vla_spm_patch}
     )
-    # sentencepiece v0.2.0 still asks for cmake_minimum_required(VERSION 3.1),
-    # which CMake 4 refuses outright.
-    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
     FetchContent_MakeAvailable(sentencepiece)
-    unset(CMAKE_POLICY_VERSION_MINIMUM)
     # Only the static library is linked; its CLI tools are dead weight.
     vla_exclude_fetched_targets(${sentencepiece_SOURCE_DIR})
     # vcpkg's FindProtobuf shim reports the DLL, not its import library, as
