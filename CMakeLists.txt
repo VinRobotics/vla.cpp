@@ -149,6 +149,14 @@ if(VLA_SPM)
     set(SPM_BUILD_TEST       OFF        CACHE BOOL   "" FORCE)
     set(SPM_ENABLE_TCMALLOC  OFF        CACHE BOOL   "" FORCE)
     set(SPM_PROTOBUF_PROVIDER "package" CACHE STRING "" FORCE)
+    # protobuf 22+ headers include abseil, so sentencepiece must compile and
+    # link against that same abseil rather than its internal copy.
+    if(NOT WIN32)
+        find_package(Protobuf QUIET)
+        if(Protobuf_VERSION VERSION_GREATER_EQUAL 4.22)
+            set(SPM_ABSL_PROVIDER "package" CACHE STRING "" FORCE)
+        endif()
+    endif()
     set(_vla_spm_patch "")
     if(WIN32 AND NOT MSVC)
         set(_vla_spm_patch PATCH_COMMAND ${CMAKE_COMMAND} -P
