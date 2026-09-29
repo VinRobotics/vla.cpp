@@ -383,8 +383,9 @@ Success rate belongs to the checkpoint, not the engine;
 `vla_predict_check` in [CONTRIBUTING.md](CONTRIBUTING.md) is how a
 change is shown to leave it alone.
 
-Experimental results on other platforms can be found in
-[eval/reports](eval/reports) or  [docs/backend](docs/backend).
+Latency and memory on other devices, all measured at one commit, are in
+[docs/benchmark](docs/benchmark). Backend-specific notes are in
+[docs/backend](docs/backend).
 
 ---
 
