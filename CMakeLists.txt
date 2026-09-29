@@ -149,8 +149,6 @@ if(VLA_SPM)
     set(SPM_BUILD_TEST       OFF        CACHE BOOL   "" FORCE)
     set(SPM_ENABLE_TCMALLOC  OFF        CACHE BOOL   "" FORCE)
     set(SPM_PROTOBUF_PROVIDER "package" CACHE STRING "" FORCE)
-    # protobuf 22+ headers include abseil, so sentencepiece must compile and
-    # link against that same abseil rather than its internal copy.
     if(NOT WIN32)
         find_package(Protobuf QUIET)
         if(Protobuf_VERSION VERSION_GREATER_EQUAL 4.22)
