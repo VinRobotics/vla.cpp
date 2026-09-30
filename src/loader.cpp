@@ -47,6 +47,16 @@ ggml_tensor * WeightLoader::declare(ggml_type want, bool required, bool gemma_no
         return nullptr;
     }
 
+    // INT8 in the file is a FoldQuant site (docs/QUANTIZATION.md), which only
+    // typed(GGML_TYPE_I8) may declare; a float GEMM declare would otherwise fail
+    // later in read_convert with a size mismatch that says nothing useful.
+    if (src->type == GGML_TYPE_I8 && want != GGML_TYPE_I8) {
+        std::fprintf(stderr, "vla(%s): %s is INT8 (FoldQuant) but this site is not FoldQuant-aware in this arch\n",
+                     arch_, name);
+        ok_ = false;
+        return nullptr;
+    }
+
     ggml_tensor * t = ggml_new_tensor(ctx_, g_.resident_type(src, want), ggml_n_dims(src), src->ne);
     if (!t) {
         std::fprintf(stderr, "vla(%s): ggml_new_tensor failed for %s (weight context too small?)\n", arch_, name);
@@ -85,6 +95,23 @@ ggml_tensor * WeightLoader::typed(ggml_type want, const char * fmt, ...) {
     return t;
 }
 
+ggml_tensor * WeightLoader::opt_typed(ggml_type want, const char * fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    ggml_tensor * t = declare(want, false, false, fmt, ap);
+    va_end(ap);
+    return t;
+}
+
+void WeightLoader::fail(const char * what) {
+    std::fprintf(stderr, "vla(%s): %s\n", arch_, what);
+    ok_ = false;
+}
+
+ggml_tensor * WeightLoader::fuse_typed(ggml_type want, const char * out_name, const std::vector<std::string> & srcs) {
+    return fuse(want, out_name, srcs);
+}
+
 ggml_tensor * WeightLoader::fuse_gemm(const char * out_name, const std::vector<std::string> & srcs) {
     return fuse(gemm_, out_name, srcs);
 }
@@ -112,6 +139,14 @@ ggml_tensor * WeightLoader::fuse(ggml_type want, const char * out_name, const st
         const ggml_tensor * gs = g_.meta(s.c_str());
         if (!gs) {
             std::fprintf(stderr, "vla(%s): missing tensor %s\n", arch_, s.c_str());
+            ok_ = false;
+            return nullptr;
+        }
+        // Concatenation along the last axis needs the same row shape and, for a
+        // packed type copied raw, the same source type.
+        if (gs->type != first->type || (!is1d && gs->ne[0] != first->ne[0]) || ggml_n_dims(gs) != ggml_n_dims(first)) {
+            std::fprintf(stderr, "vla(%s): cannot fuse %s with %s (type/shape differ)\n",
+                         arch_, s.c_str(), srcs[0].c_str());
             ok_ = false;
             return nullptr;
         }

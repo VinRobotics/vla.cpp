@@ -20,6 +20,36 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   faster than BF16 on CPUs without BF16 matmul.
 - `VLA_BUILD_SERVER=OFF` builds `vla-cli` and `vla-bench` without protobuf or
   ZeroMQ.
+- **FoldQuant INT8 / INT4 checkpoints.** A FoldQuant GGUF carries the GR00T
+  and π0.5 language backbone and action module as INT8 or INT4 codes in a block-Hadamard, SmoothQuant-folded frame with per-row scales;
+  vla.cpp quantizes activations per token and runs the projections on the
+  integer tensor cores. The file format and arithmetic are the contract in
+  `docs/QUANTIZATION.md`. Each site is two `GGML_OP_CUSTOM` nodes
+  (`src/layers/fq_linear.h`): the CPU backend runs the reference in
+  `src/foldquant_ref.cpp`, CUDA claims the same nodes through the ggml extension
+  hook with `src/kernels/foldquant/` (wmma INT8 GEMM, fused RMSNorm + butterfly
+  + quant prologue), bit-identical to the CPU path. `scripts/foldquant_fake_export.py`
+  produces an uncalibrated file for bring-up, `scripts/inspect_gguf_quant.py`
+  checks one against the contract, `scripts/foldquant_ref.py` is the numpy
+  reference. Other backends refuse a FoldQuant file at load.
+- The ggml CUDA extension hook now goes through one dispatcher
+  (`src/cuda/vla_cuda_ext.cu`) so the BF16 activation ops and the FoldQuant
+  handler compose.
+- `WeightLoader::opt_typed`, `fuse_typed`, `reader()` and `fail()`; `fuse()`
+  refuses sources of differing type or row shape, and a float `gemm()` declare
+  of an INT8 tensor fails with a message naming the FoldQuant site.
+- The family converters expose `convert(ckpt, out, writer_factory=...)`, so a
+  quantizing writer reuses them instead of re-implementing the file.
+- `scripts/convert_quantized_model_to_gguf.py` turns a quantized model into a
+  FoldQuant GGUF without calibration: FoldQuantVLA's quantized checkpoint
+  (`.qweight` / `.weight_scale` in place of each quantized `.weight`; the family
+  converters read it through a base view, and a W4A4 DiT's INT4 adaLN is
+  dequantized, since vla.cpp keeps adaLN in float), FoldQuantVLA's earlier
+  `foldquant.fakequant` state (sites by name, gains folded as the emitter
+  folds them). GR00T N1.5 / N1.6 / N1.7 and pi0.5; `--check-onnx`
+  byte-compares every site against the TensorRT plugin graphs.
+  `scripts/gguf_quant_writer.py` is the quantizing writer.
+
 - **OpenVINO backend.** `-DGGML_OPENVINO=ON` runs the archs on Intel CPUs, iGPUs
   and NPUs through ggml's OpenVINO backend. SmolVLA, π0.5, Evo-1 and VLA-Adapter
   match an F32 CPU reference to 1e-3; on an Arc B390 iGPU that is 3.0x to 9.6x

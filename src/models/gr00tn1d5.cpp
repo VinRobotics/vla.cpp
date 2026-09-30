@@ -16,6 +16,7 @@
 #include "options.h"
 #include "backend.h"
 #include "env_flag.h"
+#include "foldquant.h"
 #include "gguf_reader.h"
 #include "layers/embed.h"
 #include "layers/linear.h"
@@ -232,10 +233,13 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
                 (long long) m->action_horizon, (long long) m->action_dim, (long long) m->num_steps, (long long) m->aex.embodiment_id,
                 m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
+    const FoldQuantSpec fq = foldquant_parse(g, "gr00t_n1_5");
     const Backend b = backend_init("vla(gr00tn1d5)", m->n_threads);
     if (!b.handle)
         return nullptr;
     m->backend = b.handle;
+    if (!foldquant_check_backend("vla(gr00tn1d5)", b, fq, opts.weight_dtype.has_value()))
+        return nullptr;
 
     ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };
     m->ctx_weights = ggml_init(wp);
@@ -250,7 +254,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
     m->mm_W = L.gemm("mm.fc.weight");
     m->mm_b = L.f32 ("mm.fc.bias");
 
-    m->lm.declare(L, "vlm");
+    m->lm.declare(L, "vlm", fq.present ? &fq.llm : nullptr);
 
     m->vlln_w = L.f32("aex.vlln.weight");
     m->vlln_b = L.f32("aex.vlln.bias");
@@ -258,7 +262,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
 
     m->aex.declare(L, "aex");
     m->future_tokens = L.f32("aex.future_tokens");
-    m->dit.declare(L, "aex.dit");
+    m->dit.declare(L, "aex.dit", false, false, nullptr, fq.present ? &fq.action : nullptr);
 
     if (!L.upload(m->backend, &m->weight_buf))
         return nullptr;

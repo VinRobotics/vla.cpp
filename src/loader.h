@@ -43,6 +43,7 @@ public:
     // Explicit resident type, for weights that are neither a plain GEMM input
     // nor F32 (BitVLA's int2-packed ternary blocks).
     ggml_tensor * typed(ggml_type want, const char * fmt, ...) __attribute__((format(printf, 3, 4)));
+    ggml_tensor * opt_typed(ggml_type want, const char * fmt, ...) __attribute__((format(printf, 3, 4)));
 
     // A miss is not an error.
     ggml_tensor * opt_gemm(const char * fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -55,6 +56,14 @@ public:
     // synthetic and need not exist in the file.
     ggml_tensor * fuse_gemm(const char * out_name, const std::vector<std::string> & srcs);
     ggml_tensor * fuse_f32 (const char * out_name, const std::vector<std::string> & srcs);
+    ggml_tensor * fuse_typed(ggml_type want, const char * out_name, const std::vector<std::string> & srcs);
+
+    // For helpers that inspect the file before declaring (foldquant.cpp).
+    gguf_reader & reader() {
+        return g_;
+    }
+    // Record a failure detected outside declare(); upload() then refuses.
+    void fail(const char * what);
 
     ggml_type gemm_type() const {
         return gemm_;

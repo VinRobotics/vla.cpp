@@ -26,6 +26,7 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include "ggml-backend.h"
+#include "ggml-alloc.h"
 #include "backend.h"
 #include "gguf.h"
 #include "gguf_reader.h"
@@ -66,6 +67,15 @@ struct Gr00tN1d7ModelArch : public ModelArchBase {
     scratch_ctx           vision_scratch;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             matmul_type = GGML_TYPE_F32;
+    // adaLN conditions per (denoising step, DiT layer) and the proj_out condition
+    // per step, computed once at load: the timestep embedding is fixed per step,
+    // so these GEMVs (2*hidden x hidden, bf16, 132 per request) never change.
+    // VLA_GR00T_ADALN_CACHE=0 rebuilds them in the graph instead (bit-identical).
+    ggml_context *            ctx_cache = nullptr;
+    ggml_backend_buffer_t     cache_buf = nullptr;
+    std::vector<ggml_tensor*> t_cond;   // [s*dit_layers + i], F32[2*dit_hidden]
+    std::vector<ggml_tensor*> t_po;     // [s], F32[2*dit_hidden]
+    bool precompute_dit_cond();
 
     int64_t vit_hidden=1024, vit_layers=24, vit_heads=16, vit_inter=4096;
     int64_t patch_size=16, temporal_patch=2, spatial_merge=2, vit_num_pos=2304, vit_patch_flat=1536, vit_merged_dim=4096;
@@ -228,6 +238,10 @@ bool load_config(const gguf_reader & g, Gr00tN1d7ModelArch & m, Config & cfg) {
 
 Gr00tN1d7ModelArch::~Gr00tN1d7ModelArch() {
     mg.release();
+    if (cache_buf)
+        ggml_backend_buffer_free(cache_buf);
+    if (ctx_cache)
+        ggml_free(ctx_cache);
     if (weight_buf)
         ggml_backend_buffer_free(weight_buf);
     if (ctx_weights)
@@ -256,6 +270,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
     }
     if (!load_config(g, *m, m->cfg))
         return nullptr;
+    const FoldQuantSpec fq = foldquant_parse(g, "gr00t_n1_7");
     std::printf("vla(gr00tn1d7): vit=Qwen3-VL %lldd×%lldL×%lldh (Conv3d patch %lld², temporal %lld; learned pos %lld + 2D rope; deepstack@{%lld,%lld,%lld}; merge÷%lld)  "
                 "lm=Qwen3-VL %lldd×%lldL (%lldq/%lldkv×%lld, θ=%g)  vlsa=%lldL×%lldh×%lld  dit=AlternateVLDiT %lldL×%lldh×%lld(inner %lld) attend_text_every_n=%lld  "
                 "in_emb=%lld  horizon=%lld action_dim=%lld max_state=%lld N_steps=%lld  embodiment=%lld  resident=%s\n",
@@ -273,6 +288,8 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
             return nullptr;
         }
         m->backend = b.handle;
+        if (!foldquant_check_backend("vla(gr00tn1d7)", b, fq, opts.weight_dtype.has_value()))
+            return nullptr;
     }
 
     ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };
@@ -285,14 +302,25 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
     WeightLoader L("gr00tn1d7", g, m->ctx_weights, m->matmul_type);
 
     m->vit.declare(L, "vit", m->vit_layers);
-    m->lm.declare(L, "vlm");
+    m->lm.declare(L, "vlm", fq.present ? &fq.llm : nullptr);
 
     m->vlln_w = L.f32("aex.vlln.weight");
     m->vlln_b = L.f32("aex.vlln.bias");
     m->vlsa.declare(L, "aex.vlsa", m->vlsa_layers, EncNames{"norm1", "norm3", "ff0", "ff2"});
 
     m->aex.declare(L, "aex");
-    m->dit.declare(L, "aex.dit", true, m->dit_interleave != 0);
+    m->dit.declare(L, "aex.dit", true, m->dit_interleave != 0, nullptr, fq.present ? &fq.action : nullptr);
+    if (fq.present) {
+        // Execution order of the FoldQuant GEMMs, so each one can prefetch the
+        // next site's weights (cross-attention K/V run before the step loop and
+        // are left out of the chain).
+        std::vector<FqLinear *> order;
+        for (auto & b : m->lm.blk)
+            for (FqLinear * s : {&b.fq_q, &b.fq_k, &b.fq_v, &b.fq_o, &b.fq_gate, &b.fq_up, &b.fq_down}) order.push_back(s);
+        for (auto & b : m->dit.blk)
+            for (FqLinear * s : {&b.fq_qkv, &b.fq_q, &b.fq_o, &b.fq_ff0, &b.fq_ff2}) order.push_back(s);
+        fq_link_prefetch(order);
+    }
 
     if (!L.upload(m->backend, &m->weight_buf))
         return nullptr;
@@ -305,7 +333,67 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
         std::fprintf(stderr, "vla(gr00tn1d7): build_caches failed\n");
         return nullptr;
     }
+    if (env_flag("VLA_GR00T_ADALN_CACHE", true) && !m->precompute_dit_cond()) {
+        std::fprintf(stderr, "vla(gr00tn1d7): adaLN condition precompute failed\n");
+        return nullptr;
+    }
     return m;
+}
+
+// Runs the timestep MLP and every layer's adaLN GEMV once per denoising step
+// on the backend (the same ops the graph would run) and keeps the results
+// resident, so predict() reads them as leaves.
+bool Gr00tN1d7ModelArch::precompute_dit_cond() {
+    const int64_t L = dit_layers, S = num_steps, D2 = 2*dit_hidden;
+    ggml_init_params p = { (size_t) 16*1024*1024, nullptr, true };
+    ggml_context * C = ggml_init(p);
+    if (!C) return false;
+    ggml_cgraph * gf = ggml_new_graph_custom(C, 4096, false);
+    std::vector<ggml_tensor*> tproj((size_t) S), conds((size_t) (S*L)), pos((size_t) S);
+    for (int64_t s=0; s<S; ++s) {
+        tproj[(size_t) s] = ggml_new_tensor_1d(C, GGML_TYPE_F32, 256);
+        ggml_set_input(tproj[(size_t) s]);
+        ggml_tensor * temb = dit.time_emb(C, tproj[(size_t) s]);
+        for (int64_t i=0; i<L; ++i) {
+            ggml_tensor * c = dit.adaln_cond(C, dit.blk[(size_t) i], temb);
+            ggml_set_output(c);
+            ggml_build_forward_expand(gf, c);
+            conds[(size_t) (s*L+i)] = c;
+        }
+        ggml_tensor * po = dit.proj_out_cond(C, temb);
+        ggml_set_output(po);
+        ggml_build_forward_expand(gf, po);
+        pos[(size_t) s] = po;
+    }
+    ggml_gallocr_t ga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+    if (!ga || !ggml_gallocr_alloc_graph(ga, gf)) { ggml_free(C); return false; }
+    for (int64_t s=0; s<S; ++s)
+        ggml_backend_tensor_set(tproj[(size_t) s], c_tproj[(size_t) s].data(), 0, ggml_nbytes(tproj[(size_t) s]));
+    if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) { ggml_gallocr_free(ga); ggml_free(C); return false; }
+    std::vector<std::vector<float>> h_cond((size_t) (S*L), std::vector<float>((size_t) D2)), h_po((size_t) S, std::vector<float>((size_t) D2));
+    for (int64_t k=0; k<S*L; ++k) ggml_backend_tensor_get(conds[(size_t) k], h_cond[(size_t) k].data(), 0, (size_t) D2*sizeof(float));
+    for (int64_t s=0; s<S; ++s)   ggml_backend_tensor_get(pos[(size_t) s],   h_po[(size_t) s].data(),   0, (size_t) D2*sizeof(float));
+    ggml_gallocr_free(ga);
+    ggml_free(C);
+
+    ggml_init_params pc = { ggml_tensor_overhead() * (size_t) (S*L + S) + 4096, nullptr, true };
+    ctx_cache = ggml_init(pc);
+    if (!ctx_cache) return false;
+    t_cond.assign((size_t) (S*L), nullptr);
+    t_po.assign((size_t) S, nullptr);
+    for (int64_t k=0; k<S*L; ++k) {
+        t_cond[(size_t) k] = ggml_new_tensor_1d(ctx_cache, GGML_TYPE_F32, D2);
+        ggml_format_name(t_cond[(size_t) k], "dit.cond.%lld.%lld", (long long) (k / L), (long long) (k % L));
+    }
+    for (int64_t s=0; s<S; ++s) {
+        t_po[(size_t) s] = ggml_new_tensor_1d(ctx_cache, GGML_TYPE_F32, D2);
+        ggml_format_name(t_po[(size_t) s], "dit.po_cond.%lld", (long long) s);
+    }
+    cache_buf = ggml_backend_alloc_ctx_tensors(ctx_cache, backend);
+    if (!cache_buf) return false;
+    for (int64_t k=0; k<S*L; ++k) ggml_backend_tensor_set(t_cond[(size_t) k], h_cond[(size_t) k].data(), 0, (size_t) D2*sizeof(float));
+    for (int64_t s=0; s<S; ++s)   ggml_backend_tensor_set(t_po[(size_t) s],   h_po[(size_t) s].data(),   0, (size_t) D2*sizeof(float));
+    return true;
 }
 
 bool Gr00tN1d7ModelArch::build_caches() {
@@ -523,10 +611,11 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         ? ggml_new_tensor_1d(C, GGML_TYPE_I32, SEQ_TXT) : nullptr;
     if (t_txt_idx)
         ggml_set_input(t_txt_idx);
-    std::vector<ggml_tensor *> t_tau(num_steps), t_tproj(num_steps);
+    const bool cond_cached = !t_cond.empty();
+    std::vector<ggml_tensor *> t_tau(num_steps), t_tproj(num_steps, nullptr);
     for (int64_t s=0; s<num_steps; ++s) {
         t_tau[s]   = ggml_new_tensor_2d(C, GGML_TYPE_F32, E, AH); ggml_set_input(t_tau[s]);
-        t_tproj[s] = ggml_new_tensor_1d(C, GGML_TYPE_F32, 256);   ggml_set_input(t_tproj[s]);
+        if (!cond_cached) { t_tproj[s] = ggml_new_tensor_1d(C, GGML_TYPE_F32, 256); ggml_set_input(t_tproj[s]); }
     }
 
     ggml_tensor * h = t_embeds;
@@ -575,7 +664,8 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
 
     ggml_tensor * actions = t_x0;
     for (int64_t s=0; s<num_steps; ++s) {
-        ggml_tensor * temb = ggml_add(C, ggml_mul_mat(C, dit.te_l2W, ggml_silu(C, ggml_add(C, ggml_mul_mat(C, dit.te_l1W, t_tproj[s]), dit.te_l1b))), dit.te_l2b);
+        ggml_tensor * temb = cond_cached ? nullptr
+            : ggml_add(C, ggml_mul_mat(C, dit.te_l2W, ggml_silu(C, ggml_add(C, ggml_mul_mat(C, dit.te_l1W, t_tproj[s]), dit.te_l1b))), dit.te_l2b);
         ggml_tensor * a_emb = cat_linear(C, aex.ae_W1W, aex.ae_W1b, aex.embodiment_id, actions);
         ggml_tensor * x_w2  = ggml_silu(C, cat_linear(C, aex.ae_W2W, aex.ae_W2b, aex.embodiment_id, ggml_concat(C, a_emb, t_tau[s], 0)));
         ggml_tensor * af    = ggml_add(C, cat_linear(C, aex.ae_W3W, aex.ae_W3b, aex.embodiment_id, x_w2), ggml_view_2d(C, aex.pos_embd, E, AH, aex.pos_embd->nb[1], 0));
@@ -588,9 +678,11 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
             else if (i%every2 == 0)           enc = vl_txt;
             else
                 enc = vl_img;
-            hh = dit.block(C, dit.blk[i], hh, temb, enc, Kc[i], Vc[i]);
+            hh = dit.block(C, dit.blk[i], hh, temb, enc, Kc[i], Vc[i],
+                           cond_cached ? t_cond[(size_t) (s*dit_layers + i)] : nullptr);
         }
-        ggml_tensor * po = ggml_add(C, ggml_mul_mat(C, dit.po1W, ggml_silu(C, temb)), dit.po1b);
+        ggml_tensor * po = cond_cached ? t_po[(size_t) s]
+                                       : ggml_add(C, ggml_mul_mat(C, dit.po1W, ggml_silu(C, temb)), dit.po1b);
         ggml_tensor * sh = ggml_view_1d(C, po, dit_hidden, 0), * sc = ggml_view_1d(C, po, dit_hidden, (size_t) dit_hidden * sizeof(float));
         ggml_tensor * hn = ggml_norm(C, hh, norm_out_eps);
         ggml_tensor * h_mod = ggml_add(C, ggml_add(C, hn, ggml_mul(C, hn, sc)), sh);
@@ -697,10 +789,42 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(t_txt_idx, text_pos_idx.data(), 0, ggml_nbytes(t_txt_idx));
     for (int64_t s=0; s<num_steps; ++s) {
         ggml_backend_tensor_set(t_tau[s],   c_tau[(size_t) s].data(),   0, ggml_nbytes(t_tau[s]));
-        ggml_backend_tensor_set(t_tproj[s], c_tproj[(size_t) s].data(), 0, ggml_nbytes(t_tproj[s]));
+        if (t_tproj[s]) ggml_backend_tensor_set(t_tproj[s], c_tproj[(size_t) s].data(), 0, ggml_nbytes(t_tproj[s]));
     }
 
     graph_unique_names(gf);
+    // VLA_GRAPH_DEBUG=1: report what changes between two computes of the cached
+    // graph, mirroring ggml-cuda's graph-reuse test (whole node struct + source
+    // data pointers / shapes); any change there defeats CUDA-graph replay.
+    if (env_flag("VLA_GRAPH_DEBUG")) {
+        struct Prop { ggml_tensor t; const void * sp[GGML_MAX_SRC]; };
+        static std::vector<Prop> prev;
+        const int n = ggml_graph_n_nodes(gf);
+        std::vector<Prop> cur((size_t) n);
+        for (int i = 0; i < n; ++i) {
+            ggml_tensor * t = ggml_graph_node(gf, i);
+            std::memcpy(&cur[(size_t) i].t, t, sizeof(ggml_tensor));
+            for (int j = 0; j < GGML_MAX_SRC; ++j) cur[(size_t) i].sp[j] = t->src[j] ? t->src[j]->data : nullptr;
+        }
+        if (prev.size() == cur.size()) {
+            int changed = 0;
+            for (int i = 0; i < n; ++i) {
+                const ggml_tensor & a = prev[(size_t) i].t, & b = cur[(size_t) i].t;
+                if (std::memcmp(&a, &b, sizeof(ggml_tensor)) != 0 || std::memcmp(prev[(size_t) i].sp, cur[(size_t) i].sp, sizeof(cur[(size_t) i].sp)) != 0) {
+                    if (changed < 5)
+                        std::printf("vla(graph-debug): node %d %s changed: data %p->%p op_params %d name %d flags %d extra %p->%p srcdata %d\n",
+                                    i, ggml_get_name(&b), a.data, b.data, std::memcmp(a.op_params, b.op_params, sizeof(a.op_params)) != 0,
+                                    std::strcmp(a.name, b.name) != 0, a.flags != b.flags, a.extra, b.extra,
+                                    std::memcmp(prev[(size_t) i].sp, cur[(size_t) i].sp, sizeof(cur[(size_t) i].sp)) != 0);
+                    ++changed;
+                }
+            }
+            std::printf("vla(graph-debug): %d of %d nodes changed since the previous compute\n", changed, n);
+        } else if (!prev.empty()) {
+            std::printf("vla(graph-debug): graph size changed %zu -> %zu\n", prev.size(), cur.size());
+        }
+        prev = std::move(cur);
+    }
     const auto tc0 = std::chrono::steady_clock::now();
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
     const auto tc1 = std::chrono::steady_clock::now();

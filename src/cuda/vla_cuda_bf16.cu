@@ -37,6 +37,7 @@
 
 #include "ggml.h"
 #include "env_flag.h"
+#include "cuda/vla_cuda_ext.h"
 
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
@@ -723,7 +724,7 @@ namespace vla {
 
 // Called once, after the CUDA backend is up. Idempotent.
 void cuda_register_bf16_ops() {
-    ggml_cuda_ext_forward = vla_cuda_bf16_forward;
+    cuda_ext_add_handler(vla_cuda_bf16_forward);   // shares the hook with the FoldQuant handler
 
     // Fusion runs in ggml_backend_cuda_graph_compute, upstream of
     // ggml_cuda_compute_forward, so the pointer above never sees a fused node.

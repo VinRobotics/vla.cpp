@@ -255,6 +255,28 @@ python scripts/quantize_gguf.py --in model-bf16.gguf --out model-q8_0.gguf --typ
 Embeddings, the output head, norms and the action expert stay float; pass `--vision` to
 pack the vision tower too (smaller, but more accuracy loss).
 
+#### FoldQuant W8A8 / W4A4
+
+The stock repack still runs float activations through `ggml_mul_mat`. A FoldQuant
+GGUF ships the language backbone and the action head as INT8 or INT4 codes in a
+Hadamard-rotated, SmoothQuant-folded frame with per-row scales, and vla.cpp quantizes
+the activations per token and runs the GEMMs on the integer tensor cores. It loads like any other checkpoint on the CUDA and CPU backends (other backends
+refuse it); the format and the arithmetic are in [docs/QUANTIZATION.md](docs/QUANTIZATION.md).
+
+A calibrated arm saved as a quantized model by
+[FoldQuantVLA](https://github.com/VinRobotics/FoldQuantVLA) converts to that file with
+no calibration and nothing re-rounded (GR00T N1.5 / N1.6 / N1.7 and π0.5):
+
+```bash
+python scripts/convert_quantized_model_to_gguf.py --quantized-model <quantized model dir> --out model-fq.gguf
+./build/vla-server model-fq.gguf --bind tcp://*:5556
+
+# uncalibrated stand-in for bring-up and benchmarks (rotation + per-row INT8, no SmoothQuant)
+python scripts/foldquant_fake_export.py --in model-bf16.gguf --out model-fq.gguf
+python scripts/inspect_gguf_quant.py model-fq.gguf
+./build/vla-bench --ckpt model-fq.gguf --images 1 --size 256 --tokens 16
+```
+
 ---
 
 ## Benchmarks
