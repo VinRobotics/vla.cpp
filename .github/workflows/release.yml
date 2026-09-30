@@ -192,6 +192,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+      # The release body is this tag's CHANGELOG.md section; a tag with none
+      # fails here rather than publishing an empty release.
+      - name: release notes
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v h="## [$ver]" 'index($0, h) == 1 {on=1; next} on && /^## \[/ {exit} on' \
+            CHANGELOG.md > notes.md
+          test -s notes.md || { echo "no CHANGELOG.md section for $ver"; exit 1; }
       # Tarballs only. The docker job also leaves a .dockerbuild build record
       # artifact behind, and pulling that one fails the whole download.
       - uses: actions/download-artifact@v8
@@ -200,4 +209,5 @@ jobs:
         with:
           files: dist/*.tar.gz
           fail_on_unmatched_files: true
+          body_path: notes.md
           generate_release_notes: true

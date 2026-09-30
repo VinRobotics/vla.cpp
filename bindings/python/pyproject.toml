@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "vla-cpp"
-version = "0.3.0"
+version = "0.4.0"
 description = "Python bindings for vla.cpp, a C++ inference engine for Vision-Language-Action models."
 readme = "README.md"
 requires-python = ">=3.10"

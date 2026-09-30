@@ -4,8 +4,40 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-30
+
+Two new architectures (Octo-Small, TurboVLA), two new backends (OpenVINO for
+Intel CPU/iGPU/NPU, Hexagon and OpenCL for Snapdragon X), portable release
+tarballs, and a numerics pass that brings every arch closer to its reference.
+Several fixes change outputs; see Fixed for the paired LIBERO results.
+
+Upgrading from 0.3.0:
+
+- The x86 CUDA 12.8 tarball is renamed `linux-x86_64-cuda-12.8` (was
+  `linux-x86_64-cuda`), and the macOS tarball no longer ships the servers.
+- `VLA_OCTO` is now `VLA_SPM`; the old name still works with a warning.
+- A missing `--config` file and bad values in its `runtime` block are errors,
+  and the command line now overrides the file.
+
 ### Added
 
+- **Octo-Small** (`octo`), with the LIBERO checkpoint at
+  [vrfai/octo-small-libero-gguf](https://hf.co/vrfai/octo-small-libero-gguf).
+  Its GGUF carries the SentencePiece tokenizer, so `--text` needs no Python.
+- **TurboVLA** (`turbovla`), with the LIBERO checkpoint at
+  [vrfai/turbovla-libero-gguf](https://hf.co/vrfai/turbovla-libero-gguf).
+- GR00T N1.7 checkpoints trained with relative actions: the eval client reads
+  `relative_stats.json` and adds the predicted offsets back onto the observed
+  state, and `scripts/gen_gr00t_relative_stats.py` generates those stats for the
+  ALOHA right-arm datasets. The ALOHA client takes `--arm-side` for single-arm
+  policies.
+- `vla-bench` takes the same precision flags as `vla-cli` and `vla-server`.
+- Per-device latency and memory reports for every arch in `docs/benchmark/`,
+  all measured at one commit, with the fastest flags per device.
+- The README is split: usage, evaluation, model conversion and prebuilt-binary
+  notes live in `docs/USAGE.md`, `docs/EVAL.md`, `docs/MODELS.md` and
+  `docs/PREBUILT.md`, and the README gains a real-robot rollout section for the
+  `lerobot-vla-cpp` client.
 - Release tarballs that run off the CI runner: every shared library ships next
   to the binaries with an `$ORIGIN` (`@loader_path`) rpath, builds use
   `GGML_NATIVE=OFF`, and a smoke step checks `ldd`/`otool -L` and runs
@@ -71,6 +103,12 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Fixed
 
+- The eval client treated GR00T N1.7 relative-action outputs as absolute
+  targets, and the ALOHA client could only drive a single-arm policy on the
+  left follower.
+- CUDA 12.x builds failed to link (`nvlink fatal: Cicc option values for '-ftz'
+  do not match`) because the BitVLA kernels and the other CUDA ops were
+  device-linked together. Each library is device-linked on its own now.
 - π0 fed its image tokens to the language model scaled by 1/sqrt(2048). Every
   reference, including the lerobot v0.4.4 code that trained the shipped
   checkpoint, feeds the raw projector output. On 100 paired LIBERO-Object
@@ -390,6 +428,9 @@ expert + dataset stats), CPU or CUDA, no external mmproj and no patch to llama.c
 - llama.cpp is fetched + pinned via CMake `FetchContent` (tag `b9866`); bumping is a
   one-line `GIT_TAG` change. Removed the `patches/` fetch script.
 
+[Unreleased]: https://github.com/VinRobotics/vla.cpp/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.4.0
+[0.3.0]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.2.0
 [0.1.1]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.1.0
