@@ -78,8 +78,7 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   π0.5 dropped the same scale and its undo, a rounding-level change.
 - TurboVLA skipped DINOv3's final LayerNorm, which the checkpoint was trained
   through, so its actions were off by up to 0.47. It now matches the PyTorch
-  reference to 9e-6. The converter writes `vit.norm`, and a GGUF without it
-  fails to load with a message to re-convert (the published one needs that).
+  reference to 9e-6.
 - Octo now matches the JAX reference it was trained with: tanh GELU (flax's
   default) instead of erf, JAX GroupNorm and StdConv epsilons, F32 im2col in
   the stem, and discretized proprio bins that were off by one. Readout is within

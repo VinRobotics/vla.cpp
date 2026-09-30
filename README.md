@@ -375,9 +375,7 @@ BitVLA (Evo-1 only through its fallback prompt, which LIBERO runs do not use).
 Paired before and after runs on 100 LIBERO-Object episodes give π0 83 to 90
 successes, SmolVLA 90 to 92 and GR00T N1.7 97 to 99. None of these is
 statistically significant (McNemar p=0.17, 0.63 and 0.5); see
-[CHANGELOG.md](CHANGELOG.md). The published TurboVLA GGUF has no DINOv3 final
-norm (`vit.norm`) and no longer loads; re-convert it with
-`scripts/convert_turbovla_to_gguf.py`.
+[CHANGELOG.md](CHANGELOG.md).
 
 Success rate belongs to the checkpoint, not the engine;
 `vla_predict_check` in [CONTRIBUTING.md](CONTRIBUTING.md) is how a

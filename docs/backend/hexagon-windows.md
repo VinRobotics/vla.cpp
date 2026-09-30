@@ -15,8 +15,6 @@ vla.cpp now builds natively on a Snapdragon X laptop in three flavours:
 
 Eleven of the twelve published checkpoints ran on all three. BitVLA does not: its only published GGUF is int2-packed, which only CUDA builds load. OpenVLA-OFT was not attempted, because at F16 it needs about 14 GB (more than the 8 GB budget).
 
-The TurboVLA rows were measured on the published GGUF, which has no DINOv3 final norm (`vit.norm`) and no longer loads. Re-convert it with `scripts/convert_turbovla_to_gguf.py`; the re-converted model was not re-measured.
-
 Every accelerator result below was checked against a CPU-backend reference on identical inputs before its latency was recorded.
 
 - **SmolVLA runs fastest on the NPU:** 1.23 s per action chunk against 2.57 s on the CPU and 3.05 s on the GPU. It is within 1.5e-3 of the CPU reference.
