@@ -102,6 +102,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   encoder's flash path aborted with more than one view. Both are wired now; on
   CUDA the flash path is within 5e-3 of the default for both archs. The default
   path is unchanged.
+- On OpenVINO, SmolVLA, π0 and π0.5 failed shape inference on every device at
+  llama.cpp b11223. ggml-openvino caches each RoPE sin/cos table under the op's
+  parameters alone, so the action suffix picked up the prefix's table.
+  `scripts/patch_ggml_openvino.py` now keys that cache on the position input too.
 - vla-server no longer dies on a bad request. An out-of-vocab Octo token, 9 to
   16 OpenVLA-OFT or VLA-Adapter views, a BitVLA prompt past 1024 tokens, or Octo
   stats without a mask each aborted the process; they now get an error

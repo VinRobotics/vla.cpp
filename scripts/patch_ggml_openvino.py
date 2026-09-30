@@ -74,6 +74,15 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      patching only the member applies cleanly and does nothing at all. Both are
      patched here so the fix survives whichever one upstream keeps.
 
+     openvino/op/rope.cpp - key the per-op sin/cos cache on the position input.
+     b11223's translate_rope() caches each sin/cos table under the ROPE's
+     op_params alone, so two ROPEs with the same parameters share one table
+     whatever their positions. pi0, pi0.5 and SmolVLA rotate the prefix and the
+     action suffix with the same parameters and different position tensors, and
+     the suffix then multiplies by the prefix's table:
+     "Multiply (Reshape[0]:f32[1,50,1,256], Concat[0]:f32[1,528,1,256])
+      Argument shapes are inconsistent." on every OpenVINO device.
+
   5. utils.{h,cpp} - cache what the naive path compiles.
      The dynamic and static paths keep a `graph_key`-indexed cache of the
      decoder and the compiled infer request; the naive path has none, so it
@@ -459,6 +468,21 @@ EDITS = {
     } else {
         res = std::make_shared<ov::op::v1::Add>(input_0, input_1);
     }""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/op/rope.cpp": [
+        (
+            """        if (context.get_input_size() == 3) {
+            cache_key += "_ff_" + context.get_input_names()[2];
+        }
+""",
+            """        if (context.get_input_size() == 3) {
+            cache_key += "_ff_" + context.get_input_names()[2];
+        }
+        // vla.cpp: two ROPEs with the same op_params but different position
+        // inputs (a prefix and an action suffix) must not share one table.
+        cache_key += "_pos_" + context.get_input_names()[1];
+""",
         ),
     ],
     "ggml/src/ggml-openvino/openvino/op/concat.cpp": [

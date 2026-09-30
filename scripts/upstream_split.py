@@ -108,9 +108,13 @@ PRS = [
   "input. Single-position graphs are untouched.\n\n"
   "Guard the free get_tensor_graph_input_ov_name() as well as the GgmlOvDecoder\n"
   "member: the free function is the one compute_model_inputs() and\n"
-  "set_input_output() actually call, and the member currently has no callers.",
+  "set_input_output() actually call, and the member currently has no callers.\n\n"
+  "translate_rope() also caches each sin/cos table under the ROPE's op_params\n"
+  "alone, so two ROPEs with the same parameters and different position inputs\n"
+  "share one table and fail the same way. Key the cache on the position input too.",
   [H(D+"ggml-decoder.h","get_graph_input_ov_name"),H(D+"ggml-decoder.h","m_cgraph = nullptr"),
-   H(D+"ggml-decoder.cpp","is_inp_pos(tensor, op)"),H(D+"ggml-decoder.cpp","compute_op_case(const ggml_tensor")]),
+   H(D+"ggml-decoder.cpp","is_inp_pos(tensor, op)"),H(D+"ggml-decoder.cpp","compute_op_case(const ggml_tensor"),
+   H(D+"openvino/op/rope.cpp","_ff_")]),
 
  ("openvino-reshape-op-case",
   "openvino: narrow the RESHAPE op_case 3 guard",
