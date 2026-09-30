@@ -11,6 +11,7 @@ Actions are [rows, max_action_dim] float32; only the first
 from __future__ import annotations
 
 import ctypes
+import threading
 from ctypes import POINTER, c_float, c_int32, c_int64
 from typing import Sequence
 
@@ -53,6 +54,7 @@ class Model:
     """A loaded checkpoint. Free it with ``close()`` or a ``with`` block."""
 
     def __init__(self, handle, lib):
+        self._mu = threading.Lock()
         self._h = handle
         self._lib = lib
         cfg = _ffi.Config()
@@ -69,9 +71,10 @@ class Model:
         return False
 
     def close(self):
-        if getattr(self, "_h", None):
-            self._lib.vla_model_free(self._h)
-            self._h = None
+        with self._mu:
+            if getattr(self, "_h", None):
+                self._lib.vla_model_free(self._h)
+                self._h = None
 
     def __del__(self):
         self.close()
@@ -83,9 +86,6 @@ class Model:
         images: one HWC array, or a sequence of them for multi-view. uint8 RGB by
         default; pass pixel_format=PIXEL_F32_RGB_01 for float RGB in [0, 1].
         """
-        if self._h is None:
-            raise RuntimeError("model is closed")
-
         views = images if isinstance(images, (list, tuple)) else [images]
         if not views:
             raise ValueError("at least one image is required")
@@ -99,6 +99,9 @@ class Model:
             shape = mv.shape
             if len(shape) != 3 or shape[2] != 3:
                 raise ValueError(f"image must be HxWx3, got {shape}")
+            want = "f" if pixel_format == PIXEL_F32_RGB_01 else "B"
+            if mv.format != want:
+                raise ValueError(f"image format {mv.format!r} does not match pixel_format (expected {want!r})")
             raw = (ctypes.c_char * mv.nbytes).from_buffer_copy(mv)
             keep.append(raw)
             img_array[i].data = ctypes.cast(raw, ctypes.c_void_p)
@@ -133,13 +136,16 @@ class Model:
 
         out = POINTER(c_float)()
         n = c_int64()
-        rc = self._lib.vla_predict(self._h, ctypes.byref(cin), ctypes.byref(out), ctypes.byref(n))
-        if rc != _ffi.OK:
-            raise RuntimeError(f"vla_predict failed ({rc})")
-        try:
-            flat = [out[i] for i in range(n.value)]
-        finally:
-            self._lib.vla_free_actions(out)
+        with self._mu:
+            if self._h is None:
+                raise RuntimeError("model is closed")
+            rc = self._lib.vla_predict(self._h, ctypes.byref(cin), ctypes.byref(out), ctypes.byref(n))
+            if rc != _ffi.OK:
+                raise RuntimeError(f"vla_predict failed ({rc})")
+            try:
+                flat = [out[i] for i in range(n.value)]
+            finally:
+                self._lib.vla_free_actions(out)
 
         cols = int(self.config.max_action_dim) or 1
         rows = len(flat) // cols if cols else len(flat)
@@ -151,14 +157,15 @@ class Model:
 
     def last_stats(self) -> _ffi.Stats:
         st = _ffi.Stats()
-        rc = self._lib.vla_last_stats(self._h, ctypes.byref(st))
+        with self._mu:
+            rc = self._lib.vla_last_stats(self._h, ctypes.byref(st))
         if rc != _ffi.OK:
             raise RuntimeError(f"vla_last_stats failed ({rc})")
         return st
 
 
 def load(ckpt_path: str, mmproj_path: str | None = None, config_path: str | None = None) -> Model:
-    """Load a checkpoint. mmproj_path is only needed for SmolVLA, pi0 and pi0.5."""
+    """Load a checkpoint. mmproj_path is accepted and ignored; every arch bundles its vision tower."""
     lib = _lib_handle()
     handle = lib.vla_model_load(
         mmproj_path.encode() if mmproj_path else None,

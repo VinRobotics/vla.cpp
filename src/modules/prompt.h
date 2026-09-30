@@ -43,8 +43,7 @@ struct Prompt {
 bool build_prompt(const char * arch, const Inputs & in, int64_t n_img,
                   int32_t image_token, int64_t max_seq, Prompt & out);
 
-bool fetch_embeds(const char * arch, gguf_reader & io, const Prompt & p,
-                  const float * img_emb, int64_t hidden, std::vector<float> & out);
+bool fetch_embeds(gguf_reader & io, const Prompt & p, const float * img_emb, int64_t hidden, std::vector<float> & out);
 
 void init_noise(const Inputs & in, size_t n, std::vector<float> & out);
 

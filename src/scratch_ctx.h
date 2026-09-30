@@ -43,7 +43,6 @@ public:
     ggml_context * reset(size_t arena) {
         // Growing matters: an arena sized from the input shape would otherwise
         // keep the first call's smaller pool and abort in ggml_new_tensor.
-        // Every call site passes a constant today.
         if (ctx_ && arena > arena_) {
             ggml_free(ctx_);
             ctx_ = nullptr;

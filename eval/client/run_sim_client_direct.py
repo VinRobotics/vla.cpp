@@ -144,6 +144,7 @@ if __name__ == "__main__":
 
     success_count, inference_times = 0.0, []
     skipped = 0
+    episodes = []
     for episode in range(args.n_episodes):
         print(f"*** Episode {episode + 1}/{args.n_episodes}")
 
@@ -184,6 +185,8 @@ if __name__ == "__main__":
 
         if episode_aborted:
             skipped += 1
+        episodes.append((episode, 0 if episode_aborted else int(bool(info.get("is_success", 0))),
+                         step_id, int(episode_aborted)))
 
     env.close()
     counted = max(1, args.n_episodes - skipped)
@@ -196,6 +199,9 @@ if __name__ == "__main__":
         f.write(f"Success rate: {success_count / counted:.2%}  ({int(success_count)}/{counted})\n")
         f.write(f"Skipped (terminated mid-step): {skipped}/{args.n_episodes}\n")
         f.write(f"Average inference time per step: {avg_inf_ms} ms\n")
+    with open(output_dir / "episodes.csv", "w") as f:
+        f.write("episode,success,steps,aborted\n")
+        f.writelines(f"{e},{s},{n},{a}\n" for e, s, n, a in episodes)
 
     print("*** All episodes completed.")
     print(f"- Success rate: {success_count / counted:.2%}  ({int(success_count)}/{counted})")

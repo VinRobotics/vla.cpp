@@ -106,6 +106,19 @@ static void test_preprocess_values() {
     for (float f : out) CHECK(std::fabs(f - (128.0f / 255.0f * 2.0f - 1.0f)) < 1e-6f);
 }
 
+static void test_mrope_positions() {
+    const int32_t img = 7;
+    const std::vector<int32_t> ids = {1, img, img, img, img, 2};
+    std::vector<int32_t> pp;
+    CHECK(mrope_positions("test", ids, img, 2, pp));
+    CHECK(pp.size() == 24);
+    const int32_t want[3][6] = {{0,1,1,1,1,3}, {0,1,1,2,2,3}, {0,1,2,1,2,3}};
+    for (int a = 0; a < 3; ++a)
+        for (int i = 0; i < 6; ++i) CHECK(pp[a * 6 + i] == want[a][i]);
+    for (int i = 0; i < 6; ++i) CHECK(pp[18 + i] == pp[i]);
+    CHECK(!mrope_positions("test", {1, img, img, img, 2}, img, 2, pp));
+}
+
 int main() {
     test_merge_block_coords();
     test_vit_rope_tables();
@@ -113,6 +126,7 @@ int main() {
     test_interp_pos_embed_bilinear();
     test_preprocess_rejects_bad_view();
     test_preprocess_values();
+    test_mrope_positions();
     if (fails == 0) std::printf("qwen3vl_vit: all checks passed\n");
     return fails == 0 ? 0 : 1;
 }

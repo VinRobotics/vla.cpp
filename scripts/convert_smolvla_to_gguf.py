@@ -15,14 +15,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import numpy as np
 from safetensors import safe_open
 
 from gguf_blocks import (
-    identity_stats,
-    load_processor_stats,
+    lerobot_stats,
     norm_eps,
     probe_siglip,
     write_decoder_blocks,
@@ -77,29 +73,6 @@ def _probe_vision(sf, keys, cfg_json: dict) -> dict:
     v["n_img_tokens"]      = (grid // scale) ** 2
     return v
 
-def _load_stats(ckpt: Path, state_dim: int, action_dim: int) -> dict[str, np.ndarray]:
-
-    out = identity_stats(state_dim, action_dim)
-    got_state = load_processor_stats(
-        ckpt,
-        "policy_preprocessor.json",
-        "normalizer_processor",
-        "observation.state",
-        state_dim
-    )
-    got_action = load_processor_stats(
-        ckpt,
-        "policy_postprocessor.json",
-        "unnormalizer_processor",
-        "action",
-        action_dim
-    )
-    if got_state is not None:
-        out["state_mean"], out["state_std"] = got_state
-    if got_action is not None:
-        out["action_mean"], out["action_std"] = got_action
-    return out
-
 def _add_kv(writer, cfg: dict) -> None:
 
     writer.add_uint32  (KV("hidden"),                      cfg["hidden"])
@@ -145,6 +118,9 @@ def main() -> int:
     require(sf_path)
 
     cfg_json = read_json(ckpt / "config.json")
+    for k in ("adapt_to_pi_aloha", "add_image_special_tokens"):
+        if cfg_json.get(k):
+            raise SystemExit(f"{k}=true is not supported")
 
     cfg = dict(SMOLLM2_500M)
     cfg["chunk_size"]               = int(cfg_json["chunk_size"])
@@ -189,7 +165,8 @@ def main() -> int:
           f"vocab={cfg['vocab_size']} chunk={cfg['chunk_size']}")
 
     print("loading normalizer stats...")
-    stats = _load_stats(ckpt, cfg["real_state_dim"], cfg["real_action_dim"])
+    stats = lerobot_stats(sf, ckpt, cfg["real_state_dim"], cfg["real_action_dim"],
+                          cfg_json.get("normalization_mapping") or {})
 
     cfg["vit"] = _probe_vision(sf, keys, cfg_json)
     v = cfg["vit"]

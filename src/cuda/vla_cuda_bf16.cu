@@ -30,7 +30,9 @@
 // cannot break it the way an anchored source patch would.
 //
 // Every entry point returns false for anything it does not handle, and ggml
-// then runs the op exactly as it would have. Nothing here changes the F32 path.
+// then runs the op exactly as it would have. The exception is mul_mat with a
+// BF16 result: ggml has no fallback for it, so an unsupported one aborts.
+// Nothing here changes the F32 path.
 //
 // Accumulation is float throughout: only operand and result *storage* is BF16,
 // never a reduction.
@@ -44,6 +46,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <map>
+#include <mutex>
 
 // Must match the typedef the hook patch inserts into ggml-cuda.cu.
 extern "C" {
@@ -266,7 +270,8 @@ bool bin_bcast(ggml_tensor * dst, cudaStream_t stream) {
         g.ok && dst->ne[0]%8 == 0 &&
         es(src0, 0) == 1 && es(dst, 0) == 1 && es(src1, 0) == 1 &&
         src1->ne[0] == dst->ne[0] &&
-        es(src0, 1)%8 == 0 && es(dst, 1)%8 == 0 && es(src1, 1)%8 == 0 &&
+        es(src0, 1)%8 == 0 && es(src0, 2)%8 == 0 && es(src0, 3)%8 == 0 &&
+        es(dst, 1)%8 == 0 && es(dst, 2)%8 == 0 && es(dst, 3)%8 == 0 && es(src1, 1)%8 == 0 &&
         ((uintptr_t) src0->data%16) == 0 && ((uintptr_t) dst->data%16) == 0;
     if (vec8_shape) {
         const int64_t nvec  = dst->ne[0]/8;
@@ -619,29 +624,32 @@ bool norm(ggml_tensor * dst, cudaStream_t stream) {
 // dst->data unconditionally, which for a BF16 dst is both wrong and twice the
 // bytes the allocator reserved.
 
-cublasHandle_t g_handle = nullptr;
-
 bool mul_mat(ggml_tensor * dst, cudaStream_t stream) {
+    if (dst->type != GGML_TYPE_BF16)
+        return false;
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
-    if (!src0 || !src1)
-        return false;
-    if (dst->type != GGML_TYPE_BF16 || src0->type != GGML_TYPE_BF16 || src1->type != GGML_TYPE_BF16) {
-        return false;
-    }
-    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
-        return false;
+    if (src0->type != GGML_TYPE_BF16 || src1->type != GGML_TYPE_BF16 ||
+        !ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
+        GGML_ABORT("vla: unsupported BF16 mul_mat %s", dst->name);
     }
     // src0 is either shared across the whole batch or batched 1:1 with src1
     const bool batch_ok = (src0->ne[2] == 1           && src0->ne[3] == 1) ||
                           (src0->ne[2] == src1->ne[2] && src0->ne[3] == src1->ne[3]);
     if (!batch_ok)
-        return false;
+        GGML_ABORT("vla: unsupported BF16 mul_mat %s", dst->name);
 
-    if (!g_handle && cublasCreate(&g_handle) != CUBLAS_STATUS_SUCCESS)
-        return false;
-    if (cublasSetStream(g_handle, stream) != CUBLAS_STATUS_SUCCESS)
-        return false;
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess)
+        GGML_ABORT("vla: cudaGetDevice failed for %s", dst->name);
+    static std::mutex mu;
+    static std::map<int, cublasHandle_t> handles;
+    std::lock_guard<std::mutex> lock(mu);
+    cublasHandle_t & handle = handles[dev];
+    if ((!handle && cublasCreate(&handle) != CUBLAS_STATUS_SUCCESS) ||
+        cublasSetStream(handle, stream) != CUBLAS_STATUS_SUCCESS) {
+        GGML_ABORT("vla: cuBLAS setup failed for %s", dst->name);
+    }
 
     const int64_t ne00 = src0->ne[0], ne01 = src0->ne[1];
     const int64_t ne10 = src1->ne[0], ne11 = src1->ne[1];
@@ -657,7 +665,7 @@ bool mul_mat(ggml_tensor * dst, cudaStream_t stream) {
 
     cublasStatus_t st;
     if (n_batch == 1) {
-        st = cublasGemmEx(g_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+        st = cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N,
                           (int) ne01, (int) ne11, (int) ne10,
                           &alpha, a, CUDA_R_16BF, (int) ne00,
                                   b, CUDA_R_16BF, (int) ne10,
@@ -666,7 +674,7 @@ bool mul_mat(ggml_tensor * dst, cudaStream_t stream) {
     } else {
         // stride_a == 0 broadcasts one weight matrix across the batch
         const long long stride_a = (src0->ne[2] == 1 && src0->ne[3] == 1) ? 0 : (long long) ne00*ne01;
-        st = cublasGemmStridedBatchedEx(g_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+        st = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N,
                           (int) ne01, (int) ne11, (int) ne10,
                           &alpha, a, CUDA_R_16BF, (int) ne00, stride_a,
                                   b, CUDA_R_16BF, (int) ne10, (long long) ne10*ne11,
@@ -674,32 +682,19 @@ bool mul_mat(ggml_tensor * dst, cudaStream_t stream) {
                           (int) n_batch,
                           CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     }
-    return st == CUBLAS_STATUS_SUCCESS;
+    if (st != CUBLAS_STATUS_SUCCESS)
+        GGML_ABORT("vla: BF16 mul_mat %s failed (%d)", dst->name, (int) st);
+    return true;
 }
 
-}  // namespace
-
-// ---------------------------------------------------------------------------
-// hook entry point
-// ---------------------------------------------------------------------------
-
-extern "C" bool vla_cuda_bf16_fused_binbcast(ggml_tensor * dst, int n_fuse, void * stream_v) {
-    if (!dst)
-        return false;
-    cudaStream_t stream = (cudaStream_t) stream_v;
-
-    switch (dst->op) {
-        case GGML_OP_ADD: return fused_bin_bcast<BinOp::Add>(dst, n_fuse, stream);
-        case GGML_OP_MUL: return fused_bin_bcast<BinOp::Mul>(dst, n_fuse, stream);
-        default: return false;
-    }
+bool launched(const ggml_tensor * dst) {
+    const cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+        GGML_ABORT("vla: %s %s failed: %s", ggml_op_desc(dst), dst->name, cudaGetErrorString(err));
+    return true;
 }
 
-extern "C" bool vla_cuda_bf16_forward(ggml_tensor * dst, void * stream_v) {
-    if (!dst)
-        return false;
-    cudaStream_t stream = (cudaStream_t) stream_v;
-
+bool forward(ggml_tensor * dst, cudaStream_t stream) {
     switch (dst->op) {
         case GGML_OP_MUL_MAT:  return mul_mat(dst, stream);
         case GGML_OP_ADD:      return bin_bcast<BinOp::Add>(dst, stream);
@@ -717,6 +712,28 @@ extern "C" bool vla_cuda_bf16_forward(ggml_tensor * dst, void * stream_v) {
             }
         default: return false;
     }
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// hook entry point
+// ---------------------------------------------------------------------------
+
+extern "C" bool vla_cuda_bf16_fused_binbcast(ggml_tensor * dst, int n_fuse, void * stream_v) {
+    if (!dst)
+        return false;
+    cudaStream_t stream = (cudaStream_t) stream_v;
+
+    switch (dst->op) {
+        case GGML_OP_ADD: return fused_bin_bcast<BinOp::Add>(dst, n_fuse, stream) && launched(dst);
+        case GGML_OP_MUL: return fused_bin_bcast<BinOp::Mul>(dst, n_fuse, stream) && launched(dst);
+        default: return false;
+    }
+}
+
+extern "C" bool vla_cuda_bf16_forward(ggml_tensor * dst, void * stream_v) {
+    return dst && forward(dst, (cudaStream_t) stream_v) && launched(dst);
 }
 
 namespace vla {

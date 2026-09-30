@@ -19,8 +19,7 @@ to take once it ran.
 
 ## What "IQ9" and "IQ10" refer to
 
-Two commits, both inside `b10729` (`458681e1`, 2026-09-01), and no Hexagon commit
-lands after it as of this writing:
+Two commits, both inside the pinned `b11223` (`4da63377`, 2026-09-27):
 
 | Commit | Date | What it actually did |
 |---|---|---|
@@ -45,12 +44,12 @@ The generational split visible in the code, rather than in the marketing:
   supported without dynamic discovery"*. Two is what the fallback knows about;
   the discovery path is open-ended.
 
-## What the backend gives you at `b10729`
+## What the backend gives you at `b11223`
 
 - **Two libraries.** `libggml-hexagon.so` on the CPU side, `libggml-htp-vNN.so`
-  on the NPU side. Skels are built for v68, v69, v73, v75, v79 and v81 and the
-  right one is picked at runtime from `htpdrv_get_arch`; a failed query falls
-  back to v73. `GGML_HEXAGON_ARCH` overrides.
+  on the NPU side. Skels are built for v73, v75, v79 and v81 and the right one
+  is picked at runtime from `htpdrv_get_arch`; a failed query falls back to v73
+  and older parts are capped to it. `GGML_HEXAGON_ARCH` overrides.
 - **Sessions are devices.** Each Hexagon process domain shows up to ggml as one
   device and behaves like a GPU for offload and model splitting.
   `GGML_HEXAGON_DEVICES` takes either a count or an explicit
@@ -58,17 +57,18 @@ The generational split visible in the code, rather than in the marketing:
 - **~3.5 GB per session.** The backend now maps and unmaps execution buffers
   during graph execution to fit larger models into one session, and layer- or
   tensor-splitting across sessions is the alternative.
-- **Repack buffers.** Q4_0, Q4_1, Q8_0, IQ4_NL and MXFP4 weights are repacked
-  into non-host buffers; since #26501 non-host is the default and
-  `GGML_HEXAGON_HOSTBUF=1` is the opt-out (needed to exercise `MUL_MAT` in
-  `test-backend-ops`).
+- **Repack buffers.** Q4_0, Q4_1, Q8_0, IQ4_NL, MXFP4, Q4_K, Q5_K and Q6_K
+  weights are repacked into non-host buffers; since #26501 non-host is the
+  default and `GGML_HEXAGON_HOSTBUF=1` is the opt-out (needed to exercise
+  `MUL_MAT` in `test-backend-ops`).
 - **VTCM is the real budget.** `supports_op` precomputes kernel params for
   `MUL_MAT`, `FLASH_ATTN_EXT` and friends and returns false when the tile does
   not fit VTCM. An op is not rejected by shape rules so much as by whether it
   fits - which means coverage is a function of your tensor sizes, and has to be
   measured on the board, not predicted from a table.
 - **Fusion**, controlled by `GGML_HEXAGON_OPFUSION`: `RMS_NORM+MUL`,
-  `MUL_MAT+ADD`, N-way `MUL_MAT`, `ALLREDUCE+ADD`.
+  `MUL_MAT+ADD`, N-way `MUL_MAT` and `MUL_MAT_ID`, `ALLREDUCE+ADD`,
+  `GATED_DELTA_NET+CPY`.
 
 The knobs worth knowing on day one:
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Post-LN encoder. The SigLIP vision blocks and the GR00T vision-language
+// Pre-LN encoder. The SigLIP vision blocks and the GR00T vision-language
 // self-attention blocks are the same computation under different tensor names,
 // which is what EncNames selects.
 

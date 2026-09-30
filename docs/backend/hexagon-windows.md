@@ -1,7 +1,7 @@
 # vla.cpp on Snapdragon X (Windows on Arm): Hexagon NPU, Adreno GPU and CPU
 
 Measured 2026-09 against llama.cpp build 11201 (`2145525a4`), passed in with
-`-LlamaDir`. The `b10729` tag that `CMakeLists.txt` pins was not tested.
+`-LlamaDir`. The `b11223` tag that `CMakeLists.txt` pins was not tested.
 
 ## Summary
 
@@ -13,7 +13,7 @@ vla.cpp now builds natively on a Snapdragon X laptop in three flavours:
 
 `vla-server`, `vla-cli`, `vla-bench` and the tests all build.
 
-Eleven of the twelve published checkpoints run on all three. BitVLA does not: its only published GGUF is int2-packed, which only CUDA builds load. OpenVLA-OFT was not attempted, because at F16 it needs about 14 GB (more than the 8 GB budget).
+Eleven of the twelve published checkpoints ran on all three. BitVLA does not: its only published GGUF is int2-packed, which only CUDA builds load. OpenVLA-OFT was not attempted, because at F16 it needs about 14 GB (more than the 8 GB budget).
 
 Every accelerator result below was checked against a CPU-backend reference on identical inputs before its latency was recorded.
 
@@ -77,9 +77,9 @@ The build script sets up the Visual Studio shell, the compiler flags llama.cpp's
 .\scripts\build_windows_snapdragon.ps1 -Backend cpu    -LlamaDir <llama.cpp>
 ```
 
-Each build goes into `build-wos-<backend>`, with every binary and DLL in `build-wos-<backend>\bin`. `-NoServer` skips `vla-server`, Octo and their protobuf and ZeroMQ dependencies.
+Each build goes into `build-wos-<backend>`, with every binary and DLL in `build-wos-<backend>\bin`. `-NoServer` skips `vla-server`, SentencePiece and their protobuf and ZeroMQ dependencies, so Octo `--text` needs `--tokens` there.
 
-`-LlamaDir` points the build at an existing llama.cpp checkout through `FETCHCONTENT_SOURCE_DIR_LLAMA`. Without it, the `b10729` pin in `CMakeLists.txt` applies, which was not tested here.
+`-LlamaDir` points the build at an existing llama.cpp checkout through `FETCHCONTENT_SOURCE_DIR_LLAMA`. Without it, the `b11223` pin in `CMakeLists.txt` applies, which was not tested here.
 
 The HTP build also signs `libggml-htp-v*.so` with the certificate and copies the skels and their catalog next to the binaries. At startup the Hexagon backend points `ADSP_LIBRARY_PATH` at the executable's own folder, but only if the variable is unset. If it is already set, for example by a llama.cpp install, the skels it names must come from the same llama.cpp commit.
 
@@ -249,6 +249,10 @@ TurboVLA and Octo ship F32 GGUFs, so their "CPU BF16" column is the F32 default.
 | TurboVLA | 7.1e-3 | 6.0e-4 | 1.1e-6 |
 | Octo-Small | 0 | 5.2e-4 | 8.2e-4 |
 
+The GR00T N1.5 and N1.6 rows predate flash attention reaching their towers.
+Hexagon turns it on by default, so both now run it there; they were not
+re-measured.
+
 † Against the CPU BF16 run. An F32 reference for π0.5 needs more memory than the 8 GB budget.
 
 The accelerators are often closer to F32 than the CPU running the same F16 weights. ggml's CPU matmul converts activations to the weight's type (F16 here), while HTP and Adreno keep them in F32.
@@ -290,7 +294,7 @@ count on top of the host copy made during loading.
 | GR00T N1.6 | 9.16 → 7.99 GB | 4,930 ms, 7.9e-3 | 3,473 ms, 8.5e-3 | 6,509 ms, 6.6e-3 |
 | VLA-JEPA | 4.57 → 3.24 GB | 745 ms, 2.5e-2 | 1,477 ms, 4.9e-2 | 2,979 ms, 5.2e-2 |
 
-SmolVLA's CPU Q8_0 run keeps its float weights at F16; the other rows keep the CPU default, BF16. The π0 Q8_0 result on the GPU (0.27) is far worse than the same file on the CPU, and was not investigated. Evo-1's Q8_0 file fails to load on every backend, including the CPU, with a `ggml_view` assertion; that is an arch bug, not a Snapdragon one.
+SmolVLA's CPU Q8_0 run keeps its float weights at F16; the other rows keep the CPU default, BF16. The π0 Q8_0 result on the GPU (0.27) is far worse than the same file on the CPU, and was not investigated. Evo-1's Q8_0 file failed to load on every backend with a `ggml_view` assertion; it now loads on the CPU and the NPU. The Adreno GPU refuses one made by the old quantizer, because ggml-opencl ignores view offsets on quantized weights; requantize with the current `scripts/quantize_gguf.py`, which keeps the action expert float.
 
 ## Observations
 

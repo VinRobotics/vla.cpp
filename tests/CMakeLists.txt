@@ -5,6 +5,9 @@
 if(WIN32)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+if(VLA_WERROR)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Werror>)
+endif()
 
 add_executable(vla_predict_check predict_check.cpp)
 target_link_libraries(vla_predict_check PRIVATE vla_core)
@@ -17,6 +20,7 @@ add_test(NAME vision_common COMMAND test_vision_common)
 
 add_executable(test_rope_conventions test_rope_conventions.cpp)
 target_include_directories(test_rope_conventions PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_rope_conventions PRIVATE ggml)
 target_compile_options(test_rope_conventions PRIVATE -Wall -Wextra)
 add_test(NAME rope_conventions COMMAND test_rope_conventions)
 
@@ -52,6 +56,11 @@ target_link_libraries(test_config_guard PRIVATE vla_core)
 target_compile_options(test_config_guard PRIVATE -Wall -Wextra)
 add_test(NAME config_guard COMMAND test_config_guard)
 
+add_executable(test_prompt test_prompt.cpp)
+target_link_libraries(test_prompt PRIVATE vla_core)
+target_compile_options(test_prompt PRIVATE -Wall -Wextra)
+add_test(NAME prompt COMMAND test_prompt)
+
 # A/B harness for the two BitVLA ternary-GEMM tilings. Built so it cannot rot,
 # not registered with ctest: it needs a GPU and is read by hand.
 # VLA_BITVLA_NARROW_GEMM=1 selects the old one-tile-per-CTA kernel at runtime.
@@ -69,4 +78,6 @@ if(GGML_CUDA)
     target_link_libraries(test_bf16_cuda_ops PRIVATE vla_cuda_ops ggml)
     target_compile_options(test_bf16_cuda_ops PRIVATE -Wall -Wextra)
     add_test(NAME bf16_cuda_ops COMMAND test_bf16_cuda_ops)
+    add_test(NAME bf16_cuda_ops_flat COMMAND test_bf16_cuda_ops)
+    set_tests_properties(bf16_cuda_ops_flat PROPERTIES ENVIRONMENT VLA_BF16_FLAT=1)
 endif()

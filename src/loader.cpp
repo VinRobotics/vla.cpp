@@ -106,8 +106,9 @@ ggml_tensor * WeightLoader::fuse(ggml_type want, const char * out_name, const st
         return nullptr;
     }
 
-    const bool is1d = ggml_n_dims(first) == 1;
-    int64_t    rows = 0;
+    const ggml_type rt   = g_.resident_type(first, want);
+    const bool      is1d = ggml_n_dims(first) == 1;
+    int64_t         rows = 0;
     for (const std::string & s : srcs) {
         const ggml_tensor * gs = g_.meta(s.c_str());
         if (!gs) {
@@ -115,11 +116,16 @@ ggml_tensor * WeightLoader::fuse(ggml_type want, const char * out_name, const st
             ok_ = false;
             return nullptr;
         }
+        if (g_.resident_type(gs, want) != rt || (!is1d && gs->ne[0] != first->ne[0])) {
+            std::fprintf(stderr, "vla(%s): %s does not match %s for fusing\n", arch_, s.c_str(), srcs[0].c_str());
+            ok_ = false;
+            return nullptr;
+        }
         rows += is1d ? gs->ne[0] : gs->ne[1];
     }
 
-    ggml_tensor * t = is1d ? ggml_new_tensor_1d(ctx_, want, rows)
-                           : ggml_new_tensor_2d(ctx_, want, first->ne[0], rows);
+    ggml_tensor * t = is1d ? ggml_new_tensor_1d(ctx_, rt, rows)
+                           : ggml_new_tensor_2d(ctx_, rt, first->ne[0], rows);
     if (!t) {
         std::fprintf(stderr, "vla(%s): ggml_new_tensor failed for %s\n", arch_, out_name);
         ok_ = false;

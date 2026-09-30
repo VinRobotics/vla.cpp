@@ -305,6 +305,7 @@ def test_turbovla_converter_remap():
         "vit.blk.0.attn_v.weight", "vit.blk.0.attn_v.bias", "vit.blk.0.attn_o.weight", "vit.blk.0.attn_o.bias",
         "vit.blk.0.ln1.weight", "vit.blk.0.ln1.bias", "vit.blk.0.ln2.weight", "vit.blk.0.ln2.bias",
         "vit.blk.0.fc1.weight", "vit.blk.0.fc1.bias", "vit.blk.0.fc2.weight", "vit.blk.0.fc2.bias",
+        "vit.norm.weight", "vit.norm.bias",
         "text.embed.word_embeddings", "text.embed.position_embeddings", "text.embed.token_type_embeddings",
         "text.embed.LayerNorm.weight", "text.embed.LayerNorm.bias",
         "text.encoder.layer.0.attention.self.query.weight", "text.encoder.layer.0.attention.self.query.bias",
@@ -346,6 +347,44 @@ def test_turbovla_converter_remap():
         "action_head.state_projection.net.4.weight",
         "view_embedding",
     } <= set(tensors.keys_read)
+
+
+def test_quantize_skip_names():
+    import importlib
+    Q = importlib.import_module("quantize_gguf")
+    default = Q.SKIP + Q.SKIP_VISION
+    keep = [
+        "aex.blk.0.attn_q.weight", "aex.vlsa.0.ff0.weight", "aex.head.fc1.weight", "aex.seq_pool.weight",
+        "ah.act_enc.l2.weight", "act.dec.0.fc1.weight", "octo.head.diffusion.reverse.out.weight",
+        "octo.t5.tok_embd.weight", "vis.d.blk.0.qkv.weight", "vis.s.blk.0.fc1.weight",
+        "octo.obs.primary.proj.weight",
+    ]
+    pack = [
+        "vlm.blk.0.attn_q.weight", "lm.blk.0.ffn_up.weight", "octo.t5.blk.0.attn_q.weight",
+        "text.encoder.layer.0.attention.self.query.weight", "mm.fc1.weight", "vis.proj.fc1.weight",
+    ]
+    for n in keep:
+        assert not Q.eligible(n, (64, 64), "Q8_0", default), n
+    for n in pack:
+        assert Q.eligible(n, (64, 64), "Q8_0", default), n
+    assert Q.eligible("vis.d.blk.0.qkv.weight", (64, 64), "Q8_0", Q.SKIP)
+
+
+def test_find_sidecar():
+    import tempfile
+    from gguf_common import find_sidecar
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        try:
+            find_sidecar(d, "action_head")
+            raise AssertionError("missing sidecar must exit")
+        except SystemExit:
+            pass
+        (d / "action_head--checkpoint.pt").touch()
+        assert find_sidecar(d, "action_head").name == "action_head--checkpoint.pt"
+        for step in (5000, 30000, 10000):
+            (d / f"action_head--{step}_checkpoint.pt").touch()
+        assert find_sidecar(d, "action_head").name == "action_head--30000_checkpoint.pt"
 
 
 def test_every_converter_imports():

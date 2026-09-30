@@ -15,9 +15,10 @@
 #include "vlm/engine.h"
 #include "serving/vlm.pb.h"
 
-// stbi_info_from_memory only, to preflight JPEG dimensions before mtmd decodes.
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_PNG
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
 #include "stb_image.h"
@@ -43,6 +44,7 @@ void on_signal(int) {
 
 // Reject absurd image dimensions before any size arithmetic on untrusted input.
 constexpr unsigned kMaxImageDim = 8192;
+constexpr size_t   kMaxTotalPixels = size_t(64) << 20;
 
 std::string make_error_stream(uint64_t request_id, const std::string & msg) {
     vlm_chat::StreamMessage sm;
@@ -106,6 +108,18 @@ int main(int argc, char ** argv) {
     lp.mmproj_path = positionals[0];
     lp.model_path  = positionals[1];
 
+    zmq::context_t zctx( 1);
+    zmq::socket_t  sock(zctx, zmq::socket_type::router);
+    sock.set(zmq::sockopt::linger, 0);
+    // Per frame only.
+    sock.set(zmq::sockopt::maxmsgsize, int64_t(64)*1024*1024);
+    try {
+        sock.bind(bind_addr);
+    } catch (const zmq::error_t & e) {
+        std::fprintf(stderr, "vlm-server: bind %s: %s\n", bind_addr.c_str(), e.what());
+        return 1;
+    }
+
     std::printf("vlm-server: loading model ...\n  mmproj: %s\n  lm:     %s\n",
                 lp.mmproj_path.c_str(), lp.model_path.c_str());
 
@@ -115,16 +129,6 @@ int main(int argc, char ** argv) {
         return 1;
     }
     std::printf("vlm-server: loaded. n_ctx=%d ngl=%d\n", lp.n_ctx, lp.n_gpu_layers);
-
-    zmq::context_t zctx( 1);
-    zmq::socket_t  sock(zctx, zmq::socket_type::router);
-    sock.set(zmq::sockopt::linger, 0);
-    // Per frame only; the recv loop caps the multipart total.
-    sock.set(zmq::sockopt::maxmsgsize, int64_t(64)*1024*1024);
-    // A peer that sends a frame with SNDMORE and then stalls would otherwise park
-    // this single-threaded loop in recv for good, starving every other client.
-    sock.set(zmq::sockopt::rcvtimeo, 5000);
-    sock.bind(bind_addr);
     std::printf("vlm-server: bound to %s. ready.\n", bind_addr.c_str());
 
     if (bind_addr.find("127.0.0.1") == std::string::npos &&
@@ -156,8 +160,7 @@ int main(int argc, char ** argv) {
         if (!(poll[0].revents & ZMQ_POLLIN))
             continue;
 
-        // maxmsgsize bounds each frame but not how many, so a peer could stream
-        // sub-limit frames until memory runs out.
+        // Caps the envelope copied and echoed back; libzmq has already buffered it.
         constexpr size_t kMaxEnvFrames = 8;
         constexpr size_t kMaxEnvBytes  = 64*1024;
 
@@ -248,12 +251,13 @@ int main(int argc, char ** argv) {
         std::vector<vlm::Image> images;
         images.reserve(req.images_size());
         bool decode_ok = true;
+        size_t total_px = 0;
         for (int v=0; v<req.images_size(); ++v) {
             const vlm_chat::Image & im = req.images(v);
             vlm::Image out;
             if (im.encoding() == vlm_chat::Image::JPEG) {
                 const auto & d = im.data();
-                // Header first: mtmd decodes with no dimension guard.
+                // Header first: stbi_load allocates before any dimension check.
                 int jw = 0, jh = 0, jc = 0;
                 if (d.size() > size_t(INT_MAX) ||
                     !stbi_info_from_memory(reinterpret_cast<const stbi_uc*>(d.data()),
@@ -265,12 +269,22 @@ int main(int argc, char ** argv) {
                     send_reply(make_error_stream(rid, buf));
                     decode_ok = false; break;
                 }
-                if (!engine.decode_image_buf(
-                        reinterpret_cast<const uint8_t*>(d.data()), d.size(), out)) {
+                if ((total_px += size_t(jw)*size_t(jh)) > kMaxTotalPixels) {
+                    send_reply(make_error_stream(rid, "images exceed the per-request pixel budget"));
+                    decode_ok = false; break;
+                }
+                int w = 0, h = 0, c = 0;
+                stbi_uc * px = stbi_load_from_memory(reinterpret_cast<const stbi_uc*>(d.data()),
+                                                     static_cast<int>(d.size()), &w, &h, &c, 3);
+                if (!px) {
                     char buf[64]; std::snprintf(buf, sizeof(buf), "image[%d] JPEG decode failed", v);
                     send_reply(make_error_stream(rid, buf));
                     decode_ok = false; break;
                 }
+                out.width  = uint32_t(w);
+                out.height = uint32_t(h);
+                out.rgb.assign(px, px+size_t(3)*w*h);
+                stbi_image_free(px);
             } else if (im.encoding() == vlm_chat::Image::RGB_U8) {
                 if (im.width() == 0 || im.height() == 0 ||
                     im.width() > kMaxImageDim || im.height() > kMaxImageDim) {
@@ -286,6 +300,10 @@ int main(int argc, char ** argv) {
                         "image[%d] RGB_U8 size %zu != 3*%u*%u", v,
                         im.data().size(), im.width(), im.height());
                     send_reply(make_error_stream(rid, buf));
+                    decode_ok = false; break;
+                }
+                if ((total_px += size_t(im.width())*im.height()) > kMaxTotalPixels) {
+                    send_reply(make_error_stream(rid, "images exceed the per-request pixel budget"));
                     decode_ok = false; break;
                 }
                 out.width  = im.width();

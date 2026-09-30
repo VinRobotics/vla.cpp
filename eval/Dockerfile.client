@@ -30,6 +30,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
+    PIP_NO_CACHE_DIR=1 \
     VLA_CPP_PROTO=/workspace/vla.cpp/src/serving/vla.proto
 
 # System dependencies: build tools, protobuf, ZMQ, EGL (for MuJoCo offscreen)
@@ -66,8 +67,7 @@ RUN pip3 install "mujoco<3.0"
 
 # PyTorch CPU-only (the server handles GPU inference)
 # install it now to prevent later deps from pulling in a GPU version
-RUN pip3 install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
-RUN pip3 install torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+RUN pip3 install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cpu
 
 # LIBERO — clone and install.
 # We use editable install (following eval/sim/libero/setup_libero.sh) so that
@@ -78,18 +78,14 @@ RUN pip3 install torchvision==0.20.1 --index-url https://download.pytorch.org/wh
 # The CMAKE_POLICY_VERSION_MINIMUM env-var is needed by egl-probe (a transitive
 # dep of robomimic/robosuite) which requests cmake_minimum_required < 3.5.
 RUN CMAKE_POLICY_VERSION_MINIMUM=3.5 pip3 install --upgrade pip setuptools
-RUN git clone --depth 1 https://github.com/Lifelong-Robot-Learning/LIBERO.git /tmp/LIBERO
+RUN git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git /tmp/LIBERO && git -C /tmp/LIBERO checkout 8f1084e3132a39270c3a13ebe37270a43ece2a01
 RUN CMAKE_POLICY_VERSION_MINIMUM=3.5 pip3 install -r /tmp/LIBERO/requirements.txt
 RUN CMAKE_POLICY_VERSION_MINIMUM=3.5 pip3 install \
         -e /tmp/LIBERO --config-settings editable_mode=compat && \
     rm -rf /root/.libero && \
     echo "N" | python3 -c "import libero.libero" 2>/dev/null || true
 
-# lerobot — install with dependencies but immediately re-pin torch so it is
-# not upgraded from our pinned CPU-only version.
-RUN pip3 install lerobot==0.4.3 && \
-    pip3 install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu && \
-    pip3 install torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+RUN pip3 install lerobot==0.4.3
 
 # Remaining client dependencies
 RUN pip3 install \
@@ -119,9 +115,6 @@ RUN pip3 install numpy==1.26.4
 # Apply the accelerate monkey-patch for numpy compat
 RUN sed -i 's/np_core = np._core if is_numpy_available("2.0.0") else np.core/np_core = np.core/' \
     /usr/local/lib/python3.10/dist-packages/accelerate/utils/other.py 2>/dev/null || true
-
-# Clean up pip cache to keep image size small
-RUN rm -rf /root/.cache/pip
 
 # The repo goes last: it changes every commit, and everything above it is a
 # half-hour of installs worth caching.

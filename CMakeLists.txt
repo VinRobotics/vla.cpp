@@ -11,6 +11,13 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+include(GNUInstallDirs)
+if(APPLE)
+    set(CMAKE_INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}" CACHE STRING "")
+elseif(UNIX)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}" CACHE STRING "")
+endif()
+
 set(_vla_accel "")
 foreach(_flag GGML_CUDA GGML_SYCL GGML_METAL GGML_OPENVINO GGML_HEXAGON GGML_OPENCL)
     if(${_flag})
@@ -32,6 +39,11 @@ if(_vla_accel_n GREATER 0 AND GGML_BACKEND_DL)
         "GGML_BACKEND_DL=ON is not supported with ${_vla_accel}: the backend is "
         "built as a module and src/backend.h links its init directly.")
 endif()
+foreach(_flag GGML_VULKAN GGML_HIP GGML_MUSA GGML_CANN GGML_WEBGPU)
+    if(${_flag})
+        message(WARNING "${_flag}=ON reaches vlm-server through llama only; src/backend.h has no ${_flag} path, so the VLA archs run on CPU.")
+    endif()
+endforeach()
 
 set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS    ON  CACHE BOOL "" FORCE)
@@ -43,6 +55,28 @@ if(GGML_CUDA)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_cuda_ext_hook.py <SOURCE_DIR>)
+
+    find_package(CUDAToolkit REQUIRED)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND "$ENV{CUDAARCHS}" STREQUAL "")
+        # SASS per supported GPU, sm_90 PTX so future cards JIT.
+        set(_vla_cuda_archs 80-real 86-real 87-real 89-real 90-real)
+        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+            list(APPEND _vla_cuda_archs 100-real 120-real)
+        else()
+            message(WARNING
+                "CUDA ${CUDAToolkit_VERSION} < 12.8: omitting Blackwell sm_100/sm_120. "
+                "Pass -DCMAKE_CUDA_ARCHITECTURES=<arch> explicitly to override.")
+        endif()
+        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
+            list(APPEND _vla_cuda_archs 121-real)
+        endif()
+        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+            list(APPEND _vla_cuda_archs 110-real)
+        endif()
+        set(CMAKE_CUDA_ARCHITECTURES ${_vla_cuda_archs} 90-virtual
+            CACHE STRING "" FORCE)
+    endif()
+    set(GGML_CUDA_FA_QUANTS "f16-f16" CACHE STRING "")
 elseif(GGML_OPENVINO)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
@@ -63,7 +97,7 @@ endif()
 # build dir (-DVLA_LLAMA_TAG=b10326) without editing this file. The patch
 # anchors in scripts/patch_ggml_cuda_ext_hook.py and scripts/patch_ggml_openvino.py
 # are checked against the default.
-set(_vla_llama_tag_default "b10729")
+set(_vla_llama_tag_default "b11223")
 set(VLA_LLAMA_TAG "${_vla_llama_tag_default}" CACHE STRING "llama.cpp tag to fetch")
 # A cache entry survives an edit to the line above, so an existing build dir keeps
 # the tag it was first configured with and quietly builds the wrong llama.cpp.
@@ -100,17 +134,27 @@ function(vla_exclude_fetched_targets dir)
 endfunction()
 vla_exclude_fetched_targets(${llama_SOURCE_DIR})
 
-# Octo is the one arch that tokenizes in-process, so it is also the one that
-# needs SentencePiece and, through it, a protobuf. Optional so a build that does
-# not want Octo does not inherit that dependency.
-option(VLA_OCTO "Build the Octo arch (fetches SentencePiece, needs system protobuf)" ON)
-if(VLA_OCTO)
+# SentencePiece, and through it a protobuf, is only needed to tokenize --text with
+# a tokenizer stored in the GGUF. Optional so a build without it has no protobuf.
+option(VLA_SPM "Link SentencePiece for in-GGUF tokenizers (needs system protobuf)" ON)
+if(DEFINED VLA_OCTO)
+    message(DEPRECATION "VLA_OCTO is deprecated, use VLA_SPM")
+    set_property(CACHE VLA_SPM PROPERTY VALUE ${VLA_OCTO})
+    unset(VLA_OCTO CACHE)
+endif()
+if(VLA_SPM)
     # The system protobuf, not sentencepiece's vendored protobuf-lite: vla-server
     # aborts at static-init if two protobuf runtimes reach the same binary.
     set(SPM_ENABLE_SHARED    OFF        CACHE BOOL   "" FORCE)
     set(SPM_BUILD_TEST       OFF        CACHE BOOL   "" FORCE)
     set(SPM_ENABLE_TCMALLOC  OFF        CACHE BOOL   "" FORCE)
     set(SPM_PROTOBUF_PROVIDER "package" CACHE STRING "" FORCE)
+    if(NOT WIN32)
+        find_package(Protobuf QUIET)
+        if(Protobuf_VERSION VERSION_GREATER_EQUAL 4.22)
+            set(SPM_ABSL_PROVIDER "package" CACHE STRING "" FORCE)
+        endif()
+    endif()
     set(_vla_spm_patch "")
     if(WIN32 AND NOT MSVC)
         set(_vla_spm_patch PATCH_COMMAND ${CMAKE_COMMAND} -P
@@ -118,17 +162,13 @@ if(VLA_OCTO)
     endif()
     FetchContent_Declare(sentencepiece
         GIT_REPOSITORY https://github.com/google/sentencepiece
-        GIT_TAG        v0.2.0
+        GIT_TAG        v0.2.1
         GIT_SHALLOW    TRUE
         ${_vla_spm_patch}
     )
-    # sentencepiece v0.2.0 still asks for cmake_minimum_required(VERSION 3.1),
-    # which CMake 4 refuses outright.
-    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
     FetchContent_MakeAvailable(sentencepiece)
-    unset(CMAKE_POLICY_VERSION_MINIMUM)
     # Only the static library is linked; its CLI tools are dead weight.
-    vla_exclude_fetched_targets(${sentencepiece_SOURCE_DIR})
+    set_property(DIRECTORY ${sentencepiece_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
     # vcpkg's FindProtobuf shim reports the DLL, not its import library, as
     # PROTOBUF_LITE_LIBRARY, and sentencepiece links that path verbatim. Link the
     # imported target instead, which carries the import library and protobuf's
@@ -181,6 +221,8 @@ add_library(vla_core ${VLA_CORE_LIB_TYPE}
     src/models/openvla_oft.cpp
     src/models/vla_jepa.cpp
     src/models/turbovla.cpp
+    src/models/octo.cpp
+    src/tokenizer.cpp
 )
 target_include_directories(vla_core
     PUBLIC
@@ -189,33 +231,16 @@ target_include_directories(vla_core
 )
 # The VLA archs call no llama_* API; only vlm_core needs llama.
 target_link_libraries(vla_core PUBLIC ggml)
-if(VLA_OCTO)
-    target_sources(vla_core PRIVATE src/models/octo.cpp)
+if(VLA_SPM)
     target_include_directories(vla_core PRIVATE ${sentencepiece_SOURCE_DIR}/src)
     target_link_libraries(vla_core PRIVATE sentencepiece-static ${VLA_SPM_PROTOBUF})
-    target_compile_definitions(vla_core PUBLIC VLA_USE_OCTO)
+    target_compile_definitions(vla_core PRIVATE VLA_USE_SPM)
 endif()
 
 if(GGML_CUDA)
     target_compile_definitions(vla_core PUBLIC GGML_USE_CUDA)
 
     enable_language(CUDA)
-    find_package(CUDAToolkit REQUIRED)
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        # SASS per supported GPU, PTX only for the newest arch so future cards JIT.
-        set(_vla_cuda_archs 80-real 86-real 87-real 89-real 90-real)
-        set(_vla_cuda_ptx 90-virtual)
-        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-            list(APPEND _vla_cuda_archs 100-real 120-real)
-            set(_vla_cuda_ptx 120-virtual)
-        else()
-            message(WARNING
-                "CUDA ${CUDAToolkit_VERSION} < 12.8: omitting Blackwell sm_100/sm_120. "
-                "Pass -DCMAKE_CUDA_ARCHITECTURES=<arch> explicitly to override.")
-        endif()
-        set(CMAKE_CUDA_ARCHITECTURES ${_vla_cuda_archs} ${_vla_cuda_ptx}
-            CACHE STRING "" FORCE)
-    endif()
     add_library(bitvla_cuda_kernels STATIC
         src/kernels/bitvla/bitnet_kernels.cu
         src/kernels/bitvla/bitvla_lm_cuda.cu
@@ -289,7 +314,7 @@ endif()
 # headers for the backend vtable, hence the private include.
 if(GGML_HEXAGON OR GGML_OPENCL)
     target_sources(vla_core PRIVATE src/backend_fallback.cpp)
-    target_include_directories(vla_core PRIVATE ${llama_SOURCE_DIR}/ggml/src)
+    target_include_directories(vla_core SYSTEM PRIVATE ${llama_SOURCE_DIR}/ggml/src)
     if(GGML_HEXAGON)
         target_compile_definitions(vla_core PUBLIC GGML_USE_HEXAGON)
     else()
@@ -300,13 +325,11 @@ endif()
 add_library(vlm_core ${VLA_CORE_LIB_TYPE}
     src/vlm/engine.cpp
 )
-target_include_directories(vlm_core
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    PRIVATE
-        ${llama_SOURCE_DIR}/common
-        ${llama_SOURCE_DIR}/tools/mtmd
-        ${llama_SOURCE_DIR}/vendor
+target_include_directories(vlm_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(vlm_core SYSTEM PRIVATE
+    ${llama_SOURCE_DIR}/common
+    ${llama_SOURCE_DIR}/tools/mtmd
+    ${llama_SOURCE_DIR}/vendor
 )
 target_link_libraries(vlm_core PUBLIC llama ggml mtmd llama-common)
 
@@ -412,13 +435,24 @@ target_include_directories(vla-cli PRIVATE
     ${llama_SOURCE_DIR}/vendor/stb
 )
 target_link_libraries(vla-cli PRIVATE vla_core)
-# --text shells out to the tokenizer script; VLA_TOKENIZE_SCRIPT overrides it.
+# --text shells out to the tokenizer script when the GGUF has no tokenizer.
 target_compile_definitions(vla-cli PRIVATE VLA_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 add_executable(vla-bench
     src/serving/vla-bench.cpp
 )
 target_link_libraries(vla-bench PRIVATE vla_core)
+
+install(TARGETS vla COMPONENT libvla)
+install(FILES LICENSE.md ${llama_SOURCE_DIR}/licenses/LICENSE-jsonhpp
+    DESTINATION ${CMAKE_INSTALL_DOCDIR} COMPONENT libvla)
+install(FILES ${llama_SOURCE_DIR}/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}
+    RENAME LICENSE.llama.cpp COMPONENT libvla)
+install(TARGETS vla_core vla-cli vla-bench)
+install(FILES scripts/tokenize_prompt.py DESTINATION ${CMAKE_INSTALL_DATADIR}/vla)
+if(VLA_BUILD_SERVER)
+    install(TARGETS vlm_core vla-server vlm-server)
+endif()
 
 # Warnings and LTO for our own targets only, never the llama.cpp subtree.
 set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla vla-cli vla-bench)
@@ -430,8 +464,10 @@ if(GGML_CUDA)
     list(APPEND VLA_FIRST_PARTY_TARGETS bitvla_cuda_kernels vla_cuda_ops)
 endif()
 
+option(VLA_WERROR "Treat warnings in first-party code as errors" OFF)
 foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)
-    target_compile_options(${tgt} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
+    target_compile_options(${tgt} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra $<$<BOOL:${VLA_WERROR}>:-Werror>>)
 endforeach()
 
 # llama.cpp sends its DLLs to <build>/bin, and Windows has no rpath: a binary

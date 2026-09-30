@@ -62,12 +62,12 @@ PRS = [
   "A hit rebinds the cached decoder through the existing update_io(), the same way\n"
   "the dynamic path handles freshly built tensors.\n\n"
   "The cache is keyed on naive_key rather than graph_key. graph_key is n_nodes plus\n"
-  "the first and last node name, which two graphs of the same size can share, and a\n"
+  "tensor names, which two graphs of the same size can share, and a\n"
   "compiled model is bound to the shapes it was built for, so a collision returns\n"
   "another graph's answer with no error. naive_key mixes in every node's op, type\n"
   "and shape. The map is bounded and flushed when full.",
   [H(D+"utils.h","struct decoder_runtime_ctx"),H(D+"utils.h","graph_key_hash> decoder_cache"),
-   H(D+"utils.h","decoder_cache.clear()"),H(D+"utils.h","enum ggml_status naive_compute"),
+   H(D+"utils.h","decoder_cache.clear()"),
    H(D+"utils.cpp","if (!model_is_splitted)"),H(D+"utils.cpp","if (is_naive(cgraph))"),
    H(D+"utils.cpp","enum ggml_status naive_compute")]),
 
@@ -108,9 +108,13 @@ PRS = [
   "input. Single-position graphs are untouched.\n\n"
   "Guard the free get_tensor_graph_input_ov_name() as well as the GgmlOvDecoder\n"
   "member: the free function is the one compute_model_inputs() and\n"
-  "set_input_output() actually call, and the member currently has no callers.",
+  "set_input_output() actually call, and the member currently has no callers.\n\n"
+  "translate_rope() also caches each sin/cos table under the ROPE's op_params\n"
+  "alone, so two ROPEs with the same parameters and different position inputs\n"
+  "share one table and fail the same way. Key the cache on the position input too.",
   [H(D+"ggml-decoder.h","get_graph_input_ov_name"),H(D+"ggml-decoder.h","m_cgraph = nullptr"),
-   H(D+"ggml-decoder.cpp","is_inp_pos(tensor, op)"),H(D+"ggml-decoder.cpp","compute_op_case(const ggml_tensor")]),
+   H(D+"ggml-decoder.cpp","is_inp_pos(tensor, op)"),H(D+"ggml-decoder.cpp","compute_op_case(const ggml_tensor"),
+   H(D+"openvino/op/rope.cpp","_ff_")]),
 
  ("openvino-reshape-op-case",
   "openvino: narrow the RESHAPE op_case 3 guard",
@@ -137,7 +141,7 @@ PRS = [
   "of the inner add is the GEMM, since the order is not fixed.\n\n"
   "Same fusion path as the broadcast-DIV defect already handled in supports_op.",
   [H(D+"ggml-decoder.cpp","case GGML_OP_ADD: {"),
-   H(D+"openvino/op/add.cpp","auto input_0 = process_view_input_new(context, 0);")]),
+   H(D+"openvino/op/add.cpp","ov::Output<ov::Node> res = std::make_shared")]),
 
  ("openvino-permute-op-case",
   "openvino: require a ROPE before taking PERMUTE op_case 2",

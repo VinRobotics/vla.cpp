@@ -20,7 +20,9 @@ compares each model against the committed baseline for the platform, and emits a
 verdict.
 
 Gates (all must pass for exit 0):
-  * SR > 0                          per (model, suite)   - "must be a positive number"
+  * SR >= sr_tol*sr_reported        per (model, suite)   - sr_tolerance in the
+                                                           baseline, default 0.5;
+                                                           SR > 0 without sr_reported
   * server latency <= tol*baseline  per model            - mean `total` ms / call
   * server memory   <= tol*baseline per model            - platform mem metric
                                                            (skipped where the
@@ -117,7 +119,8 @@ def suite_sr(model_dir: Path, suite: str) -> tuple[int, int, list[int]]:
 
 
 def check_model(name: str, model_dir: Path, logs_dir: Path, base: dict,
-                latency_metric: str, mem_metric: str | None, tol: float) -> dict:
+                latency_metric: str, mem_metric: str | None, tol: float,
+                sr_tol: float) -> dict:
     res: dict = {"model": name, "suites": {}, "checks": [], "ok": True}
 
     def gate(ok: bool, label: str, detail: str):
@@ -125,7 +128,8 @@ def check_model(name: str, model_dir: Path, logs_dir: Path, base: dict,
         if not ok:
             res["ok"] = False
 
-    # ---- SR per suite (gate: > 0) -----------------------------------------
+    # ---- SR per suite (gate: >= sr_tol * sr_reported, else > 0) ----------
+    base_sr = base.get("sr_reported")
     suites = discover_suites(model_dir)
     if not suites:
         gate(False, "outputs", f"no summary.txt found under {model_dir}")
@@ -135,8 +139,14 @@ def check_model(name: str, model_dir: Path, logs_dir: Path, base: dict,
         sr = succ / eps if eps else 0.0
         res["suites"][suite] = {"successes": succ, "episodes": eps,
                                 "tasks": len(seen), "sr": sr}
-        gate(succ > 0, f"SR>0 [{suite}]",
-             f"{succ}/{eps} success ({sr:.1%}) over {len(seen)} tasks")
+        if base_sr:
+            floor = sr_tol * base_sr
+            gate(sr >= floor - 1e-9, f"SR [{suite}]",
+                 f"{succ}/{eps} success ({sr:.1%}) over {len(seen)} tasks vs "
+                 f"{sr_tol:g}*{base_sr:.1%}={floor:.1%} baseline")
+        else:
+            gate(succ > 0, f"SR>0 [{suite}]",
+                 f"{succ}/{eps} success ({sr:.1%}) over {len(seen)} tasks")
 
     # ---- server latency (gate: <= tol * baseline) -------------------------
     # Per-suite models run several server processes; aggregate (sample-weighted)
@@ -188,10 +198,11 @@ def check_model(name: str, model_dir: Path, logs_dir: Path, base: dict,
     return res
 
 
-def render_md(platform: str, tol: float, results: list[dict]) -> str:
+def render_md(platform: str, tol: float, sr_tol: float, results: list[dict]) -> str:
     overall = all(r["ok"] for r in results)
     out = [f"# CI gate - `{platform}`  {'PASS' if overall else 'FAIL'}",
-           "", f"Tolerance: actual ≤ {tol:g}× reported baseline. SR gate: > 0.", ""]
+           "", f"Tolerance: actual ≤ {tol:g}× reported baseline. "
+           f"SR gate: ≥ {sr_tol:g}× sr_reported (> 0 without one).", ""]
     for r in results:
         out.append(f"## `{r['model']}`  {'PASS' if r['ok'] else 'FAIL'}")
         for c in r["checks"]:
@@ -215,6 +226,7 @@ def main() -> int:
 
     spec = json.loads(args.baseline.read_text())
     tol = float(spec.get("tolerance", 1.10))
+    sr_tol = float(spec.get("sr_tolerance", 0.5))
     lat_metric = spec.get("latency_metric", "server_total_ms")
     mem_metric = spec.get("mem_metric")
     base_models = spec["models"]
@@ -238,16 +250,16 @@ def main() -> int:
                             "suites": {}})
             continue
         results.append(check_model(name, model_dir, logs_dir, base_models[name],
-                                   lat_metric, mem_metric, tol))
+                                   lat_metric, mem_metric, tol, sr_tol))
 
     overall = bool(results) and all(r["ok"] for r in results)
-    verdict = {"platform": args.platform, "tolerance": tol, "ok": overall,
-               "results": results}
+    verdict = {"platform": args.platform, "tolerance": tol, "sr_tolerance": sr_tol,
+               "ok": overall, "results": results}
 
     out_dir = args.out or args.sweep
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "verdict.json").write_text(json.dumps(verdict, indent=2))
-    md = render_md(args.platform, tol, results)
+    md = render_md(args.platform, tol, sr_tol, results)
     (out_dir / "verdict.md").write_text(md)
     print(md)
     print(f"\n[gate] {'PASS' if overall else 'FAIL'} - wrote {out_dir / 'verdict.json'}")

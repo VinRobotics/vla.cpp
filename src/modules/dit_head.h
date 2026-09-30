@@ -21,6 +21,7 @@
 #include "loader.h"
 
 #include "ggml.h"
+#include "ggml-backend.h"
 
 #include <cstdint>
 #include <vector>
@@ -58,13 +59,33 @@ struct DitHead {
     void kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
             ggml_tensor ** K_out, ggml_tensor ** V_out) const;
 
-    ggml_tensor * block(ggml_context * C, const DitLayerW & w, ggml_tensor * h, ggml_tensor * temb,
+    ggml_tensor * block(ggml_context * C, const DitLayerW & w, ggml_tensor * h, ggml_tensor * mod,
                         ggml_tensor * enc, ggml_tensor * K_pre = nullptr, ggml_tensor * V_pre = nullptr) const;
 
     ggml_tensor * time_emb(ggml_context * C, ggml_tensor * tproj) const;
 
-    // (shift, scale) adaLN, opposite to layers/norm.h adaln.
-    ggml_tensor * proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * temb) const;
+    // (shift, scale), opposite to the blocks.
+    ggml_tensor * proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * mod) const;
+};
+
+struct FlowTimes {
+    std::vector<ggml_tensor *> tau;
+
+    FlowTimes() = default;
+    FlowTimes(const FlowTimes &) = delete;
+    FlowTimes & operator=(const FlowTimes &) = delete;
+    ~FlowTimes();
+
+    bool build(const char * arch, ggml_backend_t backend, const DitHead & dit,
+               int64_t steps, int64_t buckets, int64_t embed_dim, int64_t horizon);
+
+    ggml_tensor * mod(ggml_context * C, int64_t s, int64_t i) const;
+
+private:
+    ggml_tensor *         mods = nullptr;
+    int64_t               per_step = 0;
+    ggml_context *        ctx = nullptr;
+    ggml_backend_buffer_t buf = nullptr;
 };
 
 }

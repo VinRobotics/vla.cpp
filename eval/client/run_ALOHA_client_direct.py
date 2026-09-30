@@ -419,6 +419,7 @@ class AlohaInferenceNode(Node):
             self._async_lock     = Lock()
             self._async_chunk    = None      # prefetched raw chunk (HORIZON × action_dim)
             self._async_obs      = None      # obs snapshot captured at trigger time
+            self._async_gen      = 0
             self._async_err: Exception | None = None
             self._async_cached   = None      # chunk ready for next _run_inference call
             self._async_worker   = Thread(target=self._async_infer_worker, daemon=True)
@@ -498,7 +499,7 @@ class AlohaInferenceNode(Node):
             self._async_trigger.clear()
 
             with self._async_lock:
-                obs_snap = self._async_obs
+                gen, obs_snap = self._async_gen, self._async_obs
 
             if obs_snap is None:
                 continue
@@ -513,6 +514,8 @@ class AlohaInferenceNode(Node):
                 err   = e
 
             with self._async_lock:
+                if gen != self._async_gen:
+                    continue
                 self._async_chunk = chunk
                 self._async_err   = err
             self._async_ready.set()
@@ -540,6 +543,7 @@ class AlohaInferenceNode(Node):
                 right_state,
             )
         with self._async_lock:
+            self._async_gen  += 1
             self._async_obs   = obs_snap
             self._async_chunk = None
             self._async_err   = None
@@ -548,17 +552,12 @@ class AlohaInferenceNode(Node):
 
     def _collect_prefetched(self, timeout: float = 2.0):
         """
-        Wait for the prefetched chunk.  On timeout, clear the cache so the
-        next _run_inference falls back to a fresh synchronous request.
+        Wait for the prefetched chunk.
         Returns the raw chunk or raises on error.
         """
         if not self._async_ready.wait(timeout=timeout):
-            self.log.warning(
-                f"async prefetch timed out after {timeout:.1f}s - "
-                "next call will re-trigger synchronously"
-            )
-            self._async_cached = None
-            raise TimeoutError("async inference timed out")
+            self.log.warning(f"async prefetch slower than {timeout:.1f}s, waiting")
+            self._async_ready.wait()
         with self._async_lock:
             err   = self._async_err
             chunk = self._async_chunk
@@ -634,7 +633,7 @@ class AlohaInferenceNode(Node):
             self._async_cached = None
             self.log.debug("async: using prefetched chunk")
         else:
-            # First call or after a timeout fallback: trigger and wait.
+            # First call or after a failed prefetch: trigger and wait.
             with self.lock:
                 if self.front_rgb is None or self.wrist_left_rgb is None or self.left_state is None:
                     self._log_waiting(self.front_rgb is not None,

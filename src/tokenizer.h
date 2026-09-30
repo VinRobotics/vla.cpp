@@ -14,18 +14,24 @@
 
 #pragma once
 
+#include "gguf_reader.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace vla {
 
-// T5 SentencePiece-unigram tokenization, against the vocab the converter baked
-// into the GGUF. Pads or truncates to octo.tokens.language and appends EOS,
-// matching t5-base at max_length=16, padding="max_length", truncation=True.
-bool octo_tokenize_text(const std::string& ckpt_path,
-                        const std::string& text,
-                        std::vector<int32_t>& input_ids,
-                        std::vector<int32_t>& attention_mask);
+bool spm_encode(const gguf_reader& g, const char * arch, const std::string& text,
+                std::vector<int32_t>& ids, bool add_bos = false);
+
+bool has_spm_tokenizer(const std::string& ckpt_path, const char * arch);
+
+bool prompt_text(const char * arch, const std::string& text, const std::vector<float>& state,
+                 const std::vector<float>& q01, const std::vector<float>& q99, std::string& out);
+
+bool tokenize_prompt(const std::string& ckpt_path, const char * arch, const std::string& text,
+                     const std::vector<float>& state, std::vector<int32_t>& ids,
+                     std::vector<int32_t>& attention_mask);
 
 }  // namespace vla
