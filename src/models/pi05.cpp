@@ -251,7 +251,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     if (!load_pi_config(g, ckpt_path, 0, m->cfg) || !resolve_num_steps("pi05", opts, m->cfg.num_steps))
         return nullptr;
     const Config & cfg = m->cfg;
-    const FoldQuantSpec fq = foldquant_parse(g, "pi05");
+    FoldQuantSpec fq = foldquant_parse(g, "pi05");
     m->quantile_norm = g.has("pi05.norm_mode") && g.str("pi05.norm_mode") == "quantiles";
     std::printf("vla(pi05): hidden=%lld inter=%lld heads=%lldq/%lldkv x%lld n_layers=%lld "
                 "expert_h=%lld expert_inter=%lld chunk=%lld steps=%d real_state=%lld real_action=%lld "

@@ -6,13 +6,16 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 
-- **FoldQuant W8A8 / W4A4 inference** for GR00T N1.5 / N1.6 / N1.7 and π0.5 on
-  CUDA and CPU. A FoldQuant GGUF carries the language backbone and the action
+- **FoldQuant W8A8 / W4A4 inference** for GR00T N1.5 / N1.6 / N1.7 and π0.5. A
+  FoldQuant GGUF carries the language backbone and the action
   module as INT8 or INT4 codes with per-row scales in a block-Hadamard,
   SmoothQuant-folded frame; activations are quantized per token and the
   projections run as integer GEMMs (`src/kernels/foldquant/` on CUDA, the
-  reference in `src/foldquant_ref.cpp` on CPU). Other backends refuse the file
-  at load. The format and arithmetic are in `docs/QUANTIZATION.md`.
+  reference in `src/foldquant_ref.cpp` on CPU). On every other backend (Metal,
+  Vulkan, SYCL, OpenVINO, Hexagon, OpenCL) the sites are read back as float
+  weights with FoldQuant's rounding and run the stock float path;
+  `VLA_FQ_DEQUANT=1` does the same on CUDA or CPU. The format and arithmetic are
+  in `docs/QUANTIZATION.md`.
 - `scripts/convert_quantized_model_to_gguf.py` converts a FoldQuantVLA quantized
   model (its quantized checkpoint or its earlier fake-quant state) to a FoldQuant
   GGUF with no calibration and nothing re-rounded; `--check-onnx` byte-compares

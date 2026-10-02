@@ -24,8 +24,8 @@ not benefit and can lose accuracy).
 
 This is the stock ggml repack: block-32 absmax weights, float activations,
 dequantized inside ggml_mul_mat, runs on every backend. It is not FoldQuant.
-A FoldQuant GGUF (docs/QUANTIZATION.md: INT8 codes + sidecar scales executed by
-the in-tree integer kernels, CUDA/CPU only) is produced from a FoldQuantVLA
+A FoldQuant GGUF (docs/QUANTIZATION.md: INT8/INT4 codes + sidecar scales executed
+by the in-tree integer kernels on CUDA/CPU, read back as float weights elsewhere) is produced from a FoldQuantVLA
 quantized model by scripts/convert_quantized_model_to_gguf.py or, uncalibrated,
 by scripts/foldquant_fake_export.py; this script refuses such a file.
 """

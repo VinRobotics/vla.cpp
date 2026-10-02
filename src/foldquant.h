@@ -20,9 +20,17 @@
 // the activation is [RMS-normed,] [divided,] rotated by the same butterfly,
 // quantized per token to INT8, multiplied on integer units and dequantized.
 //
-// Both backends run the same two GGML_OP_CUSTOM nodes per site (fq_act,
+// CUDA and CPU run the same two GGML_OP_CUSTOM nodes per site (fq_act,
 // fq_gemm; see layers/fq_linear.h): the CPU backend executes the reference in
 // foldquant_ref.h, the CUDA backend claims them through the ggml extension hook.
+//
+// Every other backend (Metal, Vulkan, SYCL, OpenVINO, Hexagon, OpenCL) has no
+// implementation of those nodes, so there a site is read back as a float GEMM
+// weight instead (dequant mode): W_deq . B . diag(1/ascale) with the ascale
+// divide on the side of B the activation applies it, rebuilt at upload in the
+// resident GEMM type. The arch then takes its stock float path, with the folded
+// norm gains the file already carries. The weights keep FoldQuant's rounding;
+// the activations stay float (no per-token quantization, no INT4 clip).
 
 #pragma once
 
@@ -56,6 +64,7 @@ struct FqModuleSpec {
     float clip        = 1.0f;   // act_clip_ratio (INT4 activations only)
     std::map<std::string, int> site_bits;  // per-site override, e.g. {"o":8,"down":8}
     std::string scheme;
+    bool  dequant     = false;  // read every site back as a float weight (see above)
 
     int wbits_for(const char * site_key) const;
     int abits_for(const char * site_key) const;
@@ -127,14 +136,23 @@ int fq_rot_block_for(int64_t K, int nominal);
 bool          foldquant_present(const gguf_reader & g, const char * prefix);
 FoldQuantSpec foldquant_parse  (const gguf_reader & g, const char * prefix);
 
-// Load-time policy: CUDA (registers the kernels) or CPU. Everything else is
-// refused: GGML_OP_CUSTOM has no implementation there and the core drives one
-// backend with no per-op fallback.
-bool foldquant_check_backend(const char * tag, const Backend & b, const FoldQuantSpec & fq, bool weight_dtype_set);
+// Load-time policy: CUDA registers the integer kernels and CPU runs the exact
+// reference; any other backend switches fq to dequant mode, as does
+// VLA_FQ_DEQUANT=1 on CUDA or CPU. Returns false only on an unusable spec.
+bool foldquant_check_backend(const char * tag, const Backend & b, FoldQuantSpec & fq, bool weight_dtype_set);
+
+// A site's float weight in dequant mode, row-major [N][K]: per row, the codes
+// times wscale, then the ascale divide and the block rotation in the order the
+// activation applies them reversed onto the weight. codes: [N][K] int8 for W8,
+// [N][K/2] nibbles (low nibble = even column) for W4. ascale may be null.
+void fq_dequant_rows(const int8_t * codes, const float * wscale, const float * ascale,
+                     int64_t K, int64_t N, int wbits, int rot_block, bool fold_before, float * out);
 
 // Declares `<site>.weight` (I8), `.wscale`, optional `.ascale` and optional
 // `.bias`. Returns an empty FqLinear (w == nullptr) when `<site>.weight` is not
-// I8, so the caller falls back to its stock declare. `gamma` is the already
+// I8, so the caller falls back to its stock declare. In dequant mode it declares
+// nothing: it registers `<site>.weight` with the loader as a float weight and
+// returns an empty FqLinear, so the caller's stock declare reads it back. `gamma` is the already
 // declared folded norm weight fused into the activation node, or null.
 FqLinear fq_declare_linear(WeightLoader & L, const FqModuleSpec & mod, const char * site_key,
                            bool has_bias, ggml_tensor * gamma, float eps,

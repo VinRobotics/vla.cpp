@@ -8,7 +8,7 @@ vla.cpp runs two kinds of quantized checkpoint:
 | Weights | ggml `Q8_0` / `Q4_0` blocks (block-32 absmax) | INT8 or INT4 codes, per-output-row scale, block-Hadamard-rotated frame, SmoothQuant folded in |
 | Activations | float | dynamic per-token INT8 (INT4 in phase 3) |
 | Executed by | `ggml_mul_mat` dequantizing at compute | in-tree integer kernels (`src/kernels/foldquant/`) or the CPU reference |
-| Backends | all | CUDA, CPU (others refuse the file at load) |
+| Backends | all | integer kernels on CUDA, exact reference on CPU; every other backend reads the sites back as float weights (see [Other backends](#other-backends)) |
 
 This page is the canonical description of the FoldQuant file and of the
 arithmetic the runtime performs on it. The converters and vla.cpp's loader
@@ -155,8 +155,30 @@ The CPU backend executes the custom function. On CUDA the same nodes are
 claimed by the extension hook (`src/cuda/vla_cuda_foldquant.cu`, registered by
 `foldquant_check_backend` at load) through the magic word in the node's
 userdata; a node that violates the contract is declined, and ggml then aborts
-on the unsupported op rather than computing something else. Other backends
-refuse the file at load: there is no per-op fallback in vla.cpp.
+on the unsupported op rather than computing something else.
+
+### Other backends
+
+Metal, Vulkan, SYCL, OpenVINO, Hexagon and OpenCL have no implementation of the
+two custom nodes, and vla.cpp drives a single backend with no per-op fallback.
+There `foldquant_check_backend` switches the file to dequant mode: every site is
+registered with the loader as a float GEMM weight, rebuilt at upload in the
+resident type (`--weight-dtype`) from its codes, `wscale` and `ascale`, and the
+arch takes its stock float path. The activation path above is
+`x' = R(x / a)` (`fold_order = before`) or `R(x) / a` (`after`), with `R` the
+block-normalised Sylvester-Hadamard butterfly, which is symmetric and
+orthonormal; so `W_deq x' = (W_deq R diag(1/a)) x` or `(W_deq diag(1/a) R) x`, and
+row `n` of the float weight is `R(w_n) / a` or `R(w_n / a)` (`fq_dequant_rows`).
+The LLM sites' SmoothQuant vector is already folded into the norm gains the file
+carries, which the float path reads as its norm weights.
+
+What that runs is weight-only quantization: the weights keep FoldQuant's
+rounding, the activations stay float (no per-token quantization, no INT4 clip),
+so the actions are close to, not bit-identical with, the integer path, and
+memory and speed are those of the bf16 GGUF. `VLA_FQ_DEQUANT=1` selects the same
+mode on CUDA or CPU (on a CPU it is much faster than the exact reference).
+`tests/test_foldquant_dequant.cpp` checks the rebuilt weights against the dense
+product.
 
 Environment switches: `VLA_FQ_CHECK=1` recomputes every node with the CPU
 reference after its kernel and reports mismatches; `VLA_FQ_CPU_REF=1` runs the CPU reference on host copies

@@ -227,7 +227,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
                 (long long) m->action_horizon, (long long) m->action_dim, (long long) m->num_steps, (long long) m->aex.embodiment_id,
                 m->matmul_type == GGML_TYPE_F32 ? "F32" : "BF16");
 
-    const FoldQuantSpec fq = foldquant_parse(g, "gr00t_n1_5");
+    FoldQuantSpec fq = foldquant_parse(g, "gr00t_n1_5");
     const Backend b = backend_init("vla(gr00tn1d5)", m->n_threads);
     if (!b.handle)
         return nullptr;

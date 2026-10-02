@@ -19,7 +19,9 @@
 #include "gguf_reader.h"
 #include "loader.h"
 #include "cuda/vla_cuda_ops.h"
+#include "foldquant_ref.h"
 
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -120,17 +122,20 @@ FoldQuantSpec foldquant_parse(const gguf_reader & g, const char * prefix) {
     return fq;
 }
 
-bool foldquant_check_backend(const char * tag, const Backend & b, const FoldQuantSpec & fq, bool weight_dtype_set) {
+bool foldquant_check_backend(const char * tag, const Backend & b, FoldQuantSpec & fq, bool weight_dtype_set) {
     if (!fq.present)
         return true;
     const char * name = b.handle ? ggml_backend_name(b.handle) : "";
     const bool is_cpu = std::strcmp(name, "CPU") == 0;
-    if (!b.is_cuda && !is_cpu) {
-        std::fprintf(stderr,
-                     "%s: a FoldQuant GGUF runs on the CUDA or CPU backend only (this build drives '%s'). "
-                     "Rebuild with -DGGML_CUDA=ON or without an accelerator, or use the bf16 GGUF.\n",
-                     tag, name);
-        return false;
+    if ((!b.is_cuda && !is_cpu) || env_flag("VLA_FQ_DEQUANT")) {
+        // No FoldQuant kernels on this backend (or asked for): every site is read
+        // back as a float weight in the resident GEMM type and runs the stock path.
+        fq.llm.dequant = fq.action.dequant = true;
+        std::printf("%s: FoldQuant sites read back as float weights on '%s' (%s): weights keep the "
+                    "W%d/W%d rounding, activations stay float\n",
+                    tag, name, (!b.is_cuda && !is_cpu) ? "no integer kernels on this backend" : "VLA_FQ_DEQUANT=1",
+                    fq.llm.wbits, fq.action.wbits);
+        return true;
     }
     if (weight_dtype_set)
         std::printf("%s: --weight-dtype applies to the float tensors; FoldQuant sites stay INT%d/INT%d\n",
@@ -151,7 +156,75 @@ bool foldquant_check_backend(const char * tag, const Backend & b, const FoldQuan
     return true;
 }
 
+void fq_dequant_rows(const int8_t * codes, const float * wscale, const float * ascale,
+                     int64_t K, int64_t N, int wbits, int rot_block, bool fold_before, float * out) {
+    // The activation path is x' = R(x / a) (fold before) or R(x) / a (after), with R
+    // the block-normalised Sylvester-Hadamard butterfly, which is symmetric and
+    // orthonormal; so W x' = (W R diag(1/a)) x or (W diag(1/a) R) x, and row n of
+    // the float weight is R(w_n) / a or R(w_n / a).
+    const int64_t     kpack = fq_w_kpack(K, wbits);
+    const float       inv   = rot_block > 1 ? fqref::inv_sqrt_block(rot_block) : 1.0f;
+    std::vector<int8_t> q((size_t) K);
+    for (int64_t n = 0; n < N; ++n) {
+        const int8_t * row = codes + (size_t) n * kpack;
+        if (wbits == 4)
+            fqref::unpack_nibbles(row, K, q.data());
+        else
+            std::copy(row, row + K, q.begin());
+        float * w = out + (size_t) n * K;
+        for (int64_t k = 0; k < K; ++k)
+            w[k] = (float) q[(size_t) k] * wscale[n];
+        if (ascale && !fold_before)
+            for (int64_t k = 0; k < K; ++k) w[k] = w[k] / ascale[k];
+        if (rot_block > 1)
+            fqref::fwht_row(w, K, rot_block, inv);
+        if (ascale && fold_before)
+            for (int64_t k = 0; k < K; ++k) w[k] = w[k] / ascale[k];
+    }
+}
+
 namespace {
+
+// Dequant mode: register `<site>.weight` with the loader as a float [K, N] weight
+// rebuilt from the codes, wscale and ascale. Declares nothing itself.
+bool register_dequant(WeightLoader & L, const FqModuleSpec & mod, const char * site_key, const std::string & site) {
+    const std::string wname = site + ".weight";
+    const ggml_tensor * meta = L.reader().meta(wname.c_str());
+    const int wbits = mod.wbits_for(site_key);
+    if (wbits != 8 && wbits != 4) {
+        std::fprintf(stderr, "vla: %s: unsupported FoldQuant weight width %d\n", site.c_str(), wbits);
+        L.fail("FoldQuant widths");
+        return false;
+    }
+    const int64_t K = wbits == 4 ? 2 * meta->ne[0] : meta->ne[0];
+    const int64_t N = meta->ne[1];
+    const std::string sname = site + ".wscale", aname = site + ".ascale";
+    const ggml_tensor * sm = L.reader().meta(sname.c_str());
+    const ggml_tensor * am = L.reader().meta(aname.c_str());
+    if (ggml_n_dims(meta) != 2 || K % 64 != 0 || !sm || sm->ne[0] != N || (am && am->ne[0] != K)) {
+        std::fprintf(stderr, "vla: %s: malformed FoldQuant site (K=%lld N=%lld, wscale %s, ascale %s)\n",
+                     site.c_str(), (long long) K, (long long) N, sm ? "ok" : "missing", am ? "present" : "absent");
+        L.fail("FoldQuant site");
+        return false;
+    }
+    const int  rot    = fq_rot_block_for(K, mod.rot_block);
+    const bool before = mod.fold_before;
+    gguf_reader & g = L.reader();
+    const bool has_a = am != nullptr;
+    L.as_float(wname, K, N, [&g, wname, sname, aname, has_a, K, N, wbits, rot, before](std::vector<float> & out) {
+        const std::vector<uint8_t> codes = g.read_convert(wname.c_str(), GGML_TYPE_I8);
+        const std::vector<float>   ws    = g.read_f32(sname.c_str());
+        const std::vector<float>   as    = has_a ? g.read_f32(aname.c_str()) : std::vector<float>();
+        if ((int64_t) codes.size() != fq_w_kpack(K, wbits) * N || (int64_t) ws.size() != N ||
+            (has_a && (int64_t) as.size() != K))
+            return false;
+        out.assign((size_t) (K * N), 0.0f);
+        fq_dequant_rows((const int8_t *) codes.data(), ws.data(), has_a ? as.data() : nullptr,
+                        K, N, wbits, rot, before, out.data());
+        return true;
+    });
+    return true;
+}
 
 bool fill_specs(WeightLoader & L, const FqModuleSpec & mod, const char * site_key, const char * site,
                 ggml_tensor * gamma, float eps, FqLinear & r) {
@@ -226,6 +299,10 @@ FqLinear fq_declare_linear(WeightLoader & L, const FqModuleSpec & mod, const cha
     const ggml_tensor * meta = L.reader().meta(wname.c_str());
     if (!meta || meta->type != GGML_TYPE_I8)
         return r;   // not a FoldQuant site: caller declares it as a float GEMM
+    if (mod.dequant) {
+        register_dequant(L, mod, site_key, site);
+        return r;   // the caller's float declare reads the rebuilt weight
+    }
 
     r.w      = L.typed(GGML_TYPE_I8, "%s.weight", site);
     r.wscale = L.f32("%s.wscale", site);
@@ -280,6 +357,13 @@ FqLinear fq_declare_fused(WeightLoader & L, const FqModuleSpec & mod, const char
         ws.push_back(wname);
         ss.push_back(s + ".wscale");
         bs.push_back(s + ".bias");
+    }
+    if (mod.dequant) {
+        // Each site's ascale goes into its own rows, so they need not agree here.
+        for (const std::string & s : sites)
+            if (!register_dequant(L, mod, site_key, s))
+                break;
+        return r;   // the caller's fuse_gemm reads the rebuilt weights
     }
 
     r.w      = L.fuse_typed(GGML_TYPE_I8, (out_base + ".w").c_str(), ws);

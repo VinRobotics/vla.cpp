@@ -26,6 +26,33 @@ namespace {
 
 constexpr size_t NAME_CAP = 256;
 
+// Resident type of a float rebuild: the requested GEMM type when it is a float
+// type, F32 otherwise.
+ggml_type float_type(ggml_type want) {
+    return (want == GGML_TYPE_F32 || want == GGML_TYPE_F16 || want == GGML_TYPE_BF16) ? want : GGML_TYPE_F32;
+}
+
+}
+
+void WeightLoader::as_float(const std::string & name, int64_t K, int64_t N, FloatMaker make) {
+    as_float_[name] = AsFloat{K, N, std::move(make)};
+}
+
+bool WeightLoader::read_resident(const std::string & name, ggml_type type, bool gemma_norm, std::vector<uint8_t> & out) {
+    const auto it = as_float_.find(name);
+    if (it == as_float_.end()) {
+        out = g_.read_convert(name.c_str(), type, gemma_norm);
+        return !out.empty();
+    }
+    const AsFloat & a = it->second;
+    std::vector<float> f;
+    if (!a.make(f) || (int64_t) f.size() != a.K * a.N) {
+        std::fprintf(stderr, "vla(%s): float rebuild of %s failed\n", arch_, name.c_str());
+        return false;
+    }
+    out.assign(ggml_row_size(type, a.K) * (size_t) a.N, 0);
+    ggml_quantize_chunk(type, f.data(), out.data(), 0, a.N, a.K, nullptr);
+    return true;
 }
 
 ggml_tensor * WeightLoader::declare(ggml_type want, bool required, bool gemma_norm,
@@ -51,6 +78,18 @@ ggml_tensor * WeightLoader::declare(ggml_type want, bool required, bool gemma_no
     // typed(GGML_TYPE_I8) may declare; a float GEMM declare would otherwise fail
     // later in read_convert with a size mismatch that says nothing useful.
     if (src->type == GGML_TYPE_I8 && want != GGML_TYPE_I8) {
+        // ... unless the site was registered to be read back as a float weight.
+        const auto it = as_float_.find(name);
+        if (it != as_float_.end()) {
+            ggml_tensor * t = ggml_new_tensor_2d(ctx_, float_type(want), it->second.K, it->second.N);
+            if (!t) {
+                std::fprintf(stderr, "vla(%s): ggml_new_tensor failed for %s\n", arch_, name);
+                ok_ = false;
+                return nullptr;
+            }
+            ggml_set_name(t, name);
+            return t;
+        }
         std::fprintf(stderr, "vla(%s): %s is INT8 (FoldQuant) but this site is not FoldQuant-aware in this arch\n",
                      arch_, name);
         ok_ = false;
@@ -133,8 +172,17 @@ ggml_tensor * WeightLoader::fuse(ggml_type want, const char * out_name, const st
         return nullptr;
     }
 
-    const ggml_type rt   = g_.resident_type(first, want);
-    const bool      is1d = ggml_n_dims(first) == 1;
+    // A source registered with as_float() reads as an F32 [K, N] tensor.
+    struct View { ggml_type file, resident; int64_t ne0, ne1; int nd; };
+    auto view = [&](const std::string & s, const ggml_tensor * gs) {
+        const auto it = as_float_.find(s);
+        if (it != as_float_.end())
+            return View{GGML_TYPE_F32, float_type(want), it->second.K, it->second.N, 2};
+        return View{gs->type, g_.resident_type(gs, want), gs->ne[0], gs->ne[1], ggml_n_dims(gs)};
+    };
+    const View      v0   = view(srcs[0], first);
+    const ggml_type rt   = v0.resident;
+    const bool      is1d = v0.nd == 1;
     int64_t         rows = 0;
     for (const std::string & s : srcs) {
         const ggml_tensor * gs = g_.meta(s.c_str());
@@ -145,17 +193,18 @@ ggml_tensor * WeightLoader::fuse(ggml_type want, const char * out_name, const st
         }
         // Same resident type and row shape; a tensor copied raw (a packed type,
         // FoldQuant INT8 codes) also needs every source in that same type.
-        if (g_.resident_type(gs, want) != rt || (rt == first->type && gs->type != first->type) ||
-            (!is1d && gs->ne[0] != first->ne[0]) || ggml_n_dims(gs) != ggml_n_dims(first)) {
+        const View v = view(s, gs);
+        if (v.resident != rt || (rt == v0.file && v.file != v0.file) ||
+            (!is1d && v.ne0 != v0.ne0) || v.nd != v0.nd) {
             std::fprintf(stderr, "vla(%s): %s does not match %s for fusing\n", arch_, s.c_str(), srcs[0].c_str());
             ok_ = false;
             return nullptr;
         }
-        rows += is1d ? gs->ne[0] : gs->ne[1];
+        rows += is1d ? v.ne0 : v.ne1;
     }
 
     ggml_tensor * t = is1d ? ggml_new_tensor_1d(ctx_, rt, rows)
-                           : ggml_new_tensor_2d(ctx_, rt, first->ne[0], rows);
+                           : ggml_new_tensor_2d(ctx_, rt, v0.ne0, rows);
     if (!t) {
         std::fprintf(stderr, "vla(%s): ggml_new_tensor failed for %s\n", arch_, out_name);
         ok_ = false;
@@ -188,8 +237,8 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
 
         const bool gn = std::find(gemma_norms_.begin(), gemma_norms_.end(), name) != gemma_norms_.end();
 
-        std::vector<uint8_t> bytes = g_.read_convert(name, t->type, gn);
-        if (bytes.empty() || bytes.size() != ggml_nbytes(t)) {
+        std::vector<uint8_t> bytes;
+        if (!read_resident(name, t->type, gn, bytes) || bytes.size() != ggml_nbytes(t)) {
             std::fprintf(stderr,
                          "vla(%s): failed to load %s (got %zu bytes, expected %zu, type=%d)\n",
                          arch_, name, bytes.size(), ggml_nbytes(t), (int) t->type);
@@ -201,8 +250,8 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
     for (const Fused & f : fused_) {
         std::vector<uint8_t> parts;
         for (const std::string & s : f.srcs) {
-            std::vector<uint8_t> b = g_.read_convert(s.c_str(), f.dst->type);
-            if (b.empty()) {
+            std::vector<uint8_t> b;
+            if (!read_resident(s, f.dst->type, false, b)) {
                 std::fprintf(stderr, "vla(%s): fused fill: read %s failed\n", arch_, s.c_str());
                 return false;
             }

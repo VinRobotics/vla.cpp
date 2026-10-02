@@ -69,6 +69,14 @@ target_link_libraries(test_foldquant_cpu_op PRIVATE vla_core)
 target_compile_options(test_foldquant_cpu_op PRIVATE -Wall -Wextra -ffp-contract=off)
 add_test(NAME foldquant_cpu_op COMMAND test_foldquant_cpu_op)
 
+# FoldQuant sites read back as float weights (the path every backend without
+# the integer kernels takes) against the dense rotation they stand for.
+add_executable(test_foldquant_dequant test_foldquant_dequant.cpp)
+target_include_directories(test_foldquant_dequant PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_foldquant_dequant PRIVATE vla_core)
+target_compile_options(test_foldquant_dequant PRIVATE -Wall -Wextra)
+add_test(NAME foldquant_dequant COMMAND test_foldquant_dequant)
+
 # A/B harness for the two BitVLA ternary-GEMM tilings. Built so it cannot rot,
 # not registered with ctest: it needs a GPU and is read by hand.
 # VLA_BITVLA_NARROW_GEMM=1 selects the old one-tile-per-CTA kernel at runtime.

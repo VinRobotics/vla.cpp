@@ -79,7 +79,8 @@ carries INT8 or INT4 codes plus sidecar scales instead. `src/foldquant.h` declar
 sites, `src/layers/fq_linear.h` turns each into two `GGML_OP_CUSTOM` nodes, the
 CPU backend runs the reference in `src/foldquant_ref.cpp`, and on CUDA the
 `src/kernels/foldquant/` integer kernels claim the same nodes through the ggml
-extension hook (`src/cuda/`). CPU thread count scales to the machine core count;
+extension hook (`src/cuda/`). Every other backend reads the sites back as float
+weights through `WeightLoader::as_float` and runs the arch's float path. CPU thread count scales to the machine core count;
 the GPU backends run the towers and the transformer on the device.
 
 ## Adding an architecture
