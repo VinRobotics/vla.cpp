@@ -18,9 +18,9 @@
 // points (the op table entry and supports_op) are added by
 // scripts/patch_ggml_openvino.py.
 //
-// fq_act  (x[, gamma][, ascale]) -> [.., T, K+1] F32: the K integer-valued codes,
-//         then the per-token scale. ggml declares an I8 blob for this node; only
-//         fq_gemm reads it, so the translator is free to carry it as floats.
+// fq_act  (x[, gamma][, ascale]) -> [.., T, K] F32: the integer-valued codes times
+//         the per-token scale. ggml declares an I8 blob for this node; only fq_gemm
+//         reads it, so the translator is free to carry it as floats.
 // fq_gemm (w, act[, bias][, residual]) -> [.., T, N] F32.
 //
 // The arithmetic is the CPU reference's (src/foldquant_ref.cpp): RMSNorm with the
@@ -44,7 +44,6 @@
 #include <openvino/op/abs.hpp>
 #include <openvino/op/add.hpp>
 #include <openvino/op/clamp.hpp>
-#include <openvino/op/concat.hpp>
 #include <openvino/op/constant.hpp>
 #include <openvino/op/convert.hpp>
 #include <openvino/op/divide.hpp>
@@ -56,7 +55,6 @@
 #include <openvino/op/reshape.hpp>
 #include <openvino/op/round.hpp>
 #include <openvino/op/shape_of.hpp>
-#include <openvino/op/slice.hpp>
 #include <openvino/op/sqrt.hpp>
 #include <vector>
 
@@ -78,7 +76,9 @@ uint32_t fq_magic(const void * userdata) {
 
 }  // namespace
 
-// supports_op hook: FoldQuant's nodes, and no other GGML_OP_CUSTOM.
+// supports_op hook (declared again in the patched ggml-openvino.cpp): FoldQuant's
+// nodes, and no other GGML_OP_CUSTOM.
+bool vla_foldquant_ov_supports(const ggml_tensor * op);
 bool vla_foldquant_ov_supports(const ggml_tensor * op) {
     const uint32_t m = fq_magic(fq_userdata(op));
     if (m == vla::FQ_ACT_MAGIC) {
@@ -170,7 +170,9 @@ OutputVector translate_act(const NodeContext & context, const vla::FqActSpec & s
         std::make_shared<ov::op::v5::Round>(std::make_shared<ov::op::v1::Multiply>(y, inv),
                                             ov::op::v5::Round::RoundMode::HALF_TO_EVEN),
         -qmax, qmax);
-    auto out = std::make_shared<ov::op::v0::Concat>(OutputVector{q, scale}, -1);
+    // codes * scale: the per-token scale factors out of the GEMM, so carrying it
+    // inside the activation saves the codes/scale split at every consumer.
+    auto out = std::make_shared<ov::op::v1::Multiply>(q, scale);
     return rename_outputs_with_suffix({out}, context.get_name());
 }
 
@@ -192,13 +194,8 @@ OutputVector translate_gemm(const NodeContext & context, const vla::FqGemmSpec &
     auto wscale = std::make_shared<ov::op::v1::Reshape>(row_vector(context.get_input(2), N), i64_vec({N, 1}), false);
     auto wf     = std::make_shared<ov::op::v1::Multiply>(std::make_shared<ov::op::v0::Convert>(w, element::f32), wscale);
 
-    // Activation codes and per-token scale from fq_act.
-    const Output<Node> act = context.get_input(1);
-    auto codes = std::make_shared<ov::op::v8::Slice>(act, i64_vec({0}), i64_vec({K}), i64_vec({1}), i64_vec({-1}));
-    auto tok_s = std::make_shared<ov::op::v8::Slice>(act, i64_vec({K}), i64_vec({K + 1}), i64_vec({1}), i64_vec({-1}));
-
-    Output<Node> y = std::make_shared<ov::op::v0::MatMul>(codes, wf, false, true);
-    y = std::make_shared<ov::op::v1::Multiply>(y, tok_s);
+    // The activation arrives as codes * per-token scale (see translate_act).
+    Output<Node> y = std::make_shared<ov::op::v0::MatMul>(context.get_input(1), wf, false, true);
 
     // Optional sources after (w, act, wscale): the bias [N] and/or the residual
     // shaped like the output; ggml drops null sources, so tell them by size.
