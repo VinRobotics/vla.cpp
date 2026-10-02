@@ -301,16 +301,20 @@ B390 iGPU, OpenVINO 2026.4, `vla-bench` p50 over 10 calls after 3 warmups:
 
 | Device | Checkpoint | p50 ms | Peak RSS |
 |---|---|--:|--:|
-| CPU | bf16 | 6595 | 16.5 GB |
-| CPU | FoldQuant W4A4 | 3926 | 6.7 GB |
-| CPU | FoldQuant W8A8 (uncalibrated) | 3804 | 9.4 GB |
-| GPU | bf16 | 560 | 11.6 GB |
-| GPU | FoldQuant W4A4 | 651 | 3.8 GB |
-| GPU | FoldQuant W8A8 (uncalibrated) | 607 | 9.8 GB |
+| CPU | bf16 | 6624 | 16.5 GB |
+| CPU | FoldQuant W4A4 | 3888 | 6.4 GB |
+| CPU | FoldQuant W4A4, o/down INT8 | 3807 | 7.1 GB |
+| CPU | FoldQuant W8A8 (uncalibrated) | 3763 | 9.4 GB |
+| GPU | bf16 | 568 | 11.4 GB |
+| GPU | FoldQuant W4A4 | 656 | 3.4 GB |
+| GPU | FoldQuant W4A4, o/down INT8 | 652 | 3.7 GB |
+| GPU | FoldQuant W8A8 (uncalibrated) | 595 | 9.6 GB |
 
 The GPU runs the per-site activation ops (reduction, rounding, the rotation
 MatMul) on top of the GEMMs and comes out slower than bf16 there, at a third of
-the memory.
+the memory. On an Intel GPU the SYCL backend is the faster FoldQuant path: the
+same W4A4 file runs in 291 ms on this iGPU, against 326 ms for bf16 on SYCL
+([sycl.md](sycl.md#foldquant-w8a8--w4a4-checkpoints)).
 
 ## Known issues
 
