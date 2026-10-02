@@ -107,6 +107,10 @@ regenerate the binding next to the client:
 protoc --proto_path=src/serving --python_out=examples/chat src/serving/vlm.proto
 ```
 
+Use protoc 3.20 or 3.21 (Ubuntu 24.04's `protobuf-compiler` is 3.21.12). Its
+output imports on every protobuf runtime from 3.20 to 7.x. protoc 5.26 and newer
+adds a runtime version check, so its output fails on older runtimes.
+
 **Interactive REPL** (streams tokens live; stateless multi-turn - the client
 resends the full history each turn):
 

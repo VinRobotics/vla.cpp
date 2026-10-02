@@ -61,8 +61,7 @@ bool build_prompt(const char * arch, const Inputs & in, int64_t n_img,
     return true;
 }
 
-bool fetch_embeds(const char * arch, gguf_reader & io, const Prompt & p,
-                  const float * img_emb, int64_t hidden, std::vector<float> & out) {
+bool fetch_embeds(gguf_reader & io, const Prompt & p, const float * img_emb, int64_t hidden, std::vector<float> & out) {
     const int64_t seq = p.len();
     out.assign((size_t) seq*hidden, 0.0f);
     if (!io.fetch_rows_f32("token_embd.weight", p.ids, out.data(), hidden))
@@ -70,8 +69,6 @@ bool fetch_embeds(const char * arch, gguf_reader & io, const Prompt & p,
 
     for (size_t k=0; k<p.image_pos.size(); ++k)
         std::memcpy(out.data()+(size_t) p.image_pos[k]*hidden, img_emb+k*hidden, hidden*sizeof(float));
-
-    (void) arch;
     return true;
 }
 

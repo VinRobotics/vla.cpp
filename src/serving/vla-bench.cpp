@@ -36,6 +36,7 @@ void usage(const char * prog) {
         "          [--label name] [--images N] [--size N] [--tokens N]\n"
         "          [--extra-token ID] [--extra-count N] [--warmup N] [--reps N] [--markdown]\n"
         "          [precision flags]\n"
+        "  --mmproj   ignored; every arch bundles its vision tower in the ckpt GGUF\n"
         "  --label    row label (default: the checkpoint filename)\n"
         "  --images   camera views (default 1)\n"
         "  --size     square input side in pixels (default 224)\n"

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Run libero_object eval (task-id 0..9, N_EPISODES per task) against every VLA
+# Run a LIBERO suite eval (task-id 0..9, N_EPISODES per task) against every VLA
 # model under MODELS_ROOT. For each model: build vla-server once, launch it,
 # wait for ready, drive run_sim_client_direct.py from the LIBERO venv, then
 # stop the server before moving on.
@@ -25,21 +25,31 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") -i <MODELS_ROOT> [-o <OUTPUT_ROOT>] [-n <N_EPISODES>] [-m <MODEL>]
+Usage: $(basename "$0") -i <MODELS_ROOT> [-o <OUTPUT_ROOT>] [-n <N_EPISODES>] [-m <MODEL>] [-s <SUITE>]
 
   -i MODELS_ROOT   directory holding the per-model GGUF folders
                    (e.g. $HOME/data/vrfai) [required]
   -o OUTPUT_ROOT   destination for client outputs + server logs
-                   (default: ${REPO_ROOT}/outputs/libero_object_sweep)
+                   (default: ${REPO_ROOT}/outputs/<SUITE>_sweep)
   -n N_EPISODES    episodes per task-id (default: 1)
+  -s SUITE         libero_object | libero_spatial | libero_goal | libero_10
+                   (default: libero_object). BitVLA and GR00T-N1.7 load the
+                   matching per-suite checkpoint; the others use their one GGUF.
   -m MODEL         which model to run: smol | pi0 | pi05 | bit | evo1 |
                                        vla_adapter | openvla_oft |
-                                       gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | all
+                                       gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 |
+                                       octo | turbovla | vla_jepa | all
                    (default: all)
   -h               show this help
 
 Env overrides: BIND_ADDR, CLIENT_ADDR, BITVLA_TOKENIZER, GR00T_N1_6_TOKENIZER,
-               GR00T_N1_5_STATS, GR00T_N1_6_STATS, GR00T_N1_7_STATS
+               GR00T_N1_5_STATS, GR00T_N1_6_STATS, GR00T_N1_7_STATS,
+               PALIGEMMA_TOKENIZER (pi0/pi05), TURBOVLA_STATS, VLA_JEPA_STATS,
+               TASK_IDS (default "0 1 2 3 4 5 6 7 8 9"),
+               SERVER_BIN (prebuilt vla-server; setting it skips the build),
+               VLA_JEPA_PYTHON (python for the vla_jepa client; it needs LIBERO and
+                                transformers>=5.4, default is the LIBERO venv),
+               VLA_FIXED_NOISE_SEED (client-side noise, for paired A/B runs)
 EOF
 }
 
@@ -47,13 +57,15 @@ MODELS_ROOT=""
 OUTPUT_ROOT=""
 N_EPISODES="1"
 MODEL="all"
+TASK_SUITE="libero_object"
 
-while getopts ":i:o:n:m:h" opt; do
+while getopts ":i:o:n:m:s:h" opt; do
     case "${opt}" in
         i) MODELS_ROOT="${OPTARG}" ;;
         o) OUTPUT_ROOT="${OPTARG}" ;;
         n) N_EPISODES="${OPTARG}" ;;
         m) MODEL="${OPTARG}" ;;
+        s) TASK_SUITE="${OPTARG}" ;;
         h) usage; exit 0 ;;
         \?) echo "ERROR: unknown option -${OPTARG}" >&2; usage >&2; exit 1 ;;
         :)  echo "ERROR: option -${OPTARG} requires an argument" >&2; usage >&2; exit 1 ;;
@@ -62,12 +74,18 @@ done
 shift $((OPTIND - 1))
 
 case "${MODEL}" in
-    smol|pi0|pi05|bit|evo1|vla_adapter|openvla_oft|gr00t_n1_5|gr00t_n1_6|gr00t_n1_7|all) ;;
+    smol|pi0|pi05|bit|evo1|vla_adapter|openvla_oft|gr00t_n1_5|gr00t_n1_6|gr00t_n1_7|octo|turbovla|vla_jepa|all) ;;
     *)
-        echo "ERROR: -m must be one of: smol | pi0 | pi05 | bit | evo1 | vla_adapter | openvla_oft | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | all (got '${MODEL}')" >&2
+        echo "ERROR: -m must be one of: smol | pi0 | pi05 | bit | evo1 | vla_adapter | openvla_oft | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | octo | turbovla | vla_jepa | all (got '${MODEL}')" >&2
         exit 1
         ;;
 esac
+
+case "${TASK_SUITE}" in
+    libero_object|libero_spatial|libero_goal|libero_10) ;;
+    *) echo "ERROR: -s must be one of: libero_object | libero_spatial | libero_goal | libero_10 (got '${TASK_SUITE}')" >&2; exit 1 ;;
+esac
+SUITE_NAME="${TASK_SUITE#libero_}"   # object | spatial | goal | 10
 
 if [[ -z "${MODELS_ROOT}" ]]; then
     echo "ERROR: -i <MODELS_ROOT> is required." >&2
@@ -80,19 +98,24 @@ if [[ ! -d "${MODELS_ROOT}" ]]; then
 fi
 MODELS_ROOT="$(cd "${MODELS_ROOT}" && pwd)"
 
-OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/outputs/libero_object_sweep}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/outputs/${TASK_SUITE}_sweep}"
 
 if ! [[ "${N_EPISODES}" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: N_EPISODES must be a positive integer (got '${N_EPISODES}')" >&2
     exit 1
 fi
 
-SERVER_BIN="${REPO_ROOT}/build/vla-server"
+if [[ -n "${SERVER_BIN:-}" ]]; then
+    SKIP_BUILD=1
+fi
+SERVER_BIN="${SERVER_BIN:-${REPO_ROOT}/build/vla-server}"
+TASK_IDS="${TASK_IDS:-0 1 2 3 4 5 6 7 8 9}"
+PALIGEMMA_TOKENIZER="${PALIGEMMA_TOKENIZER:-}"
 VENV_PY="${REPO_ROOT}/eval/sim/libero/libero_uv/.venv/bin/python"
+VLA_JEPA_PYTHON="${VLA_JEPA_PYTHON:-${VENV_PY}}"
 CLIENT="${REPO_ROOT}/eval/client/run_sim_client_direct.py"
 BIND_ADDR="${BIND_ADDR:-tcp://*:5555}"
 CLIENT_ADDR="${CLIENT_ADDR:-tcp://localhost:5555}"
-TASK_SUITE="libero_object"
 
 # bitvla auto-loads its tokenizer + dataset_statistics.json from the GGUF repo on
 # the Hub. Optional override (offline): BITVLA_TOKENIZER=/path/to/bitvla-ckpt-dir
@@ -115,12 +138,15 @@ N_ACTION_STEPS_PI0="${N_ACTION_STEPS_PI0:-50}"               # pi0_libero_finetu
 N_ACTION_STEPS_PI05="${N_ACTION_STEPS_PI05:-10}"             # pi0.5 n_action_steps (chunk 50, 10 denoise steps)
 N_ACTION_STEPS_VLA_ADAPTER="${N_ACTION_STEPS_VLA_ADAPTER:-8}" # VLA-Adapter action chunk
 N_ACTION_STEPS_OPENVLA_OFT="${N_ACTION_STEPS_OPENVLA_OFT:-8}" # OpenVLA-OFT parallel 8-step chunk
-N_ACTION_STEPS_SMOL="${N_ACTION_STEPS_SMOL:-1}"              # SmolVLA golden path (re-predict each step)
-N_ACTION_STEPS_EVO1="${N_ACTION_STEPS_EVO1:-8}"              # Evo-1 (chunk replay)
+N_ACTION_STEPS_SMOL="${N_ACTION_STEPS_SMOL:-10}"             # SmolVLA paper ablation: 10 beats 1 (82.8 vs 80.3%)
+N_ACTION_STEPS_EVO1="${N_ACTION_STEPS_EVO1:-14}"             # Evo-1 upstream LIBERO client (horizon = 14)
 N_ACTION_STEPS_BIT="${N_ACTION_STEPS_BIT:-8}"                # BitVLA NUM_ACTIONS_CHUNK
 N_ACTION_STEPS_GR00T_N1_5="${N_ACTION_STEPS_GR00T_N1_5:-16}" # N1.5 lerobot closeout (10/10 on libero_object/task_0)
 N_ACTION_STEPS_GR00T_N1_6="${N_ACTION_STEPS_GR00T_N1_6:-16}" # N1.6 H4 closeout (10/10 on libero_object/task_0)
 N_ACTION_STEPS_GR00T_N1_7="${N_ACTION_STEPS_GR00T_N1_7:-16}" # N1.7 H4 closeout (10/10 on libero_object/task_0)
+N_ACTION_STEPS_OCTO="${N_ACTION_STEPS_OCTO:-4}"
+N_ACTION_STEPS_TURBOVLA="${N_ACTION_STEPS_TURBOVLA:-12}"
+N_ACTION_STEPS_VLA_JEPA="${N_ACTION_STEPS_VLA_JEPA:-7}"
 
 mkdir -p "${OUTPUT_ROOT}"
 OUTPUT_ROOT="$(cd "${OUTPUT_ROOT}" && pwd)"
@@ -132,11 +158,14 @@ echo "[config] MODELS_ROOT=${MODELS_ROOT}"
 echo "[config] OUTPUT_ROOT=${OUTPUT_ROOT}"
 echo "[config] N_EPISODES=${N_EPISODES}"
 echo "[config] MODEL=${MODEL}"
+echo "[config] TASK_SUITE=${TASK_SUITE}"
+echo "[config] TASK_IDS=${TASK_IDS}"
+echo "[config] SERVER_BIN=${SERVER_BIN}"
 
 cd "${REPO_ROOT}"
 
 if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
-    echo "[build] skipped (SKIP_BUILD=1)"
+    echo "[build] skipped (SKIP_BUILD=1 or SERVER_BIN set)"
 else
     echo "[build] cmake --build build"
     cmake --build build -j"$(nproc)"
@@ -283,16 +312,26 @@ run_model() {
     shift 4
     local server_args=("$@")
     local client_extra=()
+    local client_py="${VENV_PY}"
+    if [[ "${arch}" == vla_jepa ]]; then
+        client_py="${VLA_JEPA_PYTHON}"
+    fi
 
     # bitvla auto-loads tokenizer + dataset_statistics.json from the GGUF repo on
     # the Hub; only pass --tokenizer when BITVLA_TOKENIZER overrides with a local dir.
     if [[ "${arch}" == "bitvla" && -n "${BITVLA_TOKENIZER}" ]]; then
         client_extra+=(--tokenizer "${BITVLA_TOKENIZER}")
+    elif [[ "${arch}" == "bitvla" && "${TASK_SUITE}" != libero_object ]]; then
+        # the Hub default is the libero_object ckpt; other suites need their own stats
+        client_extra+=(--tokenizer "${model_dir}")
     fi
     # gr00t_n1_6 has no HF-default tokenizer; point the client at the vendored
     # Eagle tokenizer in the model dir (override via GR00T_N1_6_TOKENIZER).
     if [[ "${arch}" == "gr00t_n1_6" ]]; then
         client_extra+=(--tokenizer "${GR00T_N1_6_TOKENIZER:-${model_dir}}")
+    fi
+    if [[ ( "${arch}" == pi0 || "${arch}" == pi05 ) && -n "${PALIGEMMA_TOKENIZER}" ]]; then
+        client_extra+=(--tokenizer "${PALIGEMMA_TOKENIZER}")
     fi
     if [[ -n "${stats_json}" ]]; then
         client_extra+=(--stats-json "${stats_json}")
@@ -326,8 +365,12 @@ run_model() {
     else
         unset VLA_OPENVLA_OFT_UNNORM_KEY
     fi
+    if [[ "${arch}" == octo ]]; then
+        export VLA_OCTO_UNNORM_DATASET="${VLA_OCTO_UNNORM_DATASET:-${TASK_SUITE}}"
+        echo "[${arch}] VLA_OCTO_UNNORM_DATASET=${VLA_OCTO_UNNORM_DATASET}"
+    fi
 
-    local log="${LOG_DIR}/${arch}.log"
+    local log="${LOG_DIR}/${arch}-${TASK_SUITE}.log"
     echo "===================="
     echo "[${arch}] model_dir=${model_dir}"
     echo "[${arch}] server args: ${server_args[*]}"
@@ -336,9 +379,9 @@ run_model() {
     local out_dir="${OUTPUT_ROOT}/${arch}"
     mkdir -p "${out_dir}"
 
-    for task_id in $(seq 0 9); do
+    for task_id in ${TASK_IDS}; do
         echo "[${arch}] task_id=${task_id}  episodes=${N_EPISODES}"
-        "${VENV_PY}" "${CLIENT}" \
+        "${client_py}" "${CLIENT}" \
             --arch "${arch}" \
             --vla-addr "${CLIENT_ADDR}" \
             --task "${TASK_SUITE}" \
@@ -394,21 +437,22 @@ fi
 # bitvla: vision baked in; tokenizer + dataset_statistics.json auto-load from the
 # GGUF repo on the Hub. Set BITVLA_TOKENIZER=<local ckpt dir> to override (offline).
 if should_run bit; then
+    bit_suite="${SUITE_NAME/#10/long}"   # the libero_10 ckpt is named libero_long
     run_model bitvla \
-        "${MODELS_ROOT}/bitvla-libero-gguf/libero_object" \
+        "${MODELS_ROOT}/bitvla-libero-gguf/libero_${bit_suite}" \
         "${N_ACTION_STEPS_BIT}" \
         "" \
-        "${MODELS_ROOT}/bitvla-libero-gguf/libero_object/bitvla-libero-object.gguf"
+        "${MODELS_ROOT}/bitvla-libero-gguf/libero_${bit_suite}/bitvla-libero-${bit_suite}.gguf"
 fi
 
 # vla_adapter: Qwen2.5-0.5B + Bridge-Attention; vision baked in (no mmproj),
 # tokenizer auto-loads from the base ckpt on the Hub, stats baked into the GGUF.
 if should_run vla_adapter; then
     run_model vla_adapter \
-        "${MODELS_ROOT}/vla-adapter-libero-object-gguf" \
+        "${MODELS_ROOT}/vla-adapter-libero-gguf" \
         "${N_ACTION_STEPS_VLA_ADAPTER}" \
         "" \
-        "${MODELS_ROOT}/vla-adapter-libero-object-gguf/libero_object/vla-adapter-libero-object.gguf"
+        "${MODELS_ROOT}/vla-adapter-libero-gguf/libero_object/vla-adapter-libero-object.gguf"
 fi
 
 # openvla_oft: Llama-2-7B + MLPResNet head; vision baked in (no mmproj). Needs the
@@ -464,16 +508,47 @@ fi
 
 # gr00t_n1_7: needs dataset_statistics.json
 if should_run gr00t_n1_7; then
-    g7_stats_default="${MODELS_ROOT}/gr00tn1d7-libero-gguf/libero_object/dataset_statistics.json"
+    g7_stats_default="${MODELS_ROOT}/gr00tn1d7-libero-gguf/${TASK_SUITE}/dataset_statistics.json"
     g7_stats="${GR00T_N1_7_STATS:-${g7_stats_default}}"
     if [[ -f "${g7_stats}" ]]; then
         run_model gr00t_n1_7 \
-            "${MODELS_ROOT}/gr00tn1d7-libero-gguf/libero_object" \
+            "${MODELS_ROOT}/gr00tn1d7-libero-gguf/${TASK_SUITE}" \
             "${N_ACTION_STEPS_GR00T_N1_7}" \
             "${g7_stats}" \
-            "${MODELS_ROOT}/gr00tn1d7-libero-gguf/libero_object/gr00tn1d7-libero-object.gguf"
+            "${MODELS_ROOT}/gr00tn1d7-libero-gguf/${TASK_SUITE}/gr00tn1d7-libero-${SUITE_NAME}.gguf"
     else
         echo "[skip] gr00t_n1_7: dataset_statistics.json not found at ${g7_stats}; set GR00T_N1_7_STATS to override"
+    fi
+fi
+
+if should_run octo; then
+    run_model octo \
+        "${MODELS_ROOT}/octo-small-libero-gguf" \
+        "${N_ACTION_STEPS_OCTO}" \
+        "" \
+        "${MODELS_ROOT}/octo-small-libero-gguf/octo-small-libero-f32.gguf"
+fi
+
+if should_run turbovla; then
+    run_model turbovla \
+        "${MODELS_ROOT}/turbovla-libero-gguf" \
+        "${N_ACTION_STEPS_TURBOVLA}" \
+        "${TURBOVLA_STATS:-}" \
+        "${MODELS_ROOT}/turbovla-libero-gguf/turbovla-libero-f32.gguf"
+fi
+
+if should_run vla_jepa; then
+    jepa_stats="${VLA_JEPA_STATS:-${MODELS_ROOT}/vla-jepa-libero}"
+    if [[ ! -f "${jepa_stats}/policy_preprocessor_step_3_normalizer_processor.safetensors" ]]; then
+        echo "[skip] vla_jepa: policy_{pre,post}processor safetensors not found in ${jepa_stats}; set VLA_JEPA_STATS to override"
+    elif ! "${VLA_JEPA_PYTHON}" -c 'import sys, transformers as t; sys.exit(tuple(int(x) for x in t.__version__.split(".")[:2]) < (5, 4))'; then
+        echo "[skip] vla_jepa: the client needs transformers>=5.4, which ${VLA_JEPA_PYTHON} lacks; set VLA_JEPA_PYTHON to a python with LIBERO and transformers>=5.4"
+    else
+        run_model vla_jepa \
+            "${MODELS_ROOT}/vla-jepa-libero" \
+            "${N_ACTION_STEPS_VLA_JEPA}" \
+            "${jepa_stats}" \
+            "${MODELS_ROOT}/vla-jepa-libero/vla-jepa.gguf"
     fi
 fi
 

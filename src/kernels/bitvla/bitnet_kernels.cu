@@ -28,42 +28,6 @@
     std::abort();
 }
 
-extern "C" void bitlinear_int8xint2(int8_t* input0, int8_t* input1, __nv_bfloat16* output0, float* s, float* ws, int M, int N, int K, cudaStream_t stream){
-    if (M == 1 && N == 3840 && K == 2560){
-        ladder_int8xint2_kernel<1, 3840, 2560, 3, 8, 16><<<dim3(240, 1, 1), dim3(8, 16, 1), 0, stream>>>(input0, input1, output0, s, ws);
-    }
-    else if (M == 1 && N == 2560 && K == 2560){
-        ladder_int8xint2_kernel<1, 2560, 2560, 1, 8, 16><<<dim3(160, 1, 1), dim3(8, 16, 1), 0, stream>>>(input0, input1, output0, s, ws);
-    }
-    else if (M == 1 && N == 13824 && K == 2560){
-        ladder_int8xint2_kernel<1, 13824, 2560, 2, 8, 16><<<dim3(864, 1, 1), dim3(8, 16, 1), 0, stream>>>(input0, input1, output0, s, ws);
-    }
-    else if (M == 1 && N == 2560 && K == 6912){
-        ladder_int8xint2_kernel<1, 2560, 6912, 1, 8, 16><<<dim3(160, 1, 1), dim3(8, 16, 1), 0, stream>>>(input0, input1, output0, s, ws);
-    }
-    else if(M == 1 && N == 4800 && K == 3200){
-        ladder_int8xint2_kernel<1, 4800, 3200, 6, 8, 16><<<dim3(300, 1, 1), dim3(8, 16, 1), 0, stream>>>(input0, input1, output0, s, ws);
-    }
-    else if(M == 1 && N == 3200 && K == 3200){
-        ladder_int8xint2_kernel<1, 3200, 3200, 1, 8, 16><<<dim3(200, 1, 1), dim3(8, 16, 1), 0, stream>>>(input0, input1, output0, s, ws);
-    }
-    else if(M == 1 && N == 20480 && K == 3200){
-        ladder_int8xint2_kernel<1, 20480, 3200, 2, 8, 16><<<dim3(1280, 1, 1), dim3(8, 16, 1), 0, stream>>>(input0, input1, output0, s, ws);
-    }
-    else if(M == 1 && N == 3200 && K == 10240){
-        ladder_int8xint2_kernel<1, 3200, 10240, 1, 8, 16><<<dim3(200, 1, 1), dim3(8, 16, 1), 0, stream>>>(input0, input1, output0, s, ws);
-    }
-    else if(M == 1 && N == 5120 && K == 27648){
-        ladder_int8xint2_kernel<1, 5120, 27648, 1, 8, 16><<<dim3(320, 1, 1), dim3(8, 16, 1), 0, stream>>>(input0, input1, output0, s, ws);
-    }
-    else if(M == 1 && N == 55296 && K == 5120){
-        ladder_int8xint2_kernel<1, 55296, 5120, 1, 8, 16><<<dim3(3456, 1, 1), dim3(8, 16, 1), 0, stream>>>(input0, input1, output0, s, ws);
-    }
-    else{
-        bitlinear_unsupported_shape("bitlinear_int8xint2", M, N, K);
-    }
-}
-
 // The wide kernel amortises the shared A block over 4 column tiles instead of
 // 1 (see ladder_int8xint2_kernel_m_wide). It is the default; set
 // VLA_BITVLA_NARROW_GEMM=1 to fall back to the one-tile-per-CTA kernel, which
@@ -92,8 +56,6 @@ extern "C" void bitlinear_int8xint2_m(
         else if (N == 1152  && K == 1152) WIDE(1152,  1152, 1);
         else if (N == 4304  && K == 1152) WIDE(4304,  1152, 1);
         else if (N == 1152  && K == 4352) WIDE(1152,  4352, 1);
-
-        else if (N == 3840  && K == 2560) WIDE(3840,  2560, 3);
         else
             bitlinear_unsupported_shape("bitlinear_int8xint2_m", M, N, K);
 #undef WIDE
@@ -109,16 +71,14 @@ extern "C" void bitlinear_int8xint2_m(
     else if (N == 1152  && K == 1152) launch_ladder_int8xint2_m<1152,  1152, 1, 128>(input0, input1, output0, s, ws, M, stream);
     else if (N == 4304  && K == 1152) launch_ladder_int8xint2_m<4304,  1152, 1, 128>(input0, input1, output0, s, ws, M, stream);
     else if (N == 1152  && K == 4352) launch_ladder_int8xint2_m<1152,  4352, 1, 128>(input0, input1, output0, s, ws, M, stream);
-
-    else if (N == 3840  && K == 2560) launch_ladder_int8xint2_m<3840,  2560, 3, 128>(input0, input1, output0, s, ws, M, stream);
     else
         bitlinear_unsupported_shape("bitlinear_int8xint2_m", M, N, K);
 }
 
 extern "C" void bitvla_act_quant_cuda(
     const __nv_bfloat16* in, int8_t* out, float* scales,
-    int M, int K, cudaStream_t stream)
+    int M, int K, int ld_out, cudaStream_t stream)
 {
     constexpr int BLOCK_THREADS = 256;
-    act_quant_kernel<BLOCK_THREADS><<<dim3(M, 1, 1), dim3(BLOCK_THREADS, 1, 1), 0, stream>>>(in, out, scales, K);
+    act_quant_kernel<BLOCK_THREADS><<<dim3(M, 1, 1), dim3(BLOCK_THREADS, 1, 1), 0, stream>>>(in, out, scales, K, ld_out);
 }

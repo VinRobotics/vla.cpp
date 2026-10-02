@@ -70,7 +70,7 @@ Set-Location $root
 
 $dir = "build-wos-$Backend"
 $jobs = $env:NUMBER_OF_PROCESSORS
-$flags = "-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -D_GNU_SOURCE"
+$flags = "-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -D_GNU_SOURCE"
 # protobuf and abseil must be built by clang too, with the triplet in
 # cmake/vcpkg-triplets: clang code does not link against an MSVC-built protobuf.
 # ZeroMQ is a C API and comes from the stock triplet, searched second.
@@ -91,8 +91,8 @@ $args_ = @(
 )
 if ($LlamaDir) { $args_ += "-DFETCHCONTENT_SOURCE_DIR_LLAMA=$($LlamaDir -replace '\\','/')" }
 if ($NoServer) {
-    # Octo tokenizes in-process through SentencePiece, which needs protobuf too.
-    $args_ += @("-DVLA_BUILD_SERVER=OFF", "-DVLA_OCTO=OFF")
+    # SentencePiece, for in-GGUF tokenizers, needs protobuf too.
+    $args_ += @("-DVLA_BUILD_SERVER=OFF", "-DVLA_SPM=OFF")
 } else {
     $args_ += @(
         "-DCMAKE_PREFIX_PATH=$($triplet -replace '\\','/');$($tripletC -replace '\\','/');$($env:OPENCL_SDK_ROOT -replace '\\','/')",

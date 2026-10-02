@@ -34,6 +34,8 @@ sweep_and_gate() {
 # One LIBERO client per platform runs on the orchestrator at once. Gated metrics
 # are server-side, so orchestrator load cannot bias them.
 if [[ "${PLATFORM}" == "all" ]]; then
+    [[ -z "${VLA_CI_EXPECTED_COMMIT:-}" ]] || bash "${CI_DIR}/build_servers.sh" \
+        || { echo "[all] server checkout/build failed - aborting before sim." >&2; exit 1; }
     # Commit consistency across the tested machines; stops here if they disagree.
     bash "${CI_DIR}/check_commits.sh" || { echo "[all] commit check failed - aborting before sim." >&2; exit 1; }
 
@@ -59,6 +61,8 @@ fi
 # ── one platform ────────────────────────────────────────────────────────────
 case "${PLATFORM}" in
     rtx3090|orin|m4)
+        [[ -z "${VLA_CI_EXPECTED_COMMIT:-}" ]] || bash "${CI_DIR}/build_servers.sh" "${PLATFORM}" \
+            || { echo "[${PLATFORM}] server checkout/build failed - aborting before sim." >&2; exit 1; }
         bash "${CI_DIR}/check_commits.sh" "${PLATFORM}" \
             || { echo "[${PLATFORM}] commit check failed - aborting before sim." >&2; exit 1; }
         sweep_and_gate "${PLATFORM}" ;;

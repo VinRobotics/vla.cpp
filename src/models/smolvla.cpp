@@ -16,21 +16,24 @@
 // distilled action-expert weights and force num_steps = 1 at the denoise loops.
 
 #include "arch.h"
-#include "modules/encoder.h"
+#include "gguf_reader.h"
+#include "layers/attn.h"
+#include "layers/embed.h"
+#include "layers/ffn.h"
+#include "layers/norm.h"
+#include "layers/rope.h"
+#include "modules/siglip_vit.h"
 #include "options.h"
 #include "model.h"
 #include "modules/preprocess.h"
 #include "scratch_ctx.h"
-#include "layers/embed.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
-#include "ggml-cpu.h"
 #include "gguf.h"
 #include "backend.h"
 
 #include "nlohmann/json.hpp"
-#include "env_flag.h"
 
 #include <chrono>
 #include <cmath>
@@ -39,8 +42,10 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <random>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace vla {
@@ -148,40 +153,8 @@ struct safetensors {
     }
 };
 
-struct gguf_source {
-    struct gguf_context * gctx     = nullptr;
-    struct ggml_context * meta_ctx = nullptr;
-    FILE *                fp       = nullptr;
-    size_t                data_off = 0;
-
-    bool open(const std::string & path) {
-        gguf_init_params p{};
-        p.no_alloc = true;
-        p.ctx      = &meta_ctx;
-        gctx = gguf_init_from_file(path.c_str(), p);
-        if (!gctx) {
-            std::fprintf(stderr, "vla: gguf_init_from_file failed for %s\n", path.c_str());
-            return false;
-        }
-        fp = std::fopen(path.c_str(), "rb");
-        if (!fp) {
-            std::fprintf(stderr, "vla: fopen failed for %s\n", path.c_str());
-            gguf_free(gctx); gctx = nullptr;
-            ggml_free(meta_ctx); meta_ctx = nullptr;
-            return false;
-        }
-        data_off = gguf_get_data_offset(gctx);
-        return true;
-    }
-
-    ~gguf_source() {
-        if (fp)
-            std::fclose(fp);
-        if (gctx)
-            gguf_free(gctx);
-        if (meta_ctx)
-            ggml_free(meta_ctx);
-    }
+struct gguf_source : gguf_reader {
+    gguf_source() : gguf_reader("smolvla") {}
 
     static bool shape_matches(const ggml_tensor * t, const std::vector<int64_t> & pt_shape) {
         const int nd_used = std::max(1, (int) pt_shape.size());
@@ -201,118 +174,50 @@ struct gguf_source {
 
     bool read_to_f32(const std::string & name, float * dst,
                      const std::vector<int64_t> & expected_shape) {
-        ggml_tensor * t = ggml_get_tensor(meta_ctx, name.c_str());
+        const ggml_tensor * t = meta(name.c_str());
         if (!t) {
-            std::fprintf(stderr, "vla: gguf tensor not found: %s\n", name.c_str());
+            std::fprintf(stderr, "vla(smolvla): gguf tensor not found: %s\n", name.c_str());
             return false;
         }
         if (!shape_matches(t, expected_shape)) {
-            std::fprintf(stderr, "vla: gguf shape mismatch for %s\n", name.c_str());
+            std::fprintf(stderr, "vla(smolvla): gguf shape mismatch for %s\n", name.c_str());
             return false;
         }
-        const int64_t id     = gguf_find_tensor(gctx, name.c_str());
-        const size_t  offset = data_off+gguf_get_tensor_offset(gctx, id);
-        const size_t  bytes  = gguf_get_tensor_size(gctx, id);
-        if (vla_fseek64(fp, offset) != 0) {
-            std::fprintf(stderr, "vla: fseek failed for %s\n", name.c_str());
+        const size_t bytes = ggml_nbytes(t);
+        if (t->type == GGML_TYPE_F32)
+            return read_raw(name.c_str(), dst, bytes);
+        // A requantized file (scripts/quantize_gguf.py) may pack a tensor
+        // this model keeps float; unpack it rather than refuse the file.
+        const ggml_type_traits * tt = ggml_get_type_traits(t->type);
+        if (!tt->to_float) {
+            std::fprintf(stderr, "vla(smolvla): gguf cannot convert %s for %s\n",
+                         ggml_type_name(t->type), name.c_str());
             return false;
         }
-        if (t->type == GGML_TYPE_F32) {
-            if (std::fread(dst, 1, bytes, fp) != bytes)
-                return false;
-        } else if (t->type == GGML_TYPE_BF16) {
-            std::vector<ggml_bf16_t> tmp(bytes/sizeof(ggml_bf16_t));
-            if (std::fread(tmp.data(), 1, bytes, fp) != bytes)
-                return false;
-            ggml_bf16_to_fp32_row(tmp.data(), dst, tmp.size());
-        } else if (t->type == GGML_TYPE_F16 || ggml_is_quantized(t->type)) {
-            // A requantized file (scripts/quantize_gguf.py) may pack a tensor
-            // this model keeps float; unpack it rather than refuse the file.
-            const ggml_type_traits * tt = ggml_get_type_traits(t->type);
-            if (!tt->to_float) {
-                std::fprintf(stderr, "vla: gguf cannot dequantize %s for %s\n",
-                             ggml_type_name(t->type), name.c_str());
-                return false;
-            }
-            std::vector<uint8_t> tmp(bytes);
-            if (std::fread(tmp.data(), 1, bytes, fp) != bytes)
-                return false;
-            tt->to_float(tmp.data(), dst, ggml_nelements(t));
-        } else {
-            std::fprintf(stderr, "vla: gguf unsupported dtype %d for %s\n",
-                         (int) t->type, name.c_str());
+        std::vector<uint8_t> tmp(bytes);
+        if (!read_raw(name.c_str(), tmp.data(), bytes))
             return false;
-        }
+        tt->to_float(tmp.data(), dst, ggml_nelements(t));
         return true;
     }
 
     /// Type of a tensor in the file, or GGML_TYPE_COUNT if it is absent.
     ggml_type file_type(const std::string & name) const {
-        const ggml_tensor * t = ggml_get_tensor(meta_ctx, name.c_str());
+        const ggml_tensor * t = meta(name.c_str());
         return t ? t->type : GGML_TYPE_COUNT;
     }
 
-    /// Packed bytes, stored as they are: the caller made the tensor that type.
+    /// Bytes stored as they are: the caller made the tensor that type.
     bool read_packed(const std::string & name, void * dst, ggml_type want, size_t expected_bytes) {
-        const int64_t id = gguf_find_tensor(gctx, name.c_str());
-        if (id < 0 || file_type(name) != want || gguf_get_tensor_size(gctx, id) != expected_bytes) {
-            std::fprintf(stderr, "vla: gguf bad packed read for %s\n", name.c_str());
+        if (file_type(name) != want) {
+            std::fprintf(stderr, "vla(smolvla): gguf bad packed read for %s\n", name.c_str());
             return false;
         }
-        if (vla_fseek64(fp, data_off+gguf_get_tensor_offset(gctx, id)) != 0)
-            return false;
-        return std::fread(dst, 1, expected_bytes, fp) == expected_bytes;
-    }
-
-    bool read_raw(const std::string & name, void * dst, size_t expected_bytes,
-                  const char * expected_dtype) {
-        ggml_tensor * t = ggml_get_tensor(meta_ctx, name.c_str());
-        if (!t) {
-            std::fprintf(stderr, "vla: gguf tensor not found: %s\n", name.c_str());
-            return false;
-        }
-        const int64_t id    = gguf_find_tensor(gctx, name.c_str());
-        const size_t  bytes = gguf_get_tensor_size(gctx, id);
-        const bool ok_dtype = (std::strcmp(expected_dtype, "BF16") == 0 && t->type == GGML_TYPE_BF16)
-                            || (std::strcmp(expected_dtype, "F32") == 0 && t->type == GGML_TYPE_F32);
-        if (bytes != expected_bytes || !ok_dtype) {
-            std::fprintf(stderr, "vla: gguf bad raw read for %s\n", name.c_str());
-            return false;
-        }
-        const size_t offset = data_off+gguf_get_tensor_offset(gctx, id);
-        if (vla_fseek64(fp, offset) != 0)
-            return false;
-        return std::fread(dst, 1, bytes, fp) == bytes;
-    }
-
-    int64_t find_key(const char * key) const {
-        return gguf_find_key(gctx, key);
-    }
-    bool has_key(const char * key) const {
-        return find_key(key) >= 0;
-    }
-    uint32_t get_u32(const char * key) const {
-        return gguf_get_val_u32(gctx, find_key(key));
-    }
-    int32_t  get_i32(const char * key) const {
-        return gguf_get_val_i32(gctx, find_key(key));
-    }
-    float    get_f32(const char * key) const {
-        return gguf_get_val_f32(gctx, find_key(key));
-    }
-    double   get_f64(const char * key) const {
-        return gguf_get_val_f64(gctx, find_key(key));
-    }
-    std::string get_str(const char * key) const {
-        return gguf_get_val_str(gctx, find_key(key));
-    }
-
-    bool has_tensor(const char * name) const {
-        return ggml_get_tensor(meta_ctx, name) != nullptr;
+        return read_raw(name.c_str(), dst, expected_bytes);
     }
 };
 
-struct VlmLayerW {
+struct LayerW {
     ggml_tensor * Wln_in;
     ggml_tensor * Wq;
     ggml_tensor * Wk;
@@ -324,20 +229,9 @@ struct VlmLayerW {
     ggml_tensor * Wdown;
 };
 
-struct ExpertLayerW {
-    bool is_self_attn;
-    ggml_tensor * Wln_in;
-    ggml_tensor * Wq;
-    ggml_tensor * Wk;
-    ggml_tensor * Wv;
-    ggml_tensor * Wo;
-    ggml_tensor * Wln_post;
-    ggml_tensor * Wgate;
-    ggml_tensor * Wup;
-    ggml_tensor * Wdown;
-};
-
-// SigLIP-B/16 vision block weights (SmolVLM2 tower, built in-tree).
+bool expert_self_attn(const Config & cfg, int64_t i) {
+    return cfg.self_attn_every_n > 0 && i%cfg.self_attn_every_n == 0;
+}
 
 }
 
@@ -351,27 +245,27 @@ struct SmolVLAModelArch : public ModelArchBase {
     int64_t vit_hidden = 768, vit_layers = 12, vit_heads = 12, vit_inter = 3072;
     int64_t vit_patch = 16, vit_image = 512, vit_scale = 4, vit_n_tokens = 64;
     float   vit_ln_eps = 1e-6f;
-    ggml_tensor * vit_patch_w = nullptr, * vit_patch_b = nullptr, * vit_pos = nullptr;
-    ggml_tensor * vit_post_ln_w = nullptr, * vit_post_ln_b = nullptr, * mm_fc = nullptr;
-    std::vector<EncBlockW> vit;
+    SigLipTower   vit;
+    ggml_tensor * mm_fc = nullptr;
 
     ggml_backend_t        backend     = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
+    bool                  is_cuda     = false;
 
     ggml_type             weight_dtype = GGML_TYPE_BF16;
 
     ggml_context * ctx_weights = nullptr;
     scratch_ctx vision_scratch;
-    scratch_ctx connector_scratch;
 
-    ggml_tensor *  E_lang   = nullptr;
+    gguf_source              gst;
+    std::vector<ggml_bf16_t> E_lang;
+    int64_t                  n_vocab = 0;
     ggml_tensor *  Wstate   = nullptr;
     ggml_tensor *  bstate   = nullptr;
 
-    std::vector<VlmLayerW> vlm_layers;
-    ggml_tensor *  Wnorm_vlm = nullptr;
+    std::vector<LayerW> vlm_layers;
 
-    std::vector<ExpertLayerW> expert_layers;
+    std::vector<LayerW> expert_layers;
     ggml_tensor *  Wnorm_expert = nullptr;
 
     ggml_tensor *  W_ain   = nullptr;
@@ -389,30 +283,20 @@ struct SmolVLAModelArch : public ModelArchBase {
 
     std::mt19937   rng{std::random_device{}()};
 
-    ggml_context *        ctx_compute     = nullptr;
-    ggml_gallocr_t        galloc          = nullptr;
-    ggml_cgraph *         gf_cached       = nullptr;
-    int                   cached_n_views  = 0;
-
-    ggml_tensor * in_img_emb       = nullptr;
-    ggml_tensor * in_lang_ids      = nullptr;
-    ggml_tensor * in_state         = nullptr;
-    ggml_tensor * in_x0            = nullptr;
-    ggml_tensor * in_mask_prefill  = nullptr;
-    ggml_tensor * in_pos_prefill   = nullptr;
-    ggml_tensor * in_mask_full     = nullptr;
-    ggml_tensor * in_mask_pfx_only = nullptr;
-    ggml_tensor * in_pos_full      = nullptr;
-    ggml_tensor * in_pos_rebased   = nullptr;
-
-    ggml_tensor * out_x_t          = nullptr;
+    struct MainIO {
+        ggml_tensor *img_emb = nullptr, *lang_emb = nullptr, *state = nullptr, *x0 = nullptr;
+        ggml_tensor *mask_prefill = nullptr, *pos_prefill = nullptr, *mask_full = nullptr;
+        ggml_tensor *mask_pfx_only = nullptr, *pos_full = nullptr, *pos_rebased = nullptr, *x_t = nullptr;
+        std::vector<ggml_tensor *> k_cache, v_cache, k_leaf, v_leaf;
+    };
+    graph_cache<int, MainIO> main_graph;
 
     std::vector<ggml_tensor *> time_bcasts;
 };
 
 namespace {
 
-// Fused attention in the SigLIP tower. OPT-IN (VLA_SMOLVLA_FA=1), not default.
+// Fused attention in the SigLIP tower. OPT-IN (--flash-attn), not default.
 // It cuts the vision stage from 33.2 ms to 22.1 ms (total 68.5 -> 55.8 ms), which
 // is enough to beat compiled PyTorch — but ggml's CUDA flash attention computes
 // K/V at F16 regardless of input type (fattn.cu accepts F32 K/V only by
@@ -422,15 +306,13 @@ namespace {
 
 // One pre-norm SigLIP encoder block (SmolVLM2 tower), same graph as the other
 // in-tree models. Bidirectional attention, F32 score accumulation, tanh GELU.
-ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_tensor * x,
-                                 int64_t seq, int64_t heads, int64_t head_dim, int64_t hidden, float ln_eps) {
-    const float scale = 1.0f/std::sqrt((float) head_dim);
-    ggml_tensor * n1 = ggml_add(C, ggml_mul(C, ggml_norm(C, x, ln_eps), w.ln1w), w.ln1b);
-    ggml_tensor * q = ggml_add(C, ggml_mul_mat(C, w.Wq, n1), w.bq);
-    ggml_tensor * k = ggml_add(C, ggml_mul_mat(C, w.Wk, n1), w.bk);
-    ggml_tensor * v = ggml_add(C, ggml_mul_mat(C, w.Wv, n1), w.bv);
-    ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, q, head_dim, heads, seq), 0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, k, head_dim, heads, seq), 0, 2, 1, 3));
+ggml_tensor * build_siglip_layer(ggml_context * C, const EncCfg & c, const EncBlockW & w,
+                                 ggml_tensor * x, int64_t seq) {
+    const float scale = 1.0f/std::sqrt((float) c.head_dim);
+    ggml_tensor * n1 = layer_norm(C, x, w.ln1w, w.ln1b, c.ln_eps);
+    ggml_tensor * Q = to_heads(C, linear(C, w.Wq, w.bq, n1), c.head_dim, c.heads, seq);
+    ggml_tensor * K = to_heads(C, linear(C, w.Wk, w.bk, n1), c.head_dim, c.heads, seq);
+    ggml_tensor * v = linear(C, w.Wv, w.bv, n1);
     ggml_tensor * att;
     if (vla::flash_attn_enabled()) {
         // The tower runs 1024 tokens (512/16 grid) over 12 layers, so the
@@ -440,23 +322,27 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_ten
         // stage is roughly half of smolvla's latency. K/V stay F32 so the
         // numerics match the explicit path; the expert layers below already call
         // this op the same way.
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 0, 2, 1, 3));
+        ggml_tensor * V = to_heads(C, v, c.head_dim, c.heads, seq);
         ggml_tensor * fa = ggml_flash_attn_ext(C, Q, vla::fa_kv(C, K), vla::fa_kv(C, V), nullptr, scale, 0.0f, 0.0f);
-        ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
-        att = ggml_reshape_2d(C, fa, hidden, seq);
+        ggml_prec_set_acc(fa, GGML_PREC_F32);
+        att = ggml_reshape_2d(C, fa, c.hidden, seq);
     } else {
-        ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, v, head_dim, heads, seq), 1, 2, 0, 3));
-        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-        ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale, 0.0f);
-        att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, ggml_mul_mat(C, V, aw), 0, 2, 1, 3)), hidden, seq);
+        att = attention(C, Q, K, to_heads_v(C, v, c.head_dim, c.heads, seq), nullptr, scale, c.hidden, seq);
     }
-    ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
-    ggml_tensor * n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.ln2w), w.ln2b);
-    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, vla::gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);
-    return ggml_add(C, h1, ff);
+    ggml_tensor * h1 = ggml_add(C, x, linear(C, w.Wo, w.bo, att));
+    return ggml_add(C, h1, ffn_gelu(C, w.Wfc1, w.bfc1, w.Wfc2, w.bfc2, layer_norm(C, h1, w.ln2w, w.ln2b, c.ln_eps)));
 }
 
-// CHW-planar float image in [-1,1] for ggml_conv_2d (SigLIP mean/std 0.5).
+void set_derived_config(Config & cfg) {
+    cfg.rms_eps        = 1e-5f;
+    cfg.rope_mode      = GGML_ROPE_TYPE_NEOX;
+    cfg.rope_freq_base = 10000.f;
+
+    cfg.n_state     = 1;
+    cfg.q_full_dim  = cfg.n_q_heads  * cfg.head_dim;
+    cfg.kv_full_dim = cfg.n_kv_heads*cfg.head_dim;
+    cfg.rope_n_dims = static_cast<int>(cfg.head_dim);
+}
 
 bool load_config_from_json(const std::string & path, Config & cfg) {
     std::ifstream f(path);
@@ -471,16 +357,18 @@ bool load_config_from_json(const std::string & path, Config & cfg) {
         std::fprintf(stderr, "vla: failed to parse %s: %s\n", path.c_str(), e.what());
         return false;
     }
+    for (const char * k : {"adapt_to_pi_aloha", "add_image_special_tokens"}) {
+        if (j.contains(k) && j[k].is_boolean() && j[k].get<bool>()) {
+            std::fprintf(stderr, "vla(smolvla): %s=true in %s is not supported\n", k, path.c_str());
+            return false;
+        }
+    }
 
     cfg.hidden        = 960;
     cfg.n_q_heads     = 15;
     cfg.n_kv_heads    = 5;
     cfg.head_dim      = 64;
     cfg.intermediate  = 2560;
-
-    cfg.rms_eps        = 1e-5f;
-    cfg.rope_mode      = GGML_ROPE_TYPE_NEOX;
-    cfg.rope_freq_base = 10000.f;
 
     try {
         cfg.n_suffix          = j.at("chunk_size").get<int64_t>();
@@ -504,16 +392,12 @@ bool load_config_from_json(const std::string & path, Config & cfg) {
         return false;
     }
 
-    cfg.n_state     = 1;
-    cfg.q_full_dim  = cfg.n_q_heads  * cfg.head_dim;
-    cfg.kv_full_dim = cfg.n_kv_heads*cfg.head_dim;
-    cfg.rope_n_dims = static_cast<int>(cfg.head_dim);
-
+    set_derived_config(cfg);
     cfg.norm_eps    = 1e-8f;
     return true;
 }
 
-bool load_normalizer_stats(const std::string & model_dir, SmolVLAModelArch & m) {
+void load_normalizer_stats(const std::string & model_dir, SmolVLAModelArch & m) {
     const auto & cfg = m.cfg;
 
     m.state_mean .assign(cfg.real_state_dim,  0.f);
@@ -582,14 +466,11 @@ bool load_normalizer_stats(const std::string & model_dir, SmolVLAModelArch & m) 
     load_one(model_dir + "/policy_postprocessor.json", "unnormalizer_processor",
              "action.mean", "action.std",
              m.action_mean, m.action_std, cfg.real_action_dim, "action");
-    return true;
 }
 
-std::string default_config_path(const std::string & ckpt_path) {
-    const auto pos = ckpt_path.find_last_of("/\\");
-    const std::string dir = (pos == std::string::npos) ? std::string(".")
-                                                       : ckpt_path.substr(0, pos);
-    return dir + "/config.json";
+std::string dir_of(const std::string & path) {
+    const auto pos = path.find_last_of("/\\");
+    return (pos == std::string::npos) ? std::string(".") : path.substr(0, pos);
 }
 
 bool ends_with_gguf(const std::string & path) {
@@ -599,20 +480,17 @@ bool ends_with_gguf(const std::string & path) {
 }
 
 bool load_config_from_gguf(const gguf_source & st, Config & cfg) {
-    if (!st.has_key("smolvla.architecture")) {
-        std::fprintf(stderr, "vla: gguf missing key 'smolvla.architecture'\n");
-        return false;
-    }
-    const std::string arch = st.get_str("smolvla.architecture");
+    const std::string arch = st.str("smolvla.architecture");
     if (arch != "smolvla") {
-        std::fprintf(stderr, "vla: gguf architecture = '%s' (expected 'smolvla')\n",
+        std::fprintf(stderr, "vla(smolvla): gguf architecture = '%s' (expected 'smolvla')\n",
                      arch.c_str());
         return false;
     }
 
-    auto need = [&](const char * key) -> bool {
-        if (!st.has_key(key)) {
-            std::fprintf(stderr, "vla: gguf missing key '%s'\n", key);
+    auto need = [&](const char * key, gguf_type type) -> bool {
+        int64_t id;
+        if (!st.typed_key(key, type, &id)) {
+            std::fprintf(stderr, "vla(smolvla): gguf missing key '%s'\n", key);
             return false;
         }
         return true;
@@ -626,41 +504,34 @@ bool load_config_from_gguf(const gguf_source & st, Config & cfg) {
             "smolvla.chunk_size", "smolvla.num_steps",
             "smolvla.max_state_dim", "smolvla.max_action_dim",
             "smolvla.real_state_dim", "smolvla.real_action_dim",
-            "smolvla.self_attn_every_n_layers", "smolvla.tokenizer_max_length",
-            "smolvla.min_period", "smolvla.max_period"}) {
-        if (!need(k))
+            "smolvla.self_attn_every_n_layers", "smolvla.tokenizer_max_length"}) {
+        if (!need(k, GGUF_TYPE_UINT32))
             return false;
     }
+    if (!need("smolvla.min_period", GGUF_TYPE_FLOAT64) || !need("smolvla.max_period", GGUF_TYPE_FLOAT64))
+        return false;
 
-    cfg.hidden        = st.get_u32("smolvla.hidden");
-    cfg.intermediate  = st.get_u32("smolvla.intermediate");
-    cfg.n_q_heads     = st.get_u32("smolvla.n_q_heads");
-    cfg.n_kv_heads    = st.get_u32("smolvla.n_kv_heads");
-    cfg.head_dim      = st.get_u32("smolvla.head_dim");
-    cfg.n_layers      = st.get_u32("smolvla.n_layers");
-    cfg.expert_h      = st.get_u32("smolvla.expert_h");
-    cfg.expert_inter  = st.get_u32("smolvla.expert_inter");
-    cfg.n_suffix      = st.get_u32("smolvla.chunk_size");
-    cfg.num_steps     = st.get_u32("smolvla.num_steps");
-    cfg.max_state_dim = st.get_u32("smolvla.max_state_dim");
-    cfg.max_action_dim= st.get_u32("smolvla.max_action_dim");
-    cfg.real_state_dim  = st.get_u32("smolvla.real_state_dim");
-    cfg.real_action_dim = st.get_u32("smolvla.real_action_dim");
-    cfg.self_attn_every_n = st.get_u32("smolvla.self_attn_every_n_layers");
-    cfg.n_lang        = st.get_u32("smolvla.tokenizer_max_length");
-    cfg.min_period    = st.get_f64("smolvla.min_period");
-    cfg.max_period    = st.get_f64("smolvla.max_period");
+    cfg.hidden        = st.u32("smolvla.hidden");
+    cfg.intermediate  = st.u32("smolvla.intermediate");
+    cfg.n_q_heads     = st.u32("smolvla.n_q_heads");
+    cfg.n_kv_heads    = st.u32("smolvla.n_kv_heads");
+    cfg.head_dim      = st.u32("smolvla.head_dim");
+    cfg.n_layers      = st.u32("smolvla.n_layers");
+    cfg.expert_h      = st.u32("smolvla.expert_h");
+    cfg.expert_inter  = st.u32("smolvla.expert_inter");
+    cfg.n_suffix      = st.u32("smolvla.chunk_size");
+    cfg.num_steps     = st.u32("smolvla.num_steps");
+    cfg.max_state_dim = st.u32("smolvla.max_state_dim");
+    cfg.max_action_dim= st.u32("smolvla.max_action_dim");
+    cfg.real_state_dim  = st.u32("smolvla.real_state_dim");
+    cfg.real_action_dim = st.u32("smolvla.real_action_dim");
+    cfg.self_attn_every_n = st.u32("smolvla.self_attn_every_n_layers");
+    cfg.n_lang        = st.u32("smolvla.tokenizer_max_length");
+    cfg.min_period    = st.f64("smolvla.min_period");
+    cfg.max_period    = st.f64("smolvla.max_period");
 
-    cfg.rms_eps        = 1e-5f;
-    cfg.rope_mode      = GGML_ROPE_TYPE_NEOX;
-    cfg.rope_freq_base = 10000.f;
-
-    cfg.n_state     = 1;
-    cfg.q_full_dim  = cfg.n_q_heads  * cfg.head_dim;
-    cfg.kv_full_dim = cfg.n_kv_heads*cfg.head_dim;
-    cfg.rope_n_dims = static_cast<int>(cfg.head_dim);
-
-    cfg.norm_eps = st.has_key("smolvla.norm_eps") ? st.get_f32("smolvla.norm_eps") : 1e-8f;
+    set_derived_config(cfg);
+    cfg.norm_eps = st.has("smolvla.norm_eps") ? st.f32("smolvla.norm_eps") : 1e-8f;
     return true;
 }
 
@@ -709,8 +580,6 @@ std::string hf_to_gguf(const std::string & n) {
 
     if (n == "model.vlm_with_expert.vlm.model.text_model.embed_tokens.weight")
         return "token_embd.weight";
-    if (n == "model.vlm_with_expert.vlm.model.text_model.norm.weight")
-        return "vlm.output_norm.weight";
     if (n == "model.vlm_with_expert.lm_expert.norm.weight")
         return "aex.output_norm.weight";
 
@@ -787,101 +656,64 @@ std::string hf_to_gguf(const std::string & n) {
 }
 
 
-ggml_tensor * rope_q_or_k(ggml_context * ctx, ggml_tensor * x,
-                          ggml_tensor * positions, const Config & cfg) {
-    return ggml_rope_ext(ctx, x, positions,  nullptr,
-                         cfg.rope_n_dims, cfg.rope_mode,  0,
-                         cfg.rope_freq_base,  1.f,
-                          0.f,  1.f,
-                          32.f,  1.f);
+RopeSpec rope_spec(const Config & cfg) {
+    return RopeSpec{cfg.rope_mode, cfg.rope_n_dims, {}, cfg.rope_freq_base};
 }
 
-static inline bool tower_mm_f32_prec() {
-    return vla::mm_prec_f32_enabled();
-}
-static inline ggml_tensor * mm_w(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x) {
+ggml_tensor * mm_w(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x) {
     ggml_tensor * r = ggml_mul_mat(ctx, w, x);
-    if (tower_mm_f32_prec())
-        ggml_mul_mat_set_prec(r, GGML_PREC_F32);
+    if (vla::mm_prec_f32_enabled())
+        ggml_prec_set_acc(r, GGML_PREC_F32);
     return r;
 }
 
-ggml_tensor * build_vlm_layer(ggml_context * ctx, const VlmLayerW & w,
-                              ggml_tensor * x_in, ggml_tensor * mask,
-                              ggml_tensor * positions, const Config & cfg,
-                              ggml_tensor ** k_out, ggml_tensor ** v_out) {
-    ggml_tensor * x_norm = ggml_mul(ctx, ggml_rms_norm(ctx, x_in, cfg.rms_eps), w.Wln_in);
-    ggml_tensor * q_proj = mm_w(ctx, w.Wq, x_norm);
-    ggml_tensor * k_proj = mm_w(ctx, w.Wk, x_norm);
-    ggml_tensor * v_proj = mm_w(ctx, w.Wv, x_norm);
-
-    ggml_tensor * q_h = ggml_reshape_3d(ctx, q_proj, cfg.head_dim, cfg.n_q_heads,  cfg.n_prefix);
-    ggml_tensor * k_h = ggml_reshape_3d(ctx, k_proj, cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix);
-    ggml_tensor * v_h = ggml_reshape_3d(ctx, v_proj, cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix);
-
-    ggml_tensor * q_rope = rope_q_or_k(ctx, q_h, positions, cfg);
-    ggml_tensor * k_rope = rope_q_or_k(ctx, k_h, positions, cfg);
-    *k_out = k_rope;
-    *v_out = v_h;
-
-    ggml_tensor * Q = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
-    ggml_tensor * K = ggml_permute(ctx, vla::fa_kv(ctx, k_rope), 0, 2, 1, 3);
-    ggml_tensor * V = ggml_permute(ctx, vla::fa_kv(ctx, v_h),    0, 2, 1, 3);
+ggml_tensor * attn_mlp(ggml_context * ctx, const LayerW & w, ggml_tensor * x_in,
+                       ggml_tensor * q, ggml_tensor * k, ggml_tensor * v, ggml_tensor * mask,
+                       const Config & cfg, int64_t seq) {
+    ggml_tensor * Q = ggml_permute(ctx, q, 0, 2, 1, 3);
+    ggml_tensor * K = ggml_permute(ctx, vla::fa_kv(ctx, k), 0, 2, 1, 3);
+    ggml_tensor * V = ggml_permute(ctx, vla::fa_kv(ctx, v), 0, 2, 1, 3);
     const float scale = 1.f/std::sqrt(static_cast<float>(cfg.head_dim));
-    ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, K, V, mask, scale,
-                                            0.f,  0.f);
-    ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
-    ggml_tensor * att_pre_o = ggml_reshape_2d(ctx, fa, cfg.q_full_dim, cfg.n_prefix);
-    ggml_tensor * o_out = mm_w(ctx, w.Wo, att_pre_o);
-    ggml_tensor * h1    = ggml_add(ctx, x_in, o_out);
+    ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, K, V, mask, scale, 0.f, 0.f);
+    ggml_prec_set_acc(fa, GGML_PREC_F32);
+    ggml_tensor * h1 = ggml_add(ctx, x_in, mm_w(ctx, w.Wo, ggml_reshape_2d(ctx, fa, cfg.q_full_dim, seq)));
 
-    ggml_tensor * x_norm_mlp = ggml_mul(ctx, ggml_rms_norm(ctx, h1, cfg.rms_eps), w.Wln_post);
-    ggml_tensor * gate    = mm_w(ctx, w.Wgate, x_norm_mlp);
-    ggml_tensor * up      = mm_w(ctx, w.Wup,   x_norm_mlp);
-    ggml_tensor * inter   = ggml_mul(ctx, ggml_silu(ctx, gate), up);
-    ggml_tensor * mlp_out = mm_w(ctx, w.Wdown, inter);
-    return ggml_add(ctx, h1, mlp_out);
-}
-
-ggml_tensor * build_expert_self_attn_layer(
-    ggml_context * ctx, const ExpertLayerW & w,
-    ggml_tensor * x_in, ggml_tensor * cached_K, ggml_tensor * cached_V,
-    ggml_tensor * positions_full, ggml_tensor * mask_full, const Config & cfg)
-{
-    ggml_tensor * x_norm = ggml_mul(ctx, ggml_rms_norm(ctx, x_in, cfg.rms_eps), w.Wln_in);
-    ggml_tensor * q_proj = mm_w(ctx, w.Wq, x_norm);
-    ggml_tensor * k_proj = mm_w(ctx, w.Wk, x_norm);
-    ggml_tensor * v_proj = mm_w(ctx, w.Wv, x_norm);
-
-    ggml_tensor * q_h = ggml_reshape_3d(ctx, q_proj, cfg.head_dim, cfg.n_q_heads,  cfg.n_suffix);
-    ggml_tensor * k_h = ggml_reshape_3d(ctx, k_proj, cfg.head_dim, cfg.n_kv_heads, cfg.n_suffix);
-    ggml_tensor * v_h = ggml_reshape_3d(ctx, v_proj, cfg.head_dim, cfg.n_kv_heads, cfg.n_suffix);
-
-    ggml_tensor * q_rope = rope_q_or_k(ctx, q_h, positions_full, cfg);
-    ggml_tensor * k_rope = rope_q_or_k(ctx, k_h, positions_full, cfg);
-
-    ggml_tensor * K_full = ggml_concat(ctx, cached_K, k_rope, 2);
-    ggml_tensor * V_full = ggml_concat(ctx, cached_V, v_h,    2);
-
-    ggml_tensor * Q  = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
-    ggml_tensor * Kp = ggml_permute(ctx, vla::fa_kv(ctx, K_full), 0, 2, 1, 3);
-    ggml_tensor * Vp = ggml_permute(ctx, vla::fa_kv(ctx, V_full), 0, 2, 1, 3);
-    const float scale = 1.f/std::sqrt(static_cast<float>(cfg.head_dim));
-    ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, Kp, Vp, mask_full, scale,
-                                            0.f,  0.f);
-    ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
-    ggml_tensor * att_pre_o = ggml_reshape_2d(ctx, fa, cfg.q_full_dim, cfg.n_suffix);
-    ggml_tensor * h1 = ggml_add(ctx, x_in, mm_w(ctx, w.Wo, att_pre_o));
-
-    ggml_tensor * x_norm_mlp = ggml_mul(ctx, ggml_rms_norm(ctx, h1, cfg.rms_eps), w.Wln_post);
+    ggml_tensor * x_norm_mlp = rms_norm(ctx, h1, w.Wln_post, cfg.rms_eps);
     ggml_tensor * inter      = ggml_mul(ctx, ggml_silu(ctx, mm_w(ctx, w.Wgate, x_norm_mlp)),
                                         mm_w(ctx, w.Wup, x_norm_mlp));
     return ggml_add(ctx, h1, mm_w(ctx, w.Wdown, inter));
 }
 
+ggml_tensor * build_vlm_layer(ggml_context * ctx, const LayerW & w,
+                              ggml_tensor * x_in, ggml_tensor * mask,
+                              ggml_tensor * positions, const Config & cfg,
+                              ggml_tensor ** k_out, ggml_tensor ** v_out) {
+    ggml_tensor * x_norm = rms_norm(ctx, x_in, w.Wln_in, cfg.rms_eps);
+    ggml_tensor * q_h = ggml_reshape_3d(ctx, mm_w(ctx, w.Wq, x_norm), cfg.head_dim, cfg.n_q_heads,  cfg.n_prefix);
+    ggml_tensor * k_h = ggml_reshape_3d(ctx, mm_w(ctx, w.Wk, x_norm), cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix);
+    *v_out = ggml_reshape_3d(ctx, mm_w(ctx, w.Wv, x_norm), cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix);
+    *k_out = rope(ctx, rope_spec(cfg), k_h, positions);
+    return attn_mlp(ctx, w, x_in, rope(ctx, rope_spec(cfg), q_h, positions), *k_out, *v_out, mask, cfg, cfg.n_prefix);
+}
+
+ggml_tensor * build_expert_self_attn_layer(
+    ggml_context * ctx, const LayerW & w,
+    ggml_tensor * x_in, ggml_tensor * cached_K, ggml_tensor * cached_V,
+    ggml_tensor * positions_full, ggml_tensor * mask_full, const Config & cfg)
+{
+    ggml_tensor * x_norm = rms_norm(ctx, x_in, w.Wln_in, cfg.rms_eps);
+    ggml_tensor * q_h = ggml_reshape_3d(ctx, mm_w(ctx, w.Wq, x_norm), cfg.head_dim, cfg.n_q_heads,  cfg.n_suffix);
+    ggml_tensor * k_h = ggml_reshape_3d(ctx, mm_w(ctx, w.Wk, x_norm), cfg.head_dim, cfg.n_kv_heads, cfg.n_suffix);
+    ggml_tensor * v_h = ggml_reshape_3d(ctx, mm_w(ctx, w.Wv, x_norm), cfg.head_dim, cfg.n_kv_heads, cfg.n_suffix);
+
+    ggml_tensor * K_full = ggml_concat(ctx, cached_K, rope(ctx, rope_spec(cfg), k_h, positions_full), 2);
+    ggml_tensor * V_full = ggml_concat(ctx, cached_V, v_h, 2);
+    return attn_mlp(ctx, w, x_in, rope(ctx, rope_spec(cfg), q_h, positions_full), K_full, V_full, mask_full, cfg, cfg.n_suffix);
+}
+
 // Reproject the constant prefix cache into a cross-attn layer's K/V. Depends only
 // on the prefix, so it is built once and shared across all denoise steps.
-void expert_cross_kv(ggml_context * ctx, const ExpertLayerW & w,
+void expert_cross_kv(ggml_context * ctx, const LayerW & w,
                      ggml_tensor * cached_K, ggml_tensor * cached_V, const Config & cfg,
                      ggml_tensor ** K_repro, ggml_tensor ** V_repro) {
     ggml_tensor * cK_flat = ggml_reshape_2d(ctx, cached_K, cfg.kv_full_dim, cfg.n_prefix);
@@ -891,31 +723,15 @@ void expert_cross_kv(ggml_context * ctx, const ExpertLayerW & w,
 }
 
 ggml_tensor * build_expert_cross_attn_layer(
-    ggml_context * ctx, const ExpertLayerW & w,
+    ggml_context * ctx, const LayerW & w,
     ggml_tensor * x_in, ggml_tensor * K_repro, ggml_tensor * V_repro,
     ggml_tensor * positions_rebased, ggml_tensor * mask_prefix_only,
     const Config & cfg)
 {
-    ggml_tensor * x_norm = ggml_mul(ctx, ggml_rms_norm(ctx, x_in, cfg.rms_eps), w.Wln_in);
-
-    ggml_tensor * q_proj = mm_w(ctx, w.Wq, x_norm);
-    ggml_tensor * q_h    = ggml_reshape_3d(ctx, q_proj, cfg.head_dim, cfg.n_q_heads, cfg.n_suffix);
-    ggml_tensor * q_rope = rope_q_or_k(ctx, q_h, positions_rebased, cfg);
-
-    ggml_tensor * Q  = ggml_permute(ctx, q_rope,  0, 2, 1, 3);
-    ggml_tensor * Kp = ggml_permute(ctx, vla::fa_kv(ctx, K_repro), 0, 2, 1, 3);
-    ggml_tensor * Vp = ggml_permute(ctx, vla::fa_kv(ctx, V_repro), 0, 2, 1, 3);
-    const float scale = 1.f/std::sqrt(static_cast<float>(cfg.head_dim));
-    ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, Kp, Vp, mask_prefix_only, scale,
-                                            0.f,  0.f);
-    ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
-    ggml_tensor * att_pre_o = ggml_reshape_2d(ctx, fa, cfg.q_full_dim, cfg.n_suffix);
-    ggml_tensor * h1 = ggml_add(ctx, x_in, mm_w(ctx, w.Wo, att_pre_o));
-
-    ggml_tensor * x_norm_mlp = ggml_mul(ctx, ggml_rms_norm(ctx, h1, cfg.rms_eps), w.Wln_post);
-    ggml_tensor * inter      = ggml_mul(ctx, ggml_silu(ctx, mm_w(ctx, w.Wgate, x_norm_mlp)),
-                                        mm_w(ctx, w.Wup, x_norm_mlp));
-    return ggml_add(ctx, h1, mm_w(ctx, w.Wdown, inter));
+    ggml_tensor * x_norm = rms_norm(ctx, x_in, w.Wln_in, cfg.rms_eps);
+    ggml_tensor * q_h    = ggml_reshape_3d(ctx, mm_w(ctx, w.Wq, x_norm), cfg.head_dim, cfg.n_q_heads, cfg.n_suffix);
+    return attn_mlp(ctx, w, x_in, rope(ctx, rope_spec(cfg), q_h, positions_rebased), K_repro, V_repro,
+                    mask_prefix_only, cfg, cfg.n_suffix);
 }
 
 }
@@ -969,43 +785,35 @@ static void backend_set_from_f32(ggml_tensor * t, const float * src, int64_t n) 
     }
 }
 
-SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
-                                    const std::string& mmproj_path,
-                                    const std::string& ckpt_path,
-                                    const std::string& config_path) {
-    auto* m = new SmolVLAModelArch();
+std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
+                                                    const std::string& ckpt_path,
+                                                    const std::string& config_path,
+                                                    const Options& opts) {
+    auto m = std::make_unique<SmolVLAModelArch>();
 
     const bool use_gguf = ends_with_gguf(ckpt_path);
-    safetensors  st;
-    gguf_source  gst;
+    const std::string cfg_path = config_path.empty() ? dir_of(ckpt_path) + "/config.json" : config_path;
+    safetensors   st;
+    gguf_source & gst = m->gst;
 
     if (use_gguf) {
-        if (!gst.open(ckpt_path)) {
-            delete m;
+        if (!gst.open(ckpt_path) || !load_config_from_gguf(gst, m->cfg))
             return nullptr;
-        }
-        if (!load_config_from_gguf(gst, m->cfg)) {
-            delete m;
-            return nullptr;
-        }
         std::printf("vla: config = %s (gguf KV)\n", ckpt_path.c_str());
     } else {
-        const std::string cfg_path = config_path.empty() ? default_config_path(ckpt_path)
-                                                         : config_path;
-        if (!load_config_from_json(cfg_path, m->cfg)) {
-            delete m;
+        if (!load_config_from_json(cfg_path, m->cfg))
             return nullptr;
-        }
         std::printf("vla: config = %s\n", cfg_path.c_str());
     }
+    if (!resolve_num_steps("smolvla", opts, m->cfg.num_steps))
+        return nullptr;
 
     {
         const Backend b = backend_init("vla", default_cpu_threads());
-        if (!b.handle) {
-            delete m;
+        if (!b.handle)
             return nullptr;
-        }
         m->backend = b.handle;
+        m->is_cuda = b.is_cuda;
     }
     vram_probe(m->backend, "after backend init");
 
@@ -1013,26 +821,33 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
     std::printf("vla: tower weights resident as %s\n", ggml_type_name(m->weight_dtype));
 
     // Vision tower geometry: from gguf KV (self-contained ckpt), else SmolVLM2-500M defaults.
-    (void) mmproj_path;
     if (use_gguf) {
-        auto vu = [&](const char * k, int64_t & d) { if (gst.has_key(k)) d = (int64_t) gst.get_u32(k); };
+        auto vu = [&](const char * k, int64_t & d) { if (gst.has(k)) d = (int64_t) gst.u32(k); };
         vu("smolvla.vit_hidden", m->vit_hidden); vu("smolvla.vit_layers", m->vit_layers);
         vu("smolvla.vit_heads",  m->vit_heads);  vu("smolvla.patch_size", m->vit_patch);
         vu("smolvla.image_size", m->vit_image);  vu("smolvla.vit_pixel_shuffle", m->vit_scale);
         vu("smolvla.n_img_tokens", m->vit_n_tokens); vu("smolvla.vit_inter", m->vit_inter);
-        if (gst.has_key("smolvla.vit_ln_eps"))
-            m->vit_ln_eps = gst.get_f32("smolvla.vit_ln_eps");
+        if (gst.has("smolvla.vit_ln_eps"))
+            m->vit_ln_eps = gst.f32("smolvla.vit_ln_eps");
     }
     {
+        if (m->vit_patch <= 0 || m->vit_scale <= 0 || m->vit_heads <= 0 ||
+            m->vit_image % m->vit_patch || (m->vit_image/m->vit_patch) % m->vit_scale ||
+            m->vit_hidden % m->vit_heads) {
+            std::fprintf(stderr, "vla(smolvla): bad vit geometry (image %lld patch %lld shuffle %lld hidden %lld heads %lld)\n",
+                         (long long) m->vit_image, (long long) m->vit_patch, (long long) m->vit_scale,
+                         (long long) m->vit_hidden, (long long) m->vit_heads);
+            return nullptr;
+        }
         const int64_t grid = m->vit_image/m->vit_patch;
         const int64_t k = grid/m->vit_scale;
         if (k * k != m->vit_n_tokens) {
             std::fprintf(stderr, "vla: smolvla vit geometry mismatch (grid=%lld scale=%lld -> %lld tokens, KV says %lld)\n",
                          (long long) grid, (long long) m->vit_scale, (long long) (k * k), (long long) m->vit_n_tokens);
-            delete m;
             return nullptr;
         }
         m->cfg.n_img = m->vit_n_tokens;
+        m->vit.enc.cfg = {m->vit_hidden, m->vit_heads, m->vit_hidden/m->vit_heads, m->vit_ln_eps, false};
     }
     m->cfg.n_prefix = m->cfg.n_img+m->cfg.n_lang+m->cfg.n_state;
     m->cfg.n_full   = m->cfg.n_prefix+m->cfg.n_suffix;
@@ -1040,7 +855,6 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
     if (!use_gguf) {
         if (!st.open(ckpt_path)) {
             std::fprintf(stderr, "vla: failed to open %s\n", ckpt_path.c_str());
-            delete m;
             return nullptr;
         }
         if (m->cfg.n_layers <= 0) {
@@ -1055,7 +869,6 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
             }
             if (max_layer < 0) {
                 std::fprintf(stderr, "vla: cannot infer n_layers from %s\n", ckpt_path.c_str());
-                delete m;
                 return nullptr;
             }
             m->cfg.n_layers = max_layer+1;
@@ -1064,7 +877,6 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
             const auto it = st.tensors.find("model.vlm_with_expert.lm_expert.layers.0.mlp.gate_proj.weight");
             if (it == st.tensors.end() || it->second.shape.size() != 2) {
                 std::fprintf(stderr, "vla: missing/malformed expert gate_proj for shape derivation\n");
-                delete m;
                 return nullptr;
             }
 
@@ -1073,7 +885,6 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
                 std::fprintf(stderr, "vla: expert_h mismatch - config implies %lld, "
                                      "checkpoint gate_proj has %lld\n",
                              (long long) m->cfg.expert_h, (long long) it->second.shape[1]);
-                delete m;
                 return nullptr;
             }
         }
@@ -1092,16 +903,10 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
     if (use_gguf) {
         if (!load_normalizer_stats_from_gguf(gst, *m)) {
             std::fprintf(stderr, "vla: failed to load normalizer stats from gguf\n");
-            delete m;
             return nullptr;
         }
     } else {
-        const std::string cfg_path_local = config_path.empty()
-            ? default_config_path(ckpt_path) : config_path;
-        const auto pos = cfg_path_local.find_last_of("/\\");
-        const std::string model_dir = (pos == std::string::npos) ? std::string(".")
-                                                                 : cfg_path_local.substr(0, pos);
-        load_normalizer_stats(model_dir, *m);
+        load_normalizer_stats(dir_of(cfg_path), *m);
     }
 
     ggml_init_params gparams = {
@@ -1112,7 +917,6 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
     m->ctx_weights = ggml_init(gparams);
     if (!m->ctx_weights) {
         std::fprintf(stderr, "vla: ggml_init (weights) failed\n");
-        delete m;
         return nullptr;
     }
 
@@ -1121,13 +925,7 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
     const ggml_type wdt = m->weight_dtype;
 
     struct PendingF32  { std::string name; ggml_tensor * t; std::vector<int64_t> shape; };
-    struct PendingBF16 { std::string name; ggml_tensor * t; };
     std::vector<PendingF32>  pending_f32;
-    std::vector<PendingBF16> pending_bf16;
-
-    m->E_lang = ggml_new_tensor_2d(ctx, GGML_TYPE_BF16, cfg.hidden,  49280);
-    pending_bf16.push_back({
-        "model.vlm_with_expert.vlm.model.text_model.embed_tokens.weight", m->E_lang});
 
     m->Wstate = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.max_state_dim, cfg.hidden);
     m->bstate = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.hidden);
@@ -1140,19 +938,20 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
         const int64_t grid = m->vit_image/P, n_patches = grid * grid;
         const int64_t c4 = H * m->vit_scale*m->vit_scale;
         const char * VP = "model.vlm_with_expert.vlm.model.vision_model.";
-        m->vit_patch_w   = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, P, P, 3, H);
-        m->vit_patch_b   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
-        m->vit_pos       = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, n_patches);
-        m->vit_post_ln_w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
-        m->vit_post_ln_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
-        pending_f32.push_back({std::string(VP) + "embeddings.patch_embedding.weight", m->vit_patch_w, {H, 3, P, P}});
-        pending_f32.push_back({std::string(VP) + "embeddings.patch_embedding.bias",   m->vit_patch_b, {H}});
-        pending_f32.push_back({std::string(VP) + "embeddings.position_embedding.weight", m->vit_pos, {n_patches, H}});
-        pending_f32.push_back({std::string(VP) + "post_layernorm.weight", m->vit_post_ln_w, {H}});
-        pending_f32.push_back({std::string(VP) + "post_layernorm.bias",   m->vit_post_ln_b, {H}});
-        m->vit.resize(m->vit_layers);
+        SigLipTower & vt = m->vit;
+        vt.patch_w   = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, P, P, 3, H);
+        vt.patch_b   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
+        vt.pos       = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, n_patches);
+        vt.post_ln_w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
+        vt.post_ln_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
+        pending_f32.push_back({std::string(VP) + "embeddings.patch_embedding.weight", vt.patch_w, {H, 3, P, P}});
+        pending_f32.push_back({std::string(VP) + "embeddings.patch_embedding.bias",   vt.patch_b, {H}});
+        pending_f32.push_back({std::string(VP) + "embeddings.position_embedding.weight", vt.pos, {n_patches, H}});
+        pending_f32.push_back({std::string(VP) + "post_layernorm.weight", vt.post_ln_w, {H}});
+        pending_f32.push_back({std::string(VP) + "post_layernorm.bias",   vt.post_ln_b, {H}});
+        vt.enc.blk.resize(m->vit_layers);
         for (int64_t i=0; i<m->vit_layers; ++i) {
-            EncBlockW & w = m->vit[i];
+            EncBlockW & w = vt.enc.blk[i];
             char pb[256]; std::snprintf(pb, sizeof(pb), "%sencoder.layers.%lld.", VP, (long long) i);
             const std::string pf = pb;
             w.ln1w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H); w.ln1b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
@@ -1179,7 +978,7 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
 
     m->vlm_layers.resize(cfg.n_layers);
     for (int i=0; i<cfg.n_layers; ++i) {
-        VlmLayerW & w = m->vlm_layers[i];
+        LayerW & w = m->vlm_layers[i];
         w.Wln_in   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.hidden);
         w.Wq       = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.q_full_dim);
         w.Wk       = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.kv_full_dim);
@@ -1203,22 +1002,19 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
         pending_f32.push_back({pf + "mlp.up_proj.weight",              w.Wup,      {cfg.intermediate, cfg.hidden}});
         pending_f32.push_back({pf + "mlp.down_proj.weight",            w.Wdown,    {cfg.hidden,       cfg.intermediate}});
     }
-    m->Wnorm_vlm = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.hidden);
-    pending_f32.push_back({"model.vlm_with_expert.vlm.model.text_model.norm.weight",
-                           m->Wnorm_vlm, {cfg.hidden}});
 
     m->expert_layers.resize(cfg.n_layers);
     for (int i=0; i<cfg.n_layers; ++i) {
-        ExpertLayerW & w = m->expert_layers[i];
-        w.is_self_attn = (i%cfg.self_attn_every_n == 0);
+        LayerW & w = m->expert_layers[i];
+        const bool self_attn = expert_self_attn(cfg, i);
         w.Wln_in   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.expert_h);
         w.Wq       = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h, cfg.q_full_dim);
-        if (w.is_self_attn) {
+        if (self_attn) {
             w.Wk = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h,    cfg.kv_full_dim);
             w.Wv = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h,    cfg.kv_full_dim);
         } else {
-            w.Wk = ggml_new_tensor_2d(ctx, wdt, cfg.kv_full_dim, cfg.kv_full_dim);
-            w.Wv = ggml_new_tensor_2d(ctx, wdt, cfg.kv_full_dim, cfg.kv_full_dim);
+            w.Wk = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.kv_full_dim, cfg.kv_full_dim);
+            w.Wv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.kv_full_dim, cfg.kv_full_dim);
         }
         w.Wo       = ggml_new_tensor_2d(ctx, wdt, cfg.q_full_dim, cfg.expert_h);
         w.Wln_post = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.expert_h);
@@ -1231,7 +1027,7 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
         const std::string pf = p;
         pending_f32.push_back({pf + "input_layernorm.weight",  w.Wln_in, {cfg.expert_h}});
         pending_f32.push_back({pf + "self_attn.q_proj.weight", w.Wq,     {cfg.q_full_dim, cfg.expert_h}});
-        if (w.is_self_attn) {
+        if (self_attn) {
             pending_f32.push_back({pf + "self_attn.k_proj.weight", w.Wk, {cfg.kv_full_dim, cfg.expert_h}});
             pending_f32.push_back({pf + "self_attn.v_proj.weight", w.Wv, {cfg.kv_full_dim, cfg.expert_h}});
         } else {
@@ -1276,6 +1072,13 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
     // ggml_mul_mat dequantizes at compute, as in the shared WeightLoader. Every
     // tensor above that uses wdt is a mul_mat operand, so those are the ones
     // eligible. Retyping is safe here: nothing is allocated yet.
+    auto retype = [](ggml_tensor * t, ggml_type type) {
+        t->type  = type;
+        t->nb[0] = ggml_type_size(type);
+        t->nb[1] = t->nb[0] * (t->ne[0] / ggml_blck_size(type));
+        for (int d = 2; d < GGML_MAX_DIMS; ++d)
+            t->nb[d] = t->nb[d-1] * t->ne[d-1];
+    };
     struct PendingPacked { std::string name; ggml_tensor * t; };
     std::vector<PendingPacked> pending_packed;
     if (use_gguf) {
@@ -1285,11 +1088,7 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
             const ggml_type ft = gst.file_type(hf_to_gguf(p.name));
             if (p.t->type == wdt && ft != GGML_TYPE_COUNT && ggml_is_quantized(ft) &&
                 p.t->ne[0] % ggml_blck_size(ft) == 0) {
-                p.t->type  = ft;
-                p.t->nb[0] = ggml_type_size(ft);
-                p.t->nb[1] = p.t->nb[0] * (p.t->ne[0] / ggml_blck_size(ft));
-                for (int d = 2; d < GGML_MAX_DIMS; ++d)
-                    p.t->nb[d] = p.t->nb[d-1] * p.t->ne[d-1];
+                retype(p.t, ft);
                 pending_packed.push_back({p.name, p.t});
             } else {
                 keep.push_back(std::move(p));
@@ -1301,10 +1100,41 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
                         pending_packed.size(), ggml_type_name(pending_packed[0].t->type));
     }
 
+    std::unordered_set<const ggml_tensor *> widened;
+    if (m->is_cuda && vla::mm_prec_f32_enabled() && !opts.weight_dtype) {
+        for (const auto * layers : {&m->vlm_layers, &m->expert_layers})
+            for (const LayerW & w : *layers)
+                for (ggml_tensor * t : {w.Wq, w.Wk, w.Wv, w.Wo, w.Wgate, w.Wup, w.Wdown})
+                    if (t->type == GGML_TYPE_BF16) {
+                        retype(t, GGML_TYPE_F32);
+                        widened.insert(t);
+                    }
+        if (!widened.empty())
+            std::printf("vla: %zu LM GEMM weights widened to f32 for --mm-prec f32\n", widened.size());
+    }
+
+    const std::string emb = "model.vlm_with_expert.vlm.model.text_model.embed_tokens.weight";
+    if (use_gguf) {
+        const ggml_tensor * te = gst.meta(hf_to_gguf(emb).c_str());
+        if (!te || te->ne[0] != cfg.hidden || te->ne[2] != 1 || te->ne[3] != 1 ||
+            (te->type != GGML_TYPE_BF16 && te->type != GGML_TYPE_F32)) {
+            std::fprintf(stderr, "vla(smolvla): gguf %s missing or not a [%lld, vocab] f32/bf16 table\n",
+                         hf_to_gguf(emb).c_str(), (long long) cfg.hidden);
+            return nullptr;
+        }
+        m->n_vocab = te->ne[1];
+    } else {
+        m->n_vocab = 49280;
+        m->E_lang.resize(size_t(cfg.hidden)*m->n_vocab);
+        if (!st.read_raw(emb, m->E_lang.data(), m->E_lang.size()*sizeof(ggml_bf16_t), "BF16")) {
+            std::fprintf(stderr, "vla: read_raw failed for %s\n", emb.c_str());
+            return nullptr;
+        }
+    }
+
     m->weight_buf = alloc_weights(m->ctx_weights, m->backend);
     if (!m->weight_buf) {
         std::fprintf(stderr, "vla: alloc_weights failed\n");
-        delete m;
         return nullptr;
     }
     std::printf("vla: [vram] weight_buf = %.1f MiB\n",
@@ -1321,40 +1151,23 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
             std::fprintf(stderr, "vla: read_to_f32 failed for %s\n", hf_name.c_str());
             return false;
         }
-        backend_set_from_f32(t, hbuf.data(), ggml_nelements(t));
-        return true;
-    };
-    auto stream_bf16 = [&](const std::string & hf_name, ggml_tensor * t) -> bool {
-        std::vector<ggml_bf16_t> hbuf(ggml_nelements(t));
-        const bool ok = use_gguf
-            ? gst.read_raw(hf_to_gguf(hf_name), hbuf.data(), ggml_nbytes(t), "BF16")
-            : st .read_raw(hf_name,             hbuf.data(), ggml_nbytes(t), "BF16");
-        if (!ok) {
-            std::fprintf(stderr, "vla: read_raw failed for %s\n", hf_name.c_str());
-            return false;
+        if (widened.count(t)) {
+            std::vector<ggml_bf16_t> tmp(hbuf.size());
+            ggml_fp32_to_bf16_row(hbuf.data(), tmp.data(), (int64_t) hbuf.size());
+            ggml_bf16_to_fp32_row(tmp.data(), hbuf.data(), (int64_t) hbuf.size());
         }
-        ggml_backend_tensor_set(t, hbuf.data(), 0, ggml_nbytes(t));
+        backend_set_from_f32(t, hbuf.data(), ggml_nelements(t));
         return true;
     };
 
     for (auto & p : pending_f32) {
-        if (!stream_f32(p.name, p.t, p.shape)) {
-            delete m;
+        if (!stream_f32(p.name, p.t, p.shape))
             return nullptr;
-        }
-    }
-    for (auto & p : pending_bf16) {
-        if (!stream_bf16(p.name, p.t))         {
-            delete m;
-            return nullptr;
-        }
     }
     for (auto & p : pending_packed) {
         std::vector<uint8_t> hbuf(ggml_nbytes(p.t));
-        if (!gst.read_packed(hf_to_gguf(p.name), hbuf.data(), p.t->type, hbuf.size())) {
-            delete m;
+        if (!gst.read_packed(hf_to_gguf(p.name), hbuf.data(), p.t->type, hbuf.size()))
             return nullptr;
-        }
         ggml_backend_tensor_set(p.t, hbuf.data(), 0, hbuf.size());
     }
 
@@ -1379,161 +1192,98 @@ SmolVLAModelArch* smolvla_load_impl(ggml_type weight_dtype,
 }
 
 namespace {
-bool build_compute_graph(SmolVLAModelArch* m, int n_views) {
-    if (n_views < 1) {
-        std::fprintf(stderr, "vla: build_compute_graph: n_views=%d invalid\n", n_views);
-        return false;
-    }
-    const Config & cfg_model = m->cfg;
-    Config cfg = cfg_model;
+void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::MainIO & io,
+                 int n_views, int64_t n_lang, bool kv_leaves) {
+    Config cfg = m->cfg;
+    cfg.n_img    = m->cfg.n_img*int64_t(n_views);
+    cfg.n_lang   = n_lang;
+    cfg.n_prefix = cfg.n_img+cfg.n_lang+cfg.n_state;
+    cfg.n_full   = cfg.n_prefix+cfg.n_suffix;
 
-    cfg.n_img = cfg_model.n_img*int64_t(n_views);
-
-    ggml_init_params gparams = {
-         size_t(64)*1024*1024,
-         nullptr,
-         true,
-    };
-    ggml_context * ctx = ggml_init(gparams);
-    if (!ctx) {
-        std::fprintf(stderr, "vla: build_compute_graph: ggml_init failed\n");
-        return false;
-    }
-
-    const int64_t n_lang_max   = cfg.n_lang;
-    const int64_t n_prefix_max = cfg.n_img+n_lang_max+cfg.n_state;
-    const int64_t n_full_max   = n_prefix_max+cfg.n_suffix;
-
-    ggml_tensor * img_emb_in     = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.hidden,         cfg.n_img);
-    ggml_tensor * lang_ids       = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_lang_max);
-    ggml_tensor * state_t        = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.max_state_dim);
-    ggml_tensor * x0             = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.max_action_dim, cfg.n_suffix);
-
-    ggml_tensor * mask_prefill   = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_prefix_max, n_prefix_max);
-    ggml_tensor * pos_prefill    = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_prefix_max);
-    ggml_tensor * mask_full      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_full_max,   cfg.n_suffix);
-    ggml_tensor * mask_pfx_only  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_prefix_max, cfg.n_suffix);
-    ggml_tensor * pos_full       = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
-    ggml_tensor * pos_rebased    = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
-
-    for (ggml_tensor * t : {img_emb_in, lang_ids, state_t, x0,
-                            mask_prefill, pos_prefill, mask_full,
-                            mask_pfx_only, pos_full, pos_rebased}) {
+    io.img_emb       = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.hidden,         cfg.n_img);
+    io.lang_emb      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.hidden,         cfg.n_lang);
+    io.state         = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.max_state_dim);
+    io.x0            = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.max_action_dim, cfg.n_suffix);
+    io.mask_prefill  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.n_prefix, cfg.n_prefix);
+    io.pos_prefill   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_prefix);
+    io.mask_full     = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.n_full,   cfg.n_suffix);
+    io.mask_pfx_only = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.n_prefix, cfg.n_suffix);
+    io.pos_full      = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
+    io.pos_rebased   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
+    for (ggml_tensor * t : {io.img_emb, io.lang_emb, io.state, io.x0,
+                            io.mask_prefill, io.pos_prefill, io.mask_full,
+                            io.mask_pfx_only, io.pos_full, io.pos_rebased}) {
         ggml_set_input(t);
     }
 
-    Config cfg_built = cfg;
-    cfg_built.n_lang   = n_lang_max;
-    cfg_built.n_prefix = n_prefix_max;
-    cfg_built.n_full   = n_full_max;
-
     const float lang_scale = std::sqrt(static_cast<float>(cfg.hidden));
-    ggml_tensor * img_emb_scaled  = ggml_scale(ctx, img_emb_in, lang_scale);
-    ggml_tensor * lang_raw        = ggml_get_rows(ctx, m->E_lang, lang_ids);
-    ggml_tensor * lang_emb_scaled = ggml_scale(ctx, lang_raw, lang_scale);
-    ggml_tensor * state_pre       = ggml_add(ctx, ggml_mul_mat(ctx, m->Wstate, state_t), m->bstate);
-    ggml_tensor * state_emb       = ggml_reshape_2d(ctx, state_pre, cfg.hidden, 1);
-    ggml_tensor * embs_il         = ggml_concat(ctx, img_emb_scaled, lang_emb_scaled, 1);
-    ggml_tensor * prefix_embs     = ggml_concat(ctx, embs_il, state_emb, 1);
+    ggml_tensor * img_emb_scaled  = ggml_scale(ctx, io.img_emb, lang_scale);
+    ggml_tensor * lang_emb_scaled = ggml_scale(ctx, io.lang_emb, lang_scale);
+    ggml_tensor * state_emb       = ggml_reshape_2d(ctx, linear(ctx, m->Wstate, m->bstate, io.state), cfg.hidden, 1);
+    ggml_tensor * prefix_embs     = ggml_concat(ctx, ggml_concat(ctx, img_emb_scaled, lang_emb_scaled, 1), state_emb, 1);
 
-    ggml_tensor * mask_prefill_f16 = ggml_cast(ctx, mask_prefill,  GGML_TYPE_F16);
-    ggml_tensor * mask_full_f16    = ggml_cast(ctx, mask_full,     GGML_TYPE_F16);
-    ggml_tensor * mask_pfx_only_f16= ggml_cast(ctx, mask_pfx_only, GGML_TYPE_F16);
-    std::vector<ggml_tensor *> k_cache(cfg.n_layers);
-    std::vector<ggml_tensor *> v_cache(cfg.n_layers);
+    ggml_tensor * mask_prefill_f16 = ggml_cast(ctx, io.mask_prefill,  GGML_TYPE_F16);
+    ggml_tensor * mask_full_f16    = ggml_cast(ctx, io.mask_full,     GGML_TYPE_F16);
+    ggml_tensor * mask_pfx_only_f16= ggml_cast(ctx, io.mask_pfx_only, GGML_TYPE_F16);
+    io.k_cache.resize(cfg.n_layers);
+    io.v_cache.resize(cfg.n_layers);
     {
         ggml_tensor * h = prefix_embs;
         for (int i=0; i<cfg.n_layers; ++i) {
-            h = build_vlm_layer(ctx, m->vlm_layers[i], h, mask_prefill_f16, pos_prefill,
-                                cfg_built, &k_cache[i], &v_cache[i]);
+            h = build_vlm_layer(ctx, m->vlm_layers[i], h, mask_prefill_f16, io.pos_prefill,
+                                cfg, &io.k_cache[i], &io.v_cache[i]);
         }
     }
+
+    if (kv_leaves) {
+        for (int i=0; i<cfg.n_layers; ++i) {
+            io.k_leaf.push_back(ggml_new_tensor_3d(ctx, GGML_TYPE_F32, cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix));
+            io.v_leaf.push_back(ggml_new_tensor_3d(ctx, GGML_TYPE_F32, cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix));
+        }
+    }
+    const std::vector<ggml_tensor *> & K = kv_leaves ? io.k_leaf : io.k_cache;
+    const std::vector<ggml_tensor *> & V = kv_leaves ? io.v_leaf : io.v_cache;
 
     // Reproject each cross-attn layer's prefix K/V once; reused every denoise step.
     std::vector<ggml_tensor *> xk_cache(cfg.n_layers, nullptr);
     std::vector<ggml_tensor *> xv_cache(cfg.n_layers, nullptr);
     for (int li=0; li<cfg.n_layers; ++li) {
-        if (!m->expert_layers[li].is_self_attn)
-            expert_cross_kv(ctx, m->expert_layers[li], k_cache[li], v_cache[li],
-                            cfg_built, &xk_cache[li], &xv_cache[li]);
+        if (expert_self_attn(cfg, li))
+            continue;
+        expert_cross_kv(ctx, m->expert_layers[li], K[li], V[li], cfg, &xk_cache[li], &xv_cache[li]);
+        if (m->is_cuda) {
+            xk_cache[li] = ggml_cast(ctx, xk_cache[li], GGML_TYPE_F16);
+            xv_cache[li] = ggml_cast(ctx, xv_cache[li], GGML_TYPE_F16);
+        }
     }
 
     const float dt = -1.f/static_cast<float>(cfg.num_steps);
-    ggml_tensor * x_t = x0;
-
+    ggml_tensor * x_t = io.x0;
     for (int step=0; step<cfg.num_steps; ++step) {
-        ggml_tensor * time_bcast     = m->time_bcasts[step];
-        ggml_tensor * action_emb     = ggml_add(ctx, ggml_mul_mat(ctx, m->W_ain, x_t), m->b_ain);
-        ggml_tensor * action_time_in = ggml_concat(ctx, action_emb, time_bcast, 0);
-        ggml_tensor * mlp1           = ggml_add(ctx, ggml_mul_mat(ctx, m->W_at1, action_time_in), m->b_at1);
-        ggml_tensor * suffix_embs    = ggml_add(ctx,
-                                                ggml_mul_mat(ctx, m->W_at2, ggml_silu(ctx, mlp1)),
-                                                m->b_at2);
-        ggml_tensor * h = suffix_embs;
+        ggml_tensor * action_emb     = linear(ctx, m->W_ain, m->b_ain, x_t);
+        ggml_tensor * action_time_in = ggml_concat(ctx, action_emb, m->time_bcasts[step], 0);
+        ggml_tensor * mlp1           = linear(ctx, m->W_at1, m->b_at1, action_time_in);
+        ggml_tensor * h              = linear(ctx, m->W_at2, m->b_at2, ggml_silu(ctx, mlp1));
         for (int li=0; li<cfg.n_layers; ++li) {
-            if (m->expert_layers[li].is_self_attn) {
-                h = build_expert_self_attn_layer(ctx, m->expert_layers[li], h,
-                                                 k_cache[li], v_cache[li],
-                                                 pos_full, mask_full_f16, cfg_built);
+            if (expert_self_attn(cfg, li)) {
+                h = build_expert_self_attn_layer(ctx, m->expert_layers[li], h, K[li], V[li],
+                                                 io.pos_full, mask_full_f16, cfg);
             } else {
                 h = build_expert_cross_attn_layer(ctx, m->expert_layers[li], h,
                                                   xk_cache[li], xv_cache[li],
-                                                  pos_rebased, mask_pfx_only_f16, cfg_built);
+                                                  io.pos_rebased, mask_pfx_only_f16, cfg);
             }
         }
-        ggml_tensor * h_final = ggml_mul(ctx, ggml_rms_norm(ctx, h, cfg.rms_eps), m->Wnorm_expert);
-        ggml_tensor * v_t     = ggml_add(ctx, ggml_mul_mat(ctx, m->W_aout, h_final), m->b_aout);
+        ggml_tensor * v_t = linear(ctx, m->W_aout, m->b_aout, rms_norm(ctx, h, m->Wnorm_expert, cfg.rms_eps));
         x_t = ggml_add(ctx, x_t, ggml_scale(ctx, v_t, dt));
     }
 
     ggml_set_output(x_t);
-
-    ggml_cgraph * gf = ggml_new_graph_custom(ctx,  16384,  false);
-    ggml_build_forward_expand(gf, x_t);
-
-    ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(m->backend);
-    ggml_gallocr_t galloc = ggml_gallocr_new(buft);
-    if (!galloc) {
-        std::fprintf(stderr, "vla: build_compute_graph: ggml_gallocr_new failed\n");
-        ggml_free(ctx);
-        return false;
-    }
-    if (!ggml_gallocr_reserve(galloc, gf)) {
-        std::fprintf(stderr, "vla: build_compute_graph: ggml_gallocr_reserve failed\n");
-        ggml_gallocr_free(galloc);
-        ggml_free(ctx);
-        return false;
-    }
-
-    std::printf("vla: [vram] gallocr compute buf = %.1f MiB\n",
-                ggml_gallocr_get_buffer_size(galloc, 0)/(1024.0*1024.0));
-    vram_probe(m->backend, "after gallocr reserve");
-
-    m->ctx_compute       = ctx;
-    m->galloc            = galloc;
-    m->gf_cached         = gf;
-    m->in_img_emb        = img_emb_in;
-    m->in_lang_ids       = lang_ids;
-    m->in_state          = state_t;
-    m->in_x0             = x0;
-    m->in_mask_prefill   = mask_prefill;
-    m->in_pos_prefill    = pos_prefill;
-    m->in_mask_full      = mask_full;
-    m->in_mask_pfx_only  = mask_pfx_only;
-    m->in_pos_full       = pos_full;
-    m->in_pos_rebased    = pos_rebased;
-    m->out_x_t           = x_t;
-
-    return true;
+    io.x_t = x_t;
 }
 }
 
 SmolVLAModelArch::~SmolVLAModelArch() {
-
-    if (galloc)
-        ggml_gallocr_free(galloc);
-    if (ctx_compute)
-        ggml_free(ctx_compute);
     if (weight_buf)
         ggml_backend_buffer_free(weight_buf);
     if (ctx_weights)
@@ -1549,9 +1299,25 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
 
     m->stats = Stats{};
 
-    Config cfg = m->cfg;
+    const Config & cfg = m->cfg;
 
-    const size_t per_view_n = size_t(m->cfg.n_img*cfg.hidden);
+    if (in.n_lang < 1 || in.n_lang > int(cfg.n_lang)) {
+        std::fprintf(stderr, "vla: lang_tokens length %d out of range [1, %lld]\n",
+                     in.n_lang, (long long) cfg.n_lang);
+        return {};
+    }
+
+    // Reject any token id outside the embedding table before the gather so an
+    // out-of-range id cannot read past the host table.
+    for (int i=0; i<in.n_lang; ++i) {
+        if (in.lang_tokens[i] < 0 || in.lang_tokens[i] >= m->n_vocab) {
+            std::fprintf(stderr, "vla: lang_tokens[%d]=%d out of vocab range [0, %lld)\n",
+                         i, in.lang_tokens[i], (long long) m->n_vocab);
+            return {};
+        }
+    }
+
+    const size_t per_view_n = size_t(cfg.n_img*cfg.hidden);
 
     int    n_views   = 0;
     size_t img_emb_n = 0;
@@ -1580,38 +1346,26 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         const int64_t s = m->vit_scale, c4 = H * s * s, K = m->vit_n_tokens;
         const auto t_vision_begin = clock::now();
 
-        // Graph A: SigLIP ViT (conv patch-embed -> +pos -> layers -> post_ln), plain sequential positions.
+        // SigLIP ViT (conv patch-embed -> +pos -> layers -> post_ln -> pixel shuffle -> connector), plain sequential positions.
         ggml_context * VC = m->vision_scratch.reset(size_t(256)*1024*1024);
         if (!VC) { std::fprintf(stderr, "vla(smolvla): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, m->vit_image, m->vit_image, 3); ggml_set_input(t_px);
-        ggml_tensor * conv = ggml_conv_2d(VC, m->vit_patch_w, t_px, (int) m->vit_patch, (int) m->vit_patch, 0, 0, 1, 1);
-        ggml_tensor * patches = ggml_cont(VC, ggml_transpose(VC, ggml_reshape_2d(VC, conv, n_patches, H)));
-        ggml_tensor * hv = ggml_add(VC, ggml_add(VC, patches, m->vit_patch_b), m->vit_pos);
-        for (int64_t i=0; i<m->vit_layers; ++i)
-            hv = build_siglip_layer(VC, m->vit[i], hv, n_patches, m->vit_heads, H/m->vit_heads, H, m->vit_ln_eps);
-        ggml_tensor * post_ln = ggml_add(VC, ggml_mul(VC, ggml_norm(VC, hv, m->vit_ln_eps), m->vit_post_ln_w), m->vit_post_ln_b);
-        ggml_set_output(post_ln);
-        ggml_cgraph * gA = ggml_new_graph_custom(VC, 8192, false);
-        ggml_build_forward_expand(gA, post_ln);
-        if (!m->vision_scratch.alloc(m->backend, gA)) {
-            std::fprintf(stderr, "vla(smolvla): vision gallocr A alloc failed\n");
-            return {};
-        }
-
-        // Graph B: pixel-shuffle connector, a single bias-free matmul (c4 -> hidden).
-        ggml_context * MC = m->connector_scratch.reset(size_t(64)*1024*1024);
-        if (!MC) { std::fprintf(stderr, "vla(smolvla): ggml_init(connector ctx) failed\n"); return {}; }
-        ggml_tensor * t_shuf = ggml_new_tensor_2d(MC, GGML_TYPE_F32, c4, K); ggml_set_input(t_shuf);
-        ggml_tensor * img_embeds = ggml_mul_mat(MC, m->mm_fc, t_shuf);
+        ggml_tensor * hv = m->vit.embed_conv(VC, t_px, m->vit_patch, grid);
+        for (const EncBlockW & w : m->vit.enc.blk)
+            hv = build_siglip_layer(VC, m->vit.enc.cfg, w, hv, n_patches);
+        ggml_tensor * shuf = layer_norm(VC, hv, m->vit.post_ln_w, m->vit.post_ln_b, m->vit.enc.cfg.ln_eps);
+        shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_3d(VC, shuf, H*s, grid/s, grid), 0, 2, 1, 3));
+        shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_3d(VC, shuf, c4, grid/s, grid/s), 0, 2, 1, 3));
+        ggml_tensor * img_embeds = ggml_mul_mat(VC, m->mm_fc, ggml_reshape_2d(VC, shuf, c4, K));
         ggml_set_output(img_embeds);
-        ggml_cgraph * gB = ggml_new_graph(MC);
-        ggml_build_forward_expand(gB, img_embeds);
-        if (!m->connector_scratch.alloc(m->backend, gB)) {
-            std::fprintf(stderr, "vla(smolvla): vision gallocr B alloc failed\n");
+        ggml_cgraph * gA = ggml_new_graph_custom(VC, 8192, false);
+        ggml_build_forward_expand(gA, img_embeds);
+        if (!m->vision_scratch.alloc(m->backend, gA)) {
+            std::fprintf(stderr, "vla(smolvla): vision gallocr alloc failed\n");
             return {};
         }
 
-        std::vector<float> chw, post_host((size_t) H * n_patches), shuf_host((size_t) c4*K);
+        std::vector<float> chw;
         bool vok = true;
         for (int v=0; v<n_views && vok; ++v) {
             if (!preprocess_image_chw("smolvla", in.images[v], m->vit_image, chw)) {
@@ -1621,14 +1375,7 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
             ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
             graph_unique_names(gA);
             if (ggml_backend_graph_compute(m->backend, gA) != GGML_STATUS_SUCCESS) {
-                std::fprintf(stderr, "vla(smolvla): vision compute A failed (view %d)\n", v); vok = false; break;
-            }
-            ggml_backend_tensor_get(post_ln, post_host.data(), 0, ggml_nbytes(post_ln));
-            pixel_shuffle_hf(post_host.data(), shuf_host.data(), H, grid, s);
-            ggml_backend_tensor_set(t_shuf, shuf_host.data(), 0, ggml_nbytes(t_shuf));
-            graph_unique_names(gB);
-            if (ggml_backend_graph_compute(m->backend, gB) != GGML_STATUS_SUCCESS) {
-                std::fprintf(stderr, "vla(smolvla): connector compute failed (view %d)\n", v); vok = false; break;
+                std::fprintf(stderr, "vla(smolvla): vision compute failed (view %d)\n", v); vok = false; break;
             }
             ggml_backend_tensor_get(img_embeds, img_emb_pre.data()+size_t(v)*per_view_n, 0, ggml_nbytes(img_embeds));
         }
@@ -1636,182 +1383,55 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         m->stats.ms_vision = std::chrono::duration<float, std::milli>(clock::now()-t_vision_begin).count();
     }
 
-    cfg.n_img    = m->cfg.n_img*int64_t(n_views);
-    cfg.n_prefix = cfg.n_img+cfg.n_lang+cfg.n_state;
-    cfg.n_full   = cfg.n_prefix+cfg.n_suffix;
+    const bool    phase     = in.timing_detail == TimingDetail::PHASE;
+    const int64_t n_img     = cfg.n_img*int64_t(n_views);
+    const int64_t n_lang    = phase ? in.n_lang : cfg.n_lang;
+    const int64_t n_prefix  = n_img+n_lang+cfg.n_state;
+    const int64_t n_full    = n_prefix+cfg.n_suffix;
+    const int64_t pad_start = n_img+in.n_lang;
+    const int64_t pad_end   = n_img+n_lang;
 
-    if (in.n_lang < 1 || in.n_lang > int(cfg.n_lang)) {
-        std::fprintf(stderr, "vla: lang_tokens length %d out of range [1, %lld]\n",
-                     in.n_lang, (long long) cfg.n_lang);
-        return {};
-    }
+    const size_t max_nodes = size_t(64)*cfg.n_layers*(cfg.num_steps+1) + 1024;
+    const size_t arena     = ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false);
 
-    // The language tokens index E_lang via ggml_get_rows, which does not bound
-    // its indices. Reject any token id outside the embedding table before the
-    // gather so an out-of-range id cannot read past the weights.
-    const int64_t vocab_rows = m->E_lang ? m->E_lang->ne[1] : 0;
-    for (int i=0; i<in.n_lang; ++i) {
-        if (in.lang_tokens[i] < 0 || in.lang_tokens[i] >= vocab_rows) {
-            std::fprintf(stderr, "vla: lang_tokens[%d]=%d out of vocab range [0, %lld)\n",
-                         i, in.lang_tokens[i], (long long) vocab_rows);
+    SmolVLAModelArch::MainIO * io = nullptr;
+    ggml_cgraph * gf = nullptr;
+    SmolVLAModelArch::MainIO phase_io;
+    std::unique_ptr<ggml_context, decltype(&ggml_free)> phase_ctx(nullptr, ggml_free);
+    std::unique_ptr<ggml_backend_buffer, decltype(&ggml_backend_buffer_free)> phase_buf(nullptr, ggml_backend_buffer_free);
+    if (!phase) {
+        const bool built = m->main_graph.ensure(m->backend, n_views, arena,
+            [&](ggml_context * C, SmolVLAModelArch::MainIO & gio) -> ggml_cgraph * {
+                build_graph(m, C, gio, n_views, n_lang, false);
+                ggml_cgraph * g = ggml_new_graph_custom(C, max_nodes, false);
+                ggml_build_forward_expand(g, gio.x_t);
+                return g;
+            });
+        if (!built) {
+            std::fprintf(stderr, "vla: cached graph build failed\n");
             return {};
         }
-    }
-
-    if (in.timing_detail == TimingDetail::NONE) {
-
-        if (m->gf_cached == nullptr || m->cached_n_views != n_views) {
-            if (m->galloc)
-                ggml_gallocr_free(m->galloc);
-            if (m->ctx_compute)
-                ggml_free(m->ctx_compute);
-            m->galloc      = nullptr;
-            m->ctx_compute = nullptr;
-            m->gf_cached   = nullptr;
-            if (!build_compute_graph(m, n_views)) {
-                std::fprintf(stderr, "vla: cached graph build failed\n");
-                return {};
-            }
-            m->cached_n_views = n_views;
-        }
-
-        const int64_t n_lang_max   = m->cfg.n_lang;
-        const int64_t n_prefix_max = cfg.n_img+n_lang_max+cfg.n_state;
-        const int64_t n_full_max   = n_prefix_max+cfg.n_suffix;
-        const int64_t pad_start    = cfg.n_img+in.n_lang;
-        const int64_t pad_end      = cfg.n_img+n_lang_max;
-
-        std::vector<float> state_host(cfg.max_state_dim, 0.0f);
-        if (in.state)
-            std::memcpy(state_host.data(), in.state, cfg.max_state_dim*sizeof(float));
-        for (int64_t i=0; i<cfg.real_state_dim && i<cfg.max_state_dim; ++i) {
-            state_host[i] = (state_host[i]-m->state_mean[i])/(m->state_std[i]+cfg.norm_eps);
-        }
-
-        std::vector<float> noise_host(cfg.n_suffix*cfg.max_action_dim);
-        if (in.noise) {
-            std::memcpy(noise_host.data(), in.noise, noise_host.size()*sizeof(float));
-        } else {
-            std::normal_distribution<float> dist(0.f, 1.f);
-            for (auto & v : noise_host)
-                v = dist(m->rng);
-        }
-
-        std::vector<int32_t> lang_host(n_lang_max, 0);
-        std::memcpy(lang_host.data(), in.lang_tokens, in.n_lang*sizeof(int32_t));
-
-        const int64_t state_pos       = cfg.n_img+in.n_lang;
-        const int64_t suffix_pos_base = state_pos+1;
-        std::vector<float>   mask_prefill_host(n_prefix_max * n_prefix_max);
-        std::vector<int32_t> pos_prefill_host (n_prefix_max);
-        for (int64_t i=0; i<n_prefix_max; ++i) {
-            for (int64_t j=0; j<n_prefix_max; ++j) {
-                bool blocked = false;
-                if ((i < n_prefix_max-1) && (j == n_prefix_max-1))
-                    blocked = true;
-                if (j >= pad_start && j < pad_end)
-                    blocked = true;
-                mask_prefill_host[i * n_prefix_max+j] = blocked ? -INFINITY : 0.f;
-            }
-            pos_prefill_host[i] = (i == n_prefix_max-1)
-                ? static_cast<int32_t>(state_pos)
-                : static_cast<int32_t>(i);
-        }
-
-        std::vector<float>   mask_full_host       (n_full_max   * cfg.n_suffix);
-        std::vector<float>   mask_prefix_only_host(n_prefix_max * cfg.n_suffix, 0.f);
-        std::vector<int32_t> pos_full_host        (cfg.n_suffix);
-        std::vector<int32_t> pos_rebased_host     (cfg.n_suffix);
-        for (int64_t i=0; i<cfg.n_suffix; ++i) {
-            for (int64_t j=0; j<n_full_max; ++j) {
-                bool blocked;
-                if (j < n_prefix_max) {
-                    blocked = (j >= pad_start && j < pad_end);
-                } else {
-                    blocked = ((j-n_prefix_max) > i);
-                }
-                mask_full_host[i * n_full_max+j] = blocked ? -INFINITY : 0.f;
-            }
-            for (int64_t j=0; j<n_prefix_max; ++j) {
-                if (j >= pad_start && j < pad_end) {
-                    mask_prefix_only_host[i * n_prefix_max+j] = -INFINITY;
-                }
-            }
-            pos_full_host   [i] = static_cast<int32_t>(suffix_pos_base+i);
-            pos_rebased_host[i] = static_cast<int32_t>(i);
-        }
-
-        if (!ggml_gallocr_alloc_graph(m->galloc, m->gf_cached)) {
-            std::fprintf(stderr, "vla: ggml_gallocr_alloc_graph failed\n");
+        io = &m->main_graph.io();
+        gf = m->main_graph.graph();
+    } else {
+        ggml_init_params gparams = { arena + ggml_graph_overhead_custom(4096, false), nullptr, true };
+        phase_ctx.reset(ggml_init(gparams));
+        if (!phase_ctx) {
+            std::fprintf(stderr, "vla: ggml_init (compute) failed\n");
             return {};
         }
-
-        ggml_backend_tensor_set(m->in_img_emb,       img_emb_pre.data(),    0, img_emb_n * sizeof(float));
-        ggml_backend_tensor_set(m->in_lang_ids,      lang_host.data(),      0, n_lang_max        * sizeof(int32_t));
-        ggml_backend_tensor_set(m->in_state,         state_host.data(),     0, cfg.max_state_dim*sizeof(float));
-        ggml_backend_tensor_set(m->in_x0,            noise_host.data(),     0, noise_host.size()*sizeof(float));
-        ggml_backend_tensor_set(m->in_mask_prefill,  mask_prefill_host.data(),     0, mask_prefill_host.size()     * sizeof(float));
-        ggml_backend_tensor_set(m->in_pos_prefill,   pos_prefill_host.data(),      0, pos_prefill_host.size()      * sizeof(int32_t));
-        ggml_backend_tensor_set(m->in_mask_full,     mask_full_host.data(),        0, mask_full_host.size()        * sizeof(float));
-        ggml_backend_tensor_set(m->in_mask_pfx_only, mask_prefix_only_host.data(), 0, mask_prefix_only_host.size()*sizeof(float));
-        ggml_backend_tensor_set(m->in_pos_full,      pos_full_host.data(),         0, pos_full_host.size()         * sizeof(int32_t));
-        ggml_backend_tensor_set(m->in_pos_rebased,   pos_rebased_host.data(),      0, pos_rebased_host.size()      * sizeof(int32_t));
-
-        graph_unique_names(m->gf_cached);
-        const auto t0 = clock::now();
-        if (ggml_backend_graph_compute(m->backend, m->gf_cached) != GGML_STATUS_SUCCESS) {
-            std::fprintf(stderr, "vla: ggml compute (cached) failed\n");
+        build_graph(m, phase_ctx.get(), phase_io, n_views, n_lang, true);
+        // Graph inputs, not weights: tag them so a backend that reads buffer usage
+        // (ggml-openvino) does not mistake the default ANY for a KV cache. gallocr
+        // tags its own arena the same way.
+        phase_buf.reset(ggml_backend_alloc_ctx_tensors(phase_ctx.get(), m->backend));
+        if (!phase_buf) {
+            std::fprintf(stderr, "vla: ggml_backend_alloc_ctx_tensors (compute) failed\n");
             return {};
         }
-        m->stats.ms_inference = std::chrono::duration<float, std::milli>(
-            clock::now()-t0).count();
-
-        std::vector<float> out(cfg.n_suffix*cfg.max_action_dim);
-        ggml_backend_tensor_get(m->out_x_t, out.data(), 0, out.size()*sizeof(float));
-        for (int64_t r=0; r<cfg.n_suffix; ++r) {
-            float * row = out.data()+r * cfg.max_action_dim;
-            for (int64_t j=0; j<cfg.max_action_dim; ++j) {
-                row[j] = j < cfg.real_action_dim ? row[j]*(m->action_std[j]+cfg.norm_eps)+m->action_mean[j] : 0.0f;
-            }
-        }
-
-        m->stats.ms_total = std::chrono::duration<float, std::milli>(
-            clock::now()-t_total_begin).count();
-        return out;
+        ggml_backend_buffer_set_usage(phase_buf.get(), GGML_BACKEND_BUFFER_USAGE_COMPUTE);
+        io = &phase_io;
     }
-
-    ggml_init_params gparams = {
-         size_t(64)*1024*1024,
-         nullptr,
-         true,
-    };
-    ggml_context * ctx = ggml_init(gparams);
-    if (!ctx) {
-        std::fprintf(stderr, "vla: ggml_init (compute) failed\n");
-        return {};
-    }
-
-    if (in.n_lang < 1 || in.n_lang > int(cfg.n_lang)) {
-        std::fprintf(stderr, "vla: lang_tokens length %d out of range [1, %lld]\n",
-                     in.n_lang, (long long) cfg.n_lang);
-        ggml_free(ctx);
-        return {};
-    }
-
-    cfg.n_lang   = in.n_lang;
-    cfg.n_prefix = cfg.n_img+cfg.n_lang+cfg.n_state;
-    cfg.n_full   = cfg.n_prefix+cfg.n_suffix;
-    ggml_tensor * img_emb_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.hidden, cfg.n_img);
-    ggml_tensor * lang_ids   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_lang);
-    ggml_tensor * state_t    = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.max_state_dim);
-    ggml_tensor * x0         = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.max_action_dim, cfg.n_suffix);
-
-    ggml_tensor * mask_prefill     = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.n_prefix, cfg.n_prefix);
-    ggml_tensor * pos_prefill      = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_prefix);
-    ggml_tensor * mask_full        = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.n_full,   cfg.n_suffix);
-    ggml_tensor * mask_prefix_only = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.n_prefix, cfg.n_suffix);
-    ggml_tensor * pos_full         = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
-    ggml_tensor * pos_rebased      = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
 
     std::vector<float> state_host(cfg.max_state_dim, 0.0f);
     if (in.state)
@@ -1829,202 +1449,111 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
             v = dist(m->rng);
     }
 
-    std::vector<float>   mask_prefill_host(cfg.n_prefix*cfg.n_prefix);
-    std::vector<int32_t> pos_prefill_host (cfg.n_prefix);
-    for (int64_t i=0; i<cfg.n_prefix; ++i) {
-        for (int64_t j=0; j<cfg.n_prefix; ++j) {
-            const bool blocked = (i < cfg.n_prefix-1) && (j == cfg.n_prefix-1);
-            mask_prefill_host[i * cfg.n_prefix+j] = blocked ? -INFINITY : 0.f;
-        }
-        pos_prefill_host[i] = static_cast<int32_t>(i);
+    std::vector<int32_t> lang_host(n_lang, 0);
+    std::memcpy(lang_host.data(), in.lang_tokens, in.n_lang*sizeof(int32_t));
+    std::vector<float> lang_emb_host(size_t(n_lang)*cfg.hidden);
+    if (m->E_lang.empty()) {
+        if (!m->gst.fetch_rows_f32("token_embd.weight", lang_host, lang_emb_host.data(), cfg.hidden))
+            return {};
+    } else {
+        for (int64_t i=0; i<n_lang; ++i)
+            ggml_bf16_to_fp32_row(m->E_lang.data()+size_t(lang_host[i])*cfg.hidden,
+                                  lang_emb_host.data()+size_t(i)*cfg.hidden, cfg.hidden);
     }
 
-    std::vector<float>   mask_full_host       (cfg.n_full   * cfg.n_suffix);
-    std::vector<float>   mask_prefix_only_host(cfg.n_prefix*cfg.n_suffix, 0.f);
+    const int64_t state_pos       = n_img+in.n_lang;
+    const int64_t suffix_pos_base = state_pos+1;
+    std::vector<float>   mask_prefill_host(n_prefix * n_prefix);
+    std::vector<int32_t> pos_prefill_host (n_prefix);
+    for (int64_t i=0; i<n_prefix; ++i) {
+        for (int64_t j=0; j<n_prefix; ++j) {
+            bool blocked = false;
+            if ((i < n_prefix-1) && (j == n_prefix-1))
+                blocked = true;
+            if (j >= pad_start && j < pad_end)
+                blocked = true;
+            mask_prefill_host[i * n_prefix+j] = blocked ? -INFINITY : 0.f;
+        }
+        pos_prefill_host[i] = (i == n_prefix-1)
+            ? static_cast<int32_t>(state_pos)
+            : static_cast<int32_t>(i);
+    }
+
+    std::vector<float>   mask_full_host       (n_full   * cfg.n_suffix);
+    std::vector<float>   mask_prefix_only_host(n_prefix * cfg.n_suffix, 0.f);
     std::vector<int32_t> pos_full_host        (cfg.n_suffix);
     std::vector<int32_t> pos_rebased_host     (cfg.n_suffix);
     for (int64_t i=0; i<cfg.n_suffix; ++i) {
-        for (int64_t j=0; j<cfg.n_full; ++j) {
+        for (int64_t j=0; j<n_full; ++j) {
             bool blocked;
-            if (j < cfg.n_prefix)
-                blocked = false;
-            else
-                blocked = ((j-cfg.n_prefix) > i);
-            mask_full_host[i * cfg.n_full+j] = blocked ? -INFINITY : 0.f;
+            if (j < n_prefix) {
+                blocked = (j >= pad_start && j < pad_end);
+            } else {
+                blocked = ((j-n_prefix) > i);
+            }
+            mask_full_host[i * n_full+j] = blocked ? -INFINITY : 0.f;
         }
-        pos_full_host   [i] = static_cast<int32_t>(cfg.n_prefix+i);
+        for (int64_t j=0; j<n_prefix; ++j) {
+            if (j >= pad_start && j < pad_end) {
+                mask_prefix_only_host[i * n_prefix+j] = -INFINITY;
+            }
+        }
+        pos_full_host   [i] = static_cast<int32_t>(suffix_pos_base+i);
         pos_rebased_host[i] = static_cast<int32_t>(i);
     }
 
-    const float lang_scale = std::sqrt(static_cast<float>(cfg.hidden));
-    ggml_tensor * img_emb_scaled  = ggml_scale(ctx, img_emb_in, lang_scale);
-    ggml_tensor * lang_raw        = ggml_get_rows(ctx, m->E_lang, lang_ids);
-    ggml_tensor * lang_emb_scaled = ggml_scale(ctx, lang_raw, lang_scale);
-    ggml_tensor * state_pre = ggml_add(ctx, ggml_mul_mat(ctx, m->Wstate, state_t), m->bstate);
-    ggml_tensor * state_emb = ggml_reshape_2d(ctx, state_pre, cfg.hidden, 1);
-    ggml_tensor * embs_il   = ggml_concat(ctx, img_emb_scaled, lang_emb_scaled, 1);
-    ggml_tensor * prefix_embs = ggml_concat(ctx, embs_il, state_emb, 1);
+    ggml_backend_tensor_set(io->img_emb,       img_emb_pre.data(),    0, img_emb_n * sizeof(float));
+    ggml_backend_tensor_set(io->lang_emb,      lang_emb_host.data(),  0, lang_emb_host.size()*sizeof(float));
+    ggml_backend_tensor_set(io->state,         state_host.data(),     0, cfg.max_state_dim*sizeof(float));
+    ggml_backend_tensor_set(io->x0,            noise_host.data(),     0, noise_host.size()*sizeof(float));
+    ggml_backend_tensor_set(io->mask_prefill,  mask_prefill_host.data(),     0, mask_prefill_host.size()     * sizeof(float));
+    ggml_backend_tensor_set(io->pos_prefill,   pos_prefill_host.data(),      0, pos_prefill_host.size()      * sizeof(int32_t));
+    ggml_backend_tensor_set(io->mask_full,     mask_full_host.data(),        0, mask_full_host.size()        * sizeof(float));
+    ggml_backend_tensor_set(io->mask_pfx_only, mask_prefix_only_host.data(), 0, mask_prefix_only_host.size()*sizeof(float));
+    ggml_backend_tensor_set(io->pos_full,      pos_full_host.data(),         0, pos_full_host.size()         * sizeof(int32_t));
+    ggml_backend_tensor_set(io->pos_rebased,   pos_rebased_host.data(),      0, pos_rebased_host.size()      * sizeof(int32_t));
 
-    ggml_tensor * mask_prefill_f16     = ggml_cast(ctx, mask_prefill,     GGML_TYPE_F16);
-    ggml_tensor * mask_full_f16        = ggml_cast(ctx, mask_full,        GGML_TYPE_F16);
-    ggml_tensor * mask_prefix_only_f16 = ggml_cast(ctx, mask_prefix_only, GGML_TYPE_F16);
-    std::vector<ggml_tensor *> k_cache(cfg.n_layers);
-    std::vector<ggml_tensor *> v_cache(cfg.n_layers);
-    {
-        ggml_tensor * h = prefix_embs;
+    if (phase) {
+        ggml_cgraph * gf_pre = ggml_new_graph_custom(phase_ctx.get(), 4096, false);
         for (int i=0; i<cfg.n_layers; ++i) {
-            h = build_vlm_layer(ctx, m->vlm_layers[i], h, mask_prefill_f16, pos_prefill,
-                                cfg, &k_cache[i], &v_cache[i]);
-        }
-    }
-
-    std::vector<ggml_tensor *> K_storage(cfg.n_layers);
-    std::vector<ggml_tensor *> V_storage(cfg.n_layers);
-    if (in.timing_detail == TimingDetail::PHASE) {
-        for (int i=0; i<cfg.n_layers; ++i) {
-            K_storage[i] = ggml_new_tensor_3d(ctx, GGML_TYPE_F32,
-                                              cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix);
-            V_storage[i] = ggml_new_tensor_3d(ctx, GGML_TYPE_F32,
-                                              cfg.head_dim, cfg.n_kv_heads, cfg.n_prefix);
-        }
-    }
-
-    auto ms_since = [](auto t0) {
-        return std::chrono::duration<float, std::milli>(clock::now()-t0).count();
-    };
-
-    auto & K_ref = (in.timing_detail == TimingDetail::PHASE) ? K_storage : k_cache;
-    auto & V_ref = (in.timing_detail == TimingDetail::PHASE) ? V_storage : v_cache;
-
-    const float dt = -1.f/static_cast<float>(cfg.num_steps);
-    ggml_tensor * x_t = x0;
-    std::vector<ggml_tensor *>     time_bcasts(cfg.num_steps, nullptr);
-    std::vector<std::vector<float>> time_host  (cfg.num_steps);
-
-    std::vector<ggml_tensor *> xk_cache(cfg.n_layers, nullptr);
-    std::vector<ggml_tensor *> xv_cache(cfg.n_layers, nullptr);
-    for (int li=0; li<cfg.n_layers; ++li) {
-        if (!m->expert_layers[li].is_self_attn)
-            expert_cross_kv(ctx, m->expert_layers[li], K_ref[li], V_ref[li], cfg, &xk_cache[li], &xv_cache[li]);
-    }
-
-    for (int step=0; step<cfg.num_steps; ++step) {
-        const double time = 1.0+static_cast<double>(step)*static_cast<double>(dt);
-        time_host[step] = sinusoidal_time_emb(time, cfg.expert_h, cfg.min_period, cfg.max_period);
-
-        ggml_tensor * time_bcast = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.expert_h, cfg.n_suffix);
-        time_bcasts[step] = time_bcast;
-
-        ggml_tensor * action_emb     = ggml_add(ctx, ggml_mul_mat(ctx, m->W_ain, x_t), m->b_ain);
-        ggml_tensor * action_time_in = ggml_concat(ctx, action_emb, time_bcast, 0);
-        ggml_tensor * mlp1           = ggml_add(ctx, ggml_mul_mat(ctx, m->W_at1, action_time_in), m->b_at1);
-        ggml_tensor * suffix_embs    = ggml_add(ctx,
-                                                ggml_mul_mat(ctx, m->W_at2, ggml_silu(ctx, mlp1)),
-                                                m->b_at2);
-
-        ggml_tensor * h = suffix_embs;
-        for (int li=0; li<cfg.n_layers; ++li) {
-            if (m->expert_layers[li].is_self_attn) {
-                h = build_expert_self_attn_layer(ctx, m->expert_layers[li], h,
-                                                 K_ref[li], V_ref[li],
-                                                 pos_full, mask_full_f16, cfg);
-            } else {
-                h = build_expert_cross_attn_layer(ctx, m->expert_layers[li], h,
-                                                  xk_cache[li], xv_cache[li],
-                                                  pos_rebased, mask_prefix_only_f16, cfg);
-            }
-        }
-        ggml_tensor * h_final = ggml_mul(ctx, ggml_rms_norm(ctx, h, cfg.rms_eps), m->Wnorm_expert);
-        ggml_tensor * v_t     = ggml_add(ctx, ggml_mul_mat(ctx, m->W_aout, h_final), m->b_aout);
-        x_t = ggml_add(ctx, x_t, ggml_scale(ctx, v_t, dt));
-    }
-
-    // Graph inputs, not weights: tag them so a backend that reads buffer usage
-    // (ggml-openvino) does not mistake the default ANY for a KV cache. gallocr
-    // tags its own arena the same way.
-    ggml_backend_buffer_t compute_buf = ggml_backend_alloc_ctx_tensors(ctx, m->backend);
-    if (compute_buf) {
-        ggml_backend_buffer_set_usage(compute_buf, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
-    } else {
-        std::fprintf(stderr, "vla: ggml_backend_alloc_ctx_tensors (compute) failed\n");
-        ggml_free(ctx);
-        return {};
-    }
-
-    ggml_backend_tensor_set(img_emb_in,       img_emb_pre.data(),    0, img_emb_n * sizeof(float));
-    ggml_backend_tensor_set(lang_ids,         in.lang_tokens,        0, cfg.n_lang        * sizeof(int32_t));
-    ggml_backend_tensor_set(state_t,          state_host.data(),     0, cfg.max_state_dim*sizeof(float));
-    ggml_backend_tensor_set(x0,               noise_host.data(),     0, noise_host.size()        * sizeof(float));
-    ggml_backend_tensor_set(mask_prefill,     mask_prefill_host.data(),     0, mask_prefill_host.size()     * sizeof(float));
-    ggml_backend_tensor_set(pos_prefill,      pos_prefill_host.data(),      0, pos_prefill_host.size()      * sizeof(int32_t));
-    ggml_backend_tensor_set(mask_full,        mask_full_host.data(),        0, mask_full_host.size()        * sizeof(float));
-    ggml_backend_tensor_set(mask_prefix_only, mask_prefix_only_host.data(), 0, mask_prefix_only_host.size()*sizeof(float));
-    ggml_backend_tensor_set(pos_full,         pos_full_host.data(),         0, pos_full_host.size()         * sizeof(int32_t));
-    ggml_backend_tensor_set(pos_rebased,      pos_rebased_host.data(),      0, pos_rebased_host.size()      * sizeof(int32_t));
-    for (int step=0; step<cfg.num_steps; ++step) {
-
-        std::vector<float> tile(cfg.expert_h*cfg.n_suffix);
-        for (int64_t t=0; t<cfg.n_suffix; ++t) {
-            std::memcpy(tile.data()+t * cfg.expert_h,
-                        time_host[step].data(), cfg.expert_h*sizeof(float));
-        }
-        ggml_backend_tensor_set(time_bcasts[step], tile.data(), 0, tile.size()*sizeof(float));
-    }
-
-    if (in.timing_detail == TimingDetail::PHASE) {
-
-        ggml_cgraph * gf_pre = ggml_new_graph_custom(ctx,  4096,  false);
-        for (int i=0; i<cfg.n_layers; ++i) {
-            ggml_build_forward_expand(gf_pre, k_cache[i]);
-            ggml_build_forward_expand(gf_pre, v_cache[i]);
+            ggml_build_forward_expand(gf_pre, io->k_cache[i]);
+            ggml_build_forward_expand(gf_pre, io->v_cache[i]);
         }
         graph_unique_names(gf_pre);
         const auto t0 = clock::now();
         if (ggml_backend_graph_compute(m->backend, gf_pre) != GGML_STATUS_SUCCESS) {
             std::fprintf(stderr, "vla: ggml prefill compute failed\n");
-            ggml_backend_buffer_free(compute_buf);
-            ggml_free(ctx);
             return {};
         }
-        m->stats.ms_prefill = ms_since(t0);
+        m->stats.ms_prefill = std::chrono::duration<float, std::milli>(clock::now()-t0).count();
 
         for (int i=0; i<cfg.n_layers; ++i) {
-            ggml_backend_tensor_copy(k_cache[i], K_storage[i]);
-            ggml_backend_tensor_copy(v_cache[i], V_storage[i]);
+            ggml_backend_tensor_copy(io->k_cache[i], io->k_leaf[i]);
+            ggml_backend_tensor_copy(io->v_cache[i], io->v_leaf[i]);
         }
+        gf = ggml_new_graph_custom(phase_ctx.get(), max_nodes, false);
+        ggml_build_forward_expand(gf, io->x_t);
     }
 
-    {
-        ggml_cgraph * gf = ggml_new_graph_custom(ctx,  16384,  false);
-        ggml_build_forward_expand(gf, x_t);
-        graph_unique_names(gf);
-        const auto t0 = clock::now();
-        if (ggml_backend_graph_compute(m->backend, gf) != GGML_STATUS_SUCCESS) {
-            std::fprintf(stderr, "vla: ggml compute failed\n");
-            ggml_backend_buffer_free(compute_buf);
-            ggml_free(ctx);
-            return {};
-        }
-        const float ms = ms_since(t0);
-        if (in.timing_detail == TimingDetail::PHASE) {
-            m->stats.ms_denoise = ms;
-        }
-
-        m->stats.ms_inference = m->stats.ms_prefill+ms;
+    graph_unique_names(gf);
+    const auto t0 = clock::now();
+    if (ggml_backend_graph_compute(m->backend, gf) != GGML_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla: ggml compute failed\n");
+        return {};
     }
+    const float ms = std::chrono::duration<float, std::milli>(clock::now()-t0).count();
+    if (phase)
+        m->stats.ms_denoise = ms;
+    m->stats.ms_inference = m->stats.ms_prefill+ms;
 
     std::vector<float> out(cfg.n_suffix*cfg.max_action_dim);
-    ggml_backend_tensor_get(x_t, out.data(), 0, out.size()*sizeof(float));
-
+    ggml_backend_tensor_get(io->x_t, out.data(), 0, out.size()*sizeof(float));
     for (int64_t r=0; r<cfg.n_suffix; ++r) {
         float * row = out.data()+r * cfg.max_action_dim;
         for (int64_t j=0; j<cfg.max_action_dim; ++j) {
             row[j] = j < cfg.real_action_dim ? row[j]*(m->action_std[j]+cfg.norm_eps)+m->action_mean[j] : 0.0f;
         }
     }
-
-    ggml_backend_buffer_free(compute_buf);
-    ggml_free(ctx);
 
     m->stats.ms_total = std::chrono::duration<float, std::milli>(
         clock::now()-t_total_begin).count();
@@ -2036,15 +1565,12 @@ std::vector<float> SmolVLAModelArch::predict(const Inputs& in) {
     return predict_impl(this, in);
 }
 
-std::unique_ptr<ModelArchBase> smolvla_create(const std::string& mmproj_path,
+std::unique_ptr<ModelArchBase> smolvla_create(const std::string&,
                                               const std::string& ckpt_path,
                                               const std::string& config_path,
                                               const Options& opts) {
-    SmolVLAModelArch* raw = smolvla_load_impl(opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16)),
-                                             mmproj_path, ckpt_path, config_path);
-    if (!raw)
-        return nullptr;
-    return std::unique_ptr<ModelArchBase>(raw);
+    return smolvla_load_impl(opts.weight_dtype.value_or(vla::default_weight_dtype(GGML_TYPE_BF16)),
+                             ckpt_path, config_path, opts);
 }
 
 }

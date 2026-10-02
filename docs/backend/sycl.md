@@ -151,24 +151,24 @@ where it pays off.
 
 ggml-sycl's copy table used to have `f16 -> f32` but no `bf16 -> f32`, so an arch
 whose graph contained that copy aborted at predict time. VLA-Adapter hit it with
-its default BF16 weights, and the workaround was `VLA_ADAPTER_F32_WEIGHTS=1`.
+its default BF16 weights, and the workaround was F32 weights (then
+`VLA_ADAPTER_F32_WEIGHTS=1`, now `--weight-dtype f32`).
 
 llama.cpp b10326 adds the missing kernel (`cpy_1_bf16_f32` in
 `ggml/src/ggml-sycl/cpy.cpp`), so VLA-Adapter should run on stock BF16 weights
 now. Not yet re-tested on the A380 - if you hit the old abort, fall back to
-`VLA_ADAPTER_F32_WEIGHTS=1` and file an issue.
+`--weight-dtype f32` and file an issue.
 
 ## Performance note: F32 weights
 
 BF16 has no native DPAS path on Xe-HPG, so BF16 weights are slower there than
-plain F32 despite the extra bandwidth. Each arch exposes a switch
-(`VLA_WEIGHT_DTYPE=f32` for SmolVLA, `VLA_PI0_F32_WEIGHTS=1` for π0, and so on),
-and on the A380 it is worth ~16%:
+plain F32 despite the extra bandwidth. `--weight-dtype f32` switches any arch
+to F32 weights, and on the A380 it is worth ~16%:
 
 | SmolVLA weights | vision | inference | total |
 |---|---:|---:|---:|
 | BF16 (default) | 158 ms | 474 ms | **630 ms** |
-| F32 (`VLA_WEIGHT_DTYPE=f32`) | 173 ms | 355 ms | **528 ms** |
+| F32 (`--weight-dtype f32`) | 173 ms | 355 ms | **528 ms** |
 
 The tradeoff is memory - F32 doubles the resident weights (1.07 GiB -> 2.09 GiB
 for SmolVLA), which matters on a 6 GB A380 for the larger checkpoints. The
@@ -187,7 +187,7 @@ threads); GPU is the Arc A380.
 | Evo-1       | 448 | 7,695 ms | **1,176 ms** | 6.5x |
 | VLA-Adapter | 224 | 2,994 ms | **517 ms** | 5.8x |
 
-VLA-Adapter is measured with `VLA_ADAPTER_F32_WEIGHTS=1` on both sides, which was
+VLA-Adapter is measured with F32 weights on both sides, which was
 required at the time (see the `bf16 -> f32` section above); the others run their
 stock defaults.
 
@@ -201,7 +201,7 @@ Per-stage for SmolVLA:
 
 SmolVLA gains least because its flow-matching denoise loop is a long chain of
 small GEMMs that cannot fill 128 EUs; its vision tower alone is 7.1x. With
-`VLA_WEIGHT_DTYPE=f32` it reaches 528 ms (3.6x).
+`--weight-dtype f32` it reaches 528 ms (3.6x).
 
 Outputs were checked against the CPU backend on every model above: max absolute
 deviation 2.9e-3 on actions peaking at 0.99 (2.9e-6 for the all-F32

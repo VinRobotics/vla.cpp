@@ -133,8 +133,9 @@ ggml_tensor * WeightLoader::fuse(ggml_type want, const char * out_name, const st
         return nullptr;
     }
 
-    const bool is1d = ggml_n_dims(first) == 1;
-    int64_t    rows = 0;
+    const ggml_type rt   = g_.resident_type(first, want);
+    const bool      is1d = ggml_n_dims(first) == 1;
+    int64_t         rows = 0;
     for (const std::string & s : srcs) {
         const ggml_tensor * gs = g_.meta(s.c_str());
         if (!gs) {
@@ -142,19 +143,19 @@ ggml_tensor * WeightLoader::fuse(ggml_type want, const char * out_name, const st
             ok_ = false;
             return nullptr;
         }
-        // Concatenation along the last axis needs the same row shape and, for a
-        // packed type copied raw, the same source type.
-        if (gs->type != first->type || (!is1d && gs->ne[0] != first->ne[0]) || ggml_n_dims(gs) != ggml_n_dims(first)) {
-            std::fprintf(stderr, "vla(%s): cannot fuse %s with %s (type/shape differ)\n",
-                         arch_, s.c_str(), srcs[0].c_str());
+        // Same resident type and row shape; a tensor copied raw (a packed type,
+        // FoldQuant INT8 codes) also needs every source in that same type.
+        if (g_.resident_type(gs, want) != rt || (rt == first->type && gs->type != first->type) ||
+            (!is1d && gs->ne[0] != first->ne[0]) || ggml_n_dims(gs) != ggml_n_dims(first)) {
+            std::fprintf(stderr, "vla(%s): %s does not match %s for fusing\n", arch_, s.c_str(), srcs[0].c_str());
             ok_ = false;
             return nullptr;
         }
         rows += is1d ? gs->ne[0] : gs->ne[1];
     }
 
-    ggml_tensor * t = is1d ? ggml_new_tensor_1d(ctx_, want, rows)
-                           : ggml_new_tensor_2d(ctx_, want, first->ne[0], rows);
+    ggml_tensor * t = is1d ? ggml_new_tensor_1d(ctx_, rt, rows)
+                           : ggml_new_tensor_2d(ctx_, rt, first->ne[0], rows);
     if (!t) {
         std::fprintf(stderr, "vla(%s): ggml_new_tensor failed for %s\n", arch_, out_name);
         ok_ = false;

@@ -22,7 +22,7 @@
     return -1; } } while (0)
 #define CUDA_OK_NULL(c) do { cudaError_t _e = (c); if (_e != cudaSuccess) { \
     std::fprintf(stderr, "vla(bitvla_fp32head): %s at %s:%d (%s)\n", cudaGetErrorString(_e), __FILE__, __LINE__, #c); \
-    return nullptr; } } while (0)
+    bitvla_fp32head_cuda_free(ctx); return nullptr; } } while (0)
 
 struct bitvla_fp32head_cuda_ctx {
     cublasHandle_t cublas;
@@ -117,6 +117,7 @@ __global__ void layernorm_fp32_kernel(const float* __restrict__ x,
     }
     __syncthreads();
     const float mean = smem[0]/(float)K;
+    __syncthreads();
 
     float vsum = 0.0f;
     for (int k=tid; k<K; k += BLOCK) {
@@ -292,6 +293,7 @@ extern "C" int bitvla_fp32head_proprio_forward(
 
     CUDA_OK_RET(cudaMemcpyAsync(host_out, ctx->d_pp_out, (size_t)ctx->lm_hidden*sizeof(float),
                                  cudaMemcpyDeviceToHost, stream));
+    CUDA_OK_RET(cudaGetLastError());
     CUDA_OK_RET(cudaStreamSynchronize(stream));
     return 0;
 }
@@ -374,6 +376,7 @@ extern "C" int bitvla_fp32head_action_forward(
 
     CUDA_OK_RET(cudaMemcpyAsync(host_norm_actions, ctx->d_ah_out, (size_t)M * A * sizeof(float),
                                  cudaMemcpyDeviceToHost, stream));
+    CUDA_OK_RET(cudaGetLastError());
     CUDA_OK_RET(cudaStreamSynchronize(stream));
     return 0;
 }

@@ -129,6 +129,12 @@ def _resize_with_pad(img_chw: np.ndarray, target_h: int, target_w: int,
     t = F.pad(t, (pad_w, 0, pad_h, 0), value=pad_value)
     return t.squeeze(0).numpy()
 
+def _minmax_norm(x: np.ndarray, lo: np.ndarray, hi: np.ndarray, mask: np.ndarray) -> np.ndarray:
+
+    out = np.zeros_like(x, dtype=np.float32)
+    out[..., mask] = 2.0 * (x[..., mask] - lo[mask]) / (hi[mask] - lo[mask]) - 1.0
+    return out
+
 class VlaCppClient:
 
     DEFAULT_RECV_TIMEOUT_MS = 30_000
@@ -172,6 +178,8 @@ class VlaCppClient:
         self.sock = self.ctx.socket(zmq.REQ)
         self.sock.setsockopt(zmq.LINGER, 0)
         self.sock.setsockopt(zmq.RCVTIMEO, recv_timeout_ms)
+        self.sock.setsockopt(zmq.REQ_RELAXED, 1)
+        self.sock.setsockopt(zmq.REQ_CORRELATE, 1)
         self.sock.connect(vla_addr)
         print(f"vla-cpp-direct[arch={arch}]: connected to {vla_addr}", flush=True)
 
@@ -193,7 +201,9 @@ class VlaCppClient:
         self.image_keys = list(image_keys)
         self.max_length = max_length
         self._step = 0
+        self._episode = 0
         self._last_response = None
+        self._noise_len = None
 
         if n_action_steps < 1:
             raise ValueError(f"n_action_steps must be >= 1, got {n_action_steps}")
@@ -202,7 +212,7 @@ class VlaCppClient:
 
         self._bitvla_proprio_norm = None
         self._bitvla_unnorm_key   = None
-        if arch == "bitvla":
+        if arch in ("bitvla", "vla_adapter"):
             if stats_json:
                 stats_path = Path(stats_json)
             elif (Path(tokenizer_name) / "dataset_statistics.json").exists():
@@ -214,10 +224,12 @@ class VlaCppClient:
                 stats_path = Path(hf_hub_download(tokenizer_name, "dataset_statistics.json"))
             if not stats_path.exists():
                 raise FileNotFoundError(
-                    f"BitVLA dataset_statistics.json not found at {stats_path}. "
+                    f"{arch} dataset_statistics.json not found at {stats_path}. "
                     f"Pass --stats-json or point --tokenizer at a ckpt dir that has it.")
             blob = json.loads(stats_path.read_text())
             key = bitvla_unnorm_key
+            if key is None and arch == "vla_adapter":
+                key = os.environ.get("VLA_ADAPTER_UNNORM_KEY")
             if key is None:
                 if len(blob) != 1:
                     raise ValueError(
@@ -236,7 +248,7 @@ class VlaCppClient:
                 out = np.where(mask, 2.0 * (y - q01) / (q99 - q01 + 1e-8) - 1.0, y)
                 return np.clip(out, -1.0, 1.0).astype(np.float32)
             self._bitvla_proprio_norm = _norm
-            print(f"vla-cpp-direct[arch=bitvla]: proprio normalizer "
+            print(f"vla-cpp-direct[arch={arch}]: proprio normalizer "
                   f"BOUNDS_Q99 via {stats_path}::{key}.proprio", flush=True)
 
         self._oft_proprio_norm = None
@@ -381,6 +393,13 @@ class VlaCppClient:
             q01 = self._gr00t_quantile(action_stats, modalities, "q01")
             q99 = self._gr00t_quantile(action_stats, modalities, "q99")
             act_dim = int(q01.size)
+            state_stats = blob[key]["state"]
+            state_keys, state_dims = self._gr00t_modality_layout(state_stats)
+            state_cols = {}
+            s_off = 0
+            for m, dim in zip(state_keys, state_dims):
+                state_cols[m] = slice(s_off, s_off + dim)
+                s_off += dim
 
             # Checkpoints trained with use_relative_action predict, for the
             # modalities listed in meta/relative_stats.json, the offset from the
@@ -401,7 +420,7 @@ class VlaCppClient:
                 horizon = min(len(rel_stats[m]["min"]) for m in rel_names)
                 q01_t = np.tile(q01, (horizon, 1)).astype(np.float32)
                 q99_t = np.tile(q99, (horizon, 1)).astype(np.float32)
-                is_rel = np.zeros(act_dim, dtype=bool)
+                rel_cols = []
                 off = 0
                 for m, dim in zip(modalities, mod_dims):
                     if m in rel_stats:
@@ -419,13 +438,18 @@ class VlaCppClient:
                             raise ValueError(
                                 f"relative stats for {m!r} are {a.shape[1]}-wide, "
                                 f"statistics say {dim}")
+                        sc = state_cols.get(m)
+                        if sc is None or sc.stop - sc.start != dim:
+                            raise ValueError(
+                                f"relative modality {m!r} needs a {dim}-wide state.{m}, "
+                                f"state statistics have {list(zip(state_keys, state_dims))}")
                         q01_t[:, off:off + dim] = a
                         q99_t[:, off:off + dim] = b
-                        is_rel[off:off + dim] = True
+                        rel_cols.append((slice(off, off + dim), sc))
                     off += dim
                 rng_t = (q99_t - q01_t).astype(np.float32)
 
-                def _unnorm(chunk_132, q01_t=q01_t, rng_t=rng_t, is_rel=is_rel,
+                def _unnorm(chunk_132, q01_t=q01_t, rng_t=rng_t, rel_cols=tuple(rel_cols),
                             act_dim=act_dim, horizon=horizon):
                     n = min(len(chunk_132), horizon)
                     norm = np.clip(chunk_132[:n, :act_dim].astype(np.float32), -1.0, 1.0)
@@ -434,7 +458,9 @@ class VlaCppClient:
                     if ref is None:
                         raise RuntimeError("relative actions need the observation state; "
                                            "none was recorded for this request")
-                    raw[:, is_rel] += np.asarray(ref, dtype=np.float32)[:act_dim][is_rel]
+                    ref = np.asarray(ref, dtype=np.float32)
+                    for a_cols, s_cols in rel_cols:
+                        raw[:, a_cols] += ref[s_cols]
                     return raw.astype(np.float32)
             else:
                 rng = (q99 - q01).astype(np.float32)
@@ -456,17 +482,13 @@ class VlaCppClient:
                   f"relative={rel_names or 'none'}]",
                   flush=True)
 
-            state_stats = blob[key]["state"]
-            state_keys, state_dims = self._gr00t_modality_layout(state_stats)
             self._gr00t_state_keys = tuple(state_keys)
             self._gr00t_state_dims = tuple(state_dims)
             s_q01 = self._gr00t_quantile(state_stats, state_keys, "q01")
             s_q99 = self._gr00t_quantile(state_stats, state_keys, "q99")
-            s_rng = (s_q99 - s_q01).astype(np.float32)
-            def _state_norm(state_8d: np.ndarray, q01=s_q01, q99=s_q99, rng=s_rng) -> np.ndarray:
-
-                norm = 2.0 * (state_8d - q01) / np.where(rng > 1e-8, rng, 1.0) - 1.0
-                return np.clip(norm, -1.0, 1.0).astype(np.float32)
+            def _state_norm(state_8d: np.ndarray, q01=s_q01, q99=s_q99,
+                            mask=~np.isclose(s_q99, s_q01)) -> np.ndarray:
+                return np.clip(_minmax_norm(state_8d, q01, q99, mask), -1.0, 1.0)
             self._gr00t_state_norm = _state_norm
             print(f"vla-cpp-direct[arch=gr00t_n1_7]: state normalizer "
                   f"(q01/q99 + clip) via {stats_path}::{key}.state "
@@ -522,10 +544,9 @@ class VlaCppClient:
                 s_min_parts.append(mn); s_max_parts.append(mx)
             s_min = np.concatenate(s_min_parts)
             s_max = np.concatenate(s_max_parts)
-            s_rng = (s_max - s_min).astype(np.float32)
-            def _state_norm_n16(state_8d: np.ndarray, mn=s_min, mx=s_max, rng=s_rng) -> np.ndarray:
-                norm = 2.0 * (state_8d - mn) / np.where(rng > 1e-8, rng, 1.0) - 1.0
-                return np.clip(norm, -1.0, 1.0).astype(np.float32)
+            def _state_norm_n16(state_8d: np.ndarray, mn=s_min, mx=s_max,
+                                mask=~np.isclose(s_max, s_min)) -> np.ndarray:
+                return np.clip(_minmax_norm(state_8d, mn, mx, mask), -1.0, 1.0)
             self._gr00t_state_norm = _state_norm_n16
             print(f"vla-cpp-direct[arch=gr00t_n1_6]: state normalizer "
                   f"(min/max + clip) via {stats_path}::{key}.state "
@@ -564,10 +585,8 @@ class VlaCppClient:
                   f"[min={a_min.tolist()}, max={a_max.tolist()}]", flush=True)
             s_min = np.asarray(blob[key]["state"]["min"], dtype=np.float32)
             s_max = np.asarray(blob[key]["state"]["max"], dtype=np.float32)
-            s_rng = (s_max - s_min).astype(np.float32)
-            def _state_norm_n15(state_vec, mn=s_min, mx=s_max, rng=s_rng):
-
-                return (2.0 * (state_vec - mn) / np.where(rng > 1e-8, rng, 1.0) - 1.0).astype(np.float32)
+            def _state_norm_n15(state_vec, mn=s_min, mx=s_max, mask=s_min != s_max):
+                return _minmax_norm(state_vec, mn, mx, mask)
             self._gr00t_state_norm = _state_norm_n15
             print(f"vla-cpp-direct[arch=gr00t_n1_5]: state normalizer "
                   f"(flat min/max, no clip) via {stats_path}::{key}.state "
@@ -627,6 +646,8 @@ class VlaCppClient:
     def reset(self) -> None:
 
         self._action_queue.clear()
+        self._episode += 1
+        self._step = 0
 
     def get_action(self, observations: dict[str, Any]) -> np.ndarray:
 
@@ -706,6 +727,7 @@ class VlaCppClient:
         req.lang_tokens.extend(lang.tolist())
         req.state.extend(state_padded.tolist())
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
         resp = self.pb.PredictResponse()
@@ -856,6 +878,7 @@ class VlaCppClient:
         req.lang_tokens.extend(int(t) for t in lang)
         req.state.extend(float(x) for x in state_padded)
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         resp = self.pb.PredictResponse()
         resp.ParseFromString(self.sock.recv())
@@ -916,6 +939,7 @@ class VlaCppClient:
         req.lang_tokens.extend(lang.tolist())
         req.state.extend([0.0] * self.max_state_dim)
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
         resp = self.pb.PredictResponse()
@@ -931,9 +955,12 @@ class VlaCppClient:
     _EVO1_IMG_CTX           = "<IMG_CONTEXT>"
     _EVO1_NUM_IMAGE_TOKEN   = 256
     _EVO1_MAX_TEXT_LENGTH   = 1024
-    _EVO1_NOISE_LEN         = 50 * 24   # horizon * per_action_dim
+    _FIXED_NOISE_ARCHS = {
+        "smolvla", "pi0", "pi05", "evo1", "gr00t_n1_5", "gr00t_n1_6", "gr00t_n1_7",
+        "vla_jepa", "octo",
+    }
 
-    def _maybe_add_fixed_noise(self, req, n: int | None) -> None:
+    def _maybe_add_fixed_noise(self, req) -> None:
         """Attach a reproducible noise vector when VLA_FIXED_NOISE_SEED is set.
 
         Without it the server draws flow-matching noise from a clock-seeded RNG,
@@ -942,14 +969,25 @@ class VlaCppClient:
         verifiable: same inputs plus same noise must give the same actions.
         """
         seed = os.environ.get("VLA_FIXED_NOISE_SEED")
-        if seed is None or not n:
+        if seed is None or self.arch not in self._FIXED_NOISE_ARCHS:
             return
+        if self._noise_len is None:
+            self.sock.send(req.SerializeToString())
+            r = self.pb.PredictResponse()
+            r.ParseFromString(self.sock.recv())
+            if r.error:
+                raise RuntimeError(f"vla-server error: {r.error}")
+            self._noise_len = r.chunk_size * r.action_dim
+        n = self._noise_len
         # Vary per step but reproducibly, so a replay of the same episode sends
         # the same sequence of noise vectors.
-        rng = np.random.default_rng(int(seed) + self._step)
+        rng = np.random.default_rng([int(seed), self._episode, self._step])
         # Evo-1 is trained on uniform[-1,1]; matching that keeps the check in
         # the distribution the model actually sees.
-        req.noise.extend(rng.uniform(-1.0, 1.0, size=n).astype(np.float32).tolist())
+        if self.arch == "evo1":
+            req.noise.extend(rng.uniform(-1.0, 1.0, size=n).astype(np.float32).tolist())
+        else:
+            req.noise.extend(rng.standard_normal(n, dtype=np.float32).tolist())
 
     def _predict_chunk_evo1(self, observations: dict[str, Any]) -> np.ndarray:
 
@@ -1028,7 +1066,7 @@ class VlaCppClient:
         req.lang_tokens.extend(input_ids_full[:n_real].tolist())
         req.state.extend(state_padded.tolist())
         req.attention_mask.extend(attn_mask.tolist())
-        self._maybe_add_fixed_noise(req, self._EVO1_NOISE_LEN)
+        self._maybe_add_fixed_noise(req)
 
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
@@ -1081,6 +1119,7 @@ class VlaCppClient:
         req.lang_tokens.extend(input_ids.tolist())
         req.attention_mask.extend(attn_mask.tolist())
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
         resp = self.pb.PredictResponse()
@@ -1094,33 +1133,31 @@ class VlaCppClient:
         return (np.array(resp.action_chunk, dtype=np.float32)
                   .reshape(resp.chunk_size, resp.action_dim))
 
+    def _oft_image(self, observations: dict[str, Any], key: str) -> np.ndarray:
+        if key not in observations:
+            raise KeyError(f"image key '{key}' missing; got {list(observations.keys())}")
+        img = observations[key]
+        if isinstance(img, torch.Tensor):
+            img = img.numpy()
+        img = np.asarray(img, dtype=np.float32)
+        if img.ndim != 3 or img.shape[0] != 3:
+            raise ValueError(f"{key}: expected CHW float [3, H, W], got {img.shape}")
+        img_u8 = np.clip(np.transpose(img, (1, 2, 0)) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        if img_u8.shape[0] != self.image_size or img_u8.shape[1] != self.image_size:
+            img_u8 = np.array(Image.fromarray(img_u8, mode="RGB").resize(
+                (self.image_size, self.image_size), resample=Image.LANCZOS), dtype=np.uint8)
+        h, w = img_u8.shape[:2]
+        s = 0.9 ** 0.5
+        new_h, new_w = int(round(h * s)), int(round(w * s))
+        off_h, off_w = (h - new_h) // 2, (w - new_w) // 2
+        cropped = img_u8[off_h:off_h + new_h, off_w:off_w + new_w]
+        img_u8 = np.array(Image.fromarray(cropped, mode="RGB").resize(
+            (w, h), resample=Image.BILINEAR), dtype=np.uint8)
+        return np.ascontiguousarray(img_u8, dtype=np.uint8)
+
     def _predict_chunk_bitvla(self, observations: dict[str, Any]) -> np.ndarray:
 
-        images_u8: list[np.ndarray] = []
-        for key in self.image_keys[:BITVLA_N_VIEWS]:
-            if key not in observations:
-                raise KeyError(f"image key '{key}' missing; got {list(observations.keys())}")
-            img = observations[key]
-            if isinstance(img, torch.Tensor):
-                img = img.numpy()
-            img = np.asarray(img, dtype=np.float32)
-            if img.ndim != 3 or img.shape[0] != 3:
-                raise ValueError(f"{key}: expected CHW float [3, H, W], got {img.shape}")
-            img_u8 = np.clip(np.transpose(img, (1, 2, 0)) * 255.0 + 0.5, 0, 255).astype(np.uint8)
-
-            if img_u8.shape[0] != self.image_size or img_u8.shape[1] != self.image_size:
-                img_u8 = np.array(Image.fromarray(img_u8, mode="RGB").resize(
-                    (self.image_size, self.image_size), resample=Image.LANCZOS),
-                    dtype=np.uint8)
-
-            h, w = img_u8.shape[:2]
-            s = 0.9 ** 0.5
-            new_h, new_w = int(round(h * s)), int(round(w * s))
-            off_h, off_w = (h - new_h) // 2, (w - new_w) // 2
-            cropped = img_u8[off_h:off_h + new_h, off_w:off_w + new_w]
-            img_u8 = np.array(Image.fromarray(cropped, mode="RGB").resize(
-                (w, h), resample=Image.BILINEAR), dtype=np.uint8)
-            images_u8.append(np.ascontiguousarray(img_u8, dtype=np.uint8))
+        images_u8 = [self._oft_image(observations, k) for k in self.image_keys[:BITVLA_N_VIEWS]]
 
         s = observations["observation.state"]
         if isinstance(s, torch.Tensor):
@@ -1167,33 +1204,13 @@ class VlaCppClient:
         return chunk
 
     def _predict_chunk_vla_adapter(self, observations: dict[str, Any]) -> np.ndarray:
-        images_u8: list[np.ndarray] = []
-        for key in self.image_keys[:VLA_ADAPTER_N_VIEWS]:
-            if key not in observations:
-                raise KeyError(f"image key '{key}' missing; got {list(observations.keys())}")
-            img = observations[key]
-            if isinstance(img, torch.Tensor):
-                img = img.numpy()
-            img = np.asarray(img, dtype=np.float32)
-            if img.ndim != 3 or img.shape[0] != 3:
-                raise ValueError(f"{key}: expected CHW float [3, H, W], got {img.shape}")
-            img_u8 = np.clip(np.transpose(img, (1, 2, 0)) * 255.0 + 0.5, 0, 255).astype(np.uint8)
-            if img_u8.shape[0] != self.image_size or img_u8.shape[1] != self.image_size:
-                img_u8 = np.array(Image.fromarray(img_u8, mode="RGB").resize(
-                    (self.image_size, self.image_size), resample=Image.LANCZOS), dtype=np.uint8)
-            h, w = img_u8.shape[:2]
-            s = 0.9 ** 0.5
-            new_h, new_w = int(round(h * s)), int(round(w * s))
-            off_h, off_w = (h - new_h) // 2, (w - new_w) // 2
-            cropped = img_u8[off_h:off_h + new_h, off_w:off_w + new_w]
-            img_u8 = np.array(Image.fromarray(cropped, mode="RGB").resize(
-                (w, h), resample=Image.BILINEAR), dtype=np.uint8)
-            images_u8.append(np.ascontiguousarray(img_u8, dtype=np.uint8))
+        images_u8 = [self._oft_image(observations, k) for k in self.image_keys[:VLA_ADAPTER_N_VIEWS]]
 
         st = observations["observation.state"]
         if isinstance(st, torch.Tensor):
             st = st.numpy()
         st = np.asarray(st, dtype=np.float32).reshape(-1)[:8]
+        st = self._bitvla_proprio_norm(st)
 
         task = observations.get("task", "")
         if isinstance(task, bytes):
@@ -1227,28 +1244,7 @@ class VlaCppClient:
         return chunk
 
     def _predict_chunk_openvla_oft(self, observations: dict[str, Any]) -> np.ndarray:
-        images_u8: list[np.ndarray] = []
-        for key in self.image_keys[:OPENVLA_OFT_N_VIEWS]:
-            if key not in observations:
-                raise KeyError(f"image key '{key}' missing; got {list(observations.keys())}")
-            img = observations[key]
-            if isinstance(img, torch.Tensor):
-                img = img.numpy()
-            img = np.asarray(img, dtype=np.float32)
-            if img.ndim != 3 or img.shape[0] != 3:
-                raise ValueError(f"{key}: expected CHW float [3, H, W], got {img.shape}")
-            img_u8 = np.clip(np.transpose(img, (1, 2, 0)) * 255.0 + 0.5, 0, 255).astype(np.uint8)
-            if img_u8.shape[0] != self.image_size or img_u8.shape[1] != self.image_size:
-                img_u8 = np.array(Image.fromarray(img_u8, mode="RGB").resize(
-                    (self.image_size, self.image_size), resample=Image.LANCZOS), dtype=np.uint8)
-            h, w = img_u8.shape[:2]
-            s = 0.9 ** 0.5
-            new_h, new_w = int(round(h * s)), int(round(w * s))
-            off_h, off_w = (h - new_h) // 2, (w - new_w) // 2
-            cropped = img_u8[off_h:off_h + new_h, off_w:off_w + new_w]
-            img_u8 = np.array(Image.fromarray(cropped, mode="RGB").resize(
-                (w, h), resample=Image.BILINEAR), dtype=np.uint8)
-            images_u8.append(np.ascontiguousarray(img_u8, dtype=np.uint8))
+        images_u8 = [self._oft_image(observations, k) for k in self.image_keys[:OPENVLA_OFT_N_VIEWS]]
 
         st = observations["observation.state"]
         if isinstance(st, torch.Tensor):
@@ -1452,6 +1448,7 @@ class VlaCppClient:
         req.lang_tokens.extend(int(t) for t in lang)
         req.state.extend(float(x) for x in state_padded)
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
         resp = self.pb.PredictResponse()
@@ -1572,6 +1569,7 @@ class VlaCppClient:
         req.lang_tokens.extend(int(t) for t in lang)
         req.state.extend(float(x) for x in state_padded)
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
         resp = self.pb.PredictResponse()
@@ -1658,6 +1656,7 @@ class VlaCppClient:
         req.lang_tokens.extend(int(t) for t in lang)
         req.state.extend(float(x) for x in state_padded)
 
+        self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
         body = self.sock.recv()
         resp = self.pb.PredictResponse()
@@ -1759,11 +1758,7 @@ class VlaCppSimplerGr00tClient:
     def _state_norm(self, sv: np.ndarray) -> np.ndarray:
 
         mn, mx = self._s_min, self._s_max
-        rng = mx - mn
-        mask = ~np.isclose(mx, mn)
-        out = np.zeros_like(sv)
-        out[mask] = 2.0 * (sv[mask] - mn[mask]) / rng[mask] - 1.0
-        return np.clip(out, -1.0, 1.0).astype(np.float32)
+        return np.clip(_minmax_norm(sv, mn, mx, ~np.isclose(mx, mn)), -1.0, 1.0)
 
     def _decode_action(self, chunk: np.ndarray) -> np.ndarray:
 

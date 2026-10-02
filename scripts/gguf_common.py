@@ -20,13 +20,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import numpy as np
-import torch
-from safetensors import safe_open
 
 import gguf
+
+try:
+    import torch
+    from safetensors import safe_open
+except ImportError:
+    pass
 
 F32  = gguf.GGMLQuantizationType.F32
 BF16 = gguf.GGMLQuantizationType.BF16
@@ -42,6 +47,8 @@ def add(writer: gguf.GGUFWriter, name: str, t: torch.Tensor) -> None:
         writer.add_tensor(name, t.contiguous().cpu().numpy(), raw_dtype=F32)
     elif t.dtype == torch.bfloat16:
         writer.add_tensor(name, bf16_u16(t), raw_shape=list(t.shape), raw_dtype=BF16)
+    elif t.dtype == torch.float16:
+        writer.add_tensor(name, t.contiguous().cpu().numpy().astype(np.float32), raw_dtype=F32)
     else:
         raise NotImplementedError(f"unsupported dtype {t.dtype} for {name}")
 
@@ -53,6 +60,22 @@ def add_bf16(writer: gguf.GGUFWriter, name: str, t: torch.Tensor) -> None:
 
 def add_array(writer: gguf.GGUFWriter, name: str, a: np.ndarray) -> None:
     writer.add_tensor(name, np.ascontiguousarray(a, dtype=np.float32), raw_dtype=F32)
+
+def copy_kv(reader: gguf.GGUFReader, writer: gguf.GGUFWriter, skip=()) -> None:
+    meta = {"GGUF.version", "GGUF.tensor_count", "GGUF.kv_count", "general.architecture", *skip}
+    for name, f in reader.fields.items():
+        if name in meta:
+            continue
+        sub = f.types[-1] if f.types[0] == gguf.GGUFValueType.ARRAY else None
+        writer.add_key_value(name, f.contents(), f.types[0], sub_type=sub)
+
+def copy_tensor(writer: gguf.GGUFWriter, t) -> None:
+    data = np.ascontiguousarray(t.data)
+    if t.tensor_type == BF16:
+        data = data.view(np.uint16)
+    elif t.tensor_type == F32:
+        data = data.astype(np.float32, copy=False)
+    writer.add_tensor(t.name, data, raw_dtype=t.tensor_type)
 
 def kv_u32(writer: gguf.GGUFWriter, kv, values: dict) -> None:
     for k, v in values.items():
@@ -87,9 +110,19 @@ def load_safetensors(ckpt: Path, keep: tuple[str, ...] | None = None) -> dict[st
 
 def load_pt_module(path: Path) -> dict[str, torch.Tensor]:
 
-    sd = torch.load(str(path), map_location="cpu", weights_only=False)
+    sd = torch.load(str(path), map_location="cpu", weights_only=True)
     pfx = "module."
     return {(k[len(pfx):] if k.startswith(pfx) else k): v.contiguous() for k, v in sd.items()}
+
+def find_sidecar(ckpt: Path, stem: str) -> Path:
+
+    cands = sorted(
+        ckpt.glob(f"{stem}--*checkpoint.pt"),
+        key=lambda p: int(m.group(1)) if (m := re.search(r"--(\d+)_checkpoint\.pt$", p.name)) else -1,
+    )
+    if not cands:
+        raise SystemExit(f"no {stem}--*checkpoint.pt in {ckpt}")
+    return cands[-1]
 
 def read_json(path: Path) -> dict:
     if not path.exists():

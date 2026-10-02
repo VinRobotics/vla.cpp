@@ -16,12 +16,11 @@
 // actually consumes belong here: an advertised flag nothing reads is how a
 // benchmark ends up measuring a configuration nobody asked for.
 //
-// Thread count, solver steps, GR00T embodiment and un-normalisation key stay
-// environment variables (VLA_N_THREADS, VLA_NUM_STEPS, VLA_GR00T_EMBODIMENT,
-// VLA_*_UNNORM_KEY) until the loaders read them from here.
+// Thread count, GR00T embodiment and un-normalisation key stay environment
+// variables (VLA_N_THREADS, VLA_GR00T_EMBODIMENT, VLA_*_UNNORM_KEY) until the
+// loaders read them from here.
 //
-// Runtime knobs that trade precision for speed. Every field is unset by
-// default; a model reads one with value_or() so its own default stays at its
+// Every field is unset by default; a model reads one with value_or() so its own default stays at its
 // own call site, and both branches are always compiled.
 //
 // The fastest setting differs per architecture and some of them change
@@ -41,6 +40,7 @@ struct Options {
     std::optional<ggml_type>   act_dtype;
     std::optional<bool>        flash_attn;
     std::optional<bool>        mm_prec_f32;
+    std::optional<int>         num_steps;
 
     // Consumes argv[i] (and its value) if it names an option. Returns false
     // with err set on a bad value; leaves i untouched and err empty when the
@@ -66,5 +66,8 @@ bool flash_attn_enabled();
 
 void set_mm_prec_f32(bool on);
 bool mm_prec_f32_enabled();
+
+bool resolve_num_steps(const char * arch, const Options & opts, int64_t & steps);
+bool resolve_num_steps(const char * arch, const Options & opts, int & steps);
 
 }

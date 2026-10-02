@@ -4,10 +4,11 @@
 # Verify git-commit consistency across the tested platforms BEFORE running any
 # sim. Each server self-manages its checkout; the agent's `rev` reports that
 # server's real `git rev-parse HEAD`. The orchestrator's own commit need NOT
-# match the servers. Rules (over the TESTED machines = the platform servers):
+# match the servers unless VLA_CI_EXPECTED_COMMIT is set, which then replaces it.
+# Rules (over the TESTED machines = the platform servers):
 #
 #   all four equal (orchestrator + servers)  -> INFO
-#   servers equal, orchestrator differs      -> WARNING (proceed)
+#   servers equal, orchestrator differs      -> WARNING (proceed); ERROR, exit 2 with VLA_CI_EXPECTED_COMMIT
 #   servers disagree (or a rev is unreadable) -> ERROR, exit 2 (stop the CI)
 #
 #   bash ci/check_commits.sh             # all ALL_PLATFORMS (the CI default)
@@ -26,7 +27,7 @@ CTL="${VLA_CI_CTL:-${CI_DIR}/agent/build/vla-ci-ctl}"
 export VLA_CI_TOKEN="${VLA_CI_TOKEN:-}"
 
 PLATFORMS="${*:-${ALL_PLATFORMS}}"
-ORCH_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
+ORCH_COMMIT="${VLA_CI_EXPECTED_COMMIT:-$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)}"
 mkdir -p "${CI_OUTPUT_ROOT}"
 
 declare -A COMMIT
@@ -64,6 +65,9 @@ if [[ ${servers_same} -eq 0 ]]; then
 fi
 if [[ "${first}" == "${ORCH_COMMIT}" ]]; then
     echo "INFO: orchestrator and all tested machines are at the same commit (${first})."
+elif [[ -n "${VLA_CI_EXPECTED_COMMIT:-}" ]]; then
+    echo "ERROR: tested machines are at ${first}, not the expected ${VLA_CI_EXPECTED_COMMIT}; stopping CI." >&2
+    exit 2
 else
     echo "WARNING: orchestrator (${ORCH_COMMIT}) differs from the tested machines (${first}); proceeding." >&2
 fi

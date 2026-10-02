@@ -200,6 +200,15 @@ inline ggml_tensor * gelu(ggml_context * ctx, ggml_tensor * x) {
 #endif
 }
 
+inline ggml_tensor * geglu(ggml_context * ctx, ggml_tensor * gate, ggml_tensor * up) {
+#if !defined(GGML_USE_SYCL) && !defined(GGML_USE_METAL) && !defined(GGML_USE_OPENVINO) && \
+    !defined(GGML_USE_HEXAGON) && !defined(GGML_USE_OPENCL)
+    if (gate->type == GGML_TYPE_F32)
+        return ggml_geglu_split(ctx, gate, up);
+#endif
+    return ggml_mul(ctx, gelu(ctx, gate), up);
+}
+
 /**
  * @brief An arch's default resident type for GEMM weights, on this backend.
  *

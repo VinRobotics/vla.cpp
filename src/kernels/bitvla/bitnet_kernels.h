@@ -23,11 +23,8 @@
  * intrinsic to expand i2 to i8, then run a single warp-level @c wmma
  * fragment multiply per tile.
  *
- * Two GEMM entry points are provided:
- *   * @ref ladder_int8xint2_kernel-single-row (M=1) decode kernel
- *     used for next-token/single-query inference.
- *   * @ref ladder_int8xint2_kernel_m + @ref launch_ladder_int8xint2_m
- *     - multi-row (M>1) variant for prefill and ViT batches.
+ * GEMM entry point: @ref ladder_int8xint2_kernel_m + @ref launch_ladder_int8xint2_m
+ *   - multi-row (M>1) variant for prefill and ViT batches.
  *
  * This header is meant to be included by the per-tier CUDA `.cu` files
  * (@c bitvla_lm_cuda.cu, @c bitvla_vit_cuda.cu); it is not part of the
@@ -38,22 +35,9 @@
 #include <math_constants.h>
 #include <math.h>
 #include <mma.h>
-#include <iostream>
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
-
-#if (((__CUDACC_VER_MAJOR__ == 11) && (__CUDACC_VER_MINOR__ >= 4)) || (__CUDACC_VER_MAJOR__ > 11))
-#define TVM_ENABLE_L2_PREFETCH 1
-#else
-#define TVM_ENABLE_L2_PREFETCH 0
-#endif
-
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 800
-#define TVM_ENBALE_EFFICIENT_SMEM_PTR_CAST 1
-#else
-#define TVM_ENBALE_EFFICIENT_SMEM_PTR_CAST 0
-#endif
 
 /**
  * @brief Decode a packed int2 word into N int8 values via @c lop3.b32.
@@ -87,61 +71,6 @@ __device__ void decode_i2s_to_i8s(T1 *_i2s, T2 *_i8s, const int N = 16)
                  : "r"(i2s >> (2*i)), "n"(BOTTOM_MASK), "n"(I4s_TO_I8s_MAGIC_NUM), "n"(immLut));
     i8s[i] = __vsubss4(i8s[i], 0x02020202);
   }
-}
-
-/**
- * @brief Single-row ternary GEMM kernel (M = 1).
- *
- * Computes one row of @c dtype_transform[0,:] = (A * B^T)/s[0]*ws,
- * with @c A in int8, @c B packed as int2 (decoded on the fly), accumulated
- * in int32 via @c __dp4a, then scaled back to bf16. The output bias
- * @c ws is applied per @c ws_num column groups.
- *
- * @tparam M             Always 1 in this overload; kept for symmetry with
- *                       the multi-row kernel.
- * @tparam N             Output column count.
- * @tparam K             Reduction dimension.
- * @tparam ws_num        Number of column groups sharing one bias entry.
- * @tparam K_block_size  Threads collaborating along K (warp width).
- * @tparam N_block_size  Threads collaborating along N (warp height).
- */
-template <int M, int N, int K, int ws_num, int K_block_size, int N_block_size>
-__global__ void __launch_bounds__(128) ladder_int8xint2_kernel(int8_t* __restrict__ A, int8_t* __restrict__ B, __nv_bfloat16* __restrict__ dtype_transform, float* __restrict__ s, float* __restrict__ ws) {
-  constexpr int K_per_loop = 16;
-  constexpr int wmma_K = 32;
-  constexpr int wmma_N = 16;
-  int in_thread_C_local[1];
-  signed char A_local[K_per_loop];
-  int B_reshape_local[1];
-  signed char B_decode_local[K_per_loop];
-  int red_buf0[1];
-  in_thread_C_local[0] = 0;
-  #pragma unroll
-  for (int k_0=0; k_0<K/(K_per_loop * K_block_size); ++k_0) {
-    *(int4*)(A_local+0) = *(int4*)(A+((k_0*K_per_loop * K_block_size)+(((int)threadIdx.x)*K_per_loop)));
-    B_reshape_local[0] = *(int*)(B +
-      (((int)blockIdx.x)*N_block_size * K/4) +
-      (k_0*K_block_size * K_per_loop * wmma_N/4) +
-      ((((int)threadIdx.x) >> 1)*wmma_K * wmma_N/4) +
-      ((((int)threadIdx.y) >> 3)*(wmma_K * wmma_N/2)/4) +
-      ((((int)threadIdx.x) & 1)*(wmma_K * wmma_N/4)/4) +
-      ((((int)threadIdx.y) & 7)*(wmma_K/2)/4)
-      );
-    decode_i2s_to_i8s(B_reshape_local, B_decode_local, 16);
-    #pragma unroll
-    for (int k_2_0=0; k_2_0<4; ++k_2_0) {
-      in_thread_C_local[0] = __dp4a(*(int *)&A_local[((k_2_0*4))],*(int *)&B_decode_local[((k_2_0*4))], in_thread_C_local[0]);
-    }
-  }
-  red_buf0[0] = in_thread_C_local[0];
-  #pragma unroll
-  for (int offset=K_block_size/2; offset>0; offset /= 2) {
-    red_buf0[0] += __shfl_down_sync(__activemask(), red_buf0[0], offset, K_block_size);
-  }
-  int out_idx = ((((int)blockIdx.x)*N_block_size)+((int)threadIdx.y));
-  int ws_idx = out_idx/(N/ws_num);
-  if (threadIdx.x == 0)
-    dtype_transform[out_idx] = __float2bfloat16(((float)red_buf0[0])/s[0]*ws[ws_idx]);
 }
 
 /**
@@ -180,9 +109,9 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m(
   const int warp = tid >> 5;
   const int m_base = (int)blockIdx.y*M_ROWS;
 
-  __shared__ signed char A_smem[M_ROWS][K_CHUNK];
-  __shared__ signed char W_smem[16][K_CHUNK];
-  __shared__ int         C_smem[M_ROWS][16];
+  __shared__ __align__(32) signed char A_smem[M_ROWS][K_CHUNK];
+  __shared__ __align__(32) signed char W_smem[16][K_CHUNK];
+  __shared__ __align__(32) int         C_smem[M_ROWS][16];
 
   int B_reshape_local[1];
   signed char B_decode_local[K_per_loop];
@@ -316,9 +245,9 @@ __global__ void __launch_bounds__(128) ladder_int8xint2_kernel_m_wide(
   const int lane = tid & 31;
   const int m_base = (int)blockIdx.y*M_ROWS;
 
-  __shared__ signed char A_smem[M_ROWS][SM_STRIDE];
-  __shared__ signed char W_smem[N_TILES][16][SM_STRIDE];
-  __shared__ int         C_smem[WARPS][16][16];
+  __shared__ __align__(32) signed char A_smem[M_ROWS][SM_STRIDE];
+  __shared__ __align__(32) signed char W_smem[N_TILES][16][SM_STRIDE];
+  __shared__ __align__(32) int         C_smem[WARPS][16][16];
 
   // Column tile this warp owns. N is not always a multiple of 16*N_TILES
   // (the ViT's 4304 is 269 tiles), so tiles past the end are skipped rather
@@ -430,7 +359,6 @@ static constexpr int bitvla_n_tiles_for(int N, int K) {
        : (N == 1152  && K == 1152) ? 2     // vit.q/k/v/o
        : (N == 4304  && K == 1152) ? 4     // vit.fc1
        : (N == 1152  && K == 4352) ? 2     // vit.fc2
-       : (N == 3840  && K == 2560) ? 4     // action head qkv
        : 2;
 }
 
@@ -458,7 +386,7 @@ static inline void launch_ladder_int8xint2_m_wide(
  * @tparam BLOCK_THREADS Threads per CTA; must be a multiple of 32.
  * @param in     bf16 activation matrix (M x K), device pointer. M is
  *               passed implicitly via @c blockIdx.x.
- * @param out    int8 quantised matrix (M x K), device pointer.
+ * @param out    int8 quantised matrix (M x ld_out), device pointer.
  * @param scales Per-row scales (length M), device pointer.
  * @param K      Row length.
  */
@@ -467,12 +395,12 @@ __global__ void act_quant_kernel(
     const __nv_bfloat16* __restrict__ in,
     int8_t* __restrict__ out,
     float* __restrict__ scales,
-    int K)
+    int K, int ld_out)
 {
     const int m   = (int)blockIdx.x;
     const int tid = (int)threadIdx.x;
     const __nv_bfloat16* row_in  = in  + m * K;
-    int8_t*              row_out = out+m * K;
+    int8_t*              row_out = out+m * ld_out;
 
     float local_max = 0.0f;
     for (int k=tid; k<K; k += BLOCK_THREADS) {

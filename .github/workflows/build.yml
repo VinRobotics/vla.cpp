@@ -13,19 +13,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  cpp-unit:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      # Compiled directly: pure, no llama.cpp or protobuf/zmq needed.
-      - name: pure unit tests
-        run: |
-          for t in test_vision_common test_rope_conventions; do
-            g++ -std=c++17 -Isrc -Wall -Wextra -fsanitize=address,undefined \
-                -fno-omit-frame-pointer "tests/$t.cpp" -o "/tmp/$t"
-            "/tmp/$t"
-          done
-
   py-tooling:
     runs-on: ubuntu-24.04
     steps:
@@ -56,17 +43,19 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: build/_deps
-          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}
+          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}-asan
       # Everything, not a target list: ctest registers tests this job must build,
       # and a named list goes stale the next time one is added.
-      - name: build + ctest (CPU, -Wall -Wextra)
+      - name: build + ctest (CPU, ASan+UBSan, -Werror)
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF -DVLA_BUILD_TESTS=ON
+          san="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+          cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DGGML_CUDA=OFF -DVLA_BUILD_TESTS=ON \
+            -DVLA_WERROR=ON -DCMAKE_C_FLAGS="$san" -DCMAKE_CXX_FLAGS="$san"
           cmake --build build -j"$(nproc)"
           ctest --test-dir build --output-on-failure
-      # This job is the only one that fetches llama.cpp, and neither patch script
-      # runs on a CPU build, so their anchors would otherwise rot unnoticed until
-      # someone configures a CUDA or OpenVINO tree. Patch a copy: the real one is
+      # Neither patch script runs on a CPU build, and build-cuda patches only on a
+      # cache miss, so their anchors would otherwise rot unnoticed until someone
+      # configures a fresh CUDA or OpenVINO tree. Patch a copy: the real one is
       # cached.
       - name: patch anchors still apply
         run: |
@@ -74,3 +63,63 @@ jobs:
           python3 scripts/patch_ggml_cuda_ext_hook.py /tmp/llama-patchtest
           python3 scripts/patch_ggml_openvino.py /tmp/llama-patchtest
           python3 scripts/patch_ggml_openvino.py /tmp/llama-patchtest   # idempotent
+
+  build-cuda:
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:12.9.1-devel-ubuntu24.04
+    steps:
+      - name: deps
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            build-essential cmake git ca-certificates pkg-config python3 \
+            libzmq3-dev cppzmq-dev libprotobuf-dev protobuf-compiler
+      - uses: actions/checkout@v7
+      - name: read llama.cpp pin
+        id: pin
+        run: echo "tag=$(bash scripts/llama_tag.sh)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: build/_deps
+          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}-cuda-${{ hashFiles('scripts/patch_ggml_cuda_ext_hook.py') }}
+      - name: build (compile only, the runner has no GPU)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89-real \
+            -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined -DVLA_BUILD_TESTS=ON -DVLA_WERROR=ON
+          cmake --build build -j"$(nproc)"
+
+  build-backends:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: opencl, os: ubuntu-24.04, cmake: -DGGML_OPENCL=ON -DVLA_WERROR=ON }
+          - { name: metal,  os: macos-15,     cmake: -DGGML_METAL=ON, test: true }
+    steps:
+      - uses: actions/checkout@v7
+      - name: deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential cmake git ca-certificates pkg-config \
+            libzmq3-dev cppzmq-dev libprotobuf-dev protobuf-compiler \
+            ocl-icd-opencl-dev opencl-headers
+      - name: deps
+        if: runner.os == 'macOS'
+        run: brew install cmake zeromq cppzmq protobuf
+      - name: read llama.cpp pin
+        id: pin
+        run: echo "tag=$(bash scripts/llama_tag.sh)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: build/_deps
+          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}-${{ matrix.name }}
+      - name: build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake }} -DVLA_BUILD_TESTS=ON
+          cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
+      - name: ctest
+        if: matrix.test
+        run: ctest --test-dir build --output-on-failure

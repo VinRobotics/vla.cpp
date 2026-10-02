@@ -33,10 +33,10 @@ What it changes (ggml/src/ggml-cuda/ggml-cuda.cu only)
   1. Two exported function pointers, null by default.
   2. One call to the first at the top of ggml_cuda_compute_forward. Returning
      false means "not mine", and ggml runs the op exactly as before.
-  3. The RMS_NORM+MUL fusion check GGML_ASSERTs F32 rather than declining, so a
-     BF16 rms_norm aborts the process before dispatch is ever reached. Those two
-     asserts become a return, which is what the surrounding checks already do
-     for every other unsupported type.
+  3. The RMS_NORM+MUL and RMS_NORM+SCALE fusion checks GGML_ASSERT F32 rather
+     than declining, so a BF16 rms_norm aborts the process before dispatch is
+     ever reached. Each pair of asserts becomes a return, which is what the
+     surrounding checks already do for every other unsupported type.
   4. One call to the second in the ADD/MUL fusion branch of ggml_cuda_try_fuse.
      Fusion happens in ggml_backend_cuda_graph_compute, upstream of
      ggml_cuda_compute_forward, so the hook in (2) never sees a fused node --
@@ -121,11 +121,11 @@ def main():
     if MARKER in text:
         return  # idempotent: re-configure over an already-patched tree
 
-    for old, new in (HOOK_DECL, FUSION_GUARD, FUSED_BINBCAST_GUARD):
+    for old, new, want in ((*HOOK_DECL, 1), (*FUSION_GUARD, 2), (*FUSED_BINBCAST_GUARD, 1)):
         n = text.count(old)
-        if n != 1:
+        if n != want:
             raise SystemExit(
-                f"{path}: anchor found {n} times, expected 1. The pinned llama.cpp "
+                f"{path}: anchor found {n} times, expected {want}. The pinned llama.cpp "
                 f"probably moved; re-check this anchor against the new tag.\n"
                 f"---\n{old[:400]}\n---"
             )

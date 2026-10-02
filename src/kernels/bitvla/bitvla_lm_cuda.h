@@ -81,17 +81,6 @@ void bitvla_softmax_scaled_bf16(__nv_bfloat16* inout, float scale,
                                 int n_rows, int S, cudaStream_t stream);
 
 /**
- * @brief Elementwise @c relu(g)^2*u (BitVLA squared-ReLU FFN gate).
- * @param g   Gate input (N), bf16 device pointer.
- * @param u   Up input    (N), bf16 device pointer.
- * @param out Output      (N), bf16 device pointer.
- * @param N   Element count.
- * @param stream CUDA stream.
- */
-void bitvla_squared_relu_mul_bf16(const __nv_bfloat16* g, const __nv_bfloat16* u,
-                                  __nv_bfloat16* out, int N, cudaStream_t stream);
-
-/**
  * @brief Elementwise bf16 add (@p out = @p a + @p b).
  * @param a Length-@p N input, device pointer.
  * @param b Length-@p N input, device pointer.
@@ -190,16 +179,6 @@ void bitvla_gelu_tanh_bf16(const __nv_bfloat16* x, __nv_bfloat16* out,
  */
 void bitvla_add_bias_bf16(const __nv_bfloat16* x, const __nv_bfloat16* bias,
                           __nv_bfloat16* out, int M, int K, cudaStream_t stream);
-
-/**
- * @brief Zero out columns [@p start_col, @p total_cols) of an
- *        (M x @p total_cols) bf16 matrix, leaving the first @p start_col
- *        columns untouched.
- *
- * Used to mask out padding lanes added by the ternary GEMM's column tiling.
- */
-void bitvla_zero_tail_bf16(__nv_bfloat16* x, int M, int total_cols,
-                           int start_col, cudaStream_t stream);
 
 /**
  * @brief Per-layer weight pointers for one BitVLA LM transformer block.

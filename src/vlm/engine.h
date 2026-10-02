@@ -124,23 +124,6 @@ public:
     bool loaded() const;
 
     /**
-     * @brief Decode an image file (jpg/png/...) into @p out.
-     * @param path Path to the encoded image.
-     * @param[out] out Decoded RGB image.
-     * @return @c true on success; @c false on decode error.
-     */
-    bool decode_image_file(const std::string& path, Image& out) const;
-
-    /**
-     * @brief Decode an in-memory encoded image into @p out.
-     * @param data Pointer to the encoded byte stream.
-     * @param len  Length of @p data in bytes.
-     * @param[out] out Decoded RGB image.
-     * @return @c true on success; @c false on decode error.
-     */
-    bool decode_image_buf(const uint8_t* data, size_t len, Image& out) const;
-
-    /**
      * @brief Run one chat completion.
      *
      * The conversation is materialised from @p messages; @p images are
