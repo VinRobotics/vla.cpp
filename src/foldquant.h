@@ -20,11 +20,13 @@
 // the activation is [RMS-normed,] [divided,] rotated by the same butterfly,
 // quantized per token to INT8, multiplied on integer units and dequantized.
 //
-// CUDA and CPU run the same two GGML_OP_CUSTOM nodes per site (fq_act,
-// fq_gemm; see layers/fq_linear.h): the CPU backend executes the reference in
-// foldquant_ref.h, the CUDA backend claims them through the ggml extension hook.
+// Every backend that runs a site natively runs the same two GGML_OP_CUSTOM nodes
+// (fq_act, fq_gemm; see layers/fq_linear.h): the CPU backend executes the
+// reference in foldquant_ref.h, CUDA and SYCL claim them through their ggml
+// extension hooks, and OpenVINO's CPU and GPU plugins translate them into
+// OpenVINO ops (src/openvino/foldquant_ov.cpp).
 //
-// Every other backend (Metal, Vulkan, SYCL, OpenVINO, Hexagon, OpenCL) has no
+// The other backends (Metal, Vulkan, Hexagon, OpenCL, the OpenVINO NPU) have no
 // implementation of those nodes, so there a site is read back as a float GEMM
 // weight instead (dequant mode): W_deq . B . diag(1/ascale) with the ascale
 // divide on the side of B the activation applies it, rebuilt at upload in the
@@ -138,10 +140,10 @@ int fq_rot_block_for(int64_t K, int nominal);
 bool          foldquant_present(const gguf_reader & g, const char * prefix);
 FoldQuantSpec foldquant_parse  (const gguf_reader & g, const char * prefix);
 
-// Load-time policy: CUDA registers the integer kernels, CPU runs the exact
-// reference, OpenVINO (CPU and GPU devices) translates the nodes into OpenVINO
-// ops (src/openvino/foldquant_ov.cpp); any other backend, the OpenVINO NPU, and
-// VLA_FQ_DEQUANT=1 switch fq to dequant mode. Returns false only on an unusable spec.
+// Load-time policy: CUDA and SYCL register their integer kernels, CPU runs the
+// exact reference, OpenVINO (CPU and GPU devices) translates the nodes into
+// OpenVINO ops (src/openvino/foldquant_ov.cpp); any other backend, the OpenVINO
+// NPU, and VLA_FQ_DEQUANT=1 switch fq to dequant mode. Returns false only on an unusable spec.
 bool foldquant_check_backend(const char * tag, const Backend & b, FoldQuantSpec & fq, bool weight_dtype_set);
 
 // A site's float weight in dequant mode, row-major [N][K]: per row, the codes

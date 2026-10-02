@@ -183,9 +183,36 @@ code that sits on a rounding tie in one place and not the other (the reductions
 run in a different float order) flips by one, and with 15 activation levels
 those flips compound through the layers and the denoise steps to about 0.999.
 
+### SYCL
+
+On ggml's SYCL backend (Intel GPUs) the nodes are claimed through an extension
+hook like CUDA's (`scripts/patch_ggml_sycl_ext_hook.py` adds it to ggml-sycl;
+`src/sycl/vla_sycl_foldquant.cpp` registers the kernels at load). `fq_act`
+follows the CPU reference's reduction tree: lane `l` of a 32-wide sub-group owns
+the 64-element chunks `l, l+32, ...` of a row, and the sum of squares and the
+amax are xor butterflies over the sub-group. `fq_gemm` runs oneDNN's int8 matmul
+(INT4 weights as oneDNN `s4`, INT4 activations unpacked to `s8`) into an int32
+buffer, then the reference's epilogue. Built without oneDNN (`GGML_SYCL_DNN=OFF`),
+or with `VLA_FQ_SYCL_GEMM=native`, it uses its own GEMV for up to 32 tokens and
+an XMX `joint_matrix` kernel above that; both are much slower.
+
+The integer sums are exact in any order, so the output is bit-identical to the CPU
+reference as long as the float steps are: the source is built with
+`-ffp-contract=off`, and the device image carries
+`-cl-fp32-correctly-rounded-divide-sqrt` for the driver's JIT, which otherwise
+approximates division and sqrt and moves codes across rounding ties.
+`tests/test_foldquant_sycl_op.cpp` checks every activation byte and every output
+bit against the reference, for every bit width, on every GEMM path, at
+production shapes up to K = 16384. A whole π0.5 model follows the CUDA integer
+path to 1.00000 action cosine at W8A8, 0.9997 at W4A4 with INT8 o/down and 0.9991
+at W4A4. Both GPUs are exact to the same reference, so the gap comes from the
+float layers between the sites (the bf16 model's actions differ by up to 7e-4
+between them), which land some codes on the other side of a rounding tie; with
+15 activation levels those flips compound, as on OpenVINO.
+
 ### Other backends
 
-Metal, Vulkan, SYCL, Hexagon and OpenCL (and the OpenVINO NPU) have no
+Metal, Vulkan, Hexagon and OpenCL (and the OpenVINO NPU) have no
 implementation of the two custom nodes, and vla.cpp drives a single backend with
 no per-op fallback.
 There `foldquant_check_backend` switches the file to dequant mode: every site is

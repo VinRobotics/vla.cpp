@@ -51,6 +51,12 @@ set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(_vla_llama_patch "")
+if(GGML_SYCL AND NOT GGML_CUDA)
+    # The hook FoldQuant's SYCL kernels (src/sycl/vla_sycl_foldquant.cpp) run behind.
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_sycl_ext_hook.py <SOURCE_DIR>)
+endif()
 if(GGML_CUDA)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
@@ -244,9 +250,12 @@ target_include_directories(vla_core
 )
 # The VLA archs call no llama_* API; only vlm_core needs llama.
 target_link_libraries(vla_core PUBLIC ggml)
-# The FoldQuant CPU reference must match the CUDA kernels bit for bit, so no
-# FMA contraction on either side (aarch64 GCC contracts by default).
-set_source_files_properties(src/foldquant.cpp src/foldquant_ref.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+# The FoldQuant CPU reference must match the CUDA and SYCL kernels bit for bit,
+# so no FMA contraction on either side (aarch64 GCC contracts by default), and no
+# reassociation either: oneAPI's icpx compiles the host with -fp-model=fast by
+# default, which reorders the reference's sums and products.
+set_source_files_properties(src/foldquant.cpp src/foldquant_ref.cpp PROPERTIES COMPILE_OPTIONS
+    "$<$<CXX_COMPILER_ID:IntelLLVM>:-fp-model=precise>;$<$<CXX_COMPILER_ID:IntelLLVM>:-Wno-overriding-option>;-ffp-contract=off")
 if(VLA_SPM)
     target_include_directories(vla_core PRIVATE ${sentencepiece_SOURCE_DIR}/src)
     target_link_libraries(vla_core PRIVATE sentencepiece-static ${VLA_SPM_PROTOBUF})
@@ -340,6 +349,27 @@ if(GGML_SYCL AND NOT GGML_CUDA)
             "See docs/backend/sycl.md.")
     endif()
     target_compile_definitions(vla_core PUBLIC GGML_USE_SYCL)
+
+    # FoldQuant kernels for Intel GPUs, behind the hook the patch above adds. Built
+    # without FMA contraction, and with the device JIT told to round division and
+    # sqrt correctly (the GPU driver approximates both otherwise), so the codes
+    # match the CPU reference bit for bit. The JIT option is a link option: it
+    # rides in the executable's device image.
+    target_sources(vla_core PRIVATE src/sycl/vla_sycl_foldquant.cpp)
+    set_source_files_properties(src/sycl/vla_sycl_foldquant.cpp PROPERTIES
+        COMPILE_OPTIONS "-fsycl;-fp-model=precise;-Wno-overriding-option;-ffp-contract=off")
+    target_link_options(vla_core PUBLIC -fsycl
+        "SHELL:-Xsycl-target-backend=spir64 \"-cl-fp32-correctly-rounded-divide-sqrt\"")
+    target_compile_definitions(vla_core PRIVATE VLA_FQ_SYCL)
+    # Prefill-sized FoldQuant GEMMs go to oneDNN's int8 matmul when ggml-sycl
+    # was built with it (GGML_SYCL_DNN, the default).
+    if(GGML_SYCL_DNN)
+        find_package(DNNL QUIET)
+        if(DNNL_FOUND)
+            target_link_libraries(vla_core PRIVATE DNNL::dnnl)
+            target_compile_definitions(vla_core PRIVATE VLA_FQ_SYCL_DNNL)
+        endif()
+    endif()
 endif()
 
 # Precedence matches the ladder in src/backend.h.

@@ -77,6 +77,18 @@ target_link_libraries(test_foldquant_dequant PRIVATE vla_core)
 target_compile_options(test_foldquant_dequant PRIVATE -Wall -Wextra)
 add_test(NAME foldquant_dequant COMMAND test_foldquant_dequant)
 
+# The same site through ggml's SYCL backend (src/sycl/vla_sycl_foldquant.cpp),
+# bit-identical to the CPU reference.
+if(GGML_SYCL)
+    add_executable(test_foldquant_sycl_op test_foldquant_sycl_op.cpp)
+    target_include_directories(test_foldquant_sycl_op PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_foldquant_sycl_op PRIVATE vla_core)
+    # It runs the CPU reference inline: precise floating point, no contraction.
+    target_compile_options(test_foldquant_sycl_op PRIVATE -Wall -Wextra -fp-model=precise -Wno-overriding-option
+                           -ffp-contract=off)
+    add_test(NAME foldquant_sycl_op COMMAND test_foldquant_sycl_op)
+endif()
+
 # The same site through ggml's OpenVINO backend (src/openvino/foldquant_ov.cpp).
 if(GGML_OPENVINO)
     add_executable(test_foldquant_ov_op test_foldquant_ov_op.cpp)

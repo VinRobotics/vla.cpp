@@ -126,6 +126,41 @@ BitVLA is the one exception: it pins its ggml graph to the CPU backend by design
 and offloads its LM through separate hand-written CUDA kernels, so a SYCL build
 leaves it on the CPU. There is no SYCL port of those kernels.
 
+## FoldQuant (W8A8 / W4A4) checkpoints
+
+A FoldQuant GGUF runs its integer path on SYCL: `src/sycl/vla_sycl_foldquant.cpp`
+claims FoldQuant's two custom nodes through an extension hook that
+`scripts/patch_ggml_sycl_ext_hook.py` adds to ggml-sycl at configure time. The
+activation quantization runs in its own kernels and the GEMMs in oneDNN's int8
+matmul, bit-identical to the CPU reference. `VLA_FQ_DEQUANT=1` reads the sites back
+as float weights instead. See [QUANTIZATION.md](../QUANTIZATION.md#sycl) for the
+arithmetic and accuracy.
+
+π0.5 LIBERO, 2 views at 224 px, 48 tokens, Intel Core Ultra X7 358H with an Arc
+B390 iGPU, oneAPI 2026.1, `vla-bench` p50 over 10 calls after 3 warmups:
+
+| Checkpoint | GGUF | p50 ms |
+|---|--:|--:|
+| bf16 | 6.71 GB | 326 |
+| FoldQuant W4A4, `VLA_FQ_DEQUANT=1` | 3.27 GB | 327 |
+| FoldQuant W4A4 | 3.27 GB | **291** |
+| FoldQuant W4A4, o/down INT8 | 3.61 GB | **290** |
+| FoldQuant W8A8 (uncalibrated) | 4.73 GB | 330 |
+
+Vision (79 ms) stays bf16 in every row. W4A4 halves the weights and is 11% faster
+than bf16; W8A8 runs at bf16 speed.
+
+## Known issue: the Level Zero loader on Ubuntu 24.04
+
+oneAPI 2026.1's Level Zero adapters crashed (`sycl-ls` segfaults) against Ubuntu
+24.04's `libze1` 1.16 on the machine above, most likely a loader too old for them
+(a newer loader from Intel's GPU packages is untested). Pointing the runtime at
+the OpenCL adapter works, and the numbers above were measured that way:
+
+```bash
+export UR_ADAPTERS_FORCE_LOAD=/opt/intel/oneapi/compiler/2026.1/lib/libur_adapter_opencl.so.0
+```
+
 ## Known issue: the SYCL VMM pool and oneDNN
 
 ggml-sycl's VMM pool hands out virtual-memory-backed pointers that oneDNN cannot

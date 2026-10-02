@@ -20,6 +20,9 @@
 #include "loader.h"
 #include "cuda/vla_cuda_ops.h"
 #include "foldquant_ref.h"
+#ifdef VLA_FQ_SYCL
+#include "sycl/vla_sycl_foldquant.h"
+#endif
 
 #include <cmath>
 #include <cstdarg>
@@ -127,6 +130,20 @@ bool foldquant_check_backend(const char * tag, const Backend & b, FoldQuantSpec 
         return true;
     const char * name = b.handle ? ggml_backend_name(b.handle) : "";
     const bool is_cpu = std::strcmp(name, "CPU") == 0;
+#ifdef VLA_FQ_SYCL
+    // SYCL: the integer kernels in src/sycl/vla_sycl_foldquant.cpp, behind the
+    // hook scripts/patch_ggml_sycl_ext_hook.py adds. They write plain [N][T]
+    // outputs, so the head-laid-out epilogue is off.
+    if (std::strncmp(name, "SYCL", 4) == 0 && !env_flag("VLA_FQ_DEQUANT")) {
+        fq.llm.no_heads = fq.action.no_heads = true;
+        sycl_register_foldquant_ops();
+        if (weight_dtype_set)
+            std::printf("%s: --weight-dtype applies to the float tensors; FoldQuant sites stay INT%d/INT%d\n",
+                        tag, fq.llm.wbits, fq.action.wbits);
+        std::printf("%s: FoldQuant SYCL kernels registered on '%s'\n", tag, name);
+        return true;
+    }
+#endif
     bool native_ov = false;
 #ifdef VLA_FQ_OPENVINO
     // ggml's OpenVINO backend runs the nodes through the in-tree translator on the
