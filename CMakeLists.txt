@@ -117,6 +117,17 @@ FetchContent_Declare(llama
 )
 FetchContent_MakeAvailable(llama)
 
+# FoldQuant on OpenVINO: the translator for FoldQuant's two custom nodes is
+# in-tree and compiled into ggml's OpenVINO backend, which reaches it through the
+# hook scripts/patch_ggml_openvino.py adds (op table entry, supports_op).
+if(GGML_OPENVINO)
+    target_sources(ggml-openvino PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/openvino/foldquant_ov.cpp)
+    target_include_directories(ggml-openvino PRIVATE
+        ${llama_SOURCE_DIR}/ggml/src/ggml-openvino
+        ${llama_SOURCE_DIR}/ggml/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+endif()
+
 # Drop the whole fetched tree from the default build: llama.cpp's ~20 tool
 # binaries and their impl libraries are dead weight here. What we link (llama,
 # ggml, mtmd, llama-common) is still built, pulled in as a dependency. Walking
@@ -340,6 +351,8 @@ if(GGML_OPENVINO AND NOT GGML_CUDA AND NOT GGML_SYCL AND NOT GGML_METAL)
     # Only tells the archs which branch of the backend.h ladder to compile; the
     # toolkit was located before the fetch above.
     target_compile_definitions(vla_core PUBLIC GGML_USE_OPENVINO)
+    # FoldQuant nodes run natively through the translator compiled into ggml-openvino.
+    target_compile_definitions(vla_core PRIVATE VLA_FQ_OPENVINO)
 endif()
 
 # Hexagon and OpenCL reject some ops the archs build; the wrapper in

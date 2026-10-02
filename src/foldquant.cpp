@@ -127,6 +127,24 @@ bool foldquant_check_backend(const char * tag, const Backend & b, FoldQuantSpec 
         return true;
     const char * name = b.handle ? ggml_backend_name(b.handle) : "";
     const bool is_cpu = std::strcmp(name, "CPU") == 0;
+    bool native_ov = false;
+#ifdef VLA_FQ_OPENVINO
+    // ggml's OpenVINO backend runs the nodes through the in-tree translator on the
+    // CPU and GPU plugins; the NPU compiler takes no such graph, so it dequantizes.
+    if (std::strcmp(name, "OPENVINO") == 0) {
+        const char * dev = std::getenv("GGML_OPENVINO_DEVICE");
+        native_ov = !(dev && std::strcmp(dev, "NPU") == 0);
+    }
+#endif
+    if (native_ov && !env_flag("VLA_FQ_DEQUANT")) {
+        // The head-laid-out epilogue writes a layout the graph reads through views
+        // of raw memory, which a translated graph does not have.
+        fq.llm.no_heads = fq.action.no_heads = true;
+        std::printf("%s: FoldQuant on OpenVINO (%s): INT%d/INT%d weights, per-token INT%d/INT%d activations\n",
+                    tag, std::getenv("GGML_OPENVINO_DEVICE") ? std::getenv("GGML_OPENVINO_DEVICE") : "CPU",
+                    fq.llm.wbits, fq.action.wbits, fq.llm.abits, fq.action.abits);
+        return true;
+    }
     if ((!b.is_cuda && !is_cpu) || env_flag("VLA_FQ_DEQUANT")) {
         // No FoldQuant kernels on this backend (or asked for): every site is read
         // back as a float weight in the resident GEMM type and runs the stock path.
@@ -277,6 +295,7 @@ bool fill_specs(WeightLoader & L, const FqModuleSpec & mod, const char * site_ke
     r.gemm.K          = K;
     r.gemm.N          = N;
     r.gemm.wbits      = wbits;
+    r.heads_off       = mod.no_heads;
     return true;
 }
 
@@ -319,7 +338,7 @@ FqLinear fq_declare_linear(WeightLoader & L, const FqModuleSpec & mod, const cha
 
 void fq_set_heads(FqLinear & s, int head_dim, int heads, uint32_t vmask) {
     static const bool off = [] { const char * e = std::getenv("VLA_FQ_NO_HEADS"); return e && *e && *e != '0'; }();
-    if (!s.w || off) return;
+    if (!s.w || off || s.heads_off) return;
     const int64_t parts = s.gemm.N / ((int64_t) head_dim * heads);
     if (parts < 1 || parts > 32 || s.gemm.N % ((int64_t) head_dim * heads) != 0) return;
     s.gemm.head_dim = head_dim;

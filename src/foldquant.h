@@ -65,6 +65,7 @@ struct FqModuleSpec {
     std::map<std::string, int> site_bits;  // per-site override, e.g. {"o":8,"down":8}
     std::string scheme;
     bool  dequant     = false;  // read every site back as a float weight (see above)
+    bool  no_heads    = false;  // keep plain [N][T] GEMM outputs (no fq_set_heads layout)
 
     int wbits_for(const char * site_key) const;
     int abits_for(const char * site_key) const;
@@ -118,6 +119,7 @@ struct FqLinear {
     ggml_tensor * bias   = nullptr;  // F32 [N] or null
     FqActSpec     act;
     FqGemmSpec    gemm;
+    bool          heads_off = false;  // fq_set_heads is a no-op (the backend reads no raw layout)
 
     explicit operator bool() const { return w != nullptr; }
 };
@@ -136,9 +138,10 @@ int fq_rot_block_for(int64_t K, int nominal);
 bool          foldquant_present(const gguf_reader & g, const char * prefix);
 FoldQuantSpec foldquant_parse  (const gguf_reader & g, const char * prefix);
 
-// Load-time policy: CUDA registers the integer kernels and CPU runs the exact
-// reference; any other backend switches fq to dequant mode, as does
-// VLA_FQ_DEQUANT=1 on CUDA or CPU. Returns false only on an unusable spec.
+// Load-time policy: CUDA registers the integer kernels, CPU runs the exact
+// reference, OpenVINO (CPU and GPU devices) translates the nodes into OpenVINO
+// ops (src/openvino/foldquant_ov.cpp); any other backend, the OpenVINO NPU, and
+// VLA_FQ_DEQUANT=1 switch fq to dequant mode. Returns false only on an unusable spec.
 bool foldquant_check_backend(const char * tag, const Backend & b, FoldQuantSpec & fq, bool weight_dtype_set);
 
 // A site's float weight in dequant mode, row-major [N][K]: per row, the codes

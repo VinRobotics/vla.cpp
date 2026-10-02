@@ -50,9 +50,10 @@ The stock repack keeps the action head float and rounds the LM weights block by
 block with no calibration. A FoldQuant GGUF ships the language backbone and the
 action head as INT8 or INT4 codes in a Hadamard-rotated, SmoothQuant-folded frame
 with per-row scales, calibrated by FoldQuantVLA; vla.cpp quantizes the activations
-per token (to 4 bits for W4A4) and runs the GEMMs on the integer tensor cores. It loads like any other checkpoint on every backend: CUDA runs the integer kernels
-and CPU the exact reference, and the others read the sites back as float weights
-with FoldQuant's rounding (weight-only quantization, bf16-GGUF speed); the format
+per token (to 4 bits for W4A4) and runs the GEMMs on the integer tensor cores. It loads like any other checkpoint on every backend: CUDA runs the integer kernels,
+CPU the exact reference and OpenVINO (CPU and GPU) the same arithmetic as OpenVINO
+ops with INT8/INT4 weight constants; the others read the sites back as float
+weights with FoldQuant's rounding (weight-only quantization, bf16-GGUF speed); the format
 and the arithmetic are in [QUANTIZATION.md](QUANTIZATION.md).
 
 A calibrated arm saved as a quantized model by

@@ -8,7 +8,7 @@ vla.cpp runs two kinds of quantized checkpoint:
 | Weights | ggml `Q8_0` / `Q4_0` blocks (block-32 absmax) | INT8 or INT4 codes, per-output-row scale, block-Hadamard-rotated frame, SmoothQuant folded in |
 | Activations | float | dynamic per-token INT8 (INT4 in phase 3) |
 | Executed by | `ggml_mul_mat` dequantizing at compute | in-tree integer kernels (`src/kernels/foldquant/`) or the CPU reference |
-| Backends | all | integer kernels on CUDA, exact reference on CPU; every other backend reads the sites back as float weights (see [Other backends](#other-backends)) |
+| Backends | all | integer kernels on CUDA, exact reference on CPU, OpenVINO ops on the OpenVINO CPU/GPU plugins; every other backend reads the sites back as float weights (see [Other backends](#other-backends)) |
 
 This page is the canonical description of the FoldQuant file and of the
 arithmetic the runtime performs on it. The converters and vla.cpp's loader
@@ -157,10 +157,37 @@ claimed by the extension hook (`src/cuda/vla_cuda_foldquant.cu`, registered by
 userdata; a node that violates the contract is declined, and ggml then aborts
 on the unsupported op rather than computing something else.
 
+### OpenVINO
+
+On ggml's OpenVINO backend the two nodes are translated into OpenVINO ops
+(`src/openvino/foldquant_ov.cpp`, compiled into the backend; the hook that
+registers it for `GGML_OP_CUSTOM` is hunk 14 of `scripts/patch_ggml_openvino.py`).
+`fq_act` becomes the reference's arithmetic in OpenVINO ops (RMSNorm with the
+folded gamma, the ascale divide, the block rotation as a MatMul with the
+normalised Hadamard matrix, `scale = max(clip * amax / qmax, 1e-12)`,
+`clamp(round_half_even(y * (1 / scale)))`) and carries the codes and the
+per-token scale as floats to `fq_gemm`, which multiplies them with the weight
+kept as an `i8` or `i4` constant (the W4 nibble bytes are reinterpreted in place;
+OpenVINO's `i4` has the same low-nibble-first order) dequantized by `wscale` in
+the decompression pattern the plugins keep compressed. The head-laid-out
+epilogue is off there (`FqModuleSpec::no_heads`), since a translated graph has
+no raw layout for the views to read.
+
+That runs on the CPU and GPU plugins (`GGML_OPENVINO_DEVICE=CPU|GPU`). The NPU
+compiler accepts no such graph, so on the NPU the file uses dequant mode below,
+as `VLA_FQ_DEQUANT=1` does anywhere. `tests/test_foldquant_ov_op.cpp` runs one
+site through the backend against the CPU reference: every code agrees and the
+outputs match to under 1e-6 relative, on an Intel CPU and an Arc iGPU. A whole
+model follows the CUDA integer path to 1.00000 action cosine at W8A8; at W4A4 a
+code that sits on a rounding tie in one place and not the other (the reductions
+run in a different float order) flips by one, and with 15 activation levels
+those flips compound through the layers and the denoise steps to about 0.999.
+
 ### Other backends
 
-Metal, Vulkan, SYCL, OpenVINO, Hexagon and OpenCL have no implementation of the
-two custom nodes, and vla.cpp drives a single backend with no per-op fallback.
+Metal, Vulkan, SYCL, Hexagon and OpenCL (and the OpenVINO NPU) have no
+implementation of the two custom nodes, and vla.cpp drives a single backend with
+no per-op fallback.
 There `foldquant_check_backend` switches the file to dequant mode: every site is
 registered with the loader as a float GEMM weight, rebuilt at upload in the
 resident type (`--weight-dtype`) from its codes, `wscale` and `ascale`, and the

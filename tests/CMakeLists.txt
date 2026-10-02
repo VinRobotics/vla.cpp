@@ -77,6 +77,15 @@ target_link_libraries(test_foldquant_dequant PRIVATE vla_core)
 target_compile_options(test_foldquant_dequant PRIVATE -Wall -Wextra)
 add_test(NAME foldquant_dequant COMMAND test_foldquant_dequant)
 
+# The same site through ggml's OpenVINO backend (src/openvino/foldquant_ov.cpp).
+if(GGML_OPENVINO)
+    add_executable(test_foldquant_ov_op test_foldquant_ov_op.cpp)
+    target_include_directories(test_foldquant_ov_op PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_foldquant_ov_op PRIVATE vla_core)
+    target_compile_options(test_foldquant_ov_op PRIVATE -Wall -Wextra)
+    add_test(NAME foldquant_ov_op COMMAND test_foldquant_ov_op)
+endif()
+
 # A/B harness for the two BitVLA ternary-GEMM tilings. Built so it cannot rot,
 # not registered with ctest: it needs a GPU and is read by hand.
 # VLA_BITVLA_NARROW_GEMM=1 selects the old one-tile-per-CTA kernel at runtime.

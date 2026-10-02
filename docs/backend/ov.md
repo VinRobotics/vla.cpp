@@ -287,6 +287,31 @@ graph at a stage, which makes that stage the terminal node, or set
 of the subtlest fixes above were found by bisecting that way, comparing each
 stage against a CPU-backend reference; neither logs anything when it goes wrong.
 
+## FoldQuant (W8A8 / W4A4) checkpoints
+
+A FoldQuant GGUF runs on the CPU and GPU plugins through
+`src/openvino/foldquant_ov.cpp`, which translates FoldQuant's two custom nodes
+into OpenVINO ops with the weights kept as `i8` / `i4` constants (hunk 14 of
+`scripts/patch_ggml_openvino.py` registers it). The NPU, and `VLA_FQ_DEQUANT=1`,
+read the sites back as float weights instead. See
+[QUANTIZATION.md](../QUANTIZATION.md#openvino) for the arithmetic and accuracy.
+
+π0.5 LIBERO, 2 views at 224 px, 48 tokens, Intel Core Ultra X7 358H with an Arc
+B390 iGPU, OpenVINO 2026.4, `vla-bench` p50 over 10 calls after 3 warmups:
+
+| Device | Checkpoint | p50 ms | Peak RSS |
+|---|---|--:|--:|
+| CPU | bf16 | 6595 | 16.5 GB |
+| CPU | FoldQuant W4A4 | 3926 | 6.7 GB |
+| CPU | FoldQuant W8A8 (uncalibrated) | 3804 | 9.4 GB |
+| GPU | bf16 | 560 | 11.6 GB |
+| GPU | FoldQuant W4A4 | 651 | 3.8 GB |
+| GPU | FoldQuant W8A8 (uncalibrated) | 607 | 9.8 GB |
+
+The GPU runs the per-site activation ops (reduction, rounding, the rotation
+MatMul) on top of the GEMMs and comes out slower than bf16 there, at a third of
+the memory.
+
 ## Known issues
 
 **π0 needs F32 on the GPU, and gets it by default.** The GPU plugin computes in

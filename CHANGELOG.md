@@ -11,9 +11,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   module as INT8 or INT4 codes with per-row scales in a block-Hadamard,
   SmoothQuant-folded frame; activations are quantized per token and the
   projections run as integer GEMMs (`src/kernels/foldquant/` on CUDA, the
-  reference in `src/foldquant_ref.cpp` on CPU). On every other backend (Metal,
-  Vulkan, SYCL, OpenVINO, Hexagon, OpenCL) the sites are read back as float
-  weights with FoldQuant's rounding and run the stock float path;
+  reference in `src/foldquant_ref.cpp` on CPU, OpenVINO ops on the OpenVINO CPU
+  and GPU plugins with INT8/INT4 weight constants). On every other backend
+  (Metal, SYCL, Hexagon, OpenCL, the OpenVINO NPU) the sites are read back as
+  float weights with FoldQuant's rounding and run the stock float path;
   `VLA_FQ_DEQUANT=1` does the same on CUDA or CPU. The format and arithmetic are
   in `docs/QUANTIZATION.md`.
 - `scripts/convert_quantized_model_to_gguf.py` converts a FoldQuantVLA quantized
