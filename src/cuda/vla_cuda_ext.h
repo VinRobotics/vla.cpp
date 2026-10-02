@@ -14,22 +14,14 @@
 
 #pragma once
 
-// Registration for the in-tree CUDA kernel families that ride the ggml
-// extension hook: the BF16 activation ops (src/cuda/vla_cuda_bf16.cu) and the
-// FoldQuant INT8/INT4 linears (src/cuda/vla_cuda_foldquant.cu). Both install
-// through one dispatcher (src/cuda/vla_cuda_ext.cu) so they compose.
-//
-// Off every other build: without CUDA there is no hook to install and these
-// paths are unreachable anyway, so this compiles to nothing.
+#include "ggml.h"
 
 namespace vla {
 
-#ifdef GGML_USE_CUDA
-void cuda_register_bf16_ops();
-void cuda_register_foldquant_ops();
-#else
-inline void cuda_register_bf16_ops() {}
-inline void cuda_register_foldquant_ops() {}
-#endif
+using cuda_ext_fn = bool (*)(ggml_tensor *, void *);
+
+// Install a first-refusal handler for ggml_cuda_compute_forward (see
+// vla_cuda_ext.cu). Idempotent.
+void cuda_ext_add_handler(cuda_ext_fn fn);
 
 }  // namespace vla

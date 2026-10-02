@@ -64,18 +64,17 @@
 #include <string>
 #include <unordered_set>
 #endif
+#include <stdlib.h>  // setenv / _putenv_s
 #if defined(GGML_USE_SYCL) || defined(GGML_USE_OPENVINO) || \
     defined(GGML_USE_HEXAGON) || defined(GGML_USE_OPENCL)
-#include <stdlib.h>  // setenv / _putenv_s
 #include <mutex>
 #endif
 
 namespace vla {
 
-#if defined(GGML_USE_SYCL) || defined(GGML_USE_OPENVINO) || \
-    defined(GGML_USE_HEXAGON) || defined(GGML_USE_OPENCL)
 // setenv is POSIX. _putenv_s has no "do not overwrite" mode, so check first.
 // Empty counts as unset; an empty KEY= in a compose file is not a choice.
+// Used by the SYCL/OpenVINO/Hexagon/OpenCL ladders and by the FoldQuant reference switch.
 inline void setenv_default(const char * key, const char * val) {
 #ifdef _WIN32
     size_t len = 0;
@@ -89,7 +88,6 @@ inline void setenv_default(const char * key, const char * val) {
     setenv(key, val, /*overwrite=*/1);
 #endif
 }
-#endif
 
 /// Outcome of @ref backend_init. @c handle is null only if even the CPU backend
 /// failed to come up, which callers treat as a fatal load error.
