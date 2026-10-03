@@ -12,8 +12,9 @@ A C++ inference engine for **Vision-Language-Action (VLA) models**, built on [`l
 It runs the open VLA policies - SmolVLA, π0, BitVLA, Evo-1, GR00T N1.5/1.6/1.7 and more -
 under one runtime, each packaged as a single self-contained GGUF that needs no Python or
 PyTorch at inference time. The binaries drive robots on **CPU**, **Apple Silicon**, **CUDA** -
-from consumer GPUs down to Jetson-class boards - **Intel GPUs and NPUs** via
-SYCL and OpenVINO, or **Qualcomm Snapdragon CPUs, Adreno GPUs and Hexagon NPUs**
+from consumer GPUs down to Jetson-class boards - **AMD Radeon 8060S** via ROCm/HIP,
+**Intel GPUs and NPUs** via SYCL and OpenVINO, or **Qualcomm Snapdragon CPUs,
+Adreno GPUs and Hexagon NPUs**
 via OpenCL and the Hexagon backend.
 
 [**Learn vla.cpp**](https://fai-modelopt-tech.github.io/learn-vla-cpp/) walks through the engine design and how each policy is implemented on ggml.
@@ -57,6 +58,8 @@ tarball). Details, and the macOS and Windows notes, are in
 - CMake ≥ 3.22
 - A C++17 compiler (GCC 11+ or Clang 14+)
 - CUDA 12.x or 13.x (optional - required only for CUDA GPU builds)
+- ROCm with HIP, hipBLAS and rocBLAS (optional - see
+  [the tested AMD configuration](docs/backend/rocm.md))
 - Intel oneAPI 2025.x + GPU compute runtime (optional - only for Intel GPU
   builds, see [docs/backend/sycl.md](docs/backend/sycl.md))
 - OpenVINO 2026.x runtime (optional - only for Intel CPU/GPU/NPU builds via
@@ -97,6 +100,19 @@ cmake -B build \
 cmake --build build -j$(nproc)
 ```
 
+For ROCm/HIP, use a separate build directory and the target reported by
+`rocminfo` (`gfx1151` in the tested example):
+
+```bash
+HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
+cmake -B build-rocm -G Ninja -DGGML_HIP=ON -DGPU_TARGETS=gfx1151 \
+    -DCMAKE_BUILD_TYPE=Release
+cmake --build build-rocm -j$(nproc)
+```
+
+The [ROCm backend notes](docs/backend/rocm.md) cover the runtime library path,
+device selection, validation and limits.
+
 If CMake cannot find CUDA, point the environment at it explicitly:
 
 ```bash
@@ -114,7 +130,7 @@ tree. `pip install ./bindings/python` builds the Python bindings, see
 [bindings/python/README.md](bindings/python/README.md).
 
 Check [docs/backend](docs/backend) for compiling `vla.cpp` on other platforms.
-WSL2, Apple Silicon, and Intel GPU are all tested.
+ROCm on Linux `gfx1151`, WSL2, Apple Silicon, and Intel GPU are all tested.
 To build and run in containers instead, see [docs/DOCKER.md](docs/DOCKER.md).
 
 ---
@@ -148,21 +164,26 @@ variables are in [docs/USAGE.md](docs/USAGE.md).
 Models (rows) against platforms (columns). Legend: `Y` =
 supported (released and benchmarked), `~` = in progress, `-` = planned.
 
-| Model | CPU (x86-64 / ARM) | CUDA | [SYCL (Intel)](docs/backend/sycl.md) | [Metal](docs/backend/metal.md) | [OpenVINO](docs/backend/ov.md) | [Hexagon](docs/backend/hexagon-windows.md) |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | Y | Y | 
-| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | Y | ~ | 
-| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | Y | Y | Y | 
-| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | Y | Y | Y | 
-| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | Y | Y | 
-| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | Y | Y | 
-| [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | ~ | - | - | 
-| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | Y | Y | 
-| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | Y | Y | 
-| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | Y | - | 
-| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | ~ | 
-| [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | - | Y | 
-| [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | Y | Y | Y | Y | 
+| Model | CPU (x86-64 / ARM) | CUDA | [ROCm (AMD)](docs/backend/rocm.md) | [SYCL (Intel)](docs/backend/sycl.md) | [Metal](docs/backend/metal.md) | [OpenVINO](docs/backend/ov.md) | [Hexagon](docs/backend/hexagon-windows.md) |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | Y | Y | Y |
+| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | ~ | - | Y | Y | ~ |
+| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | Y | - | Y | Y | Y |
+| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | ~ | - | Y | Y | Y |
+| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | ~ | - | Y | Y | Y |
+| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | ~ | - | Y | Y | Y |
+| [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | - | ~ | - | - |
+| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | ~ | Y | Y | Y | Y |
+| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | ~ | Y | Y | Y |
+| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | - | Y | Y | - |
+| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | - | Y | Y | ~ |
+| [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | - | Y | Y | - | Y |
+| [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | ~ | Y | Y | Y | Y |
+
+ROCm `Y` currently means fixed-input inference and synthetic-input benchmark
+coverage on Linux `gfx1151` with ROCm 7.14 and llama.cpp `b11223`. The `~`
+rows await validation on this upstream revision; older results do not establish
+their current status. These engine checks do not establish robot-task success.
 
 ---
 
@@ -227,7 +248,7 @@ Wiring, recording, training and queue sizing are in the
 | [docs/MODELS.md](docs/MODELS.md) | Converting safetensors checkpoints to GGUF, quantizing to Q8_0/Q4_0 |
 | [docs/DOCKER.md](docs/DOCKER.md) | Building and running the eval in containers |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Engine design: layers, the prediction path, backends, adding an architecture |
-| [docs/backend/](docs/backend) | Per-backend build and run notes: [SYCL](docs/backend/sycl.md), [OpenVINO](docs/backend/ov.md), [Metal](docs/backend/metal.md), [Hexagon](docs/backend/hexagon.md), [Hexagon on Windows](docs/backend/hexagon-windows.md), [WSL2](docs/backend/wsl.md) |
+| [docs/backend/](docs/backend) | Per-backend build and run notes: [ROCm](docs/backend/rocm.md), [SYCL](docs/backend/sycl.md), [OpenVINO](docs/backend/ov.md), [Metal](docs/backend/metal.md), [Hexagon](docs/backend/hexagon.md), [Hexagon on Windows](docs/backend/hexagon-windows.md), [WSL2](docs/backend/wsl.md) |
 | [docs/benchmark/](docs/benchmark) | Per-device latency and memory for every model, and the fastest flags per device |
 | [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) | Known issues and their resolutions |
 | [docs/ADOPTION.md](docs/ADOPTION.md) | C ABI, Python bindings, release packaging, and what is left |

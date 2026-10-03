@@ -2,8 +2,8 @@
 
 vla.cpp runs Vision-Language-Action (VLA) policies on the ggml/llama.cpp runtime.
 Every model is a self-contained GGUF that the engine loads, detects, and drives on
-CPU, CUDA, Metal, SYCL, OpenVINO, OpenCL or Hexagon. This page is the map; the
-source is the detail.
+CPU, CUDA, ROCm/HIP, Metal, SYCL, OpenVINO, OpenCL or Hexagon. This page is the
+map; the source is the detail.
 
 ## Layers
 
