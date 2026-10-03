@@ -304,17 +304,24 @@ B390 iGPU, OpenVINO 2026.4, `vla-bench` p50 over 10 calls after 3 warmups:
 | CPU | bf16 | 6624 | 16.5 GB |
 | CPU | FoldQuant W4A4 | 3888 | 6.4 GB |
 | CPU | FoldQuant W4A4, o/down INT8 | 3807 | 7.1 GB |
-| CPU | FoldQuant W8A8 (uncalibrated) | 3763 | 9.4 GB |
+| CPU | FoldQuant W8A8 | 3653 | 8.6 GB |
 | GPU | bf16 | 568 | 11.4 GB |
 | GPU | FoldQuant W4A4 | 656 | 3.4 GB |
 | GPU | FoldQuant W4A4, o/down INT8 | 652 | 3.7 GB |
-| GPU | FoldQuant W8A8 (uncalibrated) | 595 | 9.6 GB |
+| GPU | FoldQuant W8A8 | 655 | 4.7 GB |
 
 The GPU runs the per-site activation ops (reduction, rounding, the rotation
 MatMul) on top of the GEMMs and comes out slower than bf16 there, at a third of
 the memory. On an Intel GPU the SYCL backend is the faster FoldQuant path: the
 same W4A4 file runs in 291 ms on this iGPU, against 326 ms for bf16 on SYCL
 ([sycl.md](sycl.md#foldquant-w8a8--w4a4-checkpoints)).
+
+The FoldQuant files are FoldQuantVLA quantized checkpoints converted with
+`scripts/convert_quantized_model_to_gguf.py`: W4A4 and W4A4 with INT8 o/down are
+[vrfai/pi05-libero-w4a4](https://huggingface.co/vrfai/pi05-libero-w4a4) and
+[vrfai/pi05-libero-w4a4-res8](https://huggingface.co/vrfai/pi05-libero-w4a4-res8);
+W8A8 is FoldQuantVLA's W8A8 arm (`--llm-scheme w8a8_sr --expert-scheme w8a8_sh`)
+calibrated on the same 128 LIBERO frames, seed 0.
 
 ## Known issues
 

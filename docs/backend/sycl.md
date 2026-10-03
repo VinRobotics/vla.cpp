@@ -145,10 +145,17 @@ B390 iGPU, oneAPI 2026.1, `vla-bench` p50 over 10 calls after 3 warmups:
 | FoldQuant W4A4, `VLA_FQ_DEQUANT=1` | 3.27 GB | 327 |
 | FoldQuant W4A4 | 3.27 GB | **291** |
 | FoldQuant W4A4, o/down INT8 | 3.61 GB | **290** |
-| FoldQuant W8A8 (uncalibrated) | 4.73 GB | 330 |
+| FoldQuant W8A8 | 4.42 GB | **305** |
 
 Vision (79 ms) stays bf16 in every row. W4A4 halves the weights and is 11% faster
-than bf16; W8A8 runs at bf16 speed.
+than bf16, W8A8 6%.
+
+The FoldQuant files are FoldQuantVLA quantized checkpoints converted with
+`scripts/convert_quantized_model_to_gguf.py`: W4A4 and W4A4 with INT8 o/down are
+[vrfai/pi05-libero-w4a4](https://huggingface.co/vrfai/pi05-libero-w4a4) and
+[vrfai/pi05-libero-w4a4-res8](https://huggingface.co/vrfai/pi05-libero-w4a4-res8);
+W8A8 is FoldQuantVLA's W8A8 arm (`--llm-scheme w8a8_sr --expert-scheme w8a8_sh`)
+calibrated on the same 128 LIBERO frames, seed 0.
 
 ## Known issue: the Level Zero loader on Ubuntu 24.04
 
