@@ -44,8 +44,8 @@ Checkpoints are cached under `$VLA_CACHE` (default `~/.cache/vla`).
 
 ## `vla-server`
 
-`vla-server` loads the model once at startup and answers ZeroMQ REQ/REP requests
-synchronously.
+`vla-server` loads the model once at startup and answers ZeroMQ requests carrying
+the protobuf messages in `src/serving/vla.proto`.
 
 ```bash
 ./build/vla-server "$VLA_GGUF"
@@ -59,6 +59,30 @@ vla-server: bound to tcp://*:5555. ready.
 
 Use `--bind` to change the address and port. Stop the server with `Ctrl-C`.
 `vla-server` also takes `-hf user/repo[:file.gguf|:tag]` in place of a checkpoint path.
+
+### Asynchronous clients
+
+The socket is a ZeroMQ ROUTER, and prediction runs on its own thread. A REQ
+client sees what it always did: one request, one reply. A DEALER client can
+keep several requests in flight, and the server keeps receiving while the model
+runs, so a robot's control loop never has to wait for a prediction to send the
+next observation. Replies carry the request's `request_id`, which is how a
+client matches a chunk to the observation it came from.
+
+`--queue` says what happens to requests that arrive while a prediction is
+running:
+
+- `latest` (default): one pending request per client. A newer request from the
+  same client replaces the pending one, which is answered at once with
+  `error="superseded"`. The model therefore always works on the freshest
+  observation each robot has sent, and several robots sharing one server are
+  served in turn.
+- `fifo`: every request is served in arrival order, for benchmarks that want
+  throughput rather than freshness.
+
+`latency_ms_queue` in the reply is how long the request waited for the predict
+thread. A malformed request is rejected on the socket thread, so an error comes
+back within milliseconds even mid-prediction.
 
 Clients: the LIBERO and SimplerEnv runners in [EVAL.md](EVAL.md), and the
 real-robot client in the README's

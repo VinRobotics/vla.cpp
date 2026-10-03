@@ -45,6 +45,11 @@ message PredictResponse {
   float latency_ms_prefill   = 8;
   float latency_ms_denoise   = 9;
   float latency_ms_vision    = 10;
+  // Time the request waited for the predict thread, from receipt to the start
+  // of prediction. Non-zero when another request was being served.
+  float latency_ms_queue     = 11;
 
+  // Set when the request was not served. "superseded" means the same client
+  // sent a newer request before this one started (see vla-server --queue).
   string error = 7;
 }

@@ -27,7 +27,8 @@ source is the detail.
 - `src/tokenizer.h` - SentencePiece tokenizers stored in the GGUF, for
   `vla-cli --text`.
 - `include/vla.h`, `src/vla_c_api.cpp` - the C ABI (`libvla`).
-- `src/serving/` - `vla-server` (ZeroMQ + protobuf, action prediction), `vlm-server`
+- `src/serving/` - `vla-server` (ZeroMQ ROUTER + protobuf, action prediction on a
+  worker thread behind a latest-wins request queue), `vlm-server`
   (chat), `vla-cli` (one-shot inference) and `vla-bench` (timing).
 - `src/kernels/bitvla/` - custom 1.58-bit ternary CUDA kernels for BitVLA.
 
