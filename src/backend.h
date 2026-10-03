@@ -269,7 +269,18 @@ inline int backend_device_index() {
 inline Backend backend_init(const char * tag, int n_threads) {
     Backend b;
 
-#if defined(VLA_USE_HIP)
+#if defined(GGML_USE_CUDA) && !defined(GGML_USE_HIP)
+    {
+        const int dev = backend_device_index();
+        b.handle = ggml_backend_cuda_init(dev);
+        if (b.handle) {
+            b.is_cuda = true;
+            std::printf("%s: backend = CUDA (device %d)\n", tag, dev);
+        } else {
+            std::fprintf(stderr, "%s: ggml_backend_cuda_init failed; falling back to CPU\n", tag);
+        }
+    }
+#elif defined(GGML_USE_HIP)
     {
         // ggml-hip compiles the ggml-cuda sources and keeps their entry points.
         const int dev = backend_device_index();
@@ -280,17 +291,6 @@ inline Backend backend_init(const char * tag, int n_threads) {
             std::printf("%s: backend = ROCm/HIP (device %d: %s)\n", tag, dev, desc);
         } else {
             std::fprintf(stderr, "%s: ggml_backend_cuda_init failed on ROCm; falling back to CPU\n", tag);
-        }
-    }
-#elif defined(GGML_USE_CUDA)
-    {
-        const int dev = backend_device_index();
-        b.handle = ggml_backend_cuda_init(dev);
-        if (b.handle) {
-            b.is_cuda = true;
-            std::printf("%s: backend = CUDA (device %d)\n", tag, dev);
-        } else {
-            std::fprintf(stderr, "%s: ggml_backend_cuda_init failed; falling back to CPU\n", tag);
         }
     }
 #elif defined(GGML_USE_SYCL)

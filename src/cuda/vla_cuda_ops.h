@@ -21,7 +21,7 @@
 
 namespace vla {
 
-#if defined(GGML_USE_CUDA) && !defined(VLA_USE_HIP)
+#if defined(GGML_USE_CUDA) && !defined(GGML_USE_HIP)
 void cuda_register_bf16_ops();
 #else
 inline void cuda_register_bf16_ops() {}

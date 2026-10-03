@@ -286,8 +286,8 @@ if(GGML_CUDA)
     target_link_libraries(vla_cuda_ops PUBLIC CUDA::cublas CUDA::cudart ggml-cuda)
     target_link_libraries(vla_core PRIVATE vla_cuda_ops)
 elseif(GGML_HIP)
-    # ggml-hip exports GGML_USE_CUDA publicly; keep vla.cpp's own CUDA code out.
-    target_compile_definitions(vla_core PUBLIC VLA_USE_HIP)
+    # ggml-hip also exports GGML_USE_CUDA; distinguish HIP from CUDA-only code.
+    target_compile_definitions(vla_core PUBLIC GGML_USE_HIP)
 endif()
 
 if(GGML_SYCL AND NOT GGML_CUDA)
