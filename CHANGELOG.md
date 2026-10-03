@@ -4,6 +4,14 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Added
+
+- **ROCm/HIP backend for VLA inference.** `-DGGML_HIP=ON` selects ggml's HIP
+  backend without compiling vla.cpp's CUDA-only kernels. Linux `gfx1151` with
+  ROCm 7.14 and llama.cpp `b11223` has fixed-input and synthetic benchmark
+  coverage for SmolVLA and π0.5. See `docs/backend/rocm.md` for the measured
+  numerical differences, build commands and current limits.
+
 ## [0.4.0] - 2026-09-30
 
 ### Added
