@@ -61,6 +61,8 @@ jobs:
         run: |
           cp -r build/_deps/llama-src /tmp/llama-patchtest
           python3 scripts/patch_ggml_cuda_ext_hook.py /tmp/llama-patchtest
+          python3 scripts/patch_ggml_sycl_ext_hook.py /tmp/llama-patchtest
+          python3 scripts/patch_ggml_sycl_ext_hook.py /tmp/llama-patchtest   # idempotent
           python3 scripts/patch_ggml_openvino.py /tmp/llama-patchtest
           python3 scripts/patch_ggml_openvino.py /tmp/llama-patchtest   # idempotent
 
@@ -87,6 +89,89 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89-real \
             -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined -DVLA_BUILD_TESTS=ON -DVLA_WERROR=ON
           cmake --build build -j"$(nproc)"
+
+  # Intel GPUs through oneAPI SYCL. The runner has no GPU, so ggml-sycl itself
+  # cannot start; ctest still runs everything, and test_foldquant_sycl_op drives
+  # the FoldQuant kernels straight through the extension hook on the OpenCL CPU
+  # device that the DPC++ compiler package ships, against the CPU reference.
+  build-sycl:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: free disk (oneAPI + a SYCL build need ~15 GB)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v7
+      - name: deps
+        run: |
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+            | sudo gpg --dearmor -o /usr/share/keyrings/oneapi-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" \
+            | sudo tee /etc/apt/sources.list.d/oneAPI.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential cmake git ca-certificates pkg-config python3 \
+            libzmq3-dev cppzmq-dev libprotobuf-dev protobuf-compiler \
+            intel-oneapi-compiler-dpcpp-cpp-2026.1 intel-oneapi-mkl-devel-2026.1 intel-oneapi-dnnl-devel-2026.0
+      - name: read llama.cpp pin
+        id: pin
+        run: echo "tag=$(bash scripts/llama_tag.sh)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: build/_deps
+          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}-sycl-${{ hashFiles('scripts/patch_ggml_sycl_ext_hook.py') }}
+      - name: build + ctest (OpenCL CPU device)
+        shell: bash
+        env:
+          ONEAPI_DEVICE_SELECTOR: opencl:cpu
+          VLA_FQ_TEST_REQUIRE_DEVICE: 1
+        run: |
+          source /opt/intel/oneapi/setvars.sh
+          sycl-ls
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_SYCL=ON \
+            -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DVLA_BUILD_TESTS=ON -DVLA_WERROR=ON
+          cmake --build build -j"$(nproc)"
+          ctest --test-dir build --output-on-failure
+
+  # Intel CPUs, GPUs and NPUs through OpenVINO. The CPU plugin runs on the
+  # runner, so test_foldquant_ov_op executes the translated FoldQuant graph and
+  # checks it against the CPU reference.
+  build-openvino:
+    runs-on: ubuntu-24.04
+    env:
+      OV_ARCHIVE: openvino_toolkit_ubuntu24_2026.4.0.22959.99c81491cc3_x86_64
+    steps:
+      - uses: actions/checkout@v7
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential cmake git ca-certificates pkg-config python3 \
+            libzmq3-dev cppzmq-dev libprotobuf-dev protobuf-compiler \
+            opencl-clhpp-headers ocl-icd-opencl-dev opencl-headers
+      - uses: actions/cache@v6
+        id: ov
+        with:
+          path: /opt/openvino
+          key: ${{ env.OV_ARCHIVE }}
+      - name: OpenVINO runtime
+        if: steps.ov.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL "https://storage.openvinotoolkit.org/repositories/openvino/packages/2026.4/linux/${OV_ARCHIVE}.tgz" \
+            | tar xz -C /tmp
+          sudo mv "/tmp/${OV_ARCHIVE}" /opt/openvino
+      - name: read llama.cpp pin
+        id: pin
+        run: echo "tag=$(bash scripts/llama_tag.sh)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: build/_deps
+          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}-openvino-${{ hashFiles('scripts/patch_ggml_openvino.py') }}
+      - name: build + ctest (CPU plugin)
+        shell: bash
+        run: |
+          source /opt/openvino/setupvars.sh
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_OPENVINO=ON -DVLA_BUILD_TESTS=ON -DVLA_WERROR=ON
+          cmake --build build -j"$(nproc)"
+          ctest --test-dir build --output-on-failure
 
   build-backends:
     runs-on: ${{ matrix.os }}

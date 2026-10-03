@@ -206,6 +206,15 @@ if(VLA_SPM)
     endif()
 endif()
 
+# oneAPI's icpx (the compiler of a SYCL build) defaults to -fp-model=fast, which
+# reassociates sums and drops IEEE division and NaN semantics; vla.cpp's code and
+# tests are written for what GCC, Clang and MSVC do by default. Set here, after
+# the dependencies, so ggml keeps its own flags. The FoldQuant sources then add
+# -ffp-contract=off on top, which icpx reports as an override; that is the intent.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    add_compile_options(-fp-model=precise -Wno-overriding-option)
+endif()
+
 # llama.cpp turns BUILD_SHARED_LIBS on, so these follow it. That is harmless on
 # ELF, which exports everything, but a Windows DLL exports nothing unannotated:
 # the import library comes out empty and every consumer fails to link. Nothing
@@ -251,11 +260,9 @@ target_include_directories(vla_core
 # The VLA archs call no llama_* API; only vlm_core needs llama.
 target_link_libraries(vla_core PUBLIC ggml)
 # The FoldQuant CPU reference must match the CUDA and SYCL kernels bit for bit,
-# so no FMA contraction on either side (aarch64 GCC contracts by default), and no
-# reassociation either: oneAPI's icpx compiles the host with -fp-model=fast by
-# default, which reorders the reference's sums and products.
-set_source_files_properties(src/foldquant.cpp src/foldquant_ref.cpp PROPERTIES COMPILE_OPTIONS
-    "$<$<CXX_COMPILER_ID:IntelLLVM>:-fp-model=precise>;$<$<CXX_COMPILER_ID:IntelLLVM>:-Wno-overriding-option>;-ffp-contract=off")
+# so no FMA contraction on either side (aarch64 GCC contracts by default; under
+# icpx, after the project-wide -fp-model=precise, which would allow it).
+set_source_files_properties(src/foldquant.cpp src/foldquant_ref.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 if(VLA_SPM)
     target_include_directories(vla_core PRIVATE ${sentencepiece_SOURCE_DIR}/src)
     target_link_libraries(vla_core PRIVATE sentencepiece-static ${VLA_SPM_PROTOBUF})
@@ -357,7 +364,7 @@ if(GGML_SYCL AND NOT GGML_CUDA)
     # rides in the executable's device image.
     target_sources(vla_core PRIVATE src/sycl/vla_sycl_foldquant.cpp)
     set_source_files_properties(src/sycl/vla_sycl_foldquant.cpp PROPERTIES
-        COMPILE_OPTIONS "-fsycl;-fp-model=precise;-Wno-overriding-option;-ffp-contract=off")
+        COMPILE_OPTIONS "-fsycl;-ffp-contract=off")
     target_link_options(vla_core PUBLIC -fsycl
         "SHELL:-Xsycl-target-backend=spir64 \"-cl-fp32-correctly-rounded-divide-sqrt\"")
     target_compile_definitions(vla_core PRIVATE VLA_FQ_SYCL)

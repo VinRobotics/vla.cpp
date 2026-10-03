@@ -639,7 +639,23 @@ void launch_epilogue(sycl::queue & q, const GemmParams & g, const int32_t * acc,
     });
 }
 
+bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res);
+
+// oneDNN, unless it cannot drive this device (no engine, no int8 matmul): then
+// this file's kernels, for good on that queue.
 bool gemm_dnnl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res) {
+    static std::unordered_map<sycl::queue *, bool> unusable;
+    if (unusable[&q]) return false;
+    try {
+        if (gemm_dnnl_impl(q, g, wbits, abits, has_bias, has_res)) return true;
+    } catch (const std::exception & e) {
+        std::fprintf(stderr, "FoldQuant SYCL: oneDNN unavailable on this device (%s); using the native GEMMs\n", e.what());
+    }
+    unusable[&q] = true;
+    return false;
+}
+
+bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res) {
     using dt  = dnnl::memory::data_type;
     using md  = dnnl::memory::desc;
     DnnlState & st = dnnl_state(q);

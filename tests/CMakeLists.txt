@@ -83,9 +83,9 @@ if(GGML_SYCL)
     add_executable(test_foldquant_sycl_op test_foldquant_sycl_op.cpp)
     target_include_directories(test_foldquant_sycl_op PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(test_foldquant_sycl_op PRIVATE vla_core)
-    # It runs the CPU reference inline: precise floating point, no contraction.
-    target_compile_options(test_foldquant_sycl_op PRIVATE -Wall -Wextra -fp-model=precise -Wno-overriding-option
-                           -ffp-contract=off)
+    # It runs the CPU reference inline (no contraction) and, without a GPU,
+    # drives the kernels on a SYCL queue of its own.
+    target_compile_options(test_foldquant_sycl_op PRIVATE -fsycl -Wall -Wextra -ffp-contract=off)
     add_test(NAME foldquant_sycl_op COMMAND test_foldquant_sycl_op)
 endif()
 

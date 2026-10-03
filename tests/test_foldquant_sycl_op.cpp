@@ -17,6 +17,12 @@
 // cases of test_foldquant_cpu_op.cpp: the activation blob must match byte for
 // byte and every output bit for bit, as the CUDA kernels do. Built only with
 // -DGGML_SYCL=ON.
+//
+// With a GPU the nodes go through ggml's SYCL backend. ggml-sycl refuses to
+// start without one, so otherwise they are handed straight to the extension hook
+// on whatever SYCL device there is (the OpenCL CPU device on a CI runner, or
+// ONEAPI_DEVICE_SELECTOR=opencl:cpu), with their tensors in USM shared memory:
+// the same kernels, minus XMX and oneDNN where the device has neither.
 
 #include "foldquant.h"
 #include "foldquant_ref.h"
@@ -28,12 +34,21 @@
 #include "ggml-backend.h"
 #include "ggml-sycl.h"
 
+#include <sycl/sycl.hpp>
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <utility>
 #include <vector>
+
+extern "C" {
+typedef bool (*ggml_sycl_ext_forward_t)(struct ggml_tensor * dst, void * queue);
+extern ggml_sycl_ext_forward_t ggml_sycl_ext_forward;
+}
 
 namespace {
 
@@ -55,7 +70,14 @@ struct Case {
 // The shape under test; main() runs the cases over a list of them.
 int64_t K = 256, N = 128, T = 37;
 
-int run_case(ggml_backend_t backend, const Case & c) {
+// Exactly one of the two is set: ggml's SYCL backend, or a queue for the hook.
+struct Exec {
+    ggml_backend_t backend = nullptr;
+    sycl::queue *  q       = nullptr;
+};
+
+int run_case(const Exec & ex, const Case & c) {
+    ggml_backend_t backend = ex.backend;
     Lcg rng(0x5eed1234u);
     std::vector<float> hx((size_t) K * T), hw((size_t) K * N), hws(N), hb(N), has(K), hga(K), hr((size_t) N * T);
     for (auto & v : hx)  v = rng.next() * 4.0f;
@@ -93,13 +115,6 @@ int run_case(ggml_backend_t backend, const Case & c) {
     ggml_tensor * as = c.ascale ? ggml_new_tensor_1d(W, GGML_TYPE_F32, K) : nullptr;
     ggml_tensor * ga = c.gamma  ? ggml_new_tensor_1d(W, GGML_TYPE_F32, K) : nullptr;
     ggml_set_name(w, "site.weight");
-    ggml_backend_buffer_t wbuf = ggml_backend_alloc_ctx_tensors(W, backend);
-    ggml_backend_buffer_set_usage(wbuf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
-    ggml_backend_tensor_set(w, wpacked.data(), 0, ggml_nbytes(w));
-    ggml_backend_tensor_set(ws, hws.data(), 0, ggml_nbytes(ws));
-    if (b)  ggml_backend_tensor_set(b,  hb.data(),  0, ggml_nbytes(b));
-    if (as) ggml_backend_tensor_set(as, has.data(), 0, ggml_nbytes(as));
-    if (ga) ggml_backend_tensor_set(ga, hga.data(), 0, ggml_nbytes(ga));
 
     vla::FqLinear s;
     s.w = w; s.wscale = ws; s.bias = b; s.ascale = as; s.gamma = ga;
@@ -119,19 +134,54 @@ int run_case(ggml_backend_t backend, const Case & c) {
     ggml_set_output(y);
     ggml_cgraph * gf = ggml_new_graph(C);
     ggml_build_forward_expand(gf, y);
-    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!ggml_gallocr_alloc_graph(alloc, gf)) { std::printf("FAIL: alloc\n"); return 1; }
-    ggml_backend_tensor_set(x, hx.data(), 0, ggml_nbytes(x));
-    if (r) ggml_backend_tensor_set(r, hr.data(), 0, ggml_nbytes(r));
-    if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) {
-        std::printf("FAIL: %s: graph compute\n", c.name);
+    if (ggml_graph_n_nodes(gf) != 2 || ggml_graph_node(gf, 0) != xq || ggml_graph_node(gf, 1) != y) {
+        std::printf("FAIL: %s: the graph is not fq_act -> fq_gemm\n", c.name);
         return 1;
     }
+
     const int64_t rb = vla::fq_act_row_bytes(K, c.abits), kp = vla::fq_act_kpack(K, c.abits);
     std::vector<uint8_t> got_blob((size_t) rb * T);
     std::vector<float>   got_y((size_t) N * T);
-    ggml_backend_tensor_get(xq, got_blob.data(), 0, got_blob.size());
-    ggml_backend_tensor_get(y, got_y.data(), 0, got_y.size() * sizeof(float));
+    const std::pair<ggml_tensor *, const void *> inputs[] = {
+        { w, wpacked.data() }, { ws, hws.data() }, { b, hb.data() }, { as, has.data() }, { ga, hga.data() },
+        { x, hx.data() }, { r, hr.data() },
+    };
+    ggml_backend_buffer_t wbuf  = nullptr;
+    ggml_gallocr_t        alloc = nullptr;
+    std::vector<void *>   usm;
+    if (backend) {
+        wbuf = ggml_backend_alloc_ctx_tensors(W, backend);
+        ggml_backend_buffer_set_usage(wbuf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+        if (!ggml_gallocr_alloc_graph(alloc, gf)) { std::printf("FAIL: alloc\n"); return 1; }
+        for (const auto & [t, h] : inputs)
+            if (t) ggml_backend_tensor_set(t, h, 0, ggml_nbytes(t));
+        if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) {
+            std::printf("FAIL: %s: graph compute\n", c.name);
+            return 1;
+        }
+        ggml_backend_tensor_get(xq, got_blob.data(), 0, got_blob.size());
+        ggml_backend_tensor_get(y, got_y.data(), 0, got_y.size() * sizeof(float));
+    } else {
+        auto place = [&](ggml_tensor * t, const void * h) {
+            void * p = sycl::malloc_shared(ggml_nbytes(t), *ex.q);
+            if (h) std::memcpy(p, h, ggml_nbytes(t));
+            t->data = p;
+            usm.push_back(p);
+        };
+        for (const auto & [t, h] : inputs)
+            if (t) place(t, h);
+        place(xq, nullptr);
+        place(y, nullptr);
+        // The two nodes in graph order, as ggml-sycl's compute loop would hand them over.
+        if (!ggml_sycl_ext_forward(xq, ex.q) || !ggml_sycl_ext_forward(y, ex.q)) {
+            std::printf("FAIL: %s: the hook declined a node\n", c.name);
+            return 1;
+        }
+        ex.q->wait();
+        std::memcpy(got_blob.data(), xq->data, got_blob.size());
+        std::memcpy(got_y.data(), y->data, got_y.size() * sizeof(float));
+    }
 
     // Reference: blob rows, then the integer GEMM and its epilogue.
     int bad_rows = 0, bad_y = 0;
@@ -166,9 +216,10 @@ int run_case(ggml_backend_t backend, const Case & c) {
                 "%d/%lld blob rows differ, %d/%lld outputs differ\n",
                 ok ? "ok  " : "FAIL", c.name, c.wbits, c.abits, c.rot, c.gamma, c.ascale, c.fold_before, c.bias,
                 c.residual, bad_rows, (long long) T, bad_y, (long long) (N * T));
-    ggml_gallocr_free(alloc);
+    for (void * p : usm) sycl::free(p, *ex.q);
+    if (alloc) ggml_gallocr_free(alloc);
     ggml_free(C);
-    ggml_backend_buffer_free(wbuf);
+    if (wbuf) ggml_backend_buffer_free(wbuf);
     ggml_free(W);
     return ok ? 0 : 1;
 }
@@ -176,10 +227,24 @@ int run_case(ggml_backend_t backend, const Case & c) {
 }  // namespace
 
 int main() {
-    ggml_backend_t backend = ggml_backend_sycl_init(0);
-    if (!backend) {
-        std::printf("SKIP: no SYCL device\n");
-        return 0;
+    if (sycl::device::get_devices().empty()) {
+        // CI sets VLA_FQ_TEST_REQUIRE_DEVICE so a runner that lost its OpenCL CPU
+        // device fails instead of passing on a skip.
+        const char * req = std::getenv("VLA_FQ_TEST_REQUIRE_DEVICE");
+        std::printf("%s: no SYCL device\n", req && *req && *req != '0' ? "FAIL" : "SKIP");
+        return req && *req && *req != '0' ? 1 : 0;
+    }
+    Exec ex;
+    std::unique_ptr<sycl::queue> q;
+    if (!sycl::device::get_devices(sycl::info::device_type::gpu).empty()) {
+        ex.backend = ggml_backend_sycl_init(0);
+        if (!ex.backend) { std::printf("FAIL: ggml_backend_sycl_init\n"); return 1; }
+        std::printf("through ggml's SYCL backend\n");
+    } else {
+        q = std::make_unique<sycl::queue>(sycl::default_selector_v, sycl::property::queue::in_order());
+        ex.q = q.get();
+        std::printf("no GPU: through the extension hook on %s\n",
+                    q->get_device().get_info<sycl::info::device::name>().c_str());
     }
     vla::sycl_register_foldquant_ops();
     const Case cases[] = {
@@ -212,10 +277,10 @@ int main() {
             std::printf("GEMM path '%s', K = %lld, N = %lld, T = %lld\n", path, (long long) K, (long long) N,
                         (long long) T);
             for (const Case & c : cases)
-                fails += run_case(backend, c);
+                fails += run_case(ex, c);
         }
     }
     std::printf("%s\n", fails ? "test_foldquant_sycl_op: FAILED" : "test_foldquant_sycl_op: PASS");
-    ggml_backend_free(backend);
+    if (ex.backend) ggml_backend_free(ex.backend);
     return fails ? 1 : 0;
 }
