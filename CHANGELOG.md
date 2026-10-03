@@ -4,6 +4,16 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Added
+
+- **Asynchronous serving.** `vla-server` is now a ZeroMQ ROUTER with prediction
+  on its own thread, so it keeps receiving while the model runs and a DEALER
+  client can keep requests in flight; REQ clients are unchanged. `--queue latest`
+  (default) keeps one pending request per client and answers a superseded one
+  with `error="superseded"`; `--queue fifo` serves every request in order.
+  Replies report `latency_ms_queue`. The lerobot fork's `lerobot-vla-cpp
+  --mode=async` drives it with a timestep-aligned action queue.
+
 ## [0.4.0] - 2026-09-30
 
 ### Added

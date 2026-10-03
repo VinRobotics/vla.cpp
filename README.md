@@ -207,9 +207,13 @@ lerobot-vla-cpp --server_address=tcp://127.0.0.1:5555 --arch=smolvla "${ROBOT[@]
   relative actions.
 - `--task` must match a trained instruction exactly, and the camera keys must
   stay `front` and `wrist` in that order.
-- `vla-server` answers one request at a time, so the loop is synchronous and
-  `--n_action_steps` is the feedback rate: 25 at 30 fps leaves ~0.83 s between
-  observations.
+- `--mode=async` runs inference on a background thread and merges each new chunk
+  into a timestep-aligned action queue, so the arm never waits for the server.
+  `--chunk_size_threshold` sets how early the next observation goes out, and
+  `--aggregate_fn_name` how overlapping actions from two chunks are blended. The
+  default `--mode=sync` executes `--n_action_steps` of each chunk before the
+  next request, so that number is the feedback rate: 25 at 30 fps leaves ~0.83 s
+  between observations.
 
 The GR00T paths of the client have not been tested against real checkpoints yet.
 Wiring, recording, training and queue sizing are in the

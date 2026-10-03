@@ -61,6 +61,15 @@ target_link_libraries(test_prompt PRIVATE vla_core)
 target_compile_options(test_prompt PRIVATE -Wall -Wextra)
 add_test(NAME prompt COMMAND test_prompt)
 
+# vla-server's socket-thread / predict-thread hand-off. Header-only, so no
+# ZeroMQ or protobuf is needed to exercise the coalescing rules.
+add_executable(test_request_queue test_request_queue.cpp)
+target_include_directories(test_request_queue PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(test_request_queue PRIVATE -Wall -Wextra)
+find_package(Threads REQUIRED)
+target_link_libraries(test_request_queue PRIVATE Threads::Threads)
+add_test(NAME request_queue COMMAND test_request_queue)
+
 # A/B harness for the two BitVLA ternary-GEMM tilings. Built so it cannot rot,
 # not registered with ctest: it needs a GPU and is read by hand.
 # VLA_BITVLA_NARROW_GEMM=1 selects the old one-tile-per-CTA kernel at runtime.
