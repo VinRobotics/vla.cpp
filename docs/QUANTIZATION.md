@@ -238,8 +238,8 @@ mode on CUDA or CPU (on a CPU it is much faster than the exact reference).
 `tests/test_foldquant_dequant.cpp` checks the rebuilt weights against the dense
 product.
 
-Environment switches: `VLA_FQ_CHECK=1` recomputes every node with the CPU
-reference after its kernel and reports mismatches; `VLA_FQ_CPU_REF=1` runs the CPU reference on host copies
+Environment switches: `VLA_FQ_CHECK=1` (CUDA and SYCL) recomputes every node
+with the CPU reference after its kernel and reports mismatches; `VLA_FQ_CPU_REF=1` runs the CPU reference on host copies
 of every node (a byte-exact A/B against the kernels; it disables ggml's CUDA
 graphs, whose capture cannot contain the host round trip); `VLA_FQ_TRACE=1`
 prints each node's shape once per graph build. A/B switches for the graph-level

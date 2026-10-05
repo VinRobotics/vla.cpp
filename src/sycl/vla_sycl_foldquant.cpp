@@ -37,6 +37,7 @@
 
 #include "foldquant.h"
 #include "foldquant_ref.h"
+#include "env_flag.h"
 #include "ggml.h"
 
 #include <sycl/sycl.hpp>
@@ -771,15 +772,60 @@ int blob_abits(const ggml_tensor * blob, int64_t K) {
     return blob->ne[0] == fq_act_row_bytes(K, 4) ? 4 : 8;
 }
 
+// VLA_FQ_CHECK=1, as on CUDA: after each node, recompute it with the CPU
+// reference on host copies of the same inputs and report any byte difference.
+// Slow; a diagnostic for a mismatch the unit tests' shapes do not reproduce.
+void check_against_host(sycl::queue & q, ggml_tensor * dst, void (*ref)(ggml_tensor *, int, int, void *), void * ud,
+                        size_t cmp_bytes_per_row, size_t row_bytes) {
+    std::vector<uint8_t> src_bytes[GGML_MAX_SRC];
+    ggml_tensor          src_copy[GGML_MAX_SRC];
+    ggml_tensor          d = *dst;
+    q.wait();
+    for (int i = 0; i < GGML_MAX_SRC; ++i) {
+        if (!dst->src[i]) { d.src[i] = nullptr; continue; }
+        src_copy[i] = *dst->src[i];
+        src_bytes[i].resize(ggml_nbytes(dst->src[i]));
+        q.memcpy(src_bytes[i].data(), dst->src[i]->data, src_bytes[i].size());
+        src_copy[i].data = src_bytes[i].data();
+        d.src[i] = &src_copy[i];
+    }
+    std::vector<uint8_t> got(ggml_nbytes(dst)), want(ggml_nbytes(dst));
+    q.memcpy(got.data(), dst->data, got.size());
+    q.wait();
+    d.data = want.data();
+    ref(&d, 0, 1, ud);
+    const int64_t rows = ggml_nbytes(dst) / row_bytes;
+    int64_t bad = 0, first = -1;
+    for (int64_t r = 0; r < rows; ++r)
+        if (std::memcmp(got.data() + (size_t) r * row_bytes, want.data() + (size_t) r * row_bytes, cmp_bytes_per_row)) {
+            if (first < 0) first = r;
+            ++bad;
+        }
+    std::printf("vla(fq) CHECK %-40s ne=[%lld,%lld] %s", ggml_get_name(dst), (long long) dst->ne[0],
+                (long long) dst->ne[1], bad ? "MISMATCH" : "ok\n");
+    if (bad) std::printf(" rows %lld/%lld (first %lld)\n", (long long) bad, (long long) rows, (long long) first);
+}
+
 bool dispatch(ggml_tensor * dst, void * queue) {
     const void * ud = fq_userdata(dst);
     const uint32_t m = fq_magic(ud);
     if (m != FQ_ACT_MAGIC && m != FQ_GEMM_MAGIC) return false;
     sycl::queue & q = *static_cast<sycl::queue *>(queue);
-    if (m == FQ_ACT_MAGIC)
-        return run_act(q, dst, *static_cast<const FqActSpec *>(ud));
+    static const bool check = env_flag("VLA_FQ_CHECK");
+    if (m == FQ_ACT_MAGIC) {
+        const FqActSpec & s = *static_cast<const FqActSpec *>(ud);
+        if (!run_act(q, dst, s)) return false;
+        if (check)
+            check_against_host(q, dst, fq_act_cpu, const_cast<void *>(ud), (size_t) fq_act_kpack(s.K, s.abits) + 4,
+                               (size_t) dst->ne[0]);
+        return true;
+    }
     const FqGemmSpec & s = *static_cast<const FqGemmSpec *>(ud);
-    return run_gemm(q, dst, s, blob_abits(dst->src[1], s.K));
+    if (!run_gemm(q, dst, s, blob_abits(dst->src[1], s.K))) return false;
+    if (check)
+        check_against_host(q, dst, fq_gemm_cpu, const_cast<void *>(ud), (size_t) s.N * sizeof(float),
+                           (size_t) s.N * sizeof(float));
+    return true;
 }
 
 bool supports(const ggml_tensor * op) {
