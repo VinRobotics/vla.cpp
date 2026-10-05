@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Thirteen fixes to the fetched ggml OpenVINO backend.
+"""Thirteen fixes to the fetched ggml OpenVINO backend, and the FoldQuant hook.
 
 ggml-openvino is written against llama.cpp's graphs: one decoder-only
 transformer, one position input, an F16 KV cache. vla.cpp drives it with vision
@@ -190,6 +190,14 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      and a late grasp on a robot. GGML_OPENVINO_GPU_PRECISION=f32 puts it at
      6.5e-5. Exposed rather than forced: f32 costs about 3x on this plugin, so
      src/backend.h defaults it for pi0 alone and an explicit setting still wins.
+ 14. op_table.{h,cpp}, ggml-openvino.cpp, ggml-quants.cpp, ggml-decoder.cpp -
+     the hook for FoldQuant. A FoldQuant GGUF builds two GGML_OP_CUSTOM nodes
+     per INT8/INT4 site, which ggml leaves to the CPU backend. The translator
+     that maps them onto OpenVINO ops lives in-tree (src/openvino/
+     foldquant_ov.cpp, compiled into this target by vla.cpp's CMakeLists); this
+     hunk only registers it for GGML_OP_CUSTOM, lets supports_op accept
+     FoldQuant's nodes (and no other custom op) ahead of the type checks that
+     would refuse their INT8 tensors, and keeps an INT8 weight as an i8 constant.
 
 Idempotent - re-running on a patched tree is a no-op, so a reconfigure that
 re-populates the FetchContent source dir is safe either way.
@@ -618,6 +626,56 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
         // defaults to erf, so the tanh variant must set its mode explicitly.
         {"GGML_UNARY_OP_GELU_ERF",  op::translate_1to1_match_1_input<v7::Gelu>     },""",
         ),
+        (
+            """        {"GGML_OP_ADD",             op::translate_add                              },""",
+            """        {"GGML_OP_ADD",             op::translate_add                              },
+        // vla.cpp: FoldQuant's two custom nodes (src/openvino/foldquant_ov.cpp).
+        {"GGML_OP_CUSTOM",          op::translate_vla_foldquant                    },""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/op_table.h": [
+        (
+            """GGML_OP_CONVERTER(translate_add);""",
+            """GGML_OP_CONVERTER(translate_add);
+GGML_OP_CONVERTER(translate_vla_foldquant);  // vla.cpp: src/openvino/foldquant_ov.cpp""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/ggml-openvino.cpp": [
+        (
+            """static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(ggml_backend_dev_t dev, const ggml_tensor * op) {
+    GGML_ASSERT(dev->reg != nullptr);
+""",
+            """// vla.cpp: defined in src/openvino/foldquant_ov.cpp.
+bool vla_foldquant_ov_supports(const ggml_tensor * op);
+
+static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(ggml_backend_dev_t dev, const ggml_tensor * op) {
+    GGML_ASSERT(dev->reg != nullptr);
+
+    // vla.cpp: FoldQuant's custom nodes carry INT8 weights and an INT8 blob,
+    // which the type checks below would refuse; they have their own test.
+    if (op->op == GGML_OP_CUSTOM) {
+        if (vla_foldquant_ov_supports(op)) {
+            return {true, ""};
+        }
+        return {false, "GGML_OP_CUSTOM other than FoldQuant's"};
+    }
+""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/ggml-quants.cpp": [
+        (
+            """    if (tensor->type == GGML_TYPE_F32 || tensor->type == GGML_TYPE_F16 || tensor->type == GGML_TYPE_BF16) {
+        ov::element::Type element_type;
+        switch (tensor->type) {""",
+            """    // vla.cpp: GGML_TYPE_I8 is a FoldQuant site's codes, kept as an i8 constant.
+    if (tensor->type == GGML_TYPE_F32 || tensor->type == GGML_TYPE_F16 || tensor->type == GGML_TYPE_BF16 ||
+        tensor->type == GGML_TYPE_I8) {
+        ov::element::Type element_type;
+        switch (tensor->type) {
+        case GGML_TYPE_I8:
+            element_type = ov::element::i8;
+            break;""",
+        ),
     ],
     "ggml/src/ggml-openvino/openvino/op/flash_attn_ext.cpp": [
         (
@@ -743,6 +801,11 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
 }
 
 int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {""",
+        ),
+        (
+            """    static const std::set<ggml_type> weight_types = {GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_Q8_0,""",
+            """    // vla.cpp: GGML_TYPE_I8 is a FoldQuant site's codes (see ggml-quants.cpp).
+    static const std::set<ggml_type> weight_types = {GGML_TYPE_I8,   GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_Q8_0,""",
         ),
     ],
     "ggml/src/ggml-openvino/utils.h": [

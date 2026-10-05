@@ -43,3 +43,29 @@ compute, not BF16.
 a bigger cut (`--type` also takes `Q4_1`, `Q5_0`, `Q5_1`).
 Embeddings, the output head, norms and the action expert stay float; pass `--vision` to
 pack the vision tower too (smaller, but more accuracy loss).
+
+### FoldQuant W8A8 / W4A4
+
+The stock repack keeps the action head float and rounds the LM weights block by
+block with no calibration. A FoldQuant GGUF ships the language backbone and the
+action head as INT8 or INT4 codes in a Hadamard-rotated, SmoothQuant-folded frame
+with per-row scales, calibrated by FoldQuantVLA; vla.cpp quantizes the activations
+per token (to 4 bits for W4A4) and runs the GEMMs on the integer tensor cores. It loads like any other checkpoint on every backend: CUDA and SYCL (Intel GPUs) run
+integer kernels, CPU the exact reference and OpenVINO (CPU and GPU) the same
+arithmetic as OpenVINO ops with INT8/INT4 weight constants; the others read the sites back as float
+weights with FoldQuant's rounding (weight-only quantization, bf16-GGUF speed); the format
+and the arithmetic are in [QUANTIZATION.md](QUANTIZATION.md).
+
+A calibrated arm saved as a quantized model by
+[FoldQuantVLA](https://github.com/VinRobotics/FoldQuantVLA) converts to that file with
+no calibration and nothing re-rounded (GR00T N1.5 / N1.6 / N1.7 and π0.5):
+
+```bash
+python scripts/convert_quantized_model_to_gguf.py --quantized-model <quantized model dir> --out model-fq.gguf
+./build/vla-server model-fq.gguf --bind tcp://*:5556
+
+# uncalibrated stand-in for bring-up and benchmarks (rotation + per-row INT8, no SmoothQuant)
+python scripts/foldquant_fake_export.py --in model-bf16.gguf --out model-fq.gguf
+python scripts/inspect_gguf_quant.py model-fq.gguf
+./build/vla-bench --ckpt model-fq.gguf --images 1 --size 256 --tokens 16
+```

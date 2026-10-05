@@ -25,6 +25,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "backend.h"
+#include "env_flag.h"
 #include "gguf_reader.h"
 #include "scratch_ctx.h"
 #include "layers/embed.h"
@@ -196,6 +197,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
     }
     if (!load_config(g, opts, *m, m->cfg))
         return nullptr;
+    FoldQuantSpec fq = foldquant_parse(g, "gr00t_n1_7");
     std::printf("vla(gr00tn1d7): vit=Qwen3-VL %lldd×%lldL×%lldh (Conv3d patch %lld², temporal %lld; learned pos %lld + 2D rope; deepstack@{%lld,%lld,%lld}; merge÷%lld)  "
                 "lm=Qwen3-VL %lldd×%lldL (%lldq/%lldkv×%lld, θ=%g)  vlsa=%lldL×%lldh×%lld  dit=AlternateVLDiT %lldL×%lldh×%lld(inner %lld) attend_text_every_n=%lld  "
                 "in_emb=%lld  horizon=%lld action_dim=%lld max_state=%lld N_steps=%lld  embodiment=%lld  resident=%s\n",
@@ -213,6 +215,8 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
             return nullptr;
         }
         m->backend = b.handle;
+        if (!foldquant_check_backend("vla(gr00tn1d7)", b, fq, opts.weight_dtype.has_value()))
+            return nullptr;
     }
 
     ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };
@@ -225,7 +229,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
     WeightLoader L("gr00tn1d7", g, m->ctx_weights, m->matmul_type);
 
     m->vit.declare(L, "vit");
-    m->lm.declare(L, "vlm");
+    m->lm.declare(L, "vlm", fq.present ? &fq.llm : nullptr);
 
     m->vlln_w = L.f32("aex.vlln.weight");
     m->vlln_b = L.f32("aex.vlln.bias");
@@ -233,7 +237,18 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
 
     if (!m->aex.declare(L, g, m->backend, "aex"))
         return nullptr;
-    m->dit.declare(L, "aex.dit", true, m->dit_interleave != 0);
+    m->dit.declare(L, "aex.dit", true, m->dit_interleave != 0, nullptr, fq.present ? &fq.action : nullptr);
+    if (fq.present) {
+        // Execution order of the FoldQuant GEMMs, so each one can prefetch the
+        // next site's weights (cross-attention K/V run before the step loop and
+        // are left out of the chain).
+        std::vector<FqLinear *> order;
+        for (auto & b : m->lm.blk)
+            for (FqLinear * s : {&b.fq_q, &b.fq_k, &b.fq_v, &b.fq_o, &b.fq_gate, &b.fq_up, &b.fq_down}) order.push_back(s);
+        for (auto & b : m->dit.blk)
+            for (FqLinear * s : {&b.fq_qkv, &b.fq_q, &b.fq_o, &b.fq_ff0, &b.fq_ff2}) order.push_back(s);
+        fq_link_prefetch(order);
+    }
 
     if (!L.upload(m->backend, &m->weight_buf))
         return nullptr;
@@ -396,6 +411,38 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(gio.t_txt_idx, prompt.text_pos.data(), 0, ggml_nbytes(gio.t_txt_idx));
 
     graph_unique_names(gf);
+    // VLA_GRAPH_DEBUG=1: report what changes between two computes of the cached
+    // graph, mirroring ggml-cuda's graph-reuse test (whole node struct + source
+    // data pointers / shapes); any change there defeats CUDA-graph replay.
+    if (env_flag("VLA_GRAPH_DEBUG")) {
+        struct Prop { ggml_tensor t; const void * sp[GGML_MAX_SRC]; };
+        static std::vector<Prop> prev;
+        const int n = ggml_graph_n_nodes(gf);
+        std::vector<Prop> cur((size_t) n);
+        for (int i = 0; i < n; ++i) {
+            ggml_tensor * t = ggml_graph_node(gf, i);
+            std::memcpy(&cur[(size_t) i].t, t, sizeof(ggml_tensor));
+            for (int j = 0; j < GGML_MAX_SRC; ++j) cur[(size_t) i].sp[j] = t->src[j] ? t->src[j]->data : nullptr;
+        }
+        if (prev.size() == cur.size()) {
+            int changed = 0;
+            for (int i = 0; i < n; ++i) {
+                const ggml_tensor & a = prev[(size_t) i].t, & b = cur[(size_t) i].t;
+                if (std::memcmp(&a, &b, sizeof(ggml_tensor)) != 0 || std::memcmp(prev[(size_t) i].sp, cur[(size_t) i].sp, sizeof(cur[(size_t) i].sp)) != 0) {
+                    if (changed < 5)
+                        std::printf("vla(graph-debug): node %d %s changed: data %p->%p op_params %d name %d flags %d extra %p->%p srcdata %d\n",
+                                    i, ggml_get_name(&b), a.data, b.data, std::memcmp(a.op_params, b.op_params, sizeof(a.op_params)) != 0,
+                                    std::strcmp(a.name, b.name) != 0, a.flags != b.flags, a.extra, b.extra,
+                                    std::memcmp(prev[(size_t) i].sp, cur[(size_t) i].sp, sizeof(cur[(size_t) i].sp)) != 0);
+                    ++changed;
+                }
+            }
+            std::printf("vla(graph-debug): %d of %d nodes changed since the previous compute\n", changed, n);
+        } else if (!prev.empty()) {
+            std::printf("vla(graph-debug): graph size changed %zu -> %zu\n", prev.size(), cur.size());
+        }
+        prev = std::move(cur);
+    }
     const auto tc0 = std::chrono::steady_clock::now();
     const ggml_status st = ggml_backend_graph_compute(backend, gf);
     const auto tc1 = std::chrono::steady_clock::now();

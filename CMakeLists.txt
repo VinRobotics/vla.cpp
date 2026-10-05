@@ -51,6 +51,12 @@ set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(_vla_llama_patch "")
+if(GGML_SYCL AND NOT GGML_CUDA)
+    # The hook FoldQuant's SYCL kernels (src/sycl/vla_sycl_foldquant.cpp) run behind.
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_sycl_ext_hook.py <SOURCE_DIR>)
+endif()
 if(GGML_CUDA)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
@@ -116,6 +122,17 @@ FetchContent_Declare(llama
     ${_vla_llama_patch}
 )
 FetchContent_MakeAvailable(llama)
+
+# FoldQuant on OpenVINO: the translator for FoldQuant's two custom nodes is
+# in-tree and compiled into ggml's OpenVINO backend, which reaches it through the
+# hook scripts/patch_ggml_openvino.py adds (op table entry, supports_op).
+if(GGML_OPENVINO)
+    target_sources(ggml-openvino PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/openvino/foldquant_ov.cpp)
+    target_include_directories(ggml-openvino PRIVATE
+        ${llama_SOURCE_DIR}/ggml/src/ggml-openvino
+        ${llama_SOURCE_DIR}/ggml/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+endif()
 
 # Drop the whole fetched tree from the default build: llama.cpp's ~20 tool
 # binaries and their impl libraries are dead weight here. What we link (llama,
@@ -189,6 +206,15 @@ if(VLA_SPM)
     endif()
 endif()
 
+# oneAPI's icpx (the compiler of a SYCL build) defaults to -fp-model=fast, which
+# reassociates sums and drops IEEE division and NaN semantics; vla.cpp's code and
+# tests are written for what GCC, Clang and MSVC do by default. Set here, after
+# the dependencies, so ggml keeps its own flags. The FoldQuant sources then add
+# -ffp-contract=off on top, which icpx reports as an override; that is the intent.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    add_compile_options(-fp-model=precise -Wno-overriding-option)
+endif()
+
 # llama.cpp turns BUILD_SHARED_LIBS on, so these follow it. That is harmless on
 # ELF, which exports everything, but a Windows DLL exports nothing unannotated:
 # the import library comes out empty and every consumer fails to link. Nothing
@@ -203,6 +229,8 @@ add_library(vla_core ${VLA_CORE_LIB_TYPE}
     src/model.cpp
     src/loader.cpp
     src/options.cpp
+    src/foldquant.cpp
+    src/foldquant_ref.cpp
     src/modules/action_expert.cpp
     src/modules/dit_head.cpp
     src/modules/encoder.cpp
@@ -231,6 +259,10 @@ target_include_directories(vla_core
 )
 # The VLA archs call no llama_* API; only vlm_core needs llama.
 target_link_libraries(vla_core PUBLIC ggml)
+# The FoldQuant CPU reference must match the CUDA and SYCL kernels bit for bit,
+# so no FMA contraction on either side (aarch64 GCC contracts by default; under
+# icpx, after the project-wide -fp-model=precise, which would allow it).
+set_source_files_properties(src/foldquant.cpp src/foldquant_ref.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 if(VLA_SPM)
     target_include_directories(vla_core PRIVATE ${sentencepiece_SOURCE_DIR}/src)
     target_link_libraries(vla_core PRIVATE sentencepiece-static ${VLA_SPM_PROTOBUF})
@@ -268,8 +300,36 @@ if(GGML_CUDA)
     target_compile_definitions(vla_core PUBLIC VLA_BITVLA_CUDA_KERNELS)
     target_include_directories(vla_core PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
 
+    # FoldQuant kernels: their own archive, device-linked on its own like bitvla
+    # above, because they compile with -fmad=false (bit-exact against the CPU
+    # reference in src/foldquant_ref.h) and no other archive does.
+    add_library(vla_fq_kernels STATIC
+        src/kernels/foldquant/fq_prologue.cu
+        src/kernels/foldquant/fq_gemm_i8.cu
+        src/kernels/foldquant/fq_gemm_mma.cu
+    )
+    set_target_properties(vla_fq_kernels PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_include_directories(vla_fq_kernels PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_features(vla_fq_kernels PRIVATE cxx_std_17)
+    target_compile_options(vla_fq_kernels PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3 -Xptxas=-O3 -fmad=false>
+    )
+    target_link_libraries(vla_fq_kernels PUBLIC CUDA::cudart)
+
     # ggml-cuda link: the hook resolves ggml_cuda_ext_forward out of it.
-    add_library(vla_cuda_ops STATIC src/cuda/vla_cuda_bf16.cu)
+    add_library(vla_cuda_ops STATIC
+        src/cuda/vla_cuda_ext.cu
+        src/cuda/vla_cuda_bf16.cu
+        src/cuda/vla_cuda_foldquant.cu
+    )
+    # The staging shim in vla_cuda_foldquant.cu runs the CPU reference on the
+    # host; it must round exactly like vla_core's copy.
+    set_source_files_properties(src/cuda/vla_cuda_foldquant.cu PROPERTIES
+        COMPILE_OPTIONS "-Xcompiler=-ffp-contract=off")
     target_include_directories(vla_cuda_ops PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${llama_SOURCE_DIR}/ggml/include
@@ -283,7 +343,7 @@ if(GGML_CUDA)
     target_compile_options(vla_cuda_ops PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-O3 -Xptxas=-O3>
     )
-    target_link_libraries(vla_cuda_ops PUBLIC CUDA::cublas CUDA::cudart ggml-cuda)
+    target_link_libraries(vla_cuda_ops PUBLIC CUDA::cublas CUDA::cudart ggml-cuda vla_fq_kernels)
     target_link_libraries(vla_core PRIVATE vla_cuda_ops)
 endif()
 
@@ -296,6 +356,29 @@ if(GGML_SYCL AND NOT GGML_CUDA)
             "See docs/backend/sycl.md.")
     endif()
     target_compile_definitions(vla_core PUBLIC GGML_USE_SYCL)
+
+    # FoldQuant kernels for Intel GPUs, behind the hook the patch above adds. Built
+    # without FMA contraction, and with the device JIT told to round division and
+    # sqrt correctly (the GPU driver approximates both otherwise), so the codes
+    # match the CPU reference bit for bit. The JIT option is a link option: it
+    # rides in the executable's device image. One image per kernel, so a device
+    # JIT-compiles only what it launches (not the XMX kernel on a device without
+    # XMX: the OpenCL CPU device's compiler has crashed on the whole module).
+    target_sources(vla_core PRIVATE src/sycl/vla_sycl_foldquant.cpp)
+    set_source_files_properties(src/sycl/vla_sycl_foldquant.cpp PROPERTIES
+        COMPILE_OPTIONS "-fsycl;-ffp-contract=off")
+    target_link_options(vla_core PUBLIC -fsycl -fsycl-device-code-split=per_kernel
+        "SHELL:-Xsycl-target-backend=spir64 \"-cl-fp32-correctly-rounded-divide-sqrt\"")
+    target_compile_definitions(vla_core PRIVATE VLA_FQ_SYCL)
+    # Prefill-sized FoldQuant GEMMs go to oneDNN's int8 matmul when ggml-sycl
+    # was built with it (GGML_SYCL_DNN, the default).
+    if(GGML_SYCL_DNN)
+        find_package(DNNL QUIET)
+        if(DNNL_FOUND)
+            target_link_libraries(vla_core PRIVATE DNNL::dnnl)
+            target_compile_definitions(vla_core PRIVATE VLA_FQ_SYCL_DNNL)
+        endif()
+    endif()
 endif()
 
 # Precedence matches the ladder in src/backend.h.
@@ -307,6 +390,8 @@ if(GGML_OPENVINO AND NOT GGML_CUDA AND NOT GGML_SYCL AND NOT GGML_METAL)
     # Only tells the archs which branch of the backend.h ladder to compile; the
     # toolkit was located before the fetch above.
     target_compile_definitions(vla_core PUBLIC GGML_USE_OPENVINO)
+    # FoldQuant nodes run natively through the translator compiled into ggml-openvino.
+    target_compile_definitions(vla_core PRIVATE VLA_FQ_OPENVINO)
 endif()
 
 # Hexagon and OpenCL reject some ops the archs build; the wrapper in
@@ -461,7 +546,7 @@ if(VLA_BUILD_SERVER)
 endif()
 # The CUDA targets were the only first-party code compiled without warnings.
 if(GGML_CUDA)
-    list(APPEND VLA_FIRST_PARTY_TARGETS bitvla_cuda_kernels vla_cuda_ops)
+    list(APPEND VLA_FIRST_PARTY_TARGETS bitvla_cuda_kernels vla_cuda_ops vla_fq_kernels)
 endif()
 
 option(VLA_WERROR "Treat warnings in first-party code as errors" OFF)
