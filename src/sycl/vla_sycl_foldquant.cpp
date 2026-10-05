@@ -641,10 +641,14 @@ void launch_epilogue(sycl::queue & q, const GemmParams & g, const int32_t * acc,
 
 bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res);
 
-// oneDNN, unless it cannot drive this device (no engine, no int8 matmul): then
-// this file's kernels, for good on that queue.
+// oneDNN on a GPU, unless it cannot drive it (no engine, no int8 matmul): then
+// this file's kernels, for good on that queue. GPUs only: on a CPU device
+// oneDNN's int8 matmul is not exact everywhere (on CPUs without VNNI it sums
+// pairs in saturating 16-bit lanes, vpmaddubsw), and vla.cpp only runs ggml-sycl
+// on GPUs anyway; the CPU device is test_foldquant_sycl_op's stand-in.
 bool gemm_dnnl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res) {
     static std::unordered_map<sycl::queue *, bool> unusable;
+    if (unusable.find(&q) == unusable.end()) unusable[&q] = !q.get_device().is_gpu();
     if (unusable[&q]) return false;
     try {
         if (gemm_dnnl_impl(q, g, wbits, abits, has_bias, has_res)) return true;
