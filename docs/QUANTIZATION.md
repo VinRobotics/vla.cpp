@@ -208,7 +208,7 @@ backend; without one (CI, or `ONEAPI_DEVICE_SELECTOR=opencl:cpu`) it hands the
 nodes straight to the extension hook on the OpenCL CPU device, since ggml-sycl
 will not start on a CPU; the GEMMs then run on vla.cpp's own kernels, because
 oneDNN's int8 matmul on a CPU without VNNI saturates 16-bit partial sums. A
-whole π0.5 model follows the CUDA integer path to 0.99999 action cosine at W8A8, 0.9997 at W4A4 with INT8 o/down and 0.9991
+whole π0.5 model follows the CUDA integer path to 0.99999 action cosine at W8A8, 0.9997 at W4A4 with INT8 o/down and 0.9995
 at W4A4 (FoldQuantVLA's calibrated LIBERO checkpoints). Both GPUs are exact to the same reference, so the gap comes from the
 float layers between the sites (the bf16 model's actions differ by up to 7e-4
 between them), which land some codes on the other side of a rounding tie; with

@@ -361,11 +361,13 @@ if(GGML_SYCL AND NOT GGML_CUDA)
     # without FMA contraction, and with the device JIT told to round division and
     # sqrt correctly (the GPU driver approximates both otherwise), so the codes
     # match the CPU reference bit for bit. The JIT option is a link option: it
-    # rides in the executable's device image.
+    # rides in the executable's device image. One image per kernel, so a device
+    # JIT-compiles only what it launches (not the XMX kernel on a device without
+    # XMX: the OpenCL CPU device's compiler has crashed on the whole module).
     target_sources(vla_core PRIVATE src/sycl/vla_sycl_foldquant.cpp)
     set_source_files_properties(src/sycl/vla_sycl_foldquant.cpp PROPERTIES
         COMPILE_OPTIONS "-fsycl;-ffp-contract=off")
-    target_link_options(vla_core PUBLIC -fsycl
+    target_link_options(vla_core PUBLIC -fsycl -fsycl-device-code-split=per_kernel
         "SHELL:-Xsycl-target-backend=spir64 \"-cl-fp32-correctly-rounded-divide-sqrt\"")
     target_compile_definitions(vla_core PRIVATE VLA_FQ_SYCL)
     # Prefill-sized FoldQuant GEMMs go to oneDNN's int8 matmul when ggml-sycl
