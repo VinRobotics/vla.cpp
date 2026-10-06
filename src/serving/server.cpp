@@ -406,7 +406,12 @@ int main(int argc, char ** argv) {
             send_reply(make_error_response(rid, "too many image views (max 16)"));
             continue;
         }
-        if (req.lang_tokens_size() < 1 || req.lang_tokens_size() > int(cfg.n_lang)) {
+        // ACT takes no instruction (n_lang 0), so it accepts no tokens at all.
+        if (cfg.n_lang == 0 && req.lang_tokens_size() != 0) {
+            send_reply(make_error_response(rid, "this model takes no language tokens"));
+            continue;
+        }
+        if (cfg.n_lang > 0 && (req.lang_tokens_size() < 1 || req.lang_tokens_size() > int(cfg.n_lang))) {
             char buf[128]; std::snprintf(buf, sizeof(buf),
                 "lang_tokens length %d out of range [1, %lld]",
                 req.lang_tokens_size(), (long long) cfg.n_lang);

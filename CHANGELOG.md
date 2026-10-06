@@ -6,6 +6,12 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 
+- **New model: ACT** (LeRobot `policies/act`). `scripts/convert_act_to_gguf.py`
+  converts a LeRobot `pretrained_model` directory, folding the ResNet's frozen
+  batch norms and dropping the training-only VAE encoder. No language input, so
+  `vla-server` accepts requests without tokens for it. The ResNet runs at the
+  cameras' own size; `vla-bench --height` and `VLA_IMG_H` in
+  `vla_predict_check` give non-square inputs.
 - **FoldQuant W8A8 / W4A4 inference** for GR00T N1.5 / N1.6 / N1.7 and π0.5. A
   FoldQuant GGUF carries the language backbone and the action
   module as INT8 or INT4 codes with per-row scales in a block-Hadamard,

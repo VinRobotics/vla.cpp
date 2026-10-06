@@ -249,6 +249,7 @@ add_library(vla_core ${VLA_CORE_LIB_TYPE}
     src/models/openvla_oft.cpp
     src/models/vla_jepa.cpp
     src/models/turbovla.cpp
+    src/models/act.cpp
     src/models/octo.cpp
     src/tokenizer.cpp
 )
