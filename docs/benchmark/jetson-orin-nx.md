@@ -17,15 +17,13 @@ engine only: no transport, no simulator, and no claim about task success.
 | Date | 2026-10-01 18:10 to 20:57 (UTC+02) |
 | Build | `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=87 -DCMAKE_BUILD_TYPE=Release` (`GGML_NATIVE=ON`) |
 | Runtime flags | defaults; the fastest flags per model are in the second table |
-| Method | 3 warmups + 20 timed reps per process, 3 processes. The process with the lowest mean is reported, and memory is the peak over all three. |
+| Method | 3 warmups + 20 timed reps per process, 3 processes. The process with the lowest mean is reported. |
 
-Memory is unified, and `nvidia-smi` reports no per-process usage on Jetson.
-**Peak RSS** is `getrusage` for the `vla-bench` process. On this L4T release it does
-not include the CUDA buffers (π0 peaks at 483 MiB here with 6 GB of weights
-resident), unlike the Orin Nano report on L4T R36.5. **Board RAM** is the peak
-"RAM used" from `tegrastats` (sampled every 100 ms) during a separate ~10 s run
-of the same model and flags, for the whole board; it was 2083 MB idle before the
-sweep, so subtract that for an estimate of the model's footprint.
+This report gives latency only. Memory is unified, and `nvidia-smi` reports no
+per-process usage on Jetson. `getrusage` on this board did not reliably capture
+the CUDA buffers, so there is no memory column. The weights and graphs are the
+same as on the other Jetsons, so the footprint should match the
+[Orin Nano](jetson-orin-nano.md) and [AGX Orin](jetson-agx-orin.md) reports.
 
 ## Model configuration
 
@@ -58,25 +56,25 @@ the `libero_object` variant. Settings not listed are the defaults.
 - **Octo** takes a 256 px primary view and a 128 px wrist view.
 - Every file's sha256 matches the one Hugging Face lists.
 
-## Latency and memory
+## Latency
 
 Rows are sorted by latency. `vision ms` is `-` for archs that do not time their
 vision stage separately.
 
-| Model | Views | Input | min ms | mean ms | p50 ms | p90 ms | vision ms | Peak RSS MiB | Board RAM MB |
-|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| Octo-Small | 2 | 256 + 128 | 27.4 | 27.5 | 27.5 | 27.5 | 2.9 | 331 | 2215 |
-| TurboVLA | 2 | 256 | 79.7 | 79.8 | 79.8 | 79.8 | - | 326 | 2311 |
-| VLA-JEPA | 1 | 256 | 176.7 | 176.8 | 176.7 | 176.8 | 73.6 | 427 | 5319 |
-| GR00T N1.7 | 1 | 256 | 251.4 | 251.8 | 251.6 | 251.9 | 73.5 | 441 | 6288 |
-| GR00T N1.6 | 1 | 224 | 252.1 | 252.3 | 252.2 | 253.1 | 76.5 | 426 | 5970 |
-| GR00T N1.5 | 1 | 224 | 260.8 | 261.1 | 261.0 | 261.7 | 76.5 | 470 | 5142 |
-| BitVLA | 1 | 224 | 269.1 | 269.2 | 269.2 | 269.2 | 50.6 | 1141 | 3042 |
-| VLA-Adapter | 1 | 224 | 270.7 | 270.8 | 270.8 | 270.9 | 151.8 | 952 | 4477 |
-| SmolVLA | 2 | 512 | 411.2 | 411.5 | 411.4 | 411.8 | 261.7 | 498 | 3825 |
-| π0 | 2 | 224 | 739.6 | 740.0 | 740.0 | 740.2 | 152.7 | 483 | 6843 |
-| π0.5 | 2 | 224 | 742.9 | 743.2 | 743.1 | 743.4 | 152.2 | 517 | 6731 |
-| Evo-1 | 1 | 448 | 893.2 | 894.0 | 894.1 | 894.2 | 454.0 | 491 | 3474 |
+| Model | Views | Input | min ms | mean ms | p50 ms | p90 ms | vision ms |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| Octo-Small | 2 | 256 + 128 | 27.4 | 27.5 | 27.5 | 27.5 | 2.9 |
+| TurboVLA | 2 | 256 | 79.7 | 79.8 | 79.8 | 79.8 | - |
+| VLA-JEPA | 1 | 256 | 176.7 | 176.8 | 176.7 | 176.8 | 73.6 |
+| GR00T N1.7 | 1 | 256 | 251.4 | 251.8 | 251.6 | 251.9 | 73.5 |
+| GR00T N1.6 | 1 | 224 | 252.1 | 252.3 | 252.2 | 253.1 | 76.5 |
+| GR00T N1.5 | 1 | 224 | 260.8 | 261.1 | 261.0 | 261.7 | 76.5 |
+| BitVLA | 1 | 224 | 269.1 | 269.2 | 269.2 | 269.2 | 50.6 |
+| VLA-Adapter | 1 | 224 | 270.7 | 270.8 | 270.8 | 270.9 | 151.8 |
+| SmolVLA | 2 | 512 | 411.2 | 411.5 | 411.4 | 411.8 | 261.7 |
+| π0 | 2 | 224 | 739.6 | 740.0 | 740.0 | 740.2 | 152.7 |
+| π0.5 | 2 | 224 | 742.9 | 743.2 | 743.1 | 743.4 | 152.2 |
+| Evo-1 | 1 | 448 | 893.2 | 894.0 | 894.1 | 894.2 | 454.0 |
 
 ### Fastest configuration
 
@@ -97,20 +95,20 @@ Flash attention, bf16 activations and lower-precision weights can move the
 action chunk. Success rates measured at the defaults therefore do not carry over
 to these rows.
 
-| Model | Fastest flags | min ms | mean ms | p50 ms | p90 ms | vision ms | Peak RSS MiB | Board RAM MB | vs defaults |
-|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
-| Octo-Small | *(defaults)* | 27.4 | 27.5 | 27.5 | 27.5 | 2.9 | 331 | 2215 | - |
-| TurboVLA | `--weight-dtype bf16 --flash-attn` | 46.7 | 46.8 | 46.8 | 46.8 | - | 380 | 2422 | -41% |
-| VLA-JEPA | `--weight-dtype f16 --flash-attn` | 154.9 | 155.0 | 155.0 | 155.1 | 62.0 | 404 | 5287 | -12% |
-| GR00T N1.7 | `--weight-dtype f16 --flash-attn` | 233.0 | 233.1 | 233.0 | 233.1 | 62.0 | 424 | 6343 | -7% |
-| VLA-Adapter | `--weight-dtype f16` | 236.7 | 236.9 | 236.8 | 237.3 | 131.2 | 952 | 4256 | -13% |
-| GR00T N1.6 | `--weight-dtype f16` | 243.1 | 243.3 | 243.2 | 244.1 | 68.3 | 408 | 5939 | -4% |
-| GR00T N1.5 | `--weight-dtype f16 --flash-attn` | 249.2 | 249.5 | 249.4 | 250.1 | 70.9 | 395 | 5045 | -4% |
-| SmolVLA | `--flash-attn --mm-prec default` | 254.1 | 254.3 | 254.2 | 254.7 | 151.8 | 508 | 3483 | -38% |
-| BitVLA | *(defaults)* | 269.1 | 269.2 | 269.2 | 269.2 | 50.6 | 1141 | 3042 | - |
-| π0 | `--weight-dtype f16 --flash-attn` | 597.6 | 597.9 | 597.8 | 598.2 | 140.0 | 417 | 6920 | -19% |
-| Evo-1 | `--act-dtype bf16 --flash-attn` | 626.0 | 626.3 | 626.2 | 626.4 | 196.0 | 616 | 3668 | -30% |
-| π0.5 | `--weight-dtype f16 --flash-attn` | 664.7 | 665.1 | 665.1 | 665.6 | 135.8 | 431 | 6559 | -11% |
+| Model | Fastest flags | min ms | mean ms | p50 ms | p90 ms | vision ms | vs defaults |
+|---|---|--:|--:|--:|--:|--:|--:|
+| Octo-Small | *(defaults)* | 27.4 | 27.5 | 27.5 | 27.5 | 2.9 | - |
+| TurboVLA | `--weight-dtype bf16 --flash-attn` | 46.7 | 46.8 | 46.8 | 46.8 | - | -41% |
+| VLA-JEPA | `--weight-dtype f16 --flash-attn` | 154.9 | 155.0 | 155.0 | 155.1 | 62.0 | -12% |
+| GR00T N1.7 | `--weight-dtype f16 --flash-attn` | 233.0 | 233.1 | 233.0 | 233.1 | 62.0 | -7% |
+| VLA-Adapter | `--weight-dtype f16` | 236.7 | 236.9 | 236.8 | 237.3 | 131.2 | -13% |
+| GR00T N1.6 | `--weight-dtype f16` | 243.1 | 243.3 | 243.2 | 244.1 | 68.3 | -4% |
+| GR00T N1.5 | `--weight-dtype f16 --flash-attn` | 249.2 | 249.5 | 249.4 | 250.1 | 70.9 | -4% |
+| SmolVLA | `--flash-attn --mm-prec default` | 254.1 | 254.3 | 254.2 | 254.7 | 151.8 | -38% |
+| BitVLA | *(defaults)* | 269.1 | 269.2 | 269.2 | 269.2 | 50.6 | - |
+| π0 | `--weight-dtype f16 --flash-attn` | 597.6 | 597.9 | 597.8 | 598.2 | 140.0 | -19% |
+| Evo-1 | `--act-dtype bf16 --flash-attn` | 626.0 | 626.3 | 626.2 | 626.4 | 196.0 | -30% |
+| π0.5 | `--weight-dtype f16 --flash-attn` | 664.7 | 665.1 | 665.1 | 665.6 | 135.8 | -11% |
 
 <details><summary>Screen means (ms) per flag set</summary>
 
