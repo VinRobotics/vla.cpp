@@ -18,8 +18,8 @@
 // and no denoising loop. At inference the VAE latent is zeros, so the latent
 // token is its projection's bias and the VAE encoder is not converted.
 //
-// The ResNet runs at whatever size the cameras send, like the PyTorch policy;
-// the graph is cached per input size.
+// The ResNet runs at whatever size the cameras send, like the PyTorch policy,
+// over all views as one batch; the graph is cached per input size.
 
 #include "arch.h"
 #include "backend.h"
@@ -30,12 +30,18 @@
 #include "options.h"
 #include "scratch_ctx.h"
 #include "layers/attn.h"
+#include "layers/conv.h"
 #include "layers/ffn.h"
 #include "layers/linear.h"
 #include "layers/norm.h"
+#include "modules/preprocess.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
+
+#ifdef GGML_USE_CUDA
+#include <cuda_runtime.h>
+#endif
 
 #include <chrono>
 #include <cmath>
@@ -85,6 +91,21 @@ int64_t down2(int64_t n, int64_t k, int64_t pad) {
     return (n + 2*pad - k) / 2 + 1;
 }
 
+// ggml-cuda's direct convolution is an implicit GEMM only where it has MMA
+// (Turing and newer). Before that, Volta's Jetson Xavier included, it falls back
+// to a naive kernel several times slower than im2col.
+bool cuda_conv_has_mma() {
+#ifdef GGML_USE_CUDA
+    int major = 0, minor = 0;
+    const int dev = backend_device_index();
+    return cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
+           cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev) == cudaSuccess &&
+           major*10 + minor >= 75;
+#else
+    return false;
+#endif
+}
+
 }  // namespace
 
 struct ActModelArch : public ModelArchBase {
@@ -101,6 +122,11 @@ struct ActModelArch : public ModelArchBase {
     ggml_context *        ctx_weights = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             mt          = GGML_TYPE_F32;
+    // CUDA (Turing+) runs the ResNet as ggml's direct convolution on F16
+    // kernels: an implicit GEMM on tensor cores with F32 accumulation and no
+    // im2col buffer. Elsewhere the kernels stay F32 and go through im2col, which
+    // is the faster of the two on CPU.
+    bool                  conv_direct = false;
 
     int64_t dim = 512, heads = 8, ff = 3200, enc_layers = 4, dec_layers = 1, chunk = 100;
     int64_t state_dim = 0, action_dim = 0, n_views = 1, img_h = 480, img_w = 640;
@@ -119,6 +145,7 @@ struct ActModelArch : public ModelArchBase {
     ggml_tensor *head_w = nullptr, *head_b = nullptr;
 
     std::vector<float> pos_1d;  // [n_1d, dim], host copy for the encoder position table
+    // img_std and the other stds already carry LeRobot's eps.
     std::vector<float> img_mean, img_std, state_mean, state_std, action_mean, action_std;
 
     struct Key {
@@ -129,7 +156,7 @@ struct ActModelArch : public ModelArchBase {
         ggml_tensor *pixels = nullptr, *state = nullptr, *enc_pos = nullptr, *actions = nullptr;
     };
     graph_cache<Key, IO> graph;
-    std::vector<float>   enc_pos_host;
+    std::vector<float>   pixels;  // host staging for io.pixels, kept so a call does not fault in fresh pages
 
     int64_t n_1d() const { return state_dim > 0 ? 2 : 1; }
     static void feature_size(int64_t h, int64_t w, int64_t & fh, int64_t & fw) {
@@ -141,22 +168,20 @@ struct ActModelArch : public ModelArchBase {
         }
     }
 
-    ggml_cgraph * build(ggml_context * C, IO & io, int64_t h, int64_t w) const;
-    void          fill_enc_pos(int64_t fh, int64_t fw);
+    ggml_cgraph *      build(ggml_context * C, IO & io, int64_t h, int64_t w) const;
+    std::vector<float> enc_pos_table(int64_t fh, int64_t fw) const;
 
     std::vector<float> predict(const Inputs& in) override;
 };
 
 namespace {
 
-// One view at a time, [w, h, c, 1]: the GEMM then lands as [ow*oh, oc], which is
-// already the next layer's layout, so no permute copy follows each conv.
+// [w, h, c, view] to [ow, oh, oc, view]. The kernel's type picks the path; see
+// ActModelArch::conv_direct.
 ggml_tensor * conv2d(ggml_context * C, const ConvW & cw, ggml_tensor * x, int stride, int pad) {
-    ggml_tensor * col = ggml_im2col(C, cw.w, x, stride, stride, pad, pad, 1, 1, true, GGML_TYPE_F32);
-    ggml_tensor * y   = ggml_mul_mat(C,
-        ggml_reshape_2d(C, col, col->ne[0], col->ne[2]*col->ne[1]),
-        ggml_reshape_2d(C, cw.w, cw.w->ne[0]*cw.w->ne[1]*cw.w->ne[2], cw.w->ne[3]));
-    y = ggml_reshape_4d(C, y, col->ne[1], col->ne[2], cw.w->ne[3], 1);
+    ggml_tensor * y = cw.w->type == GGML_TYPE_F16
+        ? ggml_conv_2d_direct(C, cw.w, x, stride, stride, pad, pad, 1, 1)
+        : conv_2d_f32(C, cw.w, x, stride, pad);
     return ggml_add(C, y, ggml_reshape_4d(C, cw.b, 1, 1, cw.b->ne[0], 1));
 }
 
@@ -205,27 +230,23 @@ ggml_cgraph * ActModelArch::build(ggml_context * C, IO & io, int64_t h, int64_t 
         return gelu ? ffn_gelu_erf(C, f1w, f1b, f2w, f2b, x) : ffn_relu(C, f1w, f1b, f2w, f2b, x);
     };
 
-    // ResNet per view: [w, h, c, 1].
+    // ResNet over the views as one batch: [w, h, c, view]. The stem's ReLU
+    // commutes with the max pool, so it runs on the pooled map, a quarter the size.
     io.pixels = ggml_new_tensor_4d(C, GGML_TYPE_F32, w, h, 3, n_views);
     ggml_set_input(io.pixels);
-    ggml_tensor * img = nullptr;
-    for (int64_t v = 0; v < n_views; ++v) {
-        ggml_tensor * x = ggml_view_4d(C, io.pixels, w, h, 3, 1, io.pixels->nb[1], io.pixels->nb[2],
-                                       io.pixels->nb[3], (size_t) v*io.pixels->nb[3]);
-        x = ggml_relu(C, conv2d(C, stem, x, 2, 3));
-        x = ggml_pool_2d(C, x, GGML_OP_POOL_MAX, 3, 3, 2, 2, 1, 1);
-        for (const BlockW & b : res) {
-            ggml_tensor * y = ggml_relu(C, conv2d(C, b.conv1, x, b.stride, 1));
-            y = conv2d(C, b.conv2, y, 1, 1);
-            ggml_tensor * skip = b.down.w ? conv2d(C, b.down, x, b.stride, 0) : x;
-            x = ggml_relu(C, ggml_add(C, y, skip));
-        }
-        // 1x1 projection to the model width, tokens in (h w) order. Only this
-        // last, small feature map is transposed to channels-first.
-        ggml_tensor * f = ggml_cont(C, ggml_transpose(C, ggml_reshape_2d(C, x, NF, x->ne[2])));
-        ggml_tensor * t = linear(C, img_proj_w, img_proj_b, f);
-        img = img ? ggml_concat(C, img, t, 1) : t;
+    ggml_tensor * x = ggml_pool_2d(C, conv2d(C, stem, io.pixels, 2, 3), GGML_OP_POOL_MAX, 3, 3, 2, 2, 1, 1);
+    x = ggml_relu(C, x);
+    for (const BlockW & b : res) {
+        ggml_tensor * y = ggml_relu(C, conv2d(C, b.conv1, x, b.stride, 1));
+        y = conv2d(C, b.conv2, y, 1, 1);
+        ggml_tensor * skip = b.down.w ? conv2d(C, b.down, x, b.stride, 0) : x;
+        x = ggml_relu(C, ggml_add(C, y, skip));
     }
+    // 1x1 projection to the model width, tokens in (view h w) order. Only this
+    // last, small feature map is transposed to channels-first.
+    const int64_t fc = x->ne[2];
+    ggml_tensor * f = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, x, NF, fc, n_views), 1, 0, 2, 3));
+    ggml_tensor * img = linear(C, img_proj_w, img_proj_b, ggml_reshape_2d(C, f, fc, NF*n_views));
 
     ggml_tensor * tok = ggml_reshape_2d(C, latent_tok, dim, 1);
     if (state_dim > 0) {
@@ -235,8 +256,11 @@ ggml_cgraph * ActModelArch::build(ggml_context * C, IO & io, int64_t h, int64_t 
     }
     tok = ggml_concat(C, tok, img, 1);
 
+    // Uploaded once per graph, so it is an output too: gallocr never reuses an
+    // output's memory for a later node.
     io.enc_pos = ggml_new_tensor_2d(C, GGML_TYPE_F32, dim, T);
     ggml_set_input(io.enc_pos);
+    ggml_set_output(io.enc_pos);
     for (const EncLayerW & l : enc) {
         if (pre_norm) {
             ggml_tensor * n = layer_norm(C, tok, l.ln1_w, l.ln1_b, kLnEps);
@@ -284,10 +308,10 @@ ggml_cgraph * ActModelArch::build(ggml_context * C, IO & io, int64_t h, int64_t 
 // ACTSinusoidalPositionEmbedding2d over the feature grid, the same for every
 // camera. Channels are [y | x], each half interleaving sin and cos of the
 // normalized coordinate (index+1)/(n+eps)*2pi over periods 10000^(2*(i/2)/half).
-void ActModelArch::fill_enc_pos(int64_t fh, int64_t fw) {
+std::vector<float> ActModelArch::enc_pos_table(int64_t fh, int64_t fw) const {
     const int64_t half = dim / 2, NF = fh*fw, T = n_1d() + n_views*NF;
-    enc_pos_host.assign((size_t) dim*T, 0.0f);
-    std::copy(pos_1d.begin(), pos_1d.end(), enc_pos_host.begin());
+    std::vector<float> table((size_t) dim*T, 0.0f);
+    std::copy(pos_1d.begin(), pos_1d.end(), table.begin());
     const float two_pi = 6.28318530717958647692f, eps = 1e-6f;
     std::vector<float> inv((size_t) half);
     for (int64_t i = 0; i < half; ++i)
@@ -304,7 +328,8 @@ void ActModelArch::fill_enc_pos(int64_t fh, int64_t fw) {
             }
         }
     for (int64_t v = 0; v < n_views; ++v)
-        std::copy(grid.begin(), grid.end(), enc_pos_host.begin() + (size_t) (n_1d() + v*NF)*dim);
+        std::copy(grid.begin(), grid.end(), table.begin() + (size_t) (n_1d() + v*NF)*dim);
+    return table;
 }
 
 namespace {
@@ -368,9 +393,9 @@ bool load_weights(ActModelArch & m, gguf_reader & g) {
         return false;
     WeightLoader L("act", g, m.ctx_weights, m.mt);
 
-    // Convolutions stay F32: im2col output is the GEMM's first operand.
+    const ggml_type kt = m.conv_direct ? GGML_TYPE_F16 : GGML_TYPE_F32;
     auto conv = [&](const std::string & p) {
-        return ConvW{ L.f32("%s.weight", p.c_str()), L.f32("%s.bias", p.c_str()) };
+        return ConvW{ L.typed(kt, "%s.weight", p.c_str()), L.f32("%s.bias", p.c_str()) };
     };
     m.stem = conv("bb.conv1");
     for (int64_t li = 0; li < 4; ++li)
@@ -465,6 +490,10 @@ bool load_weights(ActModelArch & m, gguf_reader & g) {
         m.state_mean = g.read_f32("state_mean");
         m.state_std  = g.read_f32("state_std");
     }
+    // Folded in once, so every use divides by the stored std.
+    for (std::vector<float> * sd : { &m.img_std, &m.state_std, &m.action_std })
+        for (float & s : *sd)
+            s += kNormEps;
     if (m.pos_1d.size() != (size_t) (m.n_1d()*m.dim) || m.img_mean.size() != (size_t) (3*m.n_views) ||
         m.img_std.size() != m.img_mean.size() || m.action_mean.size() != (size_t) m.action_dim ||
         m.action_std.size() != (size_t) m.action_dim || m.state_mean.size() != (size_t) m.state_dim ||
@@ -502,6 +531,8 @@ std::unique_ptr<ModelArchBase> act_create(const std::string& mmproj_path,
     if (!b.handle)
         return nullptr;
     m->backend = b.handle;
+    // An explicit --weight-dtype f32 keeps the convolutions F32 too.
+    m->conv_direct = b.is_cuda && cuda_conv_has_mma() && opts.weight_dtype.value_or(GGML_TYPE_F16) != GGML_TYPE_F32;
 
     if (!load_weights(*m, g))
         return nullptr;
@@ -518,11 +549,11 @@ std::unique_ptr<ModelArchBase> act_create(const std::string& mmproj_path,
     m->cfg.max_action_dim  = m->action_dim;
     m->cfg.real_action_dim = m->action_dim;
 
-    std::printf("vla(act): weights resident %.1f MiB (%s) - ResNet x%lld views at %lldx%lld, "
+    std::printf("vla(act): weights resident %.1f MiB (%s, %s convs) - ResNet x%lld views at %lldx%lld, "
                 "%lld+%lld layers, dim %lld, chunk %lld\n",
                 ggml_backend_buffer_get_size(m->weight_buf)/(1024.0*1024.0), dtype_name(m->mt),
-                (long long) m->n_views, (long long) m->img_h, (long long) m->img_w,
-                (long long) m->enc_layers, (long long) m->dec_layers, (long long) m->dim, (long long) m->chunk);
+                m->conv_direct ? "f16 direct" : "f32 im2col",
+                (long long) m->n_views, (long long) m->img_h, (long long) m->img_w, (long long) m->enc_layers, (long long) m->dec_layers, (long long) m->dim, (long long) m->chunk);
     if (!m->cameras.empty())
         std::printf("vla(act): send the views in this order: %s\n", m->cameras.c_str());
     return m;
@@ -562,35 +593,23 @@ std::vector<float> ActModelArch::predict(const Inputs& in) {
         std::fprintf(stderr, "vla(act): graph build/alloc failed\n");
         return {};
     }
+    IO & io = graph.io();
     if (fresh) {
         int64_t fh = 0, fw = 0;
         feature_size(h, w, fh, fw);
-        fill_enc_pos(fh, fw);
+        const std::vector<float> table = enc_pos_table(fh, fw);
+        ggml_backend_tensor_set(io.enc_pos, table.data(), 0, ggml_nbytes(io.enc_pos));
     }
-    IO & io = graph.io();
 
     // HWC to [w, h, c, view], normalized per camera with the dataset stats.
-    std::vector<float> pixels((size_t) w*h*3*n_views);
-    for (int64_t v = 0; v < n_views; ++v) {
-        const ImageView & iv = in.images[v];
-        for (int64_t c = 0; c < 3; ++c) {
-            const float mean = img_mean[(size_t) (v*3 + c)], inv = 1.0f / (img_std[(size_t) (v*3 + c)] + kNormEps);
-            float * dst = pixels.data() + (size_t) ((v*3 + c)*h)*w;
-            for (int64_t y = 0; y < h; ++y)
-                for (int64_t x = 0; x < w; ++x) {
-                    const size_t idx = (size_t) ((y*w + x)*3 + c);
-                    const float  px  = iv.format == PixelFormat::U8 ? ((const uint8_t *) iv.data)[idx] / 255.0f
-                                                                    : ((const float *) iv.data)[idx];
-                    dst[y*w + x] = (px - mean) * inv;
-                }
-        }
-    }
-    ggml_backend_tensor_set(io.pixels,  pixels.data(),       0, ggml_nbytes(io.pixels));
-    ggml_backend_tensor_set(io.enc_pos, enc_pos_host.data(), 0, ggml_nbytes(io.enc_pos));
+    pixels.resize((size_t) w*h*3*n_views);
+    for (int64_t v = 0; v < n_views; ++v)
+        image_to_chw(in.images[v], &img_mean[(size_t) v*3], &img_std[(size_t) v*3], pixels.data() + (size_t) v*3*h*w);
+    ggml_backend_tensor_set(io.pixels, pixels.data(), 0, ggml_nbytes(io.pixels));
     if (state_dim > 0) {
         std::vector<float> s((size_t) state_dim);
         for (int64_t i = 0; i < state_dim; ++i)
-            s[(size_t) i] = (in.state[i] - state_mean[(size_t) i]) / (state_std[(size_t) i] + kNormEps);
+            s[(size_t) i] = (in.state[i] - state_mean[(size_t) i]) / state_std[(size_t) i];
         ggml_backend_tensor_set(io.state, s.data(), 0, ggml_nbytes(io.state));
     }
 
@@ -605,7 +624,7 @@ std::vector<float> ActModelArch::predict(const Inputs& in) {
     for (int64_t t = 0; t < chunk; ++t)
         for (int64_t j = 0; j < action_dim; ++j) {
             float & a = out[(size_t) (t*action_dim + j)];
-            a = a * (action_std[(size_t) j] + kNormEps) + action_mean[(size_t) j];
+            a = a * action_std[(size_t) j] + action_mean[(size_t) j];
         }
 
     stats.ms_inference = std::chrono::duration<float, std::milli>(clock::now() - tc).count();
