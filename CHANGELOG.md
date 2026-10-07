@@ -6,6 +6,11 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 
+- **ROCm/HIP backend for VLA inference.** `-DGGML_HIP=ON` selects ggml's HIP
+  backend without compiling vla.cpp's CUDA-only kernels. Linux `gfx1151` with
+  ROCm 7.14 and llama.cpp `b11223` has fixed-input and synthetic benchmark
+  coverage for SmolVLA and π0.5. See `docs/backend/rocm.md` for the measured
+  numerical differences, build commands and current limits.
 - **FoldQuant W8A8 / W4A4 inference** for GR00T N1.5 / N1.6 / N1.7 and π0.5. A
   FoldQuant GGUF carries the language backbone and the action
   module as INT8 or INT4 codes with per-row scales in a block-Hadamard,
