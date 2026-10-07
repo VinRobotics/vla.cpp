@@ -40,16 +40,19 @@ jobs:
       - name: read llama.cpp pin
         id: pin
         run: echo "tag=$(bash scripts/llama_tag.sh)" >> "$GITHUB_OUTPUT"
+      # The cached _deps holds compiled ggml-cpu objects, and hosted runners do not
+      # all have the same CPU. Jobs that run ctest build with GGML_NATIVE=OFF so a
+      # tree compiled on one runner does not hit SIGILL on another (AVX-512).
       - uses: actions/cache@v6
         with:
           path: build/_deps
-          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}-asan
+          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}-asan-generic
       # Everything, not a target list: ctest registers tests this job must build,
       # and a named list goes stale the next time one is added.
       - name: build + ctest (CPU, ASan+UBSan, -Werror)
         run: |
           san="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
-          cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DGGML_CUDA=OFF -DVLA_BUILD_TESTS=ON \
+          cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DGGML_CUDA=OFF -DGGML_NATIVE=OFF -DVLA_BUILD_TESTS=ON \
             -DVLA_WERROR=ON -DCMAKE_C_FLAGS="$san" -DCMAKE_CXX_FLAGS="$san"
           cmake --build build -j"$(nproc)"
           ctest --test-dir build --output-on-failure
@@ -117,7 +120,7 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: build/_deps
-          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}-sycl-${{ hashFiles('scripts/patch_ggml_sycl_ext_hook.py') }}
+          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}-sycl-generic-${{ hashFiles('scripts/patch_ggml_sycl_ext_hook.py') }}
       - name: build + ctest (OpenCL CPU device)
         shell: bash
         env:
@@ -126,7 +129,7 @@ jobs:
         run: |
           source /opt/intel/oneapi/setvars.sh
           sycl-ls
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_SYCL=ON \
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_SYCL=ON -DGGML_NATIVE=OFF \
             -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DVLA_BUILD_TESTS=ON -DVLA_WERROR=ON
           cmake --build build -j"$(nproc)"
           ctest --test-dir build --output-on-failure
@@ -164,12 +167,12 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: build/_deps
-          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}-openvino-${{ hashFiles('scripts/patch_ggml_openvino.py') }}
+          key: llama-${{ steps.pin.outputs.tag }}-${{ runner.os }}-openvino-generic-${{ hashFiles('scripts/patch_ggml_openvino.py') }}
       - name: build + ctest (CPU plugin)
         shell: bash
         run: |
           source /opt/openvino/setupvars.sh
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_OPENVINO=ON -DVLA_BUILD_TESTS=ON -DVLA_WERROR=ON
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_OPENVINO=ON -DGGML_NATIVE=OFF -DVLA_BUILD_TESTS=ON -DVLA_WERROR=ON
           cmake --build build -j"$(nproc)"
           ctest --test-dir build --output-on-failure
 
