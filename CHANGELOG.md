@@ -11,6 +11,27 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   ROCm 7.14 and llama.cpp `b11223` has fixed-input and synthetic benchmark
   coverage for SmolVLA and π0.5. See `docs/backend/rocm.md` for the measured
   numerical differences, build commands and current limits.
+- **FoldQuant W8A8 / W4A4 inference** for GR00T N1.5 / N1.6 / N1.7 and π0.5. A
+  FoldQuant GGUF carries the language backbone and the action
+  module as INT8 or INT4 codes with per-row scales in a block-Hadamard,
+  SmoothQuant-folded frame; activations are quantized per token and the
+  projections run as integer GEMMs (`src/kernels/foldquant/` on CUDA,
+  `src/sycl/vla_sycl_foldquant.cpp` on SYCL with oneDNN's int8 matmul, both
+  bit-identical to the reference in `src/foldquant_ref.cpp` that the CPU runs;
+  OpenVINO ops on the OpenVINO CPU and GPU plugins with INT8/INT4 weight
+  constants). On every other backend
+  (Metal, Hexagon, OpenCL, the OpenVINO NPU) the sites are read back as
+  float weights with FoldQuant's rounding and run the stock float path;
+  `VLA_FQ_DEQUANT=1` does the same on CUDA or CPU. The format and arithmetic are
+  in `docs/QUANTIZATION.md`.
+- `scripts/convert_quantized_model_to_gguf.py` converts a FoldQuantVLA quantized
+  model (its quantized checkpoint or its earlier fake-quant state) to a FoldQuant
+  GGUF with no calibration and nothing re-rounded; `--check-onnx` byte-compares
+  every site against the TensorRT plugin graphs. The family converters expose
+  `convert(ckpt, out, writer_factory=...)` for it.
+- `scripts/foldquant_fake_export.py` (uncalibrated file for bring-up),
+  `scripts/inspect_gguf_quant.py` (contract check) and `scripts/foldquant_ref.py`
+  (numpy reference).
 
 ## [0.4.0] - 2026-09-30
 

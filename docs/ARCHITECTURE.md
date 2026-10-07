@@ -30,6 +30,8 @@ map; the source is the detail.
 - `src/serving/` - `vla-server` (ZeroMQ + protobuf, action prediction), `vlm-server`
   (chat), `vla-cli` (one-shot inference) and `vla-bench` (timing).
 - `src/kernels/bitvla/` - custom 1.58-bit ternary CUDA kernels for BitVLA.
+- `src/foldquant.h`, `src/kernels/foldquant/`, `src/cuda/` - FoldQuant INT8 linears
+  and the in-tree CUDA kernels behind the ggml extension hook.
 
 ## The prediction path
 
@@ -70,9 +72,17 @@ llama.cpp is fetched by CMake `FetchContent` and pinned by `VLA_LLAMA_TAG` in
 (`--weight-dtype` overrides it), and a GGUF can be repacked to Q8_0/Q4_0 with
 `scripts/quantize_gguf.py`.
 The loader keeps packed weights packed. On CPU and CUDA, ggml quantizes the
-activations to 8 bits and runs int8 dot products on the blocks. CPU thread count
-scales to the machine core count; the GPU backends run the towers and the
-transformer on the device.
+activations to 8 bits and runs int8 dot products on the blocks.
+
+A FoldQuant GGUF (see [QUANTIZATION.md](QUANTIZATION.md))
+carries INT8 or INT4 codes plus sidecar scales instead. `src/foldquant.h` declares those
+sites, `src/layers/fq_linear.h` turns each into two `GGML_OP_CUSTOM` nodes, the
+CPU backend runs the reference in `src/foldquant_ref.cpp`, and on CUDA the
+`src/kernels/foldquant/` integer kernels claim the same nodes through the ggml
+extension hook (`src/cuda/`), and on OpenVINO `src/openvino/foldquant_ov.cpp`
+translates them into OpenVINO ops. Every other backend reads the sites back as
+float weights through `WeightLoader::as_float` and runs the arch's float path. CPU thread count scales to the machine core count;
+the GPU backends run the towers and the transformer on the device.
 
 ## Adding an architecture
 

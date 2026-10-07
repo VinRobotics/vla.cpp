@@ -1,0 +1,179 @@
+// Copyright 2026 VinRobotics
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// FoldQuant: real-quantized linears (docs/QUANTIZATION.md).
+//
+// A FoldQuant site ships `<site>.weight` as GGML_TYPE_I8 codes (per-output-row
+// symmetric, in a block-Hadamard-rotated frame), `<site>.wscale` F32[N], and
+// optionally `<site>.ascale` F32[K] (the static SmoothQuant vector). At runtime
+// the activation is [RMS-normed,] [divided,] rotated by the same butterfly,
+// quantized per token to INT8, multiplied on integer units and dequantized.
+//
+// Every backend that runs a site natively runs the same two GGML_OP_CUSTOM nodes
+// (fq_act, fq_gemm; see layers/fq_linear.h): the CPU backend executes the
+// reference in foldquant_ref.h, CUDA and SYCL claim them through their ggml
+// extension hooks, and OpenVINO's CPU and GPU plugins translate them into
+// OpenVINO ops (src/openvino/foldquant_ov.cpp).
+//
+// The other backends (Metal, Vulkan, Hexagon, OpenCL, the OpenVINO NPU) have no
+// implementation of those nodes, so there a site is read back as a float GEMM
+// weight instead (dequant mode): W_deq . B . diag(1/ascale) with the ascale
+// divide on the side of B the activation applies it, rebuilt at upload in the
+// resident GEMM type. The arch then takes its stock float path, with the folded
+// norm gains the file already carries. The weights keep FoldQuant's rounding;
+// the activations stay float (no per-token quantization, no INT4 clip).
+
+#pragma once
+
+#include "ggml.h"
+
+#include <cstdint>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace vla {
+
+struct gguf_reader;
+struct Backend;
+class  WeightLoader;
+
+constexpr uint32_t FQ_ACT_MAGIC  = 0x31414651u;  // "FQA1"
+constexpr uint32_t FQ_GEMM_MAGIC = 0x31474651u;  // "FQG1"
+
+// Bytes after the codes in every row of the activation blob: the per-token
+// float scale sits at byte K_pack, the rest is padding that keeps rows 16-byte
+// aligned (K is a multiple of 64 wherever a site is accepted).
+constexpr int64_t FQ_ACT_TAIL = 16;
+
+// Per-module scheme parameters parsed from `<arch>.quant.*`.
+struct FqModuleSpec {
+    int   wbits       = 8;      // 8 | 4
+    int   abits       = 8;      // 8 | 4
+    int   rot_block   = 64;     // nominal; narrowed per site by fq_rot_block_for()
+    bool  fold_before = false;  // ascale divides before (true) or after the butterfly
+    float clip        = 1.0f;   // act_clip_ratio (INT4 activations only)
+    std::map<std::string, int> site_bits;  // per-site override, e.g. {"o":8,"down":8}
+    std::string scheme;
+    bool  dequant     = false;  // read every site back as a float weight (see above)
+    bool  no_heads    = false;  // keep plain [N][T] GEMM outputs (no fq_set_heads layout)
+
+    int wbits_for(const char * site_key) const;
+    int abits_for(const char * site_key) const;
+};
+
+struct FoldQuantSpec {
+    bool         present = false;
+    FqModuleSpec llm, action;
+    std::string  method, applied_at, provenance;
+};
+
+// Static per-node parameters. Graph nodes reference them by pointer (custom-op
+// userdata), so they must outlive every graph: they live inside the module
+// weight structs, which are sized once at declare time and never resized.
+struct FqActSpec {
+    uint32_t magic       = FQ_ACT_MAGIC;
+    int64_t  K           = 0;
+    int      abits       = 8;
+    int      rot_block   = 1;      // 1 = no rotation
+    bool     fold_before = false;
+    bool     has_gamma   = false;  // fused RMSNorm with the folded gamma
+    bool     has_ascale  = false;  // static SmoothQuant vector shipped with the site
+    float    clip        = 1.0f;
+    float    eps         = 0.0f;   // RMSNorm epsilon when has_gamma
+};
+
+struct FqGemmSpec {
+    uint32_t magic = FQ_GEMM_MAGIC;
+    int64_t  K     = 0;
+    int64_t  N     = 0;
+    int      wbits = 8;
+    // The weight tensor the next FoldQuant GEMM in execution order reads; the
+    // CUDA kernel prefetches its head into L2 once its own loads are issued
+    // (fq_link_prefetch; opt-in via VLA_FQ_PREFETCH_MB, measured slower on Orin).
+    const ggml_tensor * next_w = nullptr;
+    // Head layout of the output (fq_set_heads): the N columns are nparts
+    // consecutive [heads][head_dim] projections and the epilogue writes each
+    // part directly in the layout attention consumes, [head_dim][T][heads]
+    // (Q/K) or [T][head_dim][heads] (parts whose bit is set in vmask), so the
+    // permute copies after the GEMM disappear. 0 = plain [N][T].
+    int      head_dim = 0;
+    int      heads    = 0;
+    uint32_t vmask    = 0;
+};
+
+struct FqLinear {
+    ggml_tensor * w      = nullptr;  // I8  [K_pack, N]; null => not a FoldQuant site
+    ggml_tensor * wscale = nullptr;  // F32 [N]
+    ggml_tensor * ascale = nullptr;  // F32 [K] or null
+    ggml_tensor * gamma  = nullptr;  // F32 [K] folded RMSNorm gamma or null
+    ggml_tensor * bias   = nullptr;  // F32 [N] or null
+    FqActSpec     act;
+    FqGemmSpec    gemm;
+    bool          heads_off = false;  // fq_set_heads is a no-op (the backend reads no raw layout)
+
+    explicit operator bool() const { return w != nullptr; }
+};
+
+// Activation blob layout shared by the CPU reference, the CUDA kernels and the
+// tests: I8 tensor, ne = [row_bytes, T]; row t = codes[0, K_pack) then float scale.
+inline int64_t fq_act_kpack(int64_t K, int abits)     { return abits == 4 ? K / 2 : K; }
+inline int64_t fq_act_row_bytes(int64_t K, int abits) { return fq_act_kpack(K, abits) + FQ_ACT_TAIL; }
+inline int64_t fq_w_kpack(int64_t K, int wbits)       { return wbits == 4 ? K / 2 : K; }
+
+// Largest power of two <= nominal that divides K (FoldQuant's rotation_block_for);
+// 1 means no rotation.
+int fq_rot_block_for(int64_t K, int nominal);
+
+// `<prefix>.quant.method` == "foldquant". Never asserts on a wrong KV type.
+bool          foldquant_present(const gguf_reader & g, const char * prefix);
+FoldQuantSpec foldquant_parse  (const gguf_reader & g, const char * prefix);
+
+// Load-time policy: CUDA and SYCL register their integer kernels, CPU runs the
+// exact reference, OpenVINO (CPU and GPU devices) translates the nodes into
+// OpenVINO ops (src/openvino/foldquant_ov.cpp); any other backend, the OpenVINO
+// NPU, and VLA_FQ_DEQUANT=1 switch fq to dequant mode. Returns false only on an unusable spec.
+bool foldquant_check_backend(const char * tag, const Backend & b, FoldQuantSpec & fq, bool weight_dtype_set);
+
+// A site's float weight in dequant mode, row-major [N][K]: per row, the codes
+// times wscale, then the ascale divide and the block rotation in the order the
+// activation applies them reversed onto the weight. codes: [N][K] int8 for W8,
+// [N][K/2] nibbles (low nibble = even column) for W4. ascale may be null.
+void fq_dequant_rows(const int8_t * codes, const float * wscale, const float * ascale,
+                     int64_t K, int64_t N, int wbits, int rot_block, bool fold_before, float * out);
+
+// Declares `<site>.weight` (I8), `.wscale`, optional `.ascale` and optional
+// `.bias`. Returns an empty FqLinear (w == nullptr) when `<site>.weight` is not
+// I8, so the caller falls back to its stock declare. In dequant mode it declares
+// nothing: it registers `<site>.weight` with the loader as a float weight and
+// returns an empty FqLinear, so the caller's stock declare reads it back. `gamma` is the already
+// declared folded norm weight fused into the activation node, or null.
+FqLinear fq_declare_linear(WeightLoader & L, const FqModuleSpec & mod, const char * site_key,
+                           bool has_bias, ggml_tensor * gamma, float eps,
+                           const char * site_fmt, ...) __attribute__((format(printf, 7, 8)));
+
+// Several sites sharing one input transform (DiT q/k/v, k/v) fused into one
+// weight: codes and wscale concatenate along N; ascale must agree and is kept once.
+// Marks a site's output as head-laid-out (see FqGemmSpec). No-op when the
+// site is float or VLA_FQ_NO_HEADS=1 (A/B switch: identical numbers either way).
+void fq_set_heads(FqLinear & s, int head_dim, int heads, uint32_t vmask);
+
+// Chains sites in execution order so each GEMM knows the next site's weights
+// (null entries and absent sites are skipped).
+void fq_link_prefetch(const std::vector<FqLinear *> & order);
+
+FqLinear fq_declare_fused(WeightLoader & L, const FqModuleSpec & mod, const char * site_key,
+                          bool has_bias, const std::string & out_base, const std::vector<std::string> & sites);
+
+}  // namespace vla

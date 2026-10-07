@@ -3,9 +3,10 @@
 Per-device latency and memory for every architecture, measured with `vla-bench` on
 synthetic inputs at `c93ca0a` (PR #32), llama.cpp `b11223`. The Core Ultra X7
 358H ran at `450992c`, which differs from `c93ca0a` only by an OpenVINO fix
-(`3ff447c`) and docs. Each report lists the device, the build, each model's
-configuration, latency and peak memory at the defaults, and the fastest runtime
-flags for that device.
+(`3ff447c`) and docs. The Jetson Orin NX ran at `f7e0f7f`, which differs from
+`c93ca0a` only by docs, release tooling and OpenVINO-only scripts. Each report
+lists the device, the build, each model's configuration, latency and peak memory
+at the defaults, and the fastest runtime flags for that device.
 
 The table below gives the minimum latency in ms at the defaults, the one number
 every report has. `N/A` means the arch does not run on that backend, and `-`
@@ -18,6 +19,7 @@ means the model does not fit or fails there; each report says which and why.
 | [RTX 3060 (CUDA)](rtx-3060.md) | 8.3 | 21.6 | 57.1 | 74.7 | 86.8 | 78.1 | 82.8 | 59.1 | 125.1 | 228.2 | 229.9 | - | 230.8 |
 | [RTX 5070 Laptop (CUDA)](rtx-5070-laptop.md) | 4.7 | 14.1 | 38.0 | 56.3 | 73.0 | 65.5 | 63.3 | 54.4 | 89.3 | 177.1 | 180.5 | - | 184.6 |
 | [Jetson AGX Orin (CUDA)](jetson-agx-orin.md) | 17.5 | 36.0 | 94.6 | 127.4 | 131.2 | 132.6 | 132.7 | 133.0 | 218.3 | 350.3 | 351.9 | 384.9 | 434.6 |
+| [Jetson Orin NX 16 GB (CUDA)](jetson-orin-nx.md) | 27.4 | 79.7 | 176.7 | 270.7 | 260.8 | 252.1 | 251.4 | 269.1 | 411.2 | 739.6 | 742.9 | - | 893.2 |
 | [Jetson Orin Nano Super (CUDA)](jetson-orin-nano.md) | 31.9 | 89.3 | 193.9 | 297.5 | 293.4 | 272.3 | 271.7 | 335.0 | 462.8 | 845.2 | 849.7 | - | 1011.5 |
 | [Apple M4 (Metal)](apple-m4.md) | 22.6 | 65.2 | 248.7 | 315.7 | 401.5 | 358.9 | 350.8 | N/A | 357.6 | 1141.1 | 1153.8 | 1650.7 | 829.3 |
 | [Intel Arc B390 iGPU (OpenVINO)](core-ultra-x7-358h.md) | N/A | 35.6 | 152.4 | 232.6 | 145.5 | 225.1 | 230.8 | N/A | 499.8 | 795.8 | 581.5 | 1494.4 | 841.5 |

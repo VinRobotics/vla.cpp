@@ -246,6 +246,7 @@ Wiring, recording, training and queue sizing are in the
 | [docs/USAGE.md](docs/USAGE.md) | `vla-cli`, `vla-server`, `vla-bench`: prompt tokenization, `-hf` tags, runtime flags, environment variables |
 | [docs/EVAL.md](docs/EVAL.md) | Installing LIBERO and SimplerEnv, running the eval clients against `vla-server` |
 | [docs/MODELS.md](docs/MODELS.md) | Converting safetensors checkpoints to GGUF, quantizing to Q8_0/Q4_0 |
+| [docs/QUANTIZATION.md](docs/QUANTIZATION.md) | FoldQuant W8A8 / W4A4: the GGUF contract, the integer arithmetic, converting a FoldQuantVLA quantized model |
 | [docs/DOCKER.md](docs/DOCKER.md) | Building and running the eval in containers |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Engine design: layers, the prediction path, backends, adding an architecture |
 | [docs/backend/](docs/backend) | Per-backend build and run notes: [ROCm](docs/backend/rocm.md), [SYCL](docs/backend/sycl.md), [OpenVINO](docs/backend/ov.md), [Metal](docs/backend/metal.md), [Hexagon](docs/backend/hexagon.md), [Hexagon on Windows](docs/backend/hexagon-windows.md), [WSL2](docs/backend/wsl.md) |
