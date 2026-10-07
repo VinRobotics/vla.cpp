@@ -17,7 +17,7 @@
 // No server, no simulator. --text is tokenized in-process when the GGUF carries a
 // SentencePiece tokenizer (Octo, or pi0/pi05/OpenVLA-OFT after
 // scripts/add_tokenizer_to_gguf.py) and shells out to scripts/tokenize_prompt.py
-// otherwise; --tokens takes ids directly.
+// otherwise; --tokens takes ids directly. ACT takes neither.
 //
 //   vla-cli [--mmproj m.gguf] --ckpt c.gguf --image img.jpg [--image img2.jpg]
 //           (--text "pick up the bowl" | --tokens id,id,...) [--state f,f,...] [--pretty]
@@ -131,6 +131,7 @@ const char * arch_slug(Arch a) {
         case Arch::VLA_JEPA:    return "vla_jepa";
         case Arch::OCTO:        return "octo";
         case Arch::TURBOVLA:    return "turbovla";
+        case Arch::ACT:         return "act";
     }
     return "";
 }
@@ -251,6 +252,7 @@ void usage(const char * prog) {
         "  --text     instruction; tokenized in-process when the GGUF carries its\n"
         "             tokenizer, else by scripts/tokenize_prompt.py (needs transformers)\n"
         "  --tokens   language token ids, comma-separated, if you tokenized already\n"
+        "             (ACT reads no instruction: pass neither --text nor --tokens)\n"
         "  --state    proprioception floats, comma-separated (default zeros); pi05\n"
         "             --text needs it, since the state is part of the prompt\n"
         "  --pretty   print one action row (max_action_dim values) per line\n"
@@ -317,12 +319,27 @@ int main(int argc, char ** argv) {
         if (ckpt.empty())
             return 1;
     }
-    if (ckpt.empty() || image_paths.empty() || (tokens_s.empty() && text_s.empty())) {
+    if (ckpt.empty() || image_paths.empty()) {
         usage(argv[0]);
         return 1;
     }
     if (!tokens_s.empty() && !text_s.empty()) {
         std::fprintf(stderr, "vla-cli: pass --text or --tokens, not both\n");
+        return 1;
+    }
+    Arch arch;
+    if (!detect_arch_from_ckpt(ckpt, &arch)) {
+        std::fprintf(stderr, "vla-cli: cannot detect the arch of %s\n", ckpt.c_str());
+        return 1;
+    }
+    // ACT reads no instruction; every other arch needs one.
+    const bool takes_lang = arch != Arch::ACT;
+    if (takes_lang && tokens_s.empty() && text_s.empty()) {
+        usage(argv[0]);
+        return 1;
+    }
+    if (!takes_lang && (!tokens_s.empty() || !text_s.empty())) {
+        std::fprintf(stderr, "vla-cli: %s takes no instruction; drop --text/--tokens\n", arch_slug(arch));
         return 1;
     }
     // Validate the cheap args before loading the model.
@@ -333,11 +350,6 @@ int main(int argc, char ** argv) {
     if (!parse_floats(state_s, state))
         return 1;
     if (!text_s.empty()) {
-        Arch arch;
-        if (!detect_arch_from_ckpt(ckpt, &arch)) {
-            std::fprintf(stderr, "vla-cli: cannot detect the arch of %s for --text\n", ckpt.c_str());
-            return 1;
-        }
         if (has_spm_tokenizer(ckpt, arch_slug(arch))) {
             if (!tokenize_prompt(ckpt, arch_slug(arch), text_s, state, lang, attn))
                 return 1;
@@ -356,7 +368,7 @@ int main(int argc, char ** argv) {
     }
     if (!parse_ints(tokens_s, lang))
         return 1;
-    if (lang.empty()) {
+    if (takes_lang && lang.empty()) {
         std::fprintf(stderr, "vla-cli: --tokens parsed to nothing\n");
         return 1;
     }
