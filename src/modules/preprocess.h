@@ -39,23 +39,37 @@ inline bool view_ok(const char * arch, const ImageView & v, int64_t side) {
     return false;
 }
 
-// HWC to CHW planar with per-channel mean/std. No resize: the view must
-// already be side x side. arch only labels the error.
+// HWC to CHW planar with per-channel mean/std, into 3*v.w*v.h floats at out.
+// Any size; the caller has checked the view holds real data.
+inline void image_to_chw(const ImageView & v, const float mean[3], const float std_[3], float * out) {
+    const int64_t n = (int64_t) v.w * v.h;
+    for (int64_t c=0; c<3; ++c) {
+        float * dst = out + c*n;
+        if (v.format == PixelFormat::U8) {
+            // A byte has 256 values: a table of the exact results replaces a
+            // per-pixel divide, which does not vectorize for a stride-3 read.
+            float lut[256];
+            for (int k=0; k<256; ++k)
+                lut[k] = (k/255.0f-mean[c])/std_[c];
+            const uint8_t * src = (const uint8_t *) v.data + c;
+            for (int64_t i=0; i<n; ++i)
+                dst[i] = lut[src[3*i]];
+        } else {
+            const float m = mean[c], s = std_[c];
+            const float * src = (const float *) v.data + c;
+            for (int64_t i=0; i<n; ++i)
+                dst[i] = (src[3*i]-m)/s;
+        }
+    }
+}
+
+// The same for a view that must already be side x side. arch only labels the error.
 inline bool preprocess_image_chw(const char * arch, const ImageView & v, int64_t side,
                                  const float mean[3], const float std_[3], std::vector<float> & out) {
     if (!view_ok(arch, v, side))
         return false;
-    out.assign((size_t) 3*side * side, 0.0f);
-    for (int64_t h=0; h<side; ++h)
-        for (int64_t w=0; w<side; ++w)
-            for (int64_t c=0; c<3; ++c) {
-                float px;
-                if (v.format == PixelFormat::U8)
-                    px = ((const uint8_t *) v.data)[(h * side+w)*3+c]/255.0f;
-                else
-                    px = ((const float  *) v.data)[(h * side+w)*3+c];
-                out[c * side * side+h * side+w] = (px-mean[c])/std_[c];
-            }
+    out.resize((size_t) 3*side * side);
+    image_to_chw(v, mean, std_, out.data());
     return true;
 }
 
