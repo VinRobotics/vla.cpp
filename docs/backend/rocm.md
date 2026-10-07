@@ -5,10 +5,10 @@
 the current model coverage. ROCm is selected at configure time, in a separate
 build directory; it is not selected automatically on an AMD machine.
 
-The results below are from Linux 6.17.0-40 on a Ryzen AI Max+ 395 / Radeon
-8060S (`gfx1151`), ROCm 7.14.60850, and the repository's llama.cpp tag
-`b11223` (ggml commit `4da6337`). Other GPUs and ROCm versions have not been
-measured here.
+The results below are from upstream `main@1adf078` merged with this HIP
+backend on Linux 6.17.0-40, Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`),
+ROCm 7.14.60850, and the repository's llama.cpp tag `b11223` (ggml commit
+`4da6337`). Other GPUs and ROCm versions have not been measured here.
 
 ## Build and select the device
 
@@ -59,9 +59,9 @@ CUDA or Vulkan, and rejects `GGML_BACKEND_DL=ON` with HIP.
 `vla_predict_check` fixes images, language tokens, state and diffusion noise.
 Both the CPU reference and HIP run used BF16 resident weights.
 The CPU build of this candidate produced byte-identical actions to upstream
-`main@8eec763` for both rows below. Each HIP row returned the complete
+`main@1adf078` for both rows below. Each HIP row returned the complete
 50 × 32 action array, with finite values and identical action bytes across
-five independent processes. CPU and HIP Release builds each passed all eight
+five independent processes. CPU and HIP Release builds each passed all ten
 first-party CTest cases.
 
 | Published GGUF | Views × image size | CPU reference | HIP vs CPU max abs | RMS | Cosine |
@@ -97,22 +97,21 @@ portion of each output. Use five fresh HIP processes to check repeatability.
 These are in-process `predict()` timings with fixed synthetic inputs. They
 exclude transport and simulator work. Each row used three fresh processes,
 each with three warmups and 20 timed calls, BF16 resident weights, GPU
-performance level `high` (2.9 GHz shown in the before/after manifests), and
-CPU governor `performance`. The GPU process probe saw no running process
-before or after the rounds. The stock `vla-bench` reports P50, P90 and mean
+performance level `high` (2.9 GHz observed before and after the rounds), and
+CPU governor `performance`. The stock `vla-bench` reports P50, P90 and mean
 Vision time for each round. The table uses the median of the three round P50
 values, the worst round P90, and the median of the three round Vision means.
 All values are milliseconds.
 
 | Model | Views × size | Tokens | P50 | Worst P90 | Vision mean |
 |---|---:|---:|---:|---:|---:|
-| SmolVLA LIBERO | 2 × 512 | 48 | 395.0 | 397.5 | 210.2 |
-| π0.5 LIBERO | 2 × 224 | 128 | 387.8 | 403.8 | 46.8 |
+| SmolVLA LIBERO | 2 × 512 | 48 | 395.0 | 396.9 | 210.3 |
+| π0.5 LIBERO | 2 × 224 | 128 | 389.1 | 403.1 | 47.1 |
 
-The π0.5 rounds had P50 values 386.3, 390.4 and 387.8 ms; the worst P90 was
-403.8 ms. These results use upstream v0.4.0's model code and llama.cpp
-`b11223`. Do not compare them as a speedup against an older revision without
-a paired benchmark.
+The π0.5 rounds had P50 values 388.1, 389.1 and 389.3 ms; the worst P90 was
+403.1 ms. These results use upstream `main@1adf078` and llama.cpp `b11223`.
+Do not compare them as a speedup against an older revision without a paired
+benchmark.
 
 Run each command three times in fresh processes, changing the log path for
 each round:
@@ -138,6 +137,8 @@ manifest when presenting new results.
   supported. π0's HIP numerical path also remains under investigation.
 - BitVLA's published int2 GGUF requires vla.cpp's CUDA-only kernels. That
   path is not available in a HIP build.
+- FoldQuant quantized GGUFs added on the newer mainline were not measured on
+  HIP. This PR does not add native HIP FoldQuant integer kernels.
 - The server/client route, task success rate, and long-duration soak have not
   been rerun on this upstream revision. Synthetic tokens and images do not
   establish policy equivalence in a robot task.
