@@ -38,7 +38,7 @@ Usage: $(basename "$0") -i <MODELS_ROOT> [-o <OUTPUT_ROOT>] [-n <N_EPISODES>] [-
   -m MODEL         which model to run: smol | pi0 | pi05 | bit | evo1 |
                                        vla_adapter | openvla_oft |
                                        gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 |
-                                       octo | turbovla | vla_jepa | all
+                                       octo | turbovla | vla_jepa | picovla | all
                    (default: all)
   -h               show this help
 
@@ -74,9 +74,9 @@ done
 shift $((OPTIND - 1))
 
 case "${MODEL}" in
-    smol|pi0|pi05|bit|evo1|vla_adapter|openvla_oft|gr00t_n1_5|gr00t_n1_6|gr00t_n1_7|octo|turbovla|vla_jepa|all) ;;
+    smol|pi0|pi05|bit|evo1|vla_adapter|openvla_oft|gr00t_n1_5|gr00t_n1_6|gr00t_n1_7|octo|turbovla|vla_jepa|picovla|all) ;;
     *)
-        echo "ERROR: -m must be one of: smol | pi0 | pi05 | bit | evo1 | vla_adapter | openvla_oft | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | octo | turbovla | vla_jepa | all (got '${MODEL}')" >&2
+        echo "ERROR: -m must be one of: smol | pi0 | pi05 | bit | evo1 | vla_adapter | openvla_oft | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | octo | turbovla | vla_jepa | picovla | all (got '${MODEL}')" >&2
         exit 1
         ;;
 esac
@@ -147,6 +147,7 @@ N_ACTION_STEPS_GR00T_N1_7="${N_ACTION_STEPS_GR00T_N1_7:-16}" # N1.7 H4 closeout 
 N_ACTION_STEPS_OCTO="${N_ACTION_STEPS_OCTO:-4}"
 N_ACTION_STEPS_TURBOVLA="${N_ACTION_STEPS_TURBOVLA:-12}"
 N_ACTION_STEPS_VLA_JEPA="${N_ACTION_STEPS_VLA_JEPA:-7}"
+N_ACTION_STEPS_PICOVLA="${N_ACTION_STEPS_PICOVLA:-1}"        # reference sync client re-plans every step
 
 mkdir -p "${OUTPUT_ROOT}"
 OUTPUT_ROOT="$(cd "${OUTPUT_ROOT}" && pwd)"
@@ -550,6 +551,14 @@ if should_run vla_jepa; then
             "${jepa_stats}" \
             "${MODELS_ROOT}/vla-jepa-libero/vla-jepa.gguf"
     fi
+fi
+
+if should_run picovla; then
+    run_model picovla \
+        "${MODELS_ROOT}/picovla-libero-pretrained-gguf" \
+        "${N_ACTION_STEPS_PICOVLA}" \
+        "" \
+        "${MODELS_ROOT}/picovla-libero-pretrained-gguf/picovla-libero-f32.gguf"
 fi
 
 echo "===================="

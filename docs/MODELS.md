@@ -25,7 +25,7 @@ python scripts/convert_smolvla_to_gguf.py \
 
 ## Quantization
 
-Most shipped GGUFs are BF16. π0.5, Octo and TurboVLA ship F32, and GR00T N1.5
+Most shipped GGUFs are BF16. π0.5, Octo, TurboVLA and PicoVLA ship F32, and GR00T N1.5
 and N1.6 are mostly F32. `scripts/quantize_gguf.py` repacks the LM-backbone weight
 matrices to a smaller type and copies everything else unchanged. The loader keeps
 the packed weights, so the file loads and runs like the original.

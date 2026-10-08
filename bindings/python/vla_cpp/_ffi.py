@@ -15,7 +15,7 @@ from ctypes import (
     c_void_p,
 )
 
-ABI_VERSION = 1
+ABI_VERSION = 2
 
 OK = 0
 ERR_ARG = -1
@@ -86,6 +86,7 @@ class Inputs(ctypes.Structure):
         ("attention_mask", POINTER(c_int32)),
         ("attention_mask_n", c_int32),
         ("timing_detail", c_int32),
+        ("reset_memory", c_int32),
     ]
 
 

@@ -34,7 +34,7 @@ extern "C" {
 #endif
 
 // Bumped on any incompatible change to the structs or functions below.
-#define VLA_ABI_VERSION 1
+#define VLA_ABI_VERSION 2
 
 typedef struct vla_model vla_model;
 
@@ -124,6 +124,10 @@ typedef struct {
     int32_t           attention_mask_n;
 
     int32_t           timing_detail;  ///< A vla_timing_detail value.
+
+    /// Non-zero at an episode start: clear the model's cross-call memory first.
+    /// Only PicoVLA keeps any; other archs ignore it.
+    int32_t           reset_memory;
 } vla_inputs;
 
 /// Milliseconds. Phase fields are zero unless timing_detail was VLA_TIMING_PHASE.

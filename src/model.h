@@ -151,6 +151,11 @@ struct Inputs {
     int              attention_mask_n = 0;     ///< Length of @ref attention_mask.
 
     TimingDetail     timing_detail    = TimingDetail::NONE;
+
+    /// Start of a new episode: clear what the model carries between calls before
+    /// predicting. Only PicoVLA keeps such state (its record-token memory); the
+    /// other architectures are stateless and ignore it.
+    bool             reset_memory     = false;
 };
 
 /**

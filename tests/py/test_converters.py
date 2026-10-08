@@ -62,6 +62,8 @@ class _Tensor:
     def to(self, *a): return self
     def reshape(self, *a): return self
     def squeeze(self, *a): return self
+    def permute(self, *a): return self
+    def __getitem__(self, key): return self
     def clone(self): return self
     def __mul__(self, other): return self
 
@@ -346,6 +348,47 @@ def test_turbovla_converter_remap():
         "action_head.decoder.decoder.layers.0.multihead_attn.in_proj_weight",
         "action_head.state_projection.net.4.weight",
         "view_embedding",
+    } <= set(tensors.keys_read)
+
+
+def test_picovla_converter_remap():
+    import importlib
+
+    P = importlib.import_module("convert_picovla_to_gguf")
+    tensors = _SourceTensors()
+    writer = _Writer()
+    P.write_vision(writer, tensors.__getitem__, [1, 1, 1, 1])
+    P.write_expert(writer, tensors.__getitem__, 1)
+
+    def block(s):
+        return [f"vis.blk.{s}.0.{n}" for n in ("dw.weight", "dw.bias", "ln.weight", "ln.bias",
+                                                 "fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias")]
+
+    def down(s):
+        return [f"vis.down.{s}.norm.weight", f"vis.down.{s}.norm.bias", f"vis.down.{s}.weight", f"vis.down.{s}.bias"]
+
+    assert writer.names == [
+        "vis.stem.weight", "vis.stem.bias", "vis.stem_norm.weight", "vis.stem_norm.bias",
+        *block(0), *down(1), *block(1), *down(2), *block(2), *down(3), *block(3),
+        "vis.norm.weight", "vis.norm.bias", "conn.task_proj.weight", "conn.vision_proj.weight", "conn.proj.weight",
+        "aex.cond_proj.weight", "aex.cond_proj.bias",
+        "aex.blk.0.attn_norm.weight", "aex.blk.0.attn_q.weight", "aex.blk.0.attn_k.weight",
+        "aex.blk.0.attn_v.weight", "aex.blk.0.attn_o.weight", "aex.blk.0.ffn_norm.weight",
+        "aex.blk.0.ffn_gate.weight", "aex.blk.0.ffn_up.weight", "aex.blk.0.ffn_down.weight",
+        "aex.blk.0.cross_k.weight", "aex.blk.0.cross_v.weight", "aex.blk.0.ada_attn.weight",
+        "aex.blk.0.ada_attn.bias", "aex.blk.0.ada_ffn.weight", "aex.blk.0.ada_ffn.bias",
+        "aex.output_ada.weight", "aex.output_ada.bias",
+    ]
+    vis = "base_model.backbone.vision_encoder"
+    assert {
+        f"{vis}.vision_model.model.stages.0.downsample_layers.0.weight",
+        f"{vis}.vision_model.model.stages.1.downsample_layers.1.weight",
+        f"{vis}.vision_model.model.stages.3.layers.0.gamma",
+        f"{vis}.vision_model.layer_norm.weight",
+        f"{vis}.connector.proj.weight",
+        "base_model.expert_head.model.layers.0.self_attn.cross_k_proj.weight",
+        "base_model.expert_head.model.layers.0.post_attention_adanorm.linear.bias",
+        "base_model.expert_head.model.norm.linear.weight",
     } <= set(tensors.keys_read)
 
 

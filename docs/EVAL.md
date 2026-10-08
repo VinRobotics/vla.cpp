@@ -58,6 +58,11 @@ The GR00T models need two extras:
 - server side: `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda`
   for N1.6, `libero_sim` for N1.7).
 
+PicoVLA (`--arch picovla`) matches its reference client with `--n-action-steps 1`: it re-plans every
+step, the client blends each chunk with the previous one, and `reset()` clears
+the server's memory at the next request. With more steps per chunk the blending
+is off.
+
 ### SimplerEnv
 
 So far only **GR00T-N1.6** is wired (the `gr00t-n1d6-bridge` checkpoint with the

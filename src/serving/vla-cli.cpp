@@ -131,6 +131,7 @@ const char * arch_slug(Arch a) {
         case Arch::VLA_JEPA:    return "vla_jepa";
         case Arch::OCTO:        return "octo";
         case Arch::TURBOVLA:    return "turbovla";
+        case Arch::PICOVLA:     return "picovla";
     }
     return "";
 }

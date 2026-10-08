@@ -45,9 +45,10 @@ TOKENIZERS = {
     "gr00t_n1_6":  "vrfai/gr00tn1d6-libero-gguf",
     "gr00t_n1_7":  "nvidia/Cosmos-Reason2-2B",
     "turbovla":    "bert-base-uncased",
+    "picovla":     "HuggingFaceTB/SmolVLM2-500M-Instruct",
 }
 TRUST_REMOTE_CODE = {"evo1", "gr00t_n1_5"}
-MAX_LENGTH = {"smolvla": 48, "pi0": 48, "pi05": 200, "turbovla": 21}
+MAX_LENGTH = {"smolvla": 48, "pi0": 48, "pi05": 200, "turbovla": 21, "picovla": 48}
 VIEWS = {"evo1": 3, "bitvla": 2, "vla_jepa": 2, "gr00t_n1_5": 2, "gr00t_n1_6": 2, "gr00t_n1_7": 2}
 
 BITVLA_PROMPT = "What action should the robot take to {}?"
@@ -92,7 +93,7 @@ def pi05_prompt(text: str, state: str, stats: str) -> str:
 
 def token_ids(arch: str, text: str, tok, args) -> list:
     views = args.views
-    if arch in ("smolvla", "pi0"):
+    if arch in ("smolvla", "pi0", "picovla"):
         text = text if text.endswith("\n") else text + "\n"
     if arch == "pi05":
         text = pi05_prompt(text, args.state, args.stats)

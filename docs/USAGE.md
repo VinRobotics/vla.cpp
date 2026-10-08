@@ -60,6 +60,11 @@ vla-server: bound to tcp://*:5555. ready.
 Use `--bind` to change the address and port. Stop the server with `Ctrl-C`.
 `vla-server` also takes `-hf user/repo[:file.gguf|:tag]` in place of a checkpoint path.
 
+PicoVLA keeps a one-frame memory between requests (its record tokens), so a
+server holds one episode's state: serve one client per server, and set
+`reset_memory` on the first `PredictRequest` of every episode. The other
+architectures are stateless and ignore the field.
+
 Clients: the LIBERO and SimplerEnv runners in [EVAL.md](EVAL.md), and the
 real-robot client in the README's
 [Rollout on a real robot](../README.md#rollout-on-a-real-robot).

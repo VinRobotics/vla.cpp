@@ -80,11 +80,13 @@ class Model:
         self.close()
 
     def predict(self, images, tokens: Sequence[int], state=None, noise=None,
-                pixel_format: int = PIXEL_U8, timing: int = TIMING_NONE):
+                pixel_format: int = PIXEL_U8, timing: int = TIMING_NONE, reset_memory: bool = False):
         """Run one forward pass.
 
         images: one HWC array, or a sequence of them for multi-view. uint8 RGB by
         default; pass pixel_format=PIXEL_F32_RGB_01 for float RGB in [0, 1].
+        reset_memory: set on an episode's first call; clears the cross-call
+        memory of the archs that keep one (PicoVLA).
         """
         views = images if isinstance(images, (list, tuple)) else [images]
         if not views:
@@ -133,6 +135,7 @@ class Model:
         if noise_ptr is not None:
             cin.noise = ctypes.cast(noise_ptr, POINTER(c_float))
         cin.timing_detail = int(timing)
+        cin.reset_memory = int(bool(reset_memory))
 
         out = POINTER(c_float)()
         n = c_int64()
