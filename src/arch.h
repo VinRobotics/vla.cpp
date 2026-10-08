@@ -72,6 +72,7 @@ enum class Arch {
     OPENVLA_OFT,// DINOv2-L/14-reg4 + SigLIP-so400m/14 +Llama-2-7B + MLPResNet.
     VLA_JEPA,   // LeRobot Qwen3-VL-2B-Instruct+V-JEPÀ+DiT-B FM.
     TURBOVLA,   // TurboVLA (DINOv3 + BERT + VL Fusion + ACT decoder).
+    PICOVLA,    // PicoVLA (DINOv3 ConvNeXt-T + Llama with record memory + MeanFlow expert).
 };
 
 /**
@@ -223,6 +224,17 @@ std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
 std::unique_ptr<ModelArchBase> turbovla_create(const std::string& mmproj_path,
                                                   const std::string& ckpt_path,
                                                   const std::string& config_path,
+                                              const Options& opts);
+
+/**
+ * @brief Build a PicoVLA model. Vision is baked into @p ckpt_path. The model
+ *        keeps a one-frame memory between predict calls; see
+ *        @ref Inputs::reset_memory.
+ * @copydetails smolvla_create
+ */
+std::unique_ptr<ModelArchBase> picovla_create(const std::string& mmproj_path,
+                                              const std::string& ckpt_path,
+                                              const std::string& config_path,
                                               const Options& opts);
 
 /**

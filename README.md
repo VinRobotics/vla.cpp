@@ -163,6 +163,7 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | ~ | 
 | [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | - | Y | 
 | [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | Y | Y | Y | Y | 
+| [PicoVLA](https://hf.co/khanhnd61/picovla-libero-pretrained-gguf) | Y | Y | - | - | - | - | 
 
 ---
 

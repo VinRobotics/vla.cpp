@@ -31,6 +31,10 @@ message PredictRequest {
   uint32         precomputed_img_emb_n_views = 7;
 
   repeated uint32 attention_mask = 8;
+
+  // Episode start: the model clears its cross-call memory before predicting.
+  // Only PicoVLA keeps any.
+  bool reset_memory = 9;
 }
 
 message PredictResponse {

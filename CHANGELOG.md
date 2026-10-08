@@ -27,6 +27,19 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 - `scripts/foldquant_fake_export.py` (uncalibrated file for bring-up),
   `scripts/inspect_gguf_quant.py` (contract check) and `scripts/foldquant_ref.py`
   (numpy reference).
+- **PicoVLA** (`fast_smolvla`): DINOv3 ConvNeXt-T with a language-gated 2x2 token
+  merge, a five-layer Llama backbone with 16 record tokens, and a four-layer
+  action expert that reads the backbone's per-layer prefix K/V; three MeanFlow
+  steps. `scripts/convert_picovla_to_gguf.py` converts the LeRobot checkpoint
+  (the latent head is dropped). The record tokens are a one-frame memory that
+  the model keeps between calls; the LIBERO client sets `reset_memory` at each
+  episode start and applies the reference server's cross-chunk blending.
+
+### Changed
+
+- `vla_inputs` gains `reset_memory` (C ABI version 2), as do `vla::Inputs`, the
+  `PredictRequest` proto and the Python bindings' `predict`. It clears the
+  cross-call memory of the archs that keep one (PicoVLA); the others ignore it.
 
 ## [0.4.0] - 2026-09-30
 

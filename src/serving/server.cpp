@@ -549,6 +549,7 @@ int main(int argc, char ** argv) {
         in.attention_mask   = attn_mask_vec.empty() ? nullptr : attn_mask_vec.data();
         in.attention_mask_n = static_cast<int>(attn_mask_vec.size());
         in.timing_detail    = timing_detail;
+        in.reset_memory     = req.reset_memory();
 
         std::vector<float> action_chunk = vla::predict(model, in);
         const auto & st = vla::last_stats(model);

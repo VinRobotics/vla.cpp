@@ -154,6 +154,7 @@ int32_t vla_predict(vla_model * h, const vla_inputs * in,
         ci.timing_detail       = in->timing_detail == VLA_TIMING_PHASE
                                      ? vla::TimingDetail::PHASE
                                      : vla::TimingDetail::NONE;
+        ci.reset_memory        = in->reset_memory != 0;
 
         const std::vector<float> act = vla::predict(h->m, ci);
         if (act.empty())
