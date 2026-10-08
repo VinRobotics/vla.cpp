@@ -163,7 +163,7 @@ supported (released and benchmarked), `~` = in progress, `-` = planned.
 | [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | ~ | 
 | [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | - | Y | 
 | [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | Y | Y | Y | Y | 
-| [ACT](https://huggingface.co/docs/lerobot/act) (LeRobot)       | Y | Y | - | Y | - | - | 
+| [ACT](https://hf.co/ravediamond/act-aloha-sim-transfer-cube-gguf) | Y | Y | - | Y | - | - | 
 
 ---
 
