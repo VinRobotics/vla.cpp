@@ -16,6 +16,7 @@
 #include "backend.h"
 #include "gguf_reader.h"
 #include "layers/attn.h"
+#include "layers/conv.h"
 #include "layers/ffn.h"
 #include "layers/linear.h"
 #include "layers/norm.h"
@@ -503,15 +504,6 @@ std::vector<float> tensor_to_vec(const ggml_tensor * t) {
     std::vector<float> out((size_t) ggml_nelements(t));
     ggml_backend_tensor_get(t, out.data(), 0, ggml_nbytes(t));
     return out;
-}
-
-ggml_tensor * conv_2d_f32(ggml_context * C, ggml_tensor * w, ggml_tensor * x, int stride, int pad) {
-    ggml_tensor * col = ggml_im2col(C, w, x, stride, stride, pad, pad, 1, 1, true, GGML_TYPE_F32);
-    ggml_tensor * y   = ggml_mul_mat(C,
-        ggml_reshape_2d(C, col, col->ne[0], col->ne[3]*col->ne[2]*col->ne[1]),
-        ggml_reshape_2d(C, w, w->ne[0]*w->ne[1]*w->ne[2], w->ne[3]));
-    y = ggml_reshape_4d(C, y, col->ne[1], col->ne[2], col->ne[3], w->ne[3]);
-    return ggml_cont(C, ggml_permute(C, y, 0, 1, 3, 2));
 }
 
 // SmallStem16 for one camera view: four standardized-conv + GroupNorm + ReLU

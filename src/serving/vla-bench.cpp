@@ -33,13 +33,15 @@ namespace {
 void usage(const char * prog) {
     std::fprintf(stderr,
         "usage: %s (--ckpt c.gguf | -hf user/repo) [--mmproj m.gguf]\n"
-        "          [--label name] [--images N] [--size N] [--tokens N]\n"
+        "          [--label name] [--images N] [--size N] [--height N] [--tokens N]\n"
         "          [--extra-token ID] [--extra-count N] [--warmup N] [--reps N] [--markdown]\n"
         "          [precision flags]\n"
         "  --mmproj   ignored; every arch bundles its vision tower in the ckpt GGUF\n"
         "  --label    row label (default: the checkpoint filename)\n"
         "  --images   camera views (default 1)\n"
-        "  --size     square input side in pixels (default 224)\n"
+        "  --size     input width in pixels (default 224)\n"
+        "  --height   input height in pixels (default: the width; ACT runs at the\n"
+        "             camera's own size, e.g. --size 640 --height 480)\n"
         "  --tokens   language token count (default 16)\n"
         "  --extra-token  token id appended --extra-count times (VLA-JEPA needs its\n"
         "                 <embodied> tokens)\n"
@@ -63,7 +65,7 @@ double percentile(const std::vector<double> & v, double p) {
 
 int main(int argc, char ** argv) {
     std::string ckpt, mmproj, hf, label;
-    int n_images = 1, side = 224, n_tokens = 16, warmup = 3, reps = 20;
+    int n_images = 1, side = 224, height = 0, n_tokens = 16, warmup = 3, reps = 20;
     int extra_token = -1, extra_count = 0;
     bool markdown = false;
     vla::Options opts;
@@ -85,6 +87,7 @@ int main(int argc, char ** argv) {
         else if (a == "--label")    label    = need("--label");
         else if (a == "--images")   n_images = std::atoi(need("--images"));
         else if (a == "--size")     side     = std::atoi(need("--size"));
+        else if (a == "--height")   height   = std::atoi(need("--height"));
         else if (a == "--tokens")   n_tokens = std::atoi(need("--tokens"));
         else if (a == "--extra-token") extra_token = std::atoi(need("--extra-token"));
         else if (a == "--extra-count") extra_count = std::atoi(need("--extra-count"));
@@ -121,8 +124,10 @@ int main(int argc, char ** argv) {
         usage(argv[0]);
         return 1;
     }
-    if (n_images < 1 || side < 16 || n_tokens < 1 || warmup < 0 || reps < 1) {
-        std::fprintf(stderr, "vla-bench: --images/--size/--tokens/--reps must be positive\n");
+    if (height == 0)
+        height = side;
+    if (n_images < 1 || side < 16 || height < 16 || n_tokens < 1 || warmup < 0 || reps < 1) {
+        std::fprintf(stderr, "vla-bench: --images/--size/--height/--tokens/--reps must be positive\n");
         return 1;
     }
     if (label.empty()) {
@@ -137,14 +142,14 @@ int main(int argc, char ** argv) {
     }
     const vla::Config & cfg = vla::model_config(m);
 
-    std::vector<std::vector<uint8_t>> pixels(n_images, std::vector<uint8_t>((size_t) 3*side * side));
+    std::vector<std::vector<uint8_t>> pixels(n_images, std::vector<uint8_t>((size_t) 3*side * height));
     std::vector<vla::ImageView> views(n_images);
     for (int v=0; v<n_images; ++v) {
-        for (int y=0; y<side; ++y)
+        for (int y=0; y<height; ++y)
         for (int x=0; x<side; ++x)
         for (int c=0; c<3; ++c)
             pixels[v][((size_t) y * side+x)*3+c] = (uint8_t) ((x+2*y+40*c+17*v) & 0xFF);
-        views[v] = vla::ImageView{ pixels[v].data(), side, side, vla::PixelFormat::U8 };
+        views[v] = vla::ImageView{ pixels[v].data(), side, height, vla::PixelFormat::U8 };
     }
 
     std::vector<int32_t> lang((size_t) n_tokens);
@@ -205,7 +210,7 @@ int main(int argc, char ** argv) {
                     label.c_str(), n_images, side, n_tokens, lo, mean, p50, p90, vision);
     } else {
         std::printf("%s: min %.1f ms  mean %.1f ms  p50 %.1f ms  p90 %.1f ms  vision %.1f ms  (%d views, %dx%d, %d tokens, %d reps)\n",
-                    label.c_str(), lo, mean, p50, p90, vision, n_images, side, side, n_tokens, reps);
+                    label.c_str(), lo, mean, p50, p90, vision, n_images, side, height, n_tokens, reps);
     }
 
     vla::model_free(m);

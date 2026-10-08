@@ -80,7 +80,8 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
         try_str("openvla_oft.architecture", arch_str) ||
         try_str("vla_jepa.architecture",   arch_str) ||
         try_str("vla_adapter.architecture", arch_str) ||
-        try_str("turbovla.architecture",  arch_str)) {
+        try_str("turbovla.architecture",  arch_str) ||
+        try_str("act.architecture",       arch_str)) {
         if      (arch_str == "smolvla")    {
             *out = Arch::SMOLVLA;
             ok = true;
@@ -131,6 +132,10 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
         }
         else if (arch_str == "turbovla")  {
             *out = Arch::TURBOVLA;
+            ok = true;
+        }
+        else if (arch_str == "act")       {
+            *out = Arch::ACT;
             ok = true;
         }
     }
@@ -243,7 +248,8 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
                           : arch == Arch::BITVLA      ? "bitvla"
                           : arch == Arch::VLA_ADAPTER ? "vla_adapter"
                           : arch == Arch::OPENVLA_OFT ? "openvla_oft"
-                          : arch == Arch::TURBOVLA    ? "turbovla" : nullptr;
+                          : arch == Arch::TURBOVLA    ? "turbovla"
+                          : arch == Arch::ACT         ? "act" : nullptr;
         if (name) {
             std::fprintf(stderr, "vla(%s): num_steps is not supported\n", name);
             return nullptr;
@@ -311,6 +317,10 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
         case Arch::TURBOVLA:
             std::printf("vla: arch = turbovla\n");
             impl = turbovla_create(mmproj_path, ckpt_path, config_path, opts);
+            break;
+        case Arch::ACT:
+            std::printf("vla: arch = act\n");
+            impl = act_create(mmproj_path, ckpt_path, config_path, opts);
             break;
     }
     if (!impl)

@@ -349,6 +349,44 @@ def test_turbovla_converter_remap():
     } <= set(tensors.keys_read)
 
 
+def test_act_converter_remap():
+    import importlib
+
+    A = importlib.import_module("convert_act_to_gguf")
+    tensors = _SourceTensors()
+    writer = _Writer()
+    # Folding needs real tensors; the remap only needs to know which ones were read.
+    fold_bn, A.fold_bn = A.fold_bn, lambda w, bn, t: (t[f"{bn}.weight"], w)
+    try:
+        A.write_backbone(writer, tensors, (1, 1, 1, 1))
+    finally:
+        A.fold_bn = fold_bn
+    assert writer.names[:4] == ["bb.conv1.weight", "bb.conv1.bias", "bb.layer1.0.conv1.weight", "bb.layer1.0.conv1.bias"]
+    assert writer.names[-2:] == ["bb.layer4.0.down.weight", "bb.layer4.0.down.bias"]
+    assert {"model.backbone.conv1.weight", "model.backbone.bn1.weight", "model.backbone.layer4.0.downsample.0.weight",
+            "model.backbone.layer4.0.downsample.1.weight"} <= set(tensors.keys_read)
+
+    class _Rows(_Tensor):
+        def __getitem__(self, s): return self  # in_proj is sliced into q, k, v
+
+    class _SlicedSource(_SourceTensors):
+        def __getitem__(self, key):
+            self.keys_read.append(key)
+            return _Rows()
+
+    tensors = _SlicedSource()
+    writer = _Writer()
+    A.write_transformer(writer, tensors, 1, 1, 4, pre_norm=False)
+    attn = ["{}_" + f"{x}.{y}" for x in "qkvo" for y in ("weight", "bias")]
+    enc = [a.format("enc.blk.0.attn") for a in attn]
+    ffn = lambda p, n: [f"{p}.fc1.weight", f"{p}.fc1.bias", f"{p}.fc2.weight", f"{p}.fc2.bias"] + \
+        [f"{p}.ln{i}.{y}" for i in range(1, n + 1) for y in ("weight", "bias")]
+    assert writer.names == enc + ffn("enc.blk.0", 2) + [a.format("dec.blk.0.attn") for a in attn] + \
+        [a.format("dec.blk.0.cross") for a in attn] + ffn("dec.blk.0", 3) + ["dec.norm.weight", "dec.norm.bias"]
+    assert "model.decoder.layers.0.multihead_attn.in_proj_weight" in tensors.keys_read
+    assert "model.encoder.norm.weight" not in tensors.keys_read
+
+
 def test_quantize_skip_names():
     import importlib
     Q = importlib.import_module("quantize_gguf")
