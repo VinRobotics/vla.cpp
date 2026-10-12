@@ -3,11 +3,12 @@
 `vla-bench` times `predict()` in-process on synthetic inputs. It measures the
 engine only: no transport, no simulator, and no claim about task success.
 
-Four ways to run on this chip, from two builds. The OpenVINO build selects its device with
+Five ways to run on this chip, from three builds. The OpenVINO build selects its device with
 `GGML_OPENVINO_DEVICE`: `GPU` for the Arc B390 iGPU, `NPU` for the AI Boost NPU and `CPU` for
 OpenVINO's CPU plugin. Every OpenVINO run was checked against ggml's `OpenVINO: using device` line,
 so a silent fallback to another device would have been counted as a failure. A build without
-OpenVINO gives ggml's own CPU backend.
+OpenVINO gives ggml's own CPU backend. A SYCL build runs ggml's SYCL backend on the Arc B390; it
+was measured later, at a newer commit, and its section has its own setup table.
 
 ## Test setup
 
@@ -125,6 +126,76 @@ vision stage separately.
 | π0 | 804.2 | 769.5 | 801.1 | 765.6 | 803.0 | 768.6 | 800.1 | 769.6 |
 | Evo-1 | 851.5 | 762.2 | 850.2 | 758.7 | 848.0 | 760.9 | 846.7 | 758.7 |
 | OpenVLA-OFT | 1476.0 | 1480.6 | 1570.6 | 1471.4 | 1550.8 | 2222.0 | 1423.7 | 2479.9 |
+
+</details>
+
+## Latency and memory: Arc B390 iGPU (SYCL)
+
+A third build: ggml's SYCL backend, compiled with oneAPI. It ran later than the
+other sections, on a newer commit and driver, so it has its own setup table.
+
+| | |
+|---|---|
+| Commit | `1adf078` (main, after PR #33) |
+| llama.cpp | `b11223` |
+| OS | Ubuntu 24.04.5 LTS, kernel 7.0 |
+| Toolkit | oneAPI 2026.1 (icx/icpx), GPU compute runtime 26.35.39758.10, Level Zero loader 1.16.1 |
+| SYCL adapter | OpenCL (`UR_ADAPTERS_FORCE_LOAD=.../libur_adapter_opencl.so.0`). The Level Zero adapter segfaults with loader 1.16.1, so every run went through OpenCL. The A380 report ran on Level Zero. |
+| Power | platform profile `balanced`; PL1 25 W, PL2 65 W; `intel_pstate` `powersave` governor |
+| Date | 2026-10-09 12:17 to 20:25 and 2026-10-12 13:53 to 13:57 (π0.5) (UTC+07) |
+| Build | `-DGGML_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DCMAKE_BUILD_TYPE=Release -G Ninja` (`GGML_NATIVE=ON`), after `source /opt/intel/oneapi/setvars.sh` |
+| Method | as above: 3 warmups + 20 timed reps per process, 3 processes, best mean; the same flag screen |
+
+Peak device buffers are the xe `fdinfo` counters, as for the OpenVINO GPU plugin.
+
+Rows are sorted by latency. `vision ms` is `-` for archs that do not time their
+vision stage separately.
+
+| Model | Views | Input | min ms | mean ms | p50 ms | p90 ms | vision ms | Peak device buffers MiB | Peak RSS MiB |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| Octo-Small | 2 | 256 + 128 | 17.0 | 17.2 | 17.1 | 17.4 | 2.0 | 605 | 417 |
+| TurboVLA | 2 | 256 | 45.0 | 46.0 | 45.7 | 47.2 | - | 901 | 423 |
+| VLA-JEPA | 1 | 256 | 103.5 | 104.7 | 104.8 | 105.5 | 40.0 | 3866 | 394 |
+| VLA-Adapter | 1 | 224 | 144.9 | 145.1 | 145.0 | 145.4 | 77.9 | 2760 | 1039 |
+| GR00T N1.5 | 1 | 224 | 156.7 | 156.9 | 156.8 | 157.1 | 39.2 | 3548 | 386 |
+| GR00T N1.7 | 1 | 256 | 181.2 | 184.6 | 184.9 | 187.5 | 40.6 | 4933 | 382 |
+| GR00T N1.6 | 1 | 224 | 183.1 | 183.8 | 183.7 | 184.4 | 39.8 | 4581 | 383 |
+| SmolVLA | 2 | 512 | 228.0 | 228.3 | 228.2 | 228.6 | 155.2 | 1129 | 396 |
+| π0 | 2 | 224 | 366.7 | 367.6 | 367.5 | 368.5 | 79.1 | 5380 | 451 |
+| π0.5 | 2 | 224 | 369.1 | 370.0 | 369.9 | 370.5 | 78.6 | 5706 | 449 |
+| Evo-1 | 1 | 448 | 535.8 | 536.9 | 536.5 | 538.4 | 261.7 | 1474 | 485 |
+
+### Fastest configuration: Arc B390 iGPU (SYCL)
+
+| Model | Fastest flags | min ms | mean ms | p50 ms | p90 ms | vision ms | Peak device buffers MiB | Peak RSS MiB | vs defaults |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| Octo-Small | *(defaults)* | 17.0 | 17.2 | 17.1 | 17.4 | 2.0 | 605 | 417 | - |
+| TurboVLA | `--weight-dtype f16 --flash-attn` | 23.7 | 23.9 | 23.8 | 24.0 | - | 550 | 419 | -48% |
+| VLA-JEPA | *(defaults)* | 103.5 | 104.7 | 104.8 | 105.5 | 40.0 | 3866 | 394 | - |
+| GR00T N1.5 | `--weight-dtype bf16 --flash-attn` | 144.5 | 144.9 | 144.8 | 145.4 | 36.9 | 3557 | 399 | -8% |
+| VLA-Adapter | *(defaults)* | 144.9 | 145.1 | 145.0 | 145.4 | 77.9 | 2760 | 1039 | - |
+| GR00T N1.6 | `--weight-dtype bf16 --flash-attn` | 174.8 | 175.1 | 175.1 | 175.6 | 37.5 | 4578 | 386 | -5% |
+| SmolVLA | `--flash-attn --mm-prec default` | 177.0 | 177.3 | 177.2 | 177.6 | 104.1 | 1108 | 396 | -22% |
+| GR00T N1.7 | *(defaults)* | 181.2 | 184.6 | 184.9 | 187.5 | 40.6 | 4933 | 382 | - |
+| π0 | *(defaults)* | 366.7 | 367.6 | 367.5 | 368.5 | 79.1 | 5380 | 451 | - |
+| π0.5 | *(defaults)* | 369.1 | 370.0 | 369.9 | 370.5 | 78.6 | 5706 | 449 | - |
+| Evo-1 | `--weight-dtype bf16 --flash-attn` | 437.7 | 438.4 | 438.4 | 438.8 | 163.2 | 1435 | 481 | -18% |
+
+<details><summary>Screen means (ms) per flag set</summary>
+
+| Model | defaults | `--flash-attn` | `--mm-prec default` | `--flash-attn --mm-prec default` | `--weight-dtype bf16` | `--weight-dtype bf16 --flash-attn` | `--weight-dtype f16` | `--weight-dtype f16 --flash-attn` |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| Octo-Small | 17.2 | 17.6 | 17.4 | 17.6 | 17.2 | 17.6 | 17.3 | 17.4 |
+| TurboVLA | 45.6 | 36.3 | 45.8 | 36.3 | 36.7 | 25.5 | 35.3 | 23.9 |
+| VLA-JEPA | 113.0 | 98.9 | 112.5 | 108.2 | 112.1 | 99.7 | 269.3 | 284.0 |
+| VLA-Adapter | 145.2 | 145.1 | 145.1 | 145.2 | 145.5 | 145.2 | 270.3 | 269.4 |
+| GR00T N1.5 | 157.1 | 145.4 | 157.2 | 145.2 | 157.3 | 145.1 | 421.9 | 409.7 |
+| GR00T N1.7 | 198.8 | 195.2 | 198.9 | 195.9 | 186.3 | 195.2 | 606.7 | 604.1 |
+| GR00T N1.6 | 199.4 | 178.8 | 180.4 | 177.1 | 179.2 | 175.7 | 688.7 | 488.0 |
+| SmolVLA | 229.4 | 177.3 | 229.7 | 177.1 | 229.2 | 177.7 | 330.1 | 278.8 |
+| π0 | 367.7 | 367.8 | 367.7 | 367.2 | 367.1 | 367.8 | 907.5 | 923.4 |
+| π0.5 | 370.3 | 373.6 | 370.3 | 372.6 | 369.4 | 370.5 | 907.4 | 907.0 |
+| Evo-1 | 537.9 | 438.2 | 537.2 | 438.2 | 536.6 | 437.7 | 782.3 | 682.6 |
 
 </details>
 
@@ -287,6 +358,11 @@ vision stage separately.
   GGML OpenVINO backend ov::Exception: Check 'it != m_translator_map.end()' failed at openvino/translate_session.cpp:304
   ```
 
+### Arc B390 iGPU (SYCL)
+
+- **BitVLA**: N/A off CUDA. The only published GGUF is int2-packed, and only CUDA builds load it.
+- **OpenVLA-OFT**: not attempted. Its 15 GB GGUF was not downloaded for this round, so whether it fits is unknown.
+
 ### AI Boost NPU (OpenVINO NPU plugin)
 
 - **π0.5**: the NPU compiler rejects the graph's dynamic shape:
@@ -371,6 +447,10 @@ A latency is not a correctness check. `docs/backend/ov.md` lists π0 as wrong on
 
 The chip runs under a 25 W long-term power limit. The first timed calls of a process can run at boost power, so on the CPU sections read `mean` or `p50` for sustained latency.
 
+On SYCL, a few models settle at one of two speeds per process. The three process means were 199.9, 184.6 and 199.0 ms for GR00T N1.7, 184.6, 183.8 and 201.0 ms for GR00T N1.6, and 104.7, 112.7 and 113.2 ms for VLA-JEPA; the reported row is the fast process. The one-process screen often landed on the slow speed, so for these three models the gap between the defaults and a flag set in the screen is within this noise.
+
+The SYCL build at `1adf078` is not the same binary as an SYCL build at `c93ca0a`. PR #33 links `vla_core` with `-fsycl-device-code-split=per_kernel` and the JIT option `-cl-fp32-correctly-rounded-divide-sqrt`. Both are link options, so they also apply to ggml-sycl's kernels in the same binary.
+
 ## Reproducing
 
 ```bash
@@ -384,6 +464,15 @@ GGML_OPENVINO_DEVICE=GPU ./build-ov/vla-bench --ckpt smolvla-libero.gguf --image
 ZE_ENABLE_ALT_DRIVERS=/lib/x86_64-linux-gnu/libze_intel_npu.so.1 GGML_OPENVINO_DEVICE=NPU \
   ./build-ov/vla-bench --ckpt smolvla-libero.gguf --images 2 --size 512 --warmup 3 --reps 20
 GGML_OPENVINO_DEVICE=CPU ./build-ov/vla-bench --ckpt smolvla-libero.gguf --images 2 --size 512 --warmup 3 --reps 20
+
+# SYCL build: Arc B390 iGPU
+source /opt/intel/oneapi/setvars.sh
+cmake -S . -B build-sycl -G Ninja -DGGML_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DCMAKE_BUILD_TYPE=Release
+cmake --build build-sycl -j
+export UR_ADAPTERS_FORCE_LOAD=/opt/intel/oneapi/compiler/2026.1/lib/libur_adapter_opencl.so.0  # Level Zero 1.16.1 segfaults
+./build-sycl/vla-bench --ckpt smolvla-libero.gguf --images 2 --size 512 --warmup 3 --reps 20
+# GR00T and Octo also need their env (see Model configuration), for example:
+VLA_GR00T_EMBODIMENT=libero_sim ./build-sycl/vla-bench --ckpt gr00tn1d7-libero-object.gguf --images 1 --size 256 --warmup 3 --reps 20
 
 # ggml CPU backend
 cmake -S . -B build-cpu -DCMAKE_BUILD_TYPE=Release && cmake --build build-cpu -j

@@ -4,13 +4,15 @@ Per-device latency and memory for every architecture, measured with `vla-bench` 
 synthetic inputs at `c93ca0a` (PR #32), llama.cpp `b11223`. The Core Ultra X7
 358H ran at `450992c`, which differs from `c93ca0a` only by an OpenVINO fix
 (`3ff447c`) and docs. The Jetson Orin NX ran at `f7e0f7f`, which differs from
-`c93ca0a` only by docs, release tooling and OpenVINO-only scripts. Each report
+`c93ca0a` only by docs, release tooling and OpenVINO-only scripts. The Arc B390
+SYCL row ran later, at `1adf078` (after PR #33, same llama.cpp pin). Each report
 lists the device, the build, each model's configuration, latency and peak memory
 at the defaults, and the fastest runtime flags for that device.
 
 The table below gives the minimum latency in ms at the defaults, the one number
 every report has. `N/A` means the arch does not run on that backend, and `-`
 means the model does not fit or fails there; each report says which and why.
+`n/r` means not run.
 
 | Device | Octo-Small | TurboVLA | VLA-JEPA | VLA-Adapter | GR00T N1.5 | GR00T N1.6 | GR00T N1.7 | BitVLA | SmolVLA | π0 | π0.5 | OpenVLA-OFT | Evo-1 |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
@@ -22,6 +24,7 @@ means the model does not fit or fails there; each report says which and why.
 | [Jetson Orin NX 16 GB (CUDA)](jetson-orin-nx.md) | 27.4 | 79.7 | 176.7 | 270.7 | 260.8 | 252.1 | 251.4 | 269.1 | 411.2 | 739.6 | 742.9 | - | 893.2 |
 | [Jetson Orin Nano Super (CUDA)](jetson-orin-nano.md) | 31.9 | 89.3 | 193.9 | 297.5 | 293.4 | 272.3 | 271.7 | 335.0 | 462.8 | 845.2 | 849.7 | - | 1011.5 |
 | [Apple M4 (Metal)](apple-m4.md) | 22.6 | 65.2 | 248.7 | 315.7 | 401.5 | 358.9 | 350.8 | N/A | 357.6 | 1141.1 | 1153.8 | 1650.7 | 829.3 |
+| [Intel Arc B390 iGPU (SYCL)](core-ultra-x7-358h.md) | 17.0 | 45.0 | 103.5 | 144.9 | 156.7 | 183.1 | 181.2 | N/A | 228.0 | 366.7 | 369.1 | n/r | 535.8 |
 | [Intel Arc B390 iGPU (OpenVINO)](core-ultra-x7-358h.md) | N/A | 35.6 | 152.4 | 232.6 | 145.5 | 225.1 | 230.8 | N/A | 499.8 | 795.8 | 581.5 | 1494.4 | 841.5 |
 | [Intel Arc A380 (SYCL)](arc-a380.md) | 60.5 | 103.5 | 355.9 | 408.9 | 472.0 | 646.0 | 615.3 | N/A | 734.5 | 921.9 | 945.6 | - | 1047.3 |
 | [Snapdragon X Hexagon NPU](snapdragon-x-hexagon.md) | 239.7 | 2280.8 | 821.0 | 4072.1 | 2755.7 | 2940.0 | 1400.2 | N/A | 1239.3 | 5730.0 | 9321.7 | - | 7208.6 |
@@ -46,6 +49,9 @@ Notes on the table:
   CPU row shows the same effect: `min` sits 42% below `p50` for Octo-Small and
   about 18% below for VLA-JEPA and GR00T N1.7. On its AI Boost NPU, VLA-Adapter's
   `min` is 27% below `p50`.
+- On the Arc B390 SYCL row, OpenVLA-OFT was not run: its 15 GB GGUF was not
+  downloaded for that round. SYCL there goes through the OpenCL adapter, because
+  the Level Zero adapter segfaults with that machine's loader (1.16.1).
 - The OpenVINO rows have no Octo-Small, because OpenVINO cannot translate one of
   its ops yet. The NPU compiler rejects the graphs of six archs; the report
   quotes each error.
