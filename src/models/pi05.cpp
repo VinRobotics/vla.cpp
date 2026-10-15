@@ -111,7 +111,7 @@ ggml_tensor * build_expert_layer(
         ggml_context * ctx, const GemmaLayerW & w,
         ggml_tensor * x_in, ggml_tensor * positions, ggml_tensor * mod_attn, ggml_tensor * mod_ffn,
         const Config & cfg, int64_t seq,
-        ggml_tensor * cached_K, ggml_tensor * cached_V) {
+        ggml_tensor * cached_K, ggml_tensor * cached_V, bool flash) {
     const int64_t h = cfg.expert_h;
 
     ggml_tensor * gate_attn = nullptr;
@@ -119,7 +119,7 @@ ggml_tensor * build_expert_layer(
     // FoldQuant: the act nodes quantize the adaRMS outputs; the residuals are
     // gated (out * gate + x), so they stay out of the GEMM epilogues.
     ggml_tensor * o_out  = gemma_attn(ctx, w, x_norm, positions, cfg, seq, cached_K, cached_V, nullptr,
-                                      nullptr, nullptr, GGML_TYPE_F32, false, x_norm);
+                                      nullptr, nullptr, GGML_TYPE_F32, flash, x_norm);
 
     ggml_tensor * h1 = ggml_add(ctx, x_in, ggml_mul(ctx, o_out, gate_attn));
 
@@ -406,6 +406,9 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     const int64_t n_layers  = cfg.n_layers;
     const int64_t max_ad    = cfg.max_action_dim;
     const int     num_steps = cfg.num_steps;
+    // --flash-attn: fused attention in the prefix and the expert. Fixed per
+    // model (Options), so it need not be part of the cached graph's key.
+    const bool    fa        = flash_attn_enabled();
     const float   dt        = -1.0f/(float) num_steps;
 
     int64_t n_img_tokens = 0;
@@ -456,7 +459,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         ggml_tensor * h = prefix_embs;
         for (int64_t i=0; i<n_layers; ++i) {
             h = gemma_layer(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix,
-                            nullptr, nullptr, nullptr, &cK[i], &cV[i]);
+                            nullptr, nullptr, nullptr, &cK[i], &cV[i], GGML_TYPE_F32, fa);
         }
         (void) h;
     }
@@ -470,7 +473,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         ggml_tensor * h = ggml_add(C, ggml_mul_mat(C, W_ain, x_t), b_ain);
         for (int64_t i=0; i<n_layers; ++i) {
             h = build_expert_layer(C, ex_layers[i], h, t_suffix_pos, mod(2*i), mod(2*i+1), cfg, n_suf,
-                                   cK[i], cV[i]);
+                                   cK[i], cV[i], fa);
         }
 
         ggml_tensor * h_final = build_adarms(C, h, mod(2*n_layers), hidden_ex, cfg.rms_eps, nullptr);
