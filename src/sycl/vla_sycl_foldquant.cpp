@@ -204,7 +204,9 @@ void act_kernel(const ActParams a, const sycl::nd_item<1> & it) {
 // of squares keeps the reference's lane-partial order (sub-group 0 runs the
 // per-row loop), so the codes are still bit-identical. The CUDA path's
 // act_row_kernel, ported.
-constexpr int RW = 8, RT = RW * SG, MAXC = 16;   // K <= RW * MAXC * 64
+constexpr int MAXC = 16;   // chunks per sub-group: K <= RW * MAXC * 64, RW = 8 or 16 sub-groups
+// (16 for the LLM's down projection, K = 16384; the amax is a max and the
+// butterfly is per chunk, so how many sub-groups share a row changes no code).
 
 template <int ROT>
 inline void rot_pair(const sycl::sub_group & sg, float & v0, float & v1, int lane, float inv_sqrt_bs) {
@@ -223,7 +225,7 @@ inline void rot_pair(const sycl::sub_group & sg, float & v0, float & v1, int lan
     }
 }
 
-template <int ABITS, int ROT>
+template <int ABITS, int ROT, int RW>
 void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red, float * s_rstd) {
     const auto    sg      = it.get_sub_group();
     const int     w       = (int) sg.get_group_linear_id();
@@ -297,21 +299,26 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
     }
 }
 
-template <int ABITS, int ROT>
+template <int ABITS, int ROT, int RW>
 void launch_act_row(sycl::queue & q, const ActParams & a) {
+    constexpr int RT = RW * SG;
     q.submit([&](sycl::handler & h) {
         sycl::local_accessor<float, 1> red(sycl::range<1>(RW + 1), h);
         h.parallel_for(sycl::nd_range<1>((size_t) a.M * RT, RT), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG)]] {
             float * r = red.template get_multi_ptr<sycl::access::decorated::no>().get();
-            act_row_kernel<ABITS, ROT>(a, it, r, r + RW);
+            act_row_kernel<ABITS, ROT, RW>(a, it, r, r + RW);
         });
     });
 }
 
 template <int ABITS, int ROT>
 void launch_act_rot(sycl::queue & q, const ActParams & a) {
-    if (a.K / CHUNK <= RW * MAXC) {
-        launch_act_row<ABITS, ROT>(q, a);
+    if (a.K / CHUNK <= 8 * MAXC) {
+        launch_act_row<ABITS, ROT, 8>(q, a);
+        return;
+    }
+    if (a.K / CHUNK <= 16 * MAXC) {
+        launch_act_row<ABITS, ROT, 16>(q, a);
         return;
     }
     const size_t groups = (size_t) ((a.M + ROWS - 1) / ROWS);
