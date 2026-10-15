@@ -346,11 +346,14 @@ bool vit_attn(sycl::queue & q, ggml_tensor * dst, const VitFusedSpec & sp) {
     Elt * q16 = buf, * k16 = q16 + n, * v16 = k16 + n;
     float * o32 = reinterpret_cast<float *>(v16 + n);
     const float * src = static_cast<const float *>(x->data);
-    q.parallel_for(sycl::range<3>(3, (size_t) (B * H * S), (size_t) Dp), [=](sycl::id<3> i) {
-        const int64_t w = i[0], r = i[1], d = i[2];
-        const int64_t b = r / (H * S), h = (r / S) % H, s = r % S;
-        const float v = d < D ? src[(b * S + s) * 3 * E + w * E + h * D + d] : 0.f;
-        (w == 0 ? q16 : w == 1 ? k16 : v16)[r * Dp + d] = Elt(v);
+    // 32-bit index math (64-bit division is emulated on Intel GPUs: it was most of
+    // this pass's time). Item (w*B*H + b*H + h, s, d).
+    const int iBH = (int) (B * H), iH = (int) H, iS = (int) S, iE = (int) E, iD = (int) D, iDp = (int) Dp;
+    q.parallel_for(sycl::range<3>((size_t) (3 * B * H), (size_t) S, (size_t) Dp), [=](sycl::id<3> i) {
+        const int wbh = (int) i[0], s = (int) i[1], d = (int) i[2];
+        const int w = wbh / iBH, bh = wbh - w * iBH, b = bh / iH, h = bh - b * iH;
+        const float v = d < iD ? src[(size_t) (b * iS + s) * 3 * iE + w * iE + h * iD + d] : 0.f;
+        (w == 0 ? q16 : w == 1 ? k16 : v16)[(size_t) (bh * iS + s) * iDp + d] = Elt(v);
     });
     launch_batched<FmhaVit>(q, q16, k16, v16, B, S, S, H, Dp, 1.f / std::sqrt((float) D), o32);
     auto * out = static_cast<sycl::ext::oneapi::bfloat16 *>(dst->data);
