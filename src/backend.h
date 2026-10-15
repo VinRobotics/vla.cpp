@@ -202,7 +202,7 @@ inline ggml_tensor * gelu(ggml_context * ctx, ggml_tensor * x) {
 }
 
 inline ggml_tensor * geglu(ggml_context * ctx, ggml_tensor * gate, ggml_tensor * up) {
-#if !defined(GGML_USE_SYCL) && !defined(GGML_USE_METAL) && !defined(GGML_USE_OPENVINO) && \
+#if !defined(GGML_USE_METAL) && !defined(GGML_USE_OPENVINO) && \
     !defined(GGML_USE_HEXAGON) && !defined(GGML_USE_OPENCL)
     if (gate->type == GGML_TYPE_F32)
         return ggml_geglu_split(ctx, gate, up);

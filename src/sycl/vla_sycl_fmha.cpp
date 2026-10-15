@@ -164,36 +164,32 @@ void to_f16(sycl::queue & q, Rows r, int64_t n, int64_t H, Elt * dst) {
     });
 }
 
-// n rows of each of H heads -> F32 rows [off, off + n) of a [H][ld][D] buffer.
-void to_f32(sycl::queue & q, Rows r, int64_t n, int64_t H, float * dst, int64_t ld, int64_t off) {
-    if (n <= 0) return;
-    q.parallel_for(sycl::range<3>(H, n, kHeadDim), [=](sycl::id<3> i) {
-        const int64_t h = i[0], s = i[1], d = i[2];
-        const char * e = r.p + h * r.nbh + s * r.nbs;
-        dst[(h * ld + off + s) * kHeadDim + d] =
-            r.f16 ? (float) reinterpret_cast<const sycl::half *>(e)[d] : reinterpret_cast<const float *>(e)[d];
-    });
+// One element of a Rows (F16 or F32) on the device.
+inline float rows_at(const Rows & r, int64_t h, int64_t s, int64_t d) {
+    const char * e = r.p + h * r.nbh + s * r.nbs;
+    return r.f16 ? (float) reinterpret_cast<const sycl::half *>(e)[d] : reinterpret_cast<const float *>(e)[d];
 }
 
 // Folds the kernel's per-split partial outputs and the keys it did not see into
 // O, exactly. On the Arc B390 the kernel's own remainder masking gives wrong rows
 // for any S_kv % 64 != 0 (tests/fmha_sycl_check), so it only ever gets whole KV
-// tiles; the rest (kt/vt, F32 [Hkv][ntail][D]) is scored here. ob/lse2 hold
-// nsplit partial outputs [split][head][query][D] and their log2(sum exp(scale*s)).
-// Three light passes: tail scores, a row of mixing weights per (head, query),
-// then a weighted sum per output element.
-void merge(sycl::queue & q, Rows qr, int64_t Sq, int64_t Hq, int64_t Hkv, const float * kt, const float * vt,
-           int64_t ntail, float * O, const float * ob, const float * lse2, float * coef, int nsplit, float scale) {
-    const int64_t grp = Hq / Hkv, rows = Hq * Sq, nc = nsplit + ntail;
+// tiles; the rest -- n0 rows of (k0, v0) then n1 rows of (k1, v1), read where
+// they lie -- is scored here. ob/lse2 hold nsplit partial outputs
+// [split][head][query][D] and their log2(sum exp(scale*s)). Three light passes:
+// tail scores, a row of mixing weights per (head, query), a weighted sum per element.
+void merge(sycl::queue & q, Rows qr, int64_t Sq, int64_t Hq, int64_t Hkv, Rows k0, Rows v0, int64_t n0, Rows k1,
+           Rows v1, int64_t n1, float * O, const float * ob, const float * lse2, float * coef, int nsplit, float scale) {
+    const int64_t grp = Hq / Hkv, rows = Hq * Sq, ntail = n0 + n1, nc = nsplit + ntail;
     // coef[row][0..nsplit) weigh the splits, coef[row][nsplit + t] tail key t.
     if (ntail > 0)
         q.parallel_for(sycl::range<2>(rows, ntail), [=](sycl::id<2> i) {
             const int64_t row = i[0], t = i[1], hq = row / Sq, s = row % Sq, hk = hq / grp;
-            const sycl::float4 * a4 = reinterpret_cast<const sycl::float4 *>(qr.p + hq * qr.nbh + s * qr.nbs);
-            const sycl::float4 * k4 = reinterpret_cast<const sycl::float4 *>(kt + (hk * ntail + t) * kHeadDim);
-            sycl::float4 a{0.f};
-            for (int j = 0; j < kHeadDim / 4; ++j) a += a4[j] * k4[j];
-            coef[row * nc + nsplit + t] = (a.x() + a.y() + a.z() + a.w()) * scale;
+            const float * qv = reinterpret_cast<const float *>(qr.p + hq * qr.nbh + s * qr.nbs);
+            const Rows & kr = t < n0 ? k0 : k1;
+            const int64_t tt = t < n0 ? t : t - n0;
+            float a = 0.f;
+            for (int64_t j = 0; j < kHeadDim; ++j) a += qv[j] * rows_at(kr, hk, tt, j);
+            coef[row * nc + nsplit + t] = a * scale;
         });
     q.parallel_for(sycl::range<1>(rows), [=](sycl::id<1> i) {
         const int64_t row = i[0];
@@ -213,7 +209,8 @@ void merge(sycl::queue & q, Rows qr, int64_t Sq, int64_t Hq, int64_t Hkv, const 
         const float * c = coef + row * nc;
         float acc = 0.f;
         for (int b = 0; b < nsplit; ++b) acc += c[b] * ob[(b * rows + row) * kHeadDim + d];
-        for (int64_t t = 0; t < ntail; ++t) acc += c[nsplit + t] * vt[(hk * ntail + t) * kHeadDim + d];
+        for (int64_t t = 0; t < n0; ++t) acc += c[nsplit + t] * rows_at(v0, hk, t, d);
+        for (int64_t t = 0; t < n1; ++t) acc += c[nsplit + n0 + t] * rows_at(v1, hk, t, d);
         O[(s * Hq + hq) * kHeadDim + d] = acc;
     });
 }
@@ -290,22 +287,23 @@ void run_kernel(sycl::queue & q, const Elt * q16, const Elt * k16, const Elt * v
 // Device scratch carved for one node.
 struct Buffers {
     Elt * q16, * k16, * v16;
-    float * kt, * vt, * ob, * lse2, * coef;
+    float * ob, * lse2, * coef;
 };
 
-// Attention of Q rows against cache rows [0, kv0) (F16, packed [Hkv][ldk][D],
-// or converted from kc/vc when they are not) plus ntail tail rows already in
-// b.kt/b.vt, written into O.
+// Attention of Q rows against rows [0, kv0) of k16/v16 (packed F16
+// [Hkv][ldk][D], whole tiles) plus the tail rows of (k0, v0) and (k1, v1),
+// written into O.
 bool attend(sycl::queue & q, Rows qr, int64_t Sq, int64_t Hq, int64_t Hkv, const Elt * k16, const Elt * v16,
-            int64_t ldk, int64_t kv0, int64_t ntail, float scale, const Buffers & b, float * O) {
+            int64_t ldk, int64_t kv0, Rows k0, Rows v0, int64_t n0, Rows k1, Rows v1, int64_t n1, float scale,
+            const Buffers & b, float * O) {
     const int nsplit = kv0 ? pick_split(kv0 / kTileKV) : 0;
-    const bool direct = nsplit == 1 && ntail == 0;
+    const bool direct = nsplit == 1 && n0 + n1 == 0;
     if (nsplit > 0) {
         to_f16(q, qr, Sq, Hq, b.q16);
         run_kernel(q, b.q16, k16, v16, ldk, kv0, Sq, Hq, Hkv, scale, nsplit, direct, O, b.ob, b.lse2);
     }
     if (!direct)
-        merge(q, qr, Sq, Hq, Hkv, b.kt, b.vt, ntail, O, b.ob, b.lse2, b.coef, nsplit, scale);
+        merge(q, qr, Sq, Hq, Hkv, k0, v0, n0, k1, v1, n1, O, b.ob, b.lse2, b.coef, nsplit, scale);
     return true;
 }
 
@@ -313,19 +311,16 @@ Buffers carve(sycl::queue & q, int64_t Sq, int64_t Hq, int64_t Hkv, int64_t nkv1
               bool & ok) {
     const int nsplit = kv0 ? pick_split(kv0 / kTileKV) : 0;
     const size_t nq = (size_t) Hq * Sq * kHeadDim, nkv = (size_t) Hkv * nkv16 * kHeadDim;
-    const size_t nt = (size_t) Hkv * ntail * kHeadDim, nob = (size_t) nsplit * nq, nlse = (size_t) nsplit * Hq * Sq;
+    const size_t nob = (size_t) nsplit * nq, nlse = (size_t) nsplit * Hq * Sq;
     const size_t ncoef = (size_t) Hq * Sq * (nsplit + ntail);
-    // F16 first (multiples of D elements), then the F32 rows (float4 reads), then the rest.
-    char * buf = scratch(q, (nq + 2 * nkv) * sizeof(Elt) + (2 * nt + nob + nlse + ncoef) * sizeof(float));
+    char * buf = scratch(q, (nq + 2 * nkv) * sizeof(Elt) + (nob + nlse + ncoef) * sizeof(float));
     Buffers b{};
     ok = buf != nullptr;
     if (!ok) return b;
     b.q16 = reinterpret_cast<Elt *>(buf);
     b.k16 = b.q16 + nq;
     b.v16 = b.k16 + nkv;
-    b.kt = reinterpret_cast<float *>(b.v16 + nkv);
-    b.vt = b.kt + nt;
-    b.ob = b.vt + nt;
+    b.ob = reinterpret_cast<float *>(b.v16 + nkv);
     b.lse2 = b.ob + nob;
     b.coef = b.lse2 + nlse;
     return b;
@@ -424,9 +419,8 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
         to_f16(q, rows_of(K), kv0, Hkv, b.k16);
         to_f16(q, rows_of(V), kv0, Hkv, b.v16);
     }
-    to_f32(q, rows_of(K, kv0), ntail, Hkv, b.kt, ntail, 0);
-    to_f32(q, rows_of(V, kv0), ntail, Hkv, b.vt, ntail, 0);
-    attend(q, rows_of(Q), Sq, Hq, Hkv, b.k16, b.v16, kv0, kv0, ntail, scale, b, static_cast<float *>(dst->data));
+    attend(q, rows_of(Q), Sq, Hq, Hkv, b.k16, b.v16, kv0, kv0, rows_of(K, kv0), rows_of(V, kv0), ntail,
+           rows_of(K), rows_of(V), 0, scale, b, static_cast<float *>(dst->data));
     static const bool check = [] { const char * e = std::getenv("VLA_SYCL_FMHA_CHECK"); return e && *e && *e != '0'; }();
     if (check) check_against_host(q, dst, Q, K, V, scale);
     return true;
@@ -481,11 +475,8 @@ bool sycl_fmha_kv_forward(ggml_tensor * dst, void * queue) {
         to_f16(q, rows_of(Kc), kv0, Hkv, b.k16);
         to_f16(q, rows_of(Vc), kv0, Hkv, b.v16);
     }
-    to_f32(q, rows_of(Kc, kv0), Sc - kv0, Hkv, b.kt, ntail, 0);
-    to_f32(q, rows_of(Vc, kv0), Sc - kv0, Hkv, b.vt, ntail, 0);
-    to_f32(q, rows_of(Kn), Sn, Hkv, b.kt, ntail, Sc - kv0);
-    to_f32(q, rows_of(Vn), Sn, Hkv, b.vt, ntail, Sc - kv0);
-    return attend(q, rows_of(Q), Sq, Hq, Hkv, k16, v16, ldk, kv0, ntail, scale, b, static_cast<float *>(dst->data));
+    return attend(q, rows_of(Q), Sq, Hq, Hkv, k16, v16, ldk, kv0, rows_of(Kc, kv0), rows_of(Vc, kv0), Sc - kv0,
+                  rows_of(Kn), rows_of(Vn), Sn, scale, b, static_cast<float *>(dst->data));
 }
 
 }  // namespace vla

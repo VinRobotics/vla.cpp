@@ -82,6 +82,10 @@ struct Pi05ModelArch : public ModelArchBase {
     ggml_tensor * W_aout = nullptr, * b_aout = nullptr;
 
     ggml_tensor * ada_mod = nullptr;
+    // Per (step, slot): 1+scale and shift as their own tensors, so adaRMS reads
+    // rms_norm -> mul -> add with no view nodes between (ggml-sycl fuses that
+    // chain into one kernel). Slot j: 2*layer (attn), 2*layer+1 (ffn), 2*n_layers (out).
+    std::vector<ggml_tensor *> ada_scale1, ada_shift;
 
     std::vector<float> action_mean, action_std;
     std::vector<float> action_q01, action_q99;
@@ -92,24 +96,36 @@ struct Pi05ModelArch : public ModelArchBase {
 
 namespace {
 
-ggml_tensor * build_adarms(
-        ggml_context * ctx, ggml_tensor * x, ggml_tensor * mod, int64_t h, float eps,
-        ggml_tensor ** gate_out) {
-    ggml_tensor * scale = ggml_view_1d(ctx, mod, h, 0);
-    ggml_tensor * shift = ggml_view_1d(ctx, mod, h, (size_t) h * sizeof(float));
-    ggml_tensor * gate  = ggml_view_1d(ctx, mod, h, (size_t) 2*h * sizeof(float));
-    ggml_tensor * normed = ggml_rms_norm(ctx, x, eps);
+// One adaRMS slot: the [scale, shift, gate] row of the baked table, and the
+// same scale (as 1+scale) and shift as standalone tensors.
+struct AdaSlot {
+    ggml_tensor * mod;
+    ggml_tensor * scale1;
+    ggml_tensor * shift;
+};
 
+ggml_tensor * build_adarms(
+        ggml_context * ctx, ggml_tensor * x, const AdaSlot & a, int64_t h, float eps,
+        ggml_tensor ** gate_out) {
+    ggml_tensor * normed = ggml_rms_norm(ctx, x, eps);
+#ifdef GGML_USE_SYCL
+    // x*(1+scale) + shift: rms_norm -> mul -> add, which ggml-sycl runs as one kernel.
+    (void) h;
+    ggml_tensor * out = ggml_add(ctx, ggml_mul(ctx, normed, a.scale1), a.shift);
+#else
+    ggml_tensor * scale = ggml_view_1d(ctx, a.mod, h, 0);
+    ggml_tensor * shift = ggml_view_1d(ctx, a.mod, h, (size_t) h * sizeof(float));
     ggml_tensor * out = ggml_add(ctx,
         ggml_add(ctx, normed, ggml_mul(ctx, normed, scale)), shift);
+#endif
     if (gate_out)
-        *gate_out = gate;
+        *gate_out = ggml_view_1d(ctx, a.mod, h, (size_t) 2*h * sizeof(float));
     return out;
 }
 
 ggml_tensor * build_expert_layer(
         ggml_context * ctx, const GemmaLayerW & w,
-        ggml_tensor * x_in, ggml_tensor * positions, ggml_tensor * mod_attn, ggml_tensor * mod_ffn,
+        ggml_tensor * x_in, ggml_tensor * positions, const AdaSlot & mod_attn, const AdaSlot & mod_ffn,
         const Config & cfg, int64_t seq,
         ggml_tensor * cached_K, ggml_tensor * cached_V, bool flash,
         ggml_tensor * cached_K16 = nullptr, ggml_tensor * cached_V16 = nullptr) {
@@ -199,19 +215,32 @@ bool bake_adarms(gguf_reader & g, Pi05ModelArch & m) {
     for (size_t k=0; k<mods.size(); ++k)
         ggml_backend_tensor_get(mods[k], table.data()+k*3*h, 0, ggml_nbytes(mods[k]));
 
-    ggml_init_params p = { ggml_tensor_overhead(), nullptr, true };
+    ggml_init_params p = { (size_t) (1 + 2*ns*nj)*ggml_tensor_overhead(), nullptr, true };
     m.ctx_const = ggml_init(p);
     if (!m.ctx_const) {
         std::fprintf(stderr, "vla(pi05): ggml_init(ctx_const) failed\n");
         return false;
     }
     m.ada_mod   = ggml_new_tensor_3d(m.ctx_const, GGML_TYPE_F32, 3*h, nj, ns);
+    m.ada_scale1.resize((size_t) ns*nj);
+    m.ada_shift.resize((size_t) ns*nj);
+    for (size_t k=0; k<(size_t) ns*nj; ++k) {
+        m.ada_scale1[k] = ggml_new_tensor_1d(m.ctx_const, GGML_TYPE_F32, h);
+        m.ada_shift[k]  = ggml_new_tensor_1d(m.ctx_const, GGML_TYPE_F32, h);
+    }
     m.const_buf = alloc_weights(m.ctx_const, m.backend);
     if (!m.const_buf) {
         std::fprintf(stderr, "vla(pi05): alloc_weights(adaRMS table) failed\n");
         return false;
     }
     ggml_backend_tensor_set(m.ada_mod, table.data(), 0, ggml_nbytes(m.ada_mod));
+    std::vector<float> scale1((size_t) h);
+    for (size_t k=0; k<(size_t) ns*nj; ++k) {
+        const float * row = table.data() + k*3*h;
+        for (int64_t c=0; c<h; ++c) scale1[c] = 1.0f + row[c];
+        ggml_backend_tensor_set(m.ada_scale1[k], scale1.data(), 0, ggml_nbytes(m.ada_scale1[k]));
+        ggml_backend_tensor_set(m.ada_shift[k], row + h, 0, ggml_nbytes(m.ada_shift[k]));
+    }
     return true;
 }
 
@@ -477,7 +506,9 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     ggml_tensor * x_t = t_x0;
     for (int step=0; step<num_steps; ++step) {
         auto mod = [&](int64_t j) {
-            return ggml_view_1d(C, ada_mod, 3*hidden_ex, step*ada_mod->nb[2]+j*ada_mod->nb[1]);
+            const size_t k = (size_t) step*(2*n_layers+1) + (size_t) j;
+            return AdaSlot{ ggml_view_1d(C, ada_mod, 3*hidden_ex, step*ada_mod->nb[2]+j*ada_mod->nb[1]),
+                            ada_scale1[k], ada_shift[k] };
         };
 
         ggml_tensor * h = ggml_add(C, ggml_mul_mat(C, W_ain, x_t), b_ain);
