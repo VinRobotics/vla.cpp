@@ -344,13 +344,12 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
             w.fq_k    = fq_declare_linear(L, a, "qkv",    false, nullptr, 0.0f, "aex.blk.%lld.attn_k",   ii);
             w.fq_v    = fq_declare_linear(L, a, "qkv",    false, nullptr, 0.0f, "aex.blk.%lld.attn_v",   ii);
             w.fq_o    = fq_declare_linear(L, a, "o",      false, nullptr, 0.0f, "aex.blk.%lld.attn_o",   ii);
-            w.fq_gate = fq_declare_linear(L, a, "gateup", false, nullptr, 0.0f, "aex.blk.%lld.ffn_gate", ii);
-            w.fq_up   = fq_declare_linear(L, a, "gateup", false, nullptr, 0.0f, "aex.blk.%lld.ffn_up",   ii);
+            gemma_declare_fq_gateup(L, w, a, "aex.blk." + std::to_string(ii), nullptr, 0.0f);
             w.fq_down = fq_declare_linear(L, a, "down",   false, nullptr, 0.0f, "aex.blk.%lld.ffn_down", ii);
             if (!w.fq_q != !w.fq_k || !w.fq_q != !w.fq_v || !w.fq_gate != !w.fq_up)
                 L.fail("FoldQuant: an expert layer's q/k/v (and gate/up) must all be INT or all float");
         }
-        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), !w.fq_q, !w.fq_gate);
+        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), !w.fq_q, !w.fq_gate && !w.fq_gu);
         if (!w.fq_o)
             w.Wo    = L.gemm("aex.blk.%lld.attn_o.weight",   ii);
         if (!w.fq_down)

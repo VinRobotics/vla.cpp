@@ -373,7 +373,8 @@ void fq_link_prefetch(const std::vector<FqLinear *> & order) {
 }
 
 FqLinear fq_declare_fused(WeightLoader & L, const FqModuleSpec & mod, const char * site_key,
-                          bool has_bias, const std::string & out_base, const std::vector<std::string> & sites) {
+                          bool has_bias, const std::string & out_base, const std::vector<std::string> & sites,
+                          ggml_tensor * gamma, float eps) {
     FqLinear r;
     if (sites.empty())
         return r;
@@ -436,7 +437,7 @@ FqLinear fq_declare_fused(WeightLoader & L, const FqModuleSpec & mod, const char
     }
     r.ascale = has_a0 ? L.typed(GGML_TYPE_F32, "%s", a0.c_str()) : nullptr;
 
-    if (!fill_specs(L, mod, site_key, out_base.c_str(), nullptr, 0.0f, r))
+    if (!fill_specs(L, mod, site_key, out_base.c_str(), gamma, eps, r))
         r.w = nullptr;
     return r;
 }

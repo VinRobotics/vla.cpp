@@ -67,6 +67,13 @@ void unpack_nibbles(const int8_t * packed, int64_t K, int8_t * out);
 // epilogue order ((float)acc * xs) * ws + bias.
 float gemm_dot(const int8_t * w_row, const int8_t * x_row, int64_t K, float xs, float ws, float bias);
 
+// The GEGLU epilogue's GELU (tanh form, ggml's constants). Backends evaluate
+// tanh their own way, so a GLU node matches the reference to rounding, not bit
+// for bit.
+inline float gelu_tanh(float x) {
+    return 0.5f * x * (1.0f + std::tanh(0.7978845608028654f * x * (1.0f + 0.044715f * x * x)));
+}
+
 }  // namespace fqref
 
 // GGML_OP_CUSTOM entry points. Sources are packed without holes:

@@ -277,6 +277,33 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     }
     std::vector<int8_t> wrow_buf(s.wbits == 4 ? (size_t) K : 0);
 
+    if (s.glu) {
+        // [gate | up] rows -> gelu_tanh(gate) * up, [N/2, T].
+        const int64_t Nh  = N / 2;
+        const int64_t per = (Nh + nth - 1) / nth;
+        const int64_t n0  = (int64_t) ith * per, n1 = std::min(Nh, n0 + per);
+        std::vector<int8_t> urow_buf(s.wbits == 4 ? (size_t) K : 0);
+        for (int64_t n = n0; n < n1; ++n) {
+            const int8_t * grow = wp + (size_t) n * kp_w;
+            const int8_t * urow = wp + (size_t) (n + Nh) * kp_w;
+            if (s.wbits == 4) {
+                fqref::unpack_nibbles(grow, K, wrow_buf.data());
+                fqref::unpack_nibbles(urow, K, urow_buf.data());
+                grow = wrow_buf.data();
+                urow = urow_buf.data();
+            }
+            for (int64_t t = 0; t < T; ++t) {
+                const uint8_t * row = xp + (size_t) t * rb;
+                const int8_t * xrow = (abits == 4) ? xa.data() + (size_t) t * K : (const int8_t *) row;
+                float xs;
+                std::memcpy(&xs, row + kp_a, sizeof(float));
+                const float g = fqref::gemm_dot(grow, xrow, K, xs, wsp[n],      bp ? bp[n]      : 0.0f);
+                const float u = fqref::gemm_dot(urow, xrow, K, xs, wsp[n + Nh], bp ? bp[n + Nh] : 0.0f);
+                y[(size_t) t * Nh + n] = fqref::gelu_tanh(g) * u;
+            }
+        }
+        return;
+    }
     const int64_t per = (N + nth - 1) / nth;
     const int64_t n0  = (int64_t) ith * per;
     const int64_t n1  = std::min(N, n0 + per);

@@ -111,6 +111,10 @@ struct FqGemmSpec {
     int      head_dim = 0;
     int      heads    = 0;
     uint32_t vmask    = 0;
+    // GEGLU epilogue (gate and up fused into one site, rows [gate | up]): the
+    // node outputs [N/2, T] = gelu_tanh(gate) * up instead of [N, T]. SYCL only
+    // for now (gemma_declare_fq_gateup); 0 = plain.
+    int      glu      = 0;
 };
 
 struct FqLinear {
@@ -174,6 +178,7 @@ void fq_set_heads(FqLinear & s, int head_dim, int heads, uint32_t vmask);
 void fq_link_prefetch(const std::vector<FqLinear *> & order);
 
 FqLinear fq_declare_fused(WeightLoader & L, const FqModuleSpec & mod, const char * site_key,
-                          bool has_bias, const std::string & out_base, const std::vector<std::string> & sites);
+                          bool has_bias, const std::string & out_base, const std::vector<std::string> & sites,
+                          ggml_tensor * gamma = nullptr, float eps = 0.0f);
 
 }  // namespace vla

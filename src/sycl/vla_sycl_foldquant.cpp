@@ -48,6 +48,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <map>
 #include <tuple>
 #include <unordered_map>
@@ -90,9 +91,15 @@ struct GemmParams {
     const float *  wscale;     // [N]
     const float *  bias;       // [N] or null
     const float *  res;        // [M][N] or null
-    float *        y;          // [M][N]
+    float *        y;          // [M][N], or [M][glu_n] when glu_n != 0
     int64_t        M, N, K, row_bytes;
+    int64_t        glu_n = 0;  // GEGLU epilogue: y[m][n] = gelu(col n) * col n + glu_n, n < glu_n
 };
+
+// ggml-sycl's GELU (tanh form); the CPU reference's fqref::gelu_tanh in device code.
+inline float gelu_tanh(float x) {
+    return 0.5f * x * (1.0f + sycl::tanh(0.7978845608028654f * x * (1.0f + 0.044715f * x * x)));
+}
 
 const void * fq_userdata(const ggml_tensor * op) {
     if (op == nullptr || op->op != GGML_OP_CUSTOM) return nullptr;
@@ -635,6 +642,21 @@ void unpack_rows(sycl::queue & q, const int8_t * src, int64_t src_stride, int8_t
     });
 }
 
+// GEGLU epilogue over [gate | up] accumulators: one pass, the [M][N] F32
+// intermediate and the separate GLU kernel never exist.
+template <int ABITS>
+void launch_epilogue_glu(sycl::queue & q, const GemmParams & g, const int32_t * acc, bool has_bias) {
+    q.parallel_for(sycl::range<2>((size_t) g.M, (size_t) g.glu_n), [=](sycl::item<2> it) {
+        const int64_t m = (int64_t) it.get_id(0), n = (int64_t) it.get_id(1), nu = n + g.glu_n;
+        float xs;
+        std::memcpy(&xs, g.blob + m * g.row_bytes + (ABITS == 4 ? g.K / 2 : g.K), sizeof(float));
+        float gv = ((float) acc[m * g.N + n]  * xs) * g.wscale[n];
+        float uv = ((float) acc[m * g.N + nu] * xs) * g.wscale[nu];
+        if (has_bias) { gv = gv + g.bias[n]; uv = uv + g.bias[nu]; }
+        g.y[m * g.glu_n + n] = gelu_tanh(gv) * uv;
+    });
+}
+
 template <int ABITS>
 void launch_epilogue(sycl::queue & q, const GemmParams & g, const int32_t * acc, bool has_bias, bool has_res) {
     q.parallel_for(sycl::range<2>((size_t) g.M, (size_t) g.N), [=](sycl::item<2> it) {
@@ -718,11 +740,33 @@ bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits,
     auto wei_m = make_memory(wei_md, st.eng, memory_kind::usm, const_cast<int8_t *>(w));
     auto dst_m = make_memory(dst_md, st.eng, memory_kind::usm, acc);
     it->second.execute(st.strm, { { DNNL_ARG_SRC, src_m }, { DNNL_ARG_WEIGHTS, wei_m }, { DNNL_ARG_DST, dst_m } });
-    if (abits == 4) launch_epilogue<4>(q, g, acc, has_bias, has_res);
-    else            launch_epilogue<8>(q, g, acc, has_bias, has_res);
+    if (g.glu_n) {
+        if (abits == 4) launch_epilogue_glu<4>(q, g, acc, has_bias);
+        else            launch_epilogue_glu<8>(q, g, acc, has_bias);
+    } else if (abits == 4) launch_epilogue<4>(q, g, acc, has_bias, has_res);
+    else                   launch_epilogue<8>(q, g, acc, has_bias, has_res);
     return true;
 }
 #endif
+
+// This file's GEMM kernels on g as given (no GLU): the GEMV for M <= SM_MAX,
+// XMX, else the plain tiled one.
+bool run_gemm_plain(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool bias, bool simple, bool res = false);
+
+// Device scratch for a GLU node's [M][N] intermediate on the native path.
+float * glu_scratch(sycl::queue & q, size_t n) {
+    static std::mutex mu;
+    static float * p = nullptr;
+    static size_t cap = 0;
+    static sycl::context ctx = q.get_context();
+    std::lock_guard<std::mutex> lk(mu);
+    if (p && cap >= n && ctx == q.get_context()) return p;
+    if (p) { q.wait(); sycl::free(p, ctx); }
+    ctx = q.get_context();
+    p = sycl::malloc_device<float>(n, q);
+    cap = p ? n : 0;
+    return p;
+}
 
 bool run_gemm(sycl::queue & q, ggml_tensor * dst, const FqGemmSpec & s, int abits) {
     const ggml_tensor * w = dst->src[0], * blob = dst->src[1], * ws = dst->src[2];
@@ -739,7 +783,9 @@ bool run_gemm(sycl::queue & q, ggml_tensor * dst, const FqGemmSpec & s, int abit
     g.N         = s.N;
     g.K         = s.K;
     g.row_bytes = blob->ne[0];
+    g.glu_n     = s.glu ? s.N / 2 : 0;
     if (g.M == 0) return true;
+    if (g.glu_n && (res || s.N % 2)) return false;
     // oneDNN when built with it; VLA_FQ_SYCL_GEMM=native picks this file's kernels
     // (the GEMV for M <= SM_MAX, else XMX) and =simple the plain tiled one. Read
     // per call so test_foldquant_sycl_op can cover every path.
@@ -750,26 +796,45 @@ bool run_gemm(sycl::queue & q, ggml_tensor * dst, const FqGemmSpec & s, int abit
     if (!native && gemm_dnnl(q, g, s.wbits, abits, bias, res))
         return true;
 #endif
+    if (g.glu_n) {
+        // The native kernels write [M][N]; apply the GLU from a scratch copy.
+        float * out = g.y;
+        GemmParams full = g;
+        full.glu_n = 0;
+        full.y = glu_scratch(q, (size_t) (g.M * g.N));
+        if (!full.y || !run_gemm_plain(q, full, s.wbits, abits, bias != nullptr, simple)) return false;
+        const float * src = full.y;
+        const int64_t N = g.N, Nh = g.glu_n;
+        q.parallel_for(sycl::range<2>((size_t) g.M, (size_t) Nh), [=](sycl::item<2> it) {
+            const int64_t m = (int64_t) it.get_id(0), n = (int64_t) it.get_id(1);
+            out[m * Nh + n] = gelu_tanh(src[m * N + n]) * src[m * N + n + Nh];
+        });
+        return true;
+    }
+    return run_gemm_plain(q, g, s.wbits, abits, bias != nullptr, simple, res != nullptr);
+}
+
+bool run_gemm_plain(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool bias, bool simple, bool res) {
     if (!simple && g.M <= SM_MAX && g.K % (SM_SG * 8) == 0) {
-        if (s.wbits == 8 && abits == 8) launch_gemm_small<8, 8>(q, g, bias, res);
-        else if (s.wbits == 8 && abits == 4) launch_gemm_small<8, 4>(q, g, bias, res);
-        else if (s.wbits == 4 && abits == 8) launch_gemm_small<4, 8>(q, g, bias, res);
-        else if (s.wbits == 4 && abits == 4) launch_gemm_small<4, 4>(q, g, bias, res);
+        if (wbits == 8 && abits == 8) launch_gemm_small<8, 8>(q, g, bias, res);
+        else if (wbits == 8 && abits == 4) launch_gemm_small<8, 4>(q, g, bias, res);
+        else if (wbits == 4 && abits == 8) launch_gemm_small<4, 8>(q, g, bias, res);
+        else if (wbits == 4 && abits == 4) launch_gemm_small<4, 4>(q, g, bias, res);
         else return false;
         return true;
     }
     if (!simple && use_xmx(q) && g.N % XN == 0 && g.K % XK == 0) {
-        if (s.wbits == 8 && abits == 8) launch_gemm_xmx<8, 8>(q, g, bias, res);
-        else if (s.wbits == 8 && abits == 4) launch_gemm_xmx<8, 4>(q, g, bias, res);
-        else if (s.wbits == 4 && abits == 8) launch_gemm_xmx<4, 8>(q, g, bias, res);
-        else if (s.wbits == 4 && abits == 4) launch_gemm_xmx<4, 4>(q, g, bias, res);
+        if (wbits == 8 && abits == 8) launch_gemm_xmx<8, 8>(q, g, bias, res);
+        else if (wbits == 8 && abits == 4) launch_gemm_xmx<8, 4>(q, g, bias, res);
+        else if (wbits == 4 && abits == 8) launch_gemm_xmx<4, 8>(q, g, bias, res);
+        else if (wbits == 4 && abits == 4) launch_gemm_xmx<4, 4>(q, g, bias, res);
         else return false;
         return true;
     }
-    if (s.wbits == 8 && abits == 8) launch_gemm_bits<8, 8>(q, g, bias, res);
-    else if (s.wbits == 8 && abits == 4) launch_gemm_bits<8, 4>(q, g, bias, res);
-    else if (s.wbits == 4 && abits == 8) launch_gemm_bits<4, 8>(q, g, bias, res);
-    else if (s.wbits == 4 && abits == 4) launch_gemm_bits<4, 4>(q, g, bias, res);
+    if (wbits == 8 && abits == 8) launch_gemm_bits<8, 8>(q, g, bias, res);
+    else if (wbits == 8 && abits == 4) launch_gemm_bits<8, 4>(q, g, bias, res);
+    else if (wbits == 4 && abits == 8) launch_gemm_bits<4, 8>(q, g, bias, res);
+    else if (wbits == 4 && abits == 4) launch_gemm_bits<4, 4>(q, g, bias, res);
     else return false;
     return true;
 }
@@ -830,7 +895,7 @@ bool fq_dispatch(ggml_tensor * dst, void * queue) {
     }
     const FqGemmSpec & s = *static_cast<const FqGemmSpec *>(ud);
     if (!run_gemm(q, dst, s, blob_abits(dst->src[1], s.K))) return false;
-    if (check)
+    if (check && !s.glu)   // GLU nodes evaluate tanh on the device: not bit-comparable
         check_against_host(q, dst, fq_gemm_cpu, const_cast<void *>(ud), (size_t) s.N * sizeof(float),
                            (size_t) s.N * sizeof(float));
     return true;

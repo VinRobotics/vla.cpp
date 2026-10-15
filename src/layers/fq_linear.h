@@ -62,13 +62,20 @@ inline bool fq_fuse_residual() {
     return !off;
 }
 
+// VLA_FQ_NO_GLU=1 declares gate and up as two sites (no GEGLU epilogue), for A/B runs.
+inline bool fq_glu_enabled() {
+    static const bool off = [] { const char * e = std::getenv("VLA_FQ_NO_GLU"); return e && *e && *e != '0'; }();
+    return !off;
+}
+
 inline ggml_tensor * fq_gemm(ggml_context * C, const FqLinear & s, ggml_tensor * xq, ggml_tensor * residual = nullptr) {
     GGML_ASSERT(xq->type == GGML_TYPE_I8 && xq->ne[0] == fq_act_row_bytes(s.act.K, s.act.abits));
     const int64_t T = xq->ne[1];
-    const bool fuse = residual && fq_fuse_residual() && !s.gemm.heads && residual->type == GGML_TYPE_F32 &&
+    const int64_t N_out = s.gemm.glu ? s.gemm.N / 2 : s.gemm.N;
+    const bool fuse = residual && fq_fuse_residual() && !s.gemm.heads && !s.gemm.glu && residual->type == GGML_TYPE_F32 &&
                       ggml_is_contiguous(residual) && residual->ne[0] == s.gemm.N && ggml_nelements(residual) == s.gemm.N * T;
     ggml_tensor * args[5] = { s.w, xq, s.wscale, s.bias, fuse ? residual : nullptr };
-    ggml_tensor * y = ggml_custom_4d(C, GGML_TYPE_F32, s.gemm.N, T, 1, 1,
+    ggml_tensor * y = ggml_custom_4d(C, GGML_TYPE_F32, N_out, T, 1, 1,
                                      args, fuse ? 5 : 4, fq_gemm_cpu, GGML_N_TASKS_MAX, (void *) &s.gemm);
     ggml_format_name(y, "%s.fq_gemm", ggml_get_name(s.w));
     return (residual && !fuse) ? ggml_add(C, residual, y) : y;
