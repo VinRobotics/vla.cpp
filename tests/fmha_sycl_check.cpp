@@ -117,6 +117,62 @@ double run(sycl::queue & q, int64_t Sq, int64_t Skv, int64_t Hq, int64_t Hkv, fl
     return worst;
 }
 
+// SigLIP's attention: head_dim 72 (padded to 96 inside), views on the batch axis.
+double run_vit(sycl::queue & q, int64_t S, int64_t H, int64_t B, bool & claimed, double & ms) {
+    const int64_t D = 72;
+    std::mt19937 rng(7);
+    std::normal_distribution<float> n(0.f, 1.f);
+    std::vector<float> hq(D * S * H * B), hk(hq.size()), hv(hq.size()), ho(D * H * S * B);
+    for (auto & x : hq) x = n(rng);
+    for (auto & x : hk) x = n(rng);
+    for (auto & x : hv) x = n(rng);
+    Dev dev{q, {}};
+    auto set4 = [&](ggml_tensor & t, int64_t a, int64_t b, int64_t c, int64_t d) {
+        t.type = GGML_TYPE_F32;
+        t.ne[0] = a; t.ne[1] = b; t.ne[2] = c; t.ne[3] = d;
+        t.nb[0] = 4; t.nb[1] = a * 4; t.nb[2] = a * b * 4; t.nb[3] = a * b * c * 4;
+    };
+    ggml_tensor Q{}, K{}, V{}, O{};
+    set4(Q, D, S, H, B); Q.data = dev.upload(hq);
+    set4(K, D, S, H, B); K.data = dev.upload(hk);
+    set4(V, D, S, H, B); V.data = dev.upload(hv);
+    set4(O, D, H, S, B); O.data = dev.upload(ho);
+    O.op = GGML_OP_FLASH_ATTN_EXT;
+    O.src[0] = &Q; O.src[1] = &K; O.src[2] = &V;
+    const float scale = 1.f / std::sqrt(72.f);
+    std::memcpy(O.op_params, &scale, sizeof(float));
+    claimed = vla::sycl_fmha_forward(&O, &q);
+    if (!claimed) return -1;
+    q.memcpy(ho.data(), O.data, ho.size() * sizeof(float)).wait();
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 50; ++i) vla::sycl_fmha_forward(&O, &q);
+    q.wait();
+    ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / 50;
+    double worst = 0;
+    std::vector<double> sc(S), o(D);
+    auto at = [&](const std::vector<float> & v, int64_t d, int64_t s, int64_t h, int64_t b) {
+        return (double) v[((b * H + h) * S + s) * D + d];
+    };
+    for (int64_t b = 0; b < B; ++b)
+        for (int64_t h = 0; h < H; ++h)
+            for (int64_t s = 0; s < S; s += 17) {
+                double m = -1e300;
+                for (int64_t t = 0; t < S; ++t) {
+                    double a = 0;
+                    for (int64_t d = 0; d < D; ++d) a += at(hq, d, s, h, b) * at(hk, d, t, h, b);
+                    sc[t] = a * scale; m = std::max(m, sc[t]);
+                }
+                double z = 0;
+                for (int64_t t = 0; t < S; ++t) { sc[t] = std::exp(sc[t] - m); z += sc[t]; }
+                std::fill(o.begin(), o.end(), 0.0);
+                for (int64_t t = 0; t < S; ++t)
+                    for (int64_t d = 0; d < D; ++d) o[d] += sc[t] / z * at(hv, d, t, h, b);
+                for (int64_t d = 0; d < D; ++d)
+                    worst = std::max(worst, std::fabs(ho[((b * S + s) * H + h) * D + d] - o[d]));
+            }
+    return worst;
+}
+
 // The cached-KV node: Q [D, Sq, Hq] against Kc/Vc (F16, packed) then Kn/Vn (F32).
 double run_kv(sycl::queue & q, int64_t Sq, int64_t Sc, int64_t Sn, int64_t Hq, int64_t Hkv, bool & claimed, double & ms) {
     const int64_t D = 256, S = Sc + Sn;
@@ -216,6 +272,14 @@ int main(int argc, char ** argv) {
         std::printf("cached-KV Sq %3lld Sc %4lld Sn %3lld Hq %lld Hkv %lld : %s max|err| %.4g  %.3f ms\n",
                     (long long) s[0], (long long) s[1], (long long) s[2], (long long) s[3], (long long) s[4],
                     claimed ? (ok ? "ok  " : "BAD ") : "not claimed", e, ms);
+    }
+    {
+        bool claimed = false;
+        double ms = 0;
+        const double e = run_vit(q, 256, 16, 2, claimed, ms);
+        const bool ok = claimed && e < 2e-2;
+        bad += !ok;
+        std::printf("vit hd72 S 256 H 16 B 2 : %s max|err| %.4g  %.3f ms\n", claimed ? (ok ? "ok  " : "BAD ") : "not claimed", e, ms);
     }
     return bad ? 1 : 0;
 }

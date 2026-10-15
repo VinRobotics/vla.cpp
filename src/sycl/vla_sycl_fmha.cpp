@@ -83,11 +83,11 @@ using ProblemShape = cutlass::fmha::kernel::FMHAProblemShape<false>;
 // Batch 1, grouped heads allowed (pi0.5 has 8 query heads per KV head).
 using Scheduler = cutlass::fmha::kernel::XeFHMAIndividualTileScheduler<true, false>;
 
-template <int QM, int SGN, bool CachedKV>
+template <int QM, int SGN, bool CachedKV, int HD = kHeadDim, class Sched = Scheduler>
 struct Fmha {
     using ShapeQK  = Shape<Int<QM>, _64, _32>;
     using ShapePV  = Shape<Int<QM>, _32, _64>;
-    using ShapeOut = Shape<Int<QM>, _256>;
+    using ShapeOut = Shape<Int<QM>, Int<HD>>;
     using SubgroupLayoutQK = Layout<Shape<Int<SGN>, _1, _1>>;
     static constexpr int SGTileQ = get<0>(shape_div(ShapeQK{}, shape(SubgroupLayoutQK{})))();
     using MMAOp = XE_DPAS_TT<cute::gcd(SGTileQ, 8), float, Elt>;
@@ -103,8 +103,14 @@ struct Fmha {
         TensorK, TensorV,
         void, void, void, void, void>;
     using Epilogue = cutlass::fmha::collective::FMHAFwdEpilogue<Mainloop, ShapeOut, TensorO, void>;
-    using Kernel = cutlass::fmha::kernel::XeFMHAFwdKernel<ProblemShape, Mainloop, Epilogue, Scheduler>;
+    using Kernel = cutlass::fmha::kernel::XeFMHAFwdKernel<ProblemShape, Mainloop, Epilogue, Sched>;
 };
+
+// SigLIP's head_dim 72, padded with zeros to the kernel's 96 (zero columns add
+// nothing to Q.K, and V's become output columns that are dropped); views on the
+// batch axis, one KV head per query head.
+constexpr int kPadDim = 96;
+using FmhaVit = Fmha<128, 8, false, kPadDim, cutlass::fmha::kernel::XeFHMAIndividualTileScheduler<false, true>>;
 
 bool env_off() {
     static const bool off = [] {
@@ -224,6 +230,97 @@ void launch(sycl::queue & q, const Elt * q16, int64_t Sq, int64_t Hq, int64_t Hk
     compat::experimental::launch<cutlass::device_kernel<K>, K, false>(policy, q, params);
 }
 
+// [D, S, H, B] tensor (F32 or F16, rows contiguous) -> packed F16 [B][H][S][Dp],
+// columns D..Dp-1 zero.
+void pack_pad(sycl::queue & q, const ggml_tensor * t, Elt * dst, int64_t Dp) {
+    const int64_t D = t->ne[0], S = t->ne[1], H = t->ne[2], B = t->ne[3];
+    const size_t nb1 = t->nb[1], nb2 = t->nb[2], nb3 = t->nb[3];
+    const bool f16 = t->type == GGML_TYPE_F16;
+    const char * src = static_cast<const char *>(t->data);
+    q.parallel_for(sycl::range<3>(B * H, S, Dp), [=](sycl::id<3> i) {
+        const int64_t b = i[0] / H, h = i[0] % H, s = i[1], d = i[2];
+        float v = 0.f;
+        if (d < D) {
+            const char * e = src + b * nb3 + h * nb2 + s * nb1;
+            v = f16 ? (float) reinterpret_cast<const sycl::half *>(e)[d] : reinterpret_cast<const float *>(e)[d];
+        }
+        dst[((b * H + h) * S + s) * Dp + d] = Elt(v);
+    });
+}
+
+// Packed [B][H][S][Dp] Q/K/V (one KV head per query head) -> O [B][S][H][Dp] F32.
+template <class Cfg>
+void launch_batched(sycl::queue & q, const Elt * q16, const Elt * k16, const Elt * v16, int64_t B, int64_t S,
+                    int64_t Skv, int64_t H, int64_t Dp, float scale, float * O) {
+    using K = typename Cfg::Kernel;
+    ProblemShape shape{};
+    shape.batch = (int) B;
+    shape.num_heads_q = (int) H;
+    shape.num_heads_kv = (int) H;
+    shape.seq_len_qo = (int) S;
+    shape.seq_len_kv = (int) Skv;
+    shape.seq_len_kv_cache = 0;
+    shape.head_size_qk = (int) Dp;
+    shape.head_size_vo = (int) Dp;
+
+    typename K::KernelArguments ka{};
+    ka.shape = shape;
+    ka.Q = q16; ka.dQ = StrideQ{(int) Dp, _1{}, (int) (S * Dp), (int) (H * S * Dp)};
+    ka.K = k16; ka.dK = StrideK{(int) Dp, _1{}, (int) (Skv * Dp), (int) (H * Skv * Dp)};
+    ka.V = v16; ka.dV = StrideV{_1{}, (int) Dp, (int) (Skv * Dp), (int) (H * Skv * Dp)};
+    ka.O = O;
+    ka.dO = StrideO{(int) (H * Dp), _1{}, (int) Dp, (int) (S * H * Dp)};
+    ka.K_cache = nullptr;
+    ka.V_cache = nullptr;
+
+    cutlass::KernelHardwareInfo hw{};
+    hw.sm_count = eu_count(q);
+    typename K::Arguments args{ka, {scale, nullptr, 0, nullptr}, {}, hw};
+    const auto params = K::to_underlying_arguments(args, nullptr);
+
+    namespace syclex  = sycl::ext::oneapi::experimental;
+    namespace intelex = sycl::ext::intel::experimental;
+    const dim3 block = K::get_block_shape();
+    const dim3 grid  = K::get_grid_shape(params);
+    compat::experimental::launch_properties launch_props{
+        syclex::work_group_scratch_size(K::SharedStorageSize),
+    };
+    compat::experimental::kernel_properties kernel_props{
+        syclex::sub_group_size<cute::intel::sg_size>,
+        intelex::grf_size<256>,
+    };
+    compat::experimental::launch_policy policy{compat::dim3(grid.x, grid.y, grid.z),
+                                               compat::dim3(block.x, block.y, block.z),
+                                               launch_props, kernel_props};
+    compat::experimental::launch<cutlass::device_kernel<K>, K, false>(policy, q, params);
+}
+
+// The head_dim-72 node (SigLIP): no mask, Hq == Hkv, any batch.
+bool fmha_vit(sycl::queue & q, ggml_tensor * dst, const ggml_tensor * Q, const ggml_tensor * K, const ggml_tensor * V,
+              float scale) {
+    const int64_t D = Q->ne[0], S = Q->ne[1], H = Q->ne[2], B = Q->ne[3], Skv = K->ne[1];
+    for (const ggml_tensor * t : {Q, K, V})
+        if (t->ne[0] != D || t->nb[0] != ggml_type_size(t->type) || t->ne[3] != B ||
+            !(t->type == GGML_TYPE_F32 || t->type == GGML_TYPE_F16))
+            return false;
+    if (K->ne[2] != H || V->ne[2] != H || V->ne[1] != Skv || dst->ne[0] != D || dst->ne[1] != H || dst->ne[2] != S)
+        return false;
+    const int64_t Dp = kPadDim, nq = B * H * S * Dp, nkv = B * H * Skv * Dp;
+    Elt * buf = scratch(q, (size_t) (nq + 2 * nkv + 2 * nq));   // F16 Q, K, V, then the F32 output
+    if (!buf) return false;
+    Elt * q16 = buf, * k16 = q16 + nq, * v16 = k16 + nkv;
+    float * o32 = reinterpret_cast<float *>(v16 + nkv);
+    pack_pad(q, Q, q16, Dp);
+    pack_pad(q, K, k16, Dp);
+    pack_pad(q, V, v16, Dp);
+    launch_batched<FmhaVit>(q, q16, k16, v16, B, S, Skv, H, Dp, scale, o32);
+    float * out = static_cast<float *>(dst->data);
+    q.parallel_for(sycl::range<2>(B * S * H, D), [=](sycl::id<2> i) {
+        out[i[0] * D + i[1]] = o32[i[0] * Dp + i[1]];
+    });
+    return true;
+}
+
 uint32_t custom_magic(const ggml_tensor * op) {
     if (op == nullptr || op->op != GGML_OP_CUSTOM) return 0;
     struct custom_params { void * fun; int n_tasks; void * userdata; };   // ggml_custom_op_params
@@ -259,8 +356,10 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
     std::memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(float));
     std::memcpy(&softcap,  (const float *) dst->op_params + 2, sizeof(float));
     if (max_bias != 0.0f || softcap != 0.0f) return false;
-    if (!rows_ok(Q, false) || !rows_ok(K, true) || !rows_ok(V, true)) return false;
     if (dst->type != GGML_TYPE_F32 || !ggml_is_contiguous(dst)) return false;
+    if (Q->ne[0] == 72)
+        return fmha_vit(*static_cast<sycl::queue *>(queue), dst, Q, K, V, scale);
+    if (!rows_ok(Q, false) || !rows_ok(K, true) || !rows_ok(V, true)) return false;
     const int64_t Sq = Q->ne[1], Hq = Q->ne[2], Skv = K->ne[1], Hkv = K->ne[2];
     if (V->ne[1] != Skv || V->ne[2] != Hkv || Hkv < 1 || Hq % Hkv != 0) return false;
 
