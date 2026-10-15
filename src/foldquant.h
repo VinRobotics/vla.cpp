@@ -95,6 +95,9 @@ struct FqActSpec {
     // INT4 codes stored one per byte (the blob reads as A8): what oneDNN's s8
     // matmul takes, so no unpack pass runs before it. Set on SYCL (fill_specs).
     bool     wide4       = false;
+    // adaRMS: a per-node shift [K] added after the (1 + scale) gamma, its source
+    // right after the gamma's. pi0.5's action expert on SYCL (build_expert_layer).
+    bool     has_shift   = false;
 };
 
 /// Bits per stored activation code: 4 only for nibble-packed INT4.

@@ -79,6 +79,7 @@ struct ActParams {
     int64_t       x_stride;
     const float * ascale;      // [K] or null
     const float * gamma;       // [K] or null
+    const float * shift;       // [K] or null (adaRMS, after the gamma)
     int8_t *      blob;        // [M][row_bytes]
     int64_t       row_bytes;
     int64_t       M, K;
@@ -95,6 +96,7 @@ struct GemmParams {
     float *        y;          // [M][N], or [M][glu_n] when glu_n != 0
     int64_t        M, N, K, row_bytes;
     int64_t        glu_n = 0;  // GEGLU epilogue: y[m][n] = gelu(col n) * col n + glu_n, n < glu_n
+    const float *  gate  = nullptr;   // [N]: y = res + v * gate (pi0.5's gated residuals)
 };
 
 // ggml-sycl's GELU (tanh form); the CPU reference's fqref::gelu_tanh in device code.
@@ -123,6 +125,8 @@ inline void load_chunk(const ActParams & a, const float * x, int64_t c0, float r
     for (int i = 0; i < CHUNK; ++i) v[i] = x[c0 + i];
     if (a.gamma)
         for (int i = 0; i < CHUNK; ++i) v[i] = (v[i] * rstd) * a.gamma[c0 + i];
+    if (a.shift)
+        for (int i = 0; i < CHUNK; ++i) v[i] = v[i] + a.shift[c0 + i];
     if (a.ascale && a.fold_before)
         for (int i = 0; i < CHUNK; ++i) v[i] = v[i] / a.ascale[c0 + i];
     if (ROT > 1) {
@@ -267,6 +271,7 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
             const int64_t k0 = (int64_t) c * CHUNK + 2 * lane;
             float e0 = x[k0], e1 = x[k0 + 1];
             if (a.gamma) { e0 = (e0 * rstd) * a.gamma[k0]; e1 = (e1 * rstd) * a.gamma[k0 + 1]; }
+            if (a.shift) { e0 = e0 + a.shift[k0]; e1 = e1 + a.shift[k0 + 1]; }
             if (a.ascale && a.fold_before) { e0 = e0 / a.ascale[k0]; e1 = e1 / a.ascale[k0 + 1]; }
             rot_pair<ROT>(sg, e0, e1, lane, a.inv_sqrt_bs);
             if (a.ascale && !a.fold_before) { e0 = e0 / a.ascale[k0]; e1 = e1 / a.ascale[k0 + 1]; }
@@ -404,7 +409,7 @@ void launch_gemm_bits(sycl::queue & q, const GemmParams & g, bool has_bias, bool
                 std::memcpy(&xs, g.blob + m * g.row_bytes + (ABITS == 4 ? g.K / 2 : g.K), sizeof(float));
                 float v = ((float) acc * xs) * g.wscale[n];
                 if (has_bias) v = v + g.bias[n];
-                if (has_res)  v = v + g.res[m * g.N + n];
+                if (has_res)  v = g.gate ? g.res[m * g.N + n] + v * g.gate[n] : v + g.res[m * g.N + n];
                 g.y[m * g.N + n] = v;
             }
         });
@@ -483,7 +488,7 @@ void launch_gemm_xmx(sycl::queue & q, const GemmParams & g, bool has_bias, bool 
                 std::memcpy(&xs, g.blob + m * g.row_bytes + (ABITS == 4 ? g.K / 2 : g.K), sizeof(float));
                 float v = ((float) Cs[e] * xs) * g.wscale[n];
                 if (has_bias) v = v + g.bias[n];
-                if (has_res)  v = v + g.res[m * g.N + n];
+                if (has_res)  v = g.gate ? g.res[m * g.N + n] + v * g.gate[n] : v + g.res[m * g.N + n];
                 g.y[m * g.N + n] = v;
             }
         });
@@ -544,7 +549,7 @@ void launch_gemm_small(sycl::queue & q, const GemmParams & g, bool has_bias, boo
                 std::memcpy(&xs, g.blob + (int64_t) m * g.row_bytes + (ABITS == 4 ? g.K / 2 : g.K), sizeof(float));
                 float v = ((float) total * xs) * g.wscale[n];
                 if (has_bias) v = v + g.bias[n];
-                if (has_res)  v = v + g.res[(int64_t) m * g.N + n];
+                if (has_res)  v = g.gate ? g.res[(int64_t) m * g.N + n] + v * g.gate[n] : v + g.res[(int64_t) m * g.N + n];
                 g.y[(int64_t) m * g.N + n] = v;
             }
         }
@@ -572,6 +577,7 @@ bool run_act(sycl::queue & q, ggml_tensor * dst, const FqActSpec & s) {
     const ggml_tensor * x = dst->src[0];
     int si = 1;
     const ggml_tensor * gamma  = s.has_gamma  ? dst->src[si++] : nullptr;
+    const ggml_tensor * shift  = s.has_shift  ? dst->src[si++] : nullptr;
     const ggml_tensor * ascale = s.has_ascale ? dst->src[si++] : nullptr;
     if (!x || x->type != GGML_TYPE_F32 || x->nb[0] != sizeof(float) || s.K % CHUNK != 0 || s.rot_block > CHUNK)
         return false;
@@ -580,6 +586,7 @@ bool run_act(sycl::queue & q, ggml_tensor * dst, const FqActSpec & s) {
     a.x_stride    = (int64_t) (x->nb[1] / sizeof(float));
     a.ascale      = ascale ? (const float *) ascale->data : nullptr;
     a.gamma       = gamma ? (const float *) gamma->data : nullptr;
+    a.shift       = shift ? (const float *) shift->data : nullptr;
     a.blob        = (int8_t *) dst->data;
     a.row_bytes   = dst->ne[0];
     a.M           = dst->ne[1] * dst->ne[2] * dst->ne[3];
@@ -667,7 +674,7 @@ void launch_epilogue(sycl::queue & q, const GemmParams & g, const int32_t * acc,
         std::memcpy(&xs, g.blob + m * g.row_bytes + (ABITS == 4 ? g.K / 2 : g.K), sizeof(float));
         float v = ((float) acc[m * g.N + n] * xs) * g.wscale[n];
         if (has_bias) v = v + g.bias[n];
-        if (has_res)  v = v + g.res[m * g.N + n];
+        if (has_res)  v = g.gate ? g.res[m * g.N + n] + v * g.gate[n] : v + g.res[m * g.N + n];
         g.y[m * g.N + n] = v;
     });
 }
@@ -780,6 +787,7 @@ bool run_gemm(sycl::queue & q, ggml_tensor * dst, const FqGemmSpec & s, int abit
     g.wscale    = (const float *) ws->data;
     g.bias      = bias ? (const float *) bias->data : nullptr;
     g.res       = res ? (const float *) res->data : nullptr;
+    g.gate      = (res && dst->src[5]) ? (const float *) dst->src[5]->data : nullptr;
     g.y         = (float *) dst->data;
     g.M         = dst->ne[1];
     g.N         = s.N;

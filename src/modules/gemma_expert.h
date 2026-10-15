@@ -60,6 +60,9 @@ struct GemmaLayerW {
     FqLinear fq_gu;
     // q/k/v as one FoldQuant GEMM (SYCL; gemma_declare_fq_qkv); fq_q/k/v empty then.
     FqLinear fq_qkv;
+    // pi0.5's expert on SYCL: the q/k/v and gate/up act specs with the adaRMS
+    // fused (has_shift set when in use; see fq_act_mod).
+    FqActSpec act_mod_qkv{}, act_mod_gu{};
 };
 
 /// Declare a float layer's q/k/v and gate/up GEMMs, `p` being the tensor-name
@@ -162,7 +165,10 @@ inline ggml_tensor * gemma_attn(
         ggml_tensor * cached_K, ggml_tensor * cached_V, ggml_tensor * mask,
         ggml_tensor ** k_out, ggml_tensor ** v_out, ggml_type at, bool flash,
         ggml_tensor * fq_x = nullptr, ggml_tensor * fq_res = nullptr,
-        ggml_tensor * cached_K16 = nullptr, ggml_tensor * cached_V16 = nullptr) {
+        ggml_tensor * cached_K16 = nullptr, ggml_tensor * cached_V16 = nullptr,
+        ggml_tensor * fq_xq = nullptr, ggml_tensor * fq_gate = nullptr) {
+    // fq_xq: the q/k/v act blob already made (fq_act_mod); fq_gate: the gate of a
+    // gated residual fq_res + o * gate, fused into the o epilogue on SYCL.
     // FoldQuant: q/k/v share one act node over fq_x (the raw residual stream when
     // the RMSNorm and its folded gamma ride in the act node, the adaRMS output
     // otherwise), and fq_res, when given, rides in the o GEMM epilogue. A float
@@ -176,7 +182,7 @@ inline ggml_tensor * gemma_attn(
     // score/softmax core all stay full precision.
     ggml_tensor *q = nullptr, *k = nullptr, *v = nullptr, *qkv_fq = nullptr;
     if (w.fq_qkv) {
-        qkv_fq = fq_gemm(ctx, w.fq_qkv, fq_act(ctx, w.fq_qkv, fq_x));
+        qkv_fq = fq_gemm(ctx, w.fq_qkv, fq_xq ? fq_xq : fq_act(ctx, w.fq_qkv, fq_x));
     } else if (w.fq_q) {
         ggml_tensor * xq = fq_act(ctx, w.fq_q, fq_x);
         q = fq_gemm(ctx, w.fq_q, xq);
@@ -224,7 +230,7 @@ inline ggml_tensor * gemma_attn(
                                    ggml_permute(ctx, k_rope, 0, 2, 1, 3), ggml_permute(ctx, v_h, 0, 2, 1, 3), scale);
         att_pre = ggml_reshape_2d(ctx, fa, qf, seq);
         if (w.fq_o)
-            return fq_linear(ctx, w.fq_o, att_pre, fq_res);
+            return fq_linear(ctx, w.fq_o, att_pre, fq_res, fq_gate);
         return mm_act(ctx, w.Wo, as_type(ctx, att_pre, at), at);
     }
 
@@ -261,11 +267,12 @@ inline ggml_tensor * gemma_attn(
 
 // fq_x / fq_res: as in gemma_attn, for the gate/up act node and the down epilogue.
 inline ggml_tensor * gemma_mlp(ggml_context * ctx, const GemmaLayerW & w, ggml_tensor * x_norm, ggml_type at,
-                               ggml_tensor * fq_x = nullptr, ggml_tensor * fq_res = nullptr) {
+                               ggml_tensor * fq_x = nullptr, ggml_tensor * fq_res = nullptr,
+                               ggml_tensor * fq_xq = nullptr, ggml_tensor * fq_gate = nullptr) {
     if (w.fq_gu) {   // one FoldQuant GEMM, GEGLU in its epilogue
-        ggml_tensor * inter = fq_gemm(ctx, w.fq_gu, fq_act(ctx, w.fq_gu, fq_x));
+        ggml_tensor * inter = fq_gemm(ctx, w.fq_gu, fq_xq ? fq_xq : fq_act(ctx, w.fq_gu, fq_x));
         if (w.fq_down)
-            return fq_linear(ctx, w.fq_down, inter, fq_res);
+            return fq_linear(ctx, w.fq_down, inter, fq_res, fq_gate);
         return mm_act(ctx, w.Wdown, inter, at);
     }
     if (w.Wgu) {   // one GEMM; ggml_geglu splits its rows into gate | up

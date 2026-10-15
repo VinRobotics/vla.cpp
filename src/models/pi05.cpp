@@ -32,6 +32,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -133,6 +135,18 @@ ggml_tensor * build_expert_layer(
         ggml_tensor * cached_K, ggml_tensor * cached_V, bool flash,
         ggml_tensor * cached_K16 = nullptr, ggml_tensor * cached_V16 = nullptr) {
     const int64_t h = cfg.expert_h;
+
+    if (w.act_mod_qkv.has_shift && w.act_mod_gu.has_shift && w.fq_o && w.fq_down) {
+        // SYCL: each adaRMS rides in its act node (rms * (1 + scale) + shift, then
+        // quantized), each gated residual in its GEMM epilogue (x + y * gate).
+        ggml_tensor * gate_attn = ggml_view_1d(ctx, mod_attn.mod, h, (size_t) 2*h * sizeof(float));
+        ggml_tensor * gate_ffn  = ggml_view_1d(ctx, mod_ffn.mod,  h, (size_t) 2*h * sizeof(float));
+        ggml_tensor * xq_attn = fq_act_mod(ctx, &w.act_mod_qkv, w.fq_qkv, x_in, mod_attn.scale1, mod_attn.shift);
+        ggml_tensor * h1 = gemma_attn(ctx, w, nullptr, positions, cfg, seq, cached_K, cached_V, nullptr, nullptr, nullptr,
+                                      GGML_TYPE_F32, flash, nullptr, x_in, cached_K16, cached_V16, xq_attn, gate_attn);
+        ggml_tensor * xq_ffn = fq_act_mod(ctx, &w.act_mod_gu, w.fq_gu, h1, mod_ffn.scale1, mod_ffn.shift);
+        return gemma_mlp(ctx, w, nullptr, GGML_TYPE_F32, nullptr, h1, xq_ffn, gate_ffn);
+    }
 
     ggml_tensor * gate_attn = nullptr;
     ggml_tensor * x_norm = build_adarms(ctx, x_in, mod_attn, h, cfg.rms_eps, &gate_attn);
@@ -348,6 +362,18 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
                 L.fail("FoldQuant: an expert layer's q/k/v (and gate/up) must all be INT or all float");
         }
         gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), !w.fq_q && !w.fq_qkv, !w.fq_gate && !w.fq_gu);
+#ifdef GGML_USE_SYCL
+        // The adaRMS fused into the q/k/v and gate/up act nodes (build_expert_layer).
+        // VLA_FQ_NO_ADA=1 keeps them apart (A/B runs).
+        if (w.fq_qkv && w.fq_gu && !(std::getenv("VLA_FQ_NO_ADA") && std::strcmp(std::getenv("VLA_FQ_NO_ADA"), "0"))) {
+            for (auto * p : { &w.act_mod_qkv, &w.act_mod_gu }) {
+                *p = (p == &w.act_mod_qkv) ? w.fq_qkv.act : w.fq_gu.act;
+                p->has_gamma = true;
+                p->has_shift = true;
+                p->eps       = cfg.rms_eps;
+            }
+        }
+#endif
         if (!w.fq_o)
             w.Wo    = L.gemm("aex.blk.%lld.attn_o.weight",   ii);
         if (!w.fq_down)

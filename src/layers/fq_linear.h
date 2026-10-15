@@ -68,17 +68,41 @@ inline bool fq_glu_enabled() {
     return !off;
 }
 
-inline ggml_tensor * fq_gemm(ggml_context * C, const FqLinear & s, ggml_tensor * xq, ggml_tensor * residual = nullptr) {
+// gate: with a residual, the model's gated residual residual + y * gate[n]
+// (pi0.5's action expert); fused on SYCL, a mul and an add elsewhere.
+inline ggml_tensor * fq_gemm(ggml_context * C, const FqLinear & s, ggml_tensor * xq, ggml_tensor * residual = nullptr,
+                             ggml_tensor * gate = nullptr) {
     GGML_ASSERT(xq->type == GGML_TYPE_I8 && xq->ne[0] == fq_act_row_bytes(s.act.K, fq_act_store_bits(s.act)));
     const int64_t T = xq->ne[1];
     const int64_t N_out = s.gemm.glu ? s.gemm.N / 2 : s.gemm.N;
-    const bool fuse = residual && fq_fuse_residual() && !s.gemm.heads && !s.gemm.glu && residual->type == GGML_TYPE_F32 &&
-                      ggml_is_contiguous(residual) && residual->ne[0] == s.gemm.N && ggml_nelements(residual) == s.gemm.N * T;
-    ggml_tensor * args[5] = { s.w, xq, s.wscale, s.bias, fuse ? residual : nullptr };
+    bool fuse = residual && fq_fuse_residual() && !s.gemm.heads && !s.gemm.glu && residual->type == GGML_TYPE_F32 &&
+                ggml_is_contiguous(residual) && residual->ne[0] == s.gemm.N && ggml_nelements(residual) == s.gemm.N * T;
+#ifndef GGML_USE_SYCL
+    if (gate) fuse = false;   // the gated epilogue is a SYCL kernel feature
+#endif
+    if (gate && (gate->type != GGML_TYPE_F32 || gate->ne[0] != s.gemm.N || !ggml_is_contiguous(gate))) fuse = false;
+    ggml_tensor * args[6] = { s.w, xq, s.wscale, s.bias, fuse ? residual : nullptr, fuse ? gate : nullptr };
     ggml_tensor * y = ggml_custom_4d(C, GGML_TYPE_F32, N_out, T, 1, 1,
-                                     args, fuse ? 5 : 4, fq_gemm_cpu, GGML_N_TASKS_MAX, (void *) &s.gemm);
+                                     args, fuse ? (gate ? 6 : 5) : 4, fq_gemm_cpu, GGML_N_TASKS_MAX, (void *) &s.gemm);
     ggml_format_name(y, "%s.fq_gemm", ggml_get_name(s.w));
-    return (residual && !fuse) ? ggml_add(C, residual, y) : y;
+    if (residual && !fuse)
+        return ggml_add(C, residual, gate ? ggml_mul(C, y, gate) : y);
+    return y;
+}
+
+// An act node with its own spec (outliving the graph) and per-node gamma and
+// shift: pi0.5's adaRMS, gamma = 1 + scale, quantized in the same pass. x is
+// the pre-norm hidden state; s supplies the site's ascale.
+inline ggml_tensor * fq_act_mod(ggml_context * C, const FqActSpec * spec, const FqLinear & s, ggml_tensor * x,
+                                ggml_tensor * gamma, ggml_tensor * shift) {
+    GGML_ASSERT(spec->has_gamma && spec->has_shift && x->type == GGML_TYPE_F32 && x->ne[0] == spec->K);
+    ggml_tensor * xin = ggml_is_contiguous(x) ? x : ggml_cont(C, x);
+    ggml_tensor * args[4] = { xin, gamma, shift, s.ascale };
+    ggml_tensor * t = ggml_custom_4d(C, GGML_TYPE_I8, fq_act_row_bytes(spec->K, fq_act_store_bits(*spec)),
+                                     ggml_nelements(xin) / spec->K, 1, 1, args, s.ascale ? 4 : 3, fq_act_cpu,
+                                     GGML_N_TASKS_MAX, (void *) spec);
+    ggml_format_name(t, "%s.fq_act_mod", ggml_get_name(s.w));
+    return t;
 }
 
 // Part `part` of a head-laid-out GEMM output (fq_set_heads), as the tensor the
@@ -95,8 +119,9 @@ inline ggml_tensor * fq_head_view(ggml_context * C, ggml_tensor * y, const FqLin
 }
 
 // y = W x (+ bias) (+ residual)
-inline ggml_tensor * fq_linear(ggml_context * C, const FqLinear & s, ggml_tensor * x, ggml_tensor * residual = nullptr) {
-    return fq_gemm(C, s, fq_act(C, s, x), residual);
+inline ggml_tensor * fq_linear(ggml_context * C, const FqLinear & s, ggml_tensor * x, ggml_tensor * residual = nullptr,
+                               ggml_tensor * gate = nullptr) {
+    return fq_gemm(C, s, fq_act(C, s, x), residual, gate);
 }
 
 }  // namespace vla

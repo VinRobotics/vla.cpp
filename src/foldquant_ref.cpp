@@ -77,7 +77,7 @@ float qmax_for(int bits) {
 // One activation row: x[K] -> codes + scale. tmp and partial are scratch
 // (K floats and NT floats).
 void act_row(const float * x, const float * ascale, const float * gamma, const FqActSpec & s,
-                    float * tmp, float * partial, int8_t * codes_out, float * scale_out) {
+                    float * tmp, float * partial, int8_t * codes_out, float * scale_out, const float * shift) {
     const int64_t K = s.K;
 
     if (s.has_gamma && gamma) {
@@ -90,6 +90,8 @@ void act_row(const float * x, const float * ascale, const float * gamma, const F
         const float sumsq = block_sum(partial);
         const float rstd  = 1.0f / std::sqrt(sumsq / (float) K + s.eps);
         for (int64_t k = 0; k < K; ++k) tmp[k] = (x[k] * rstd) * gamma[k];
+        if (shift)
+            for (int64_t k = 0; k < K; ++k) tmp[k] = tmp[k] + shift[k];
     } else {
         for (int64_t k = 0; k < K; ++k) tmp[k] = x[k];
     }
@@ -163,8 +165,8 @@ void fq_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     if (s.magic != FQ_ACT_MAGIC) return;
 
     const ggml_tensor * x = dst->src[0];
-    const ggml_tensor * g = nullptr, * as = nullptr;
-    fq_act_srcs(dst, s, &g, &as);
+    const ggml_tensor * g = nullptr, * sh = nullptr, * as = nullptr;
+    fq_act_srcs(dst, s, &g, &sh, &as);
 
     const int64_t K   = s.K;
     const int64_t T   = dst->ne[1];
@@ -212,7 +214,7 @@ void fq_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     for (int64_t t = t0; t < t1; ++t) {
         uint8_t * row = (uint8_t *) dst->data + (size_t) t * rb;
         fqref::act_row((const float *) ((const char *) xp + (size_t) t * x->nb[1]), ap, gp, s, tmp.data(), partial,
-                       (int8_t *) row, (float *) (row + kp));
+                       (int8_t *) row, (float *) (row + kp), sh ? (const float *) sh->data : nullptr);
     }
 }
 
@@ -236,6 +238,7 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     const ggml_tensor * ws = dst->src[2];
     const ggml_tensor * b  = dst->src[3];
     const ggml_tensor * r  = dst->src[4];          // optional residual [N, T]
+    const ggml_tensor * gt = r ? dst->src[5] : nullptr;   // optional gate [N]: r + y * gate
 
     const int64_t K     = s.K;
     const int64_t N     = s.N;
@@ -266,6 +269,7 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     const float * wsp = (const float *) ws->data;
     const float * bp  = b ? (const float *) b->data : nullptr;
     const float * rp  = r ? (const float *) r->data : nullptr;
+    const float * gtp = gt ? (const float *) gt->data : nullptr;
     float * y = (float *) dst->data;
 
     // Activations unpacked once per thread when they are nibbles.
@@ -321,7 +325,7 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
             float xs;
             std::memcpy(&xs, row + kp_a, sizeof(float));
             float v = fqref::gemm_dot(wrow, xrow, K, xs, wsn, bn);
-            if (rp) v = v + rp[(size_t) t * N + n];
+            if (rp) v = gtp ? rp[(size_t) t * N + n] + v * gtp[n] : v + rp[(size_t) t * N + n];
             y[fq_out_index(s, T, t, n)] = v;
         }
     }

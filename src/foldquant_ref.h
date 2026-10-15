@@ -58,7 +58,7 @@ float qmax_for(int bits);
 // One activation row: x[K] -> codes + scale. tmp and partial are scratch
 // (K floats and NT floats).
 void act_row(const float * x, const float * ascale, const float * gamma, const FqActSpec & s,
-             float * tmp, float * partial, int8_t * codes_out, float * scale_out);
+             float * tmp, float * partial, int8_t * codes_out, float * scale_out, const float * shift = nullptr);
 
 // Unpack a nibble row (low nibble = even column, two's complement) to int8.
 void unpack_nibbles(const int8_t * packed, int64_t K, int8_t * out);
@@ -81,11 +81,18 @@ inline float gelu_tanh(float x) {
 //            then ascale F32[K] if has_ascale; dst I8 [row_bytes, T]
 //   fq_gemm: src[0]=w I8 [K_pack, N], src[1]=xq blob, src[2]=wscale F32[N], src[3]=bias F32[N] or null
 //            dst F32 [N, T]
-inline void fq_act_srcs(const ggml_tensor * dst, const FqActSpec & s,
-                        const ggml_tensor ** gamma, const ggml_tensor ** ascale) {
+inline void fq_act_srcs(const ggml_tensor * dst, const FqActSpec & s, const ggml_tensor ** gamma,
+                        const ggml_tensor ** shift, const ggml_tensor ** ascale) {
     int i = 1;
     *gamma  = s.has_gamma  ? dst->src[i++] : nullptr;
+    *shift  = s.has_shift  ? dst->src[i++] : nullptr;
     *ascale = s.has_ascale ? dst->src[i++] : nullptr;
+}
+
+inline void fq_act_srcs(const ggml_tensor * dst, const FqActSpec & s,
+                        const ggml_tensor ** gamma, const ggml_tensor ** ascale) {
+    const ggml_tensor * shift = nullptr;
+    fq_act_srcs(dst, s, gamma, &shift, ascale);
 }
 
 void fq_act_cpu (ggml_tensor * dst, int ith, int nth, void * userdata);
