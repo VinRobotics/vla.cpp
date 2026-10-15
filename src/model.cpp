@@ -356,4 +356,11 @@ std::vector<float> predict(Model* m, const Inputs& in) {
     return m->impl->predict(in);
 }
 
+bool encode_images(Model* m, const ImageView* images, int n_images, std::vector<float>& out) {
+    if (!m || !m->impl || !images || n_images < 1) return false;
+    set_flash_attn(m->fa);
+    set_mm_prec_f32(m->mm);
+    return m->impl->encode_images(images, n_images, out);
+}
+
 }

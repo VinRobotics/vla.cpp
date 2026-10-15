@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -44,6 +45,12 @@ struct Pi05ModelArch : public ModelArchBase {
     ~Pi05ModelArch() override;
 
     std::vector<float> predict(const Inputs& in) override;
+    bool encode_images(const ImageView* images, int n_images, std::vector<float>& out) override;
+
+    /// Runs the vision tower + projector per view; @p sink receives each view's
+    /// [hidden, n_tokens] output tensor while it is still alive.
+    bool vision_forward(const ImageView* images, int n_images,
+                        const std::function<bool(int, ggml_tensor*, ggml_context*)>& sink);
 
     ggml_backend_t        backend     = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
@@ -339,6 +346,53 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     return m;
 }
 
+bool Pi05ModelArch::vision_forward(const ImageView* images, int n_images,
+                                   const std::function<bool(int, ggml_tensor*, ggml_context*)>& sink) {
+    const int64_t K = vis.n_tokens, grid = vis.image_size/vis.patch_size;
+    ggml_context * VC = vision_scratch.reset((size_t) 128*1024*1024);
+    if (!VC) { std::fprintf(stderr, "vla(pi05): ggml_init(vision ctx) failed\n"); return false; }
+    ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vis.image_size, vis.image_size, 3); ggml_set_input(t_px);
+    ggml_tensor * h = vis.vit.build(VC, vis.vit.embed_conv(VC, t_px, vis.patch_size, grid), K);
+    // PaliGemma projector: linear (+ optional bias).
+    ggml_tensor * vit_emb = linear(VC, vis.proj_w, vis.proj_b, h);
+    ggml_set_output(vit_emb);
+
+    ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
+    ggml_build_forward_expand(vg, vit_emb);
+
+    if (!vision_scratch.alloc(backend, vg)) {
+        std::fprintf(stderr, "vla(pi05): vision gallocr alloc failed\n");
+        return false;
+    }
+    std::vector<float> chw;
+    for (int v=0; v<n_images; ++v) {
+        if (!preprocess_image_chw("pi05", images[v], vis.image_size, chw)) return false;
+        ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
+        graph_unique_names(vg);
+        if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
+            std::fprintf(stderr, "vla(pi05): vision compute failed (view %d)\n", v);
+            return false;
+        }
+        if (!sink(v, vit_emb, VC)) return false;
+    }
+    return true;
+}
+
+bool Pi05ModelArch::encode_images(const ImageView* images, int n_images, std::vector<float>& out) {
+    using clk = std::chrono::high_resolution_clock;
+    const auto t0 = clk::now();
+    stats = Stats{};
+    const size_t per_view = (size_t) vis.n_tokens * cfg.hidden;
+    out.assign(per_view * n_images, 0.f);
+    const bool ok = vision_forward(images, n_images, [&](int v, ggml_tensor * vit_emb, ggml_context *) {
+        ggml_backend_tensor_get(vit_emb, out.data() + per_view * v, 0, per_view * sizeof(float));
+        return true;
+    });
+    stats.ms_vision = stats.ms_total = std::chrono::duration<float, std::milli>(clk::now()-t0).count();
+    if (!ok) out.clear();
+    return ok;
+}
+
 std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     using clk = std::chrono::high_resolution_clock;
     const auto t0 = clk::now();
@@ -444,39 +498,19 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     if (in.precomputed_img_emb) {
         ggml_backend_tensor_set(t_image_emb, in.precomputed_img_emb, 0, ggml_nbytes(t_image_emb));
     } else {
-        const int64_t K = vis.n_tokens, H = hidden_pl, grid = vis.image_size/vis.patch_size;
-        ggml_context * VC = vision_scratch.reset((size_t) 128*1024*1024);
-        if (!VC) { std::fprintf(stderr, "vla(pi05): ggml_init(vision ctx) failed\n"); return {}; }
-        ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vis.image_size, vis.image_size, 3); ggml_set_input(t_px);
-        ggml_tensor * h = vis.vit.build(VC, vis.vit.embed_conv(VC, t_px, vis.patch_size, grid), K);
-        // PaliGemma projector: linear (+ optional bias).
-        ggml_tensor * vit_emb = linear(VC, vis.proj_w, vis.proj_b, h);
-        ggml_set_output(vit_emb);
-
-        ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
-        ggml_build_forward_expand(vg, vit_emb);
-
-        if (!vision_scratch.alloc(backend, vg)) {
-            std::fprintf(stderr, "vla(pi05): vision gallocr alloc failed\n");
-            return {};
-        }
+        const int64_t K = vis.n_tokens, H = hidden_pl;
         const auto tv0 = clk::now();
-        std::vector<float> chw;
-        for (int v=0; v<in.n_images; ++v) {
-            if (!preprocess_image_chw("pi05", in.images[v], vis.image_size, chw)) { return {}; }
-            ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
-            graph_unique_names(vg);
-            if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
-                std::fprintf(stderr, "vla(pi05): vision compute failed (view %d)\n", v);
-                return {};
-            }
+        const bool ok = vision_forward(in.images, in.n_images,
+                                       [&](int v, ggml_tensor * vit_emb, ggml_context * VC) {
             ggml_tensor * dst = ggml_view_2d(VC, t_image_emb, H, K, t_image_emb->nb[1], (size_t) v * K * t_image_emb->nb[1]);
             if (ggml_backend_view_init(dst) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(pi05): image embedding view failed (view %d)\n", v);
-                return {};
+                return false;
             }
             ggml_backend_tensor_copy(vit_emb, dst);
-        }
+            return true;
+        });
+        if (!ok) return {};
         stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now()-tv0).count();
     }
     ggml_backend_tensor_set(t_lang_emb,  lang_rows.data(),    0, ggml_nbytes(t_lang_emb));

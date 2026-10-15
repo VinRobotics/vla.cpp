@@ -79,13 +79,8 @@ class Model:
     def __del__(self):
         self.close()
 
-    def predict(self, images, tokens: Sequence[int], state=None, noise=None,
-                pixel_format: int = PIXEL_U8, timing: int = TIMING_NONE):
-        """Run one forward pass.
-
-        images: one HWC array, or a sequence of them for multi-view. uint8 RGB by
-        default; pass pixel_format=PIXEL_F32_RGB_01 for float RGB in [0, 1].
-        """
+    @staticmethod
+    def _pack_images(images, pixel_format):
         views = images if isinstance(images, (list, tuple)) else [images]
         if not views:
             raise ValueError("at least one image is required")
@@ -108,6 +103,52 @@ class Model:
             img_array[i].h = int(shape[0])
             img_array[i].w = int(shape[1])
             img_array[i].format = int(pixel_format)
+        return views, img_array, keep
+
+    def encode_images(self, images, pixel_format: int = PIXEL_U8):
+        """Run only the vision tower; returns float32 [n_views * tokens_per_view, hidden].
+
+        Pass the result to predict(img_emb=..., n_img_views=len(images)), possibly
+        on a model loaded by another process on another device. Not every arch
+        supports it.
+        """
+        if not hasattr(self._lib, "vla_encode_images"):
+            raise RuntimeError("this libvla has no vla_encode_images")
+        views, img_array, keep = self._pack_images(images, pixel_format)
+        out = POINTER(c_float)()
+        n = c_int64()
+        with self._mu:
+            if self._h is None:
+                raise RuntimeError("model is closed")
+            rc = self._lib.vla_encode_images(self._h, img_array, len(views), ctypes.byref(out), ctypes.byref(n))
+            if rc != _ffi.OK:
+                raise RuntimeError(f"vla_encode_images failed ({rc})")
+            try:
+                import numpy as np
+                flat = np.ctypeslib.as_array(out, shape=(n.value,)).copy()
+            finally:
+                self._lib.vla_free_actions(out)
+        hidden = int(self.config.hidden) or 1
+        return flat.reshape(-1, hidden)
+
+    def predict(self, images, tokens: Sequence[int], state=None, noise=None,
+                pixel_format: int = PIXEL_U8, timing: int = TIMING_NONE,
+                img_emb=None, n_img_views: int = 0):
+        """Run one forward pass.
+
+        images: one HWC array, or a sequence of them for multi-view. uint8 RGB by
+        default; pass pixel_format=PIXEL_F32_RGB_01 for float RGB in [0, 1].
+        img_emb: optional output of encode_images (then images may be None, and
+        n_img_views must give the number of views it holds).
+        """
+        if img_emb is not None:
+            import numpy as np
+            emb = np.ascontiguousarray(img_emb, dtype=np.float32)
+            if n_img_views < 1:
+                raise ValueError("n_img_views must be >= 1 with img_emb")
+            views, img_array, keep = [], None, [emb]
+        else:
+            views, img_array, keep = self._pack_images(images, pixel_format)
 
         tok = list(tokens)
         if not tok:
@@ -124,8 +165,12 @@ class Model:
         keep.append(noise_keep)
 
         cin = _ffi.Inputs()
-        cin.images = img_array
-        cin.n_images = len(views)
+        if img_emb is not None:
+            cin.precomputed_img_emb = emb.ctypes.data_as(POINTER(c_float))
+            cin.n_img_views = int(n_img_views)
+        else:
+            cin.images = img_array
+            cin.n_images = len(views)
         cin.lang_tokens = tok_buf
         cin.n_lang = len(tok)
         if state_ptr is not None:

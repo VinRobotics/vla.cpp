@@ -204,6 +204,20 @@ const Config& model_config(const Model* m);
 std::vector<float> predict(Model* m, const Inputs& in);
 
 /**
+ * @brief Run only the vision tower; the output feeds @ref Inputs::precomputed_img_emb.
+ *
+ * Lets the vision tower run in another process or on another device than the
+ * LM and action head. Only some archs support it (pi0.5 does).
+ *
+ * @param m        A handle from @ref model_load.
+ * @param images   Camera views.
+ * @param n_images Number of @p images.
+ * @param out      Receives [n_images * tokens_per_view, hidden] floats.
+ * @return false if the arch does not support it or the forward pass failed.
+ */
+bool encode_images(Model* m, const ImageView* images, int n_images, std::vector<float>& out);
+
+/**
  * @brief Wall-clock timings of the most recent @ref predict call.
  *
  * Times are in milliseconds. Per-phase fields are zero unless
