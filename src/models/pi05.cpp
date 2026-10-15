@@ -307,11 +307,15 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
         return nullptr;
     const Config & cfg = m->cfg;
     FoldQuantSpec fq = foldquant_parse(g, "pi05");
-    // SYCL: the prefix's W4A4 sites on the INT4 DPAS GEMMs (nibble-packed
-    // activations); the expert's (50 rows) on oneDNN with INT4 activations as bytes.
-    fq.llm.s4gemm   = true;
-    fq.llm.wide4    = false;
-    fq.action.wide4 = true;
+    // SYCL: W4A4 sites on the INT4 DPAS GEMMs (nibble-packed activations), the
+    // prefix's and the expert's: at 50 rows they beat oneDNN's s8 x s4 by 2-3x.
+    // INT4 activations stay bytes (oneDNN) only where VLA_FQ_NO_S4GEMM=1.
+    {
+        const char * e = std::getenv("VLA_FQ_NO_S4GEMM");
+        const bool s4 = !(e && *e && *e != '0');
+        fq.llm.s4gemm = fq.action.s4gemm = s4;
+        fq.llm.wide4  = fq.action.wide4  = !s4;
+    }
     m->quantile_norm = g.has("pi05.norm_mode") && g.str("pi05.norm_mode") == "quantiles";
     std::printf("vla(pi05): hidden=%lld inter=%lld heads=%lldq/%lldkv x%lld n_layers=%lld "
                 "expert_h=%lld expert_inter=%lld chunk=%lld steps=%d real_state=%lld real_action=%lld "
