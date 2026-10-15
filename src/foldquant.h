@@ -92,7 +92,13 @@ struct FqActSpec {
     bool     has_ascale  = false;  // static SmoothQuant vector shipped with the site
     float    clip        = 1.0f;
     float    eps         = 0.0f;   // RMSNorm epsilon when has_gamma
+    // INT4 codes stored one per byte (the blob reads as A8): what oneDNN's s8
+    // matmul takes, so no unpack pass runs before it. Set on SYCL (fill_specs).
+    bool     wide4       = false;
 };
+
+/// Bits per stored activation code: 4 only for nibble-packed INT4.
+inline int fq_act_store_bits(const FqActSpec & s) { return (s.abits == 4 && !s.wide4) ? 4 : 8; }
 
 struct FqGemmSpec {
     uint32_t magic = FQ_GEMM_MAGIC;

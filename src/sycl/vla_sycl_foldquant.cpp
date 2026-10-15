@@ -170,7 +170,7 @@ void act_kernel(const ActParams a, const sycl::nd_item<1> & it) {
     }
     for (int off = 16; off > 0; off >>= 1) mx = sycl::fmax(mx, sycl::permute_group_by_xor(sg, mx, off));
 
-    const float qmax  = ABITS == 4 ? 7.0f : 127.0f;
+    const float qmax  = ABITS == 8 ? 127.0f : 7.0f;   // 4 and 44 (INT4 codes in bytes)
     float       scale = (a.clip * mx) / qmax;
     if (scale < 1e-12f) scale = 1e-12f;
     // Multiply by the reciprocal, as the reference and the TensorRT kernels do.
@@ -179,7 +179,7 @@ void act_kernel(const ActParams a, const sycl::nd_item<1> & it) {
     int8_t * row = a.blob + m * a.row_bytes;
     for (int c = lane; c < nchunks; c += SG) {
         if (nchunks > SG) load_chunk<ROT>(a, x, (int64_t) c * CHUNK, rstd, v);
-        if (ABITS == 8) {
+        if (ABITS != 4) {
             int8_t * dst = row + (int64_t) c * CHUNK;
             for (int i = 0; i < CHUNK; ++i) {
                 float q = sycl::rint(v[i] * inv);
@@ -197,7 +197,7 @@ void act_kernel(const ActParams a, const sycl::nd_item<1> & it) {
         }
     }
     if (lane == 0) {
-        float * s = (float *) (row + (ABITS == 8 ? K : K / 2));
+        float * s = (float *) (row + (ABITS != 4 ? K : K / 2));
         *s = scale;
     }
 }
@@ -279,7 +279,7 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
     mx = red[0];
     for (int j = 1; j < RW; ++j) mx = sycl::fmax(mx, red[j]);
 
-    const float qmax  = ABITS == 4 ? 7.0f : 127.0f;
+    const float qmax  = ABITS == 8 ? 127.0f : 7.0f;   // 4 and 44 (INT4 codes in bytes)
     float       scale = (a.clip * mx) / qmax;
     if (scale < 1e-12f) scale = 1e-12f;
     const float inv = 1.0f / scale;
@@ -291,7 +291,7 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
             float q0 = sycl::rint(v0[i] * inv), q1 = sycl::rint(v1[i] * inv);
             q0 = sycl::fmin(qmax, sycl::fmax(-qmax, q0));
             q1 = sycl::fmin(qmax, sycl::fmax(-qmax, q1));
-            if (ABITS == 8) {
+            if (ABITS != 4) {
                 row[(int64_t) c * CHUNK + 2 * lane]     = (int8_t) (int) q0;
                 row[(int64_t) c * CHUNK + 2 * lane + 1] = (int8_t) (int) q1;
             } else {
@@ -301,7 +301,7 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
         }
     }
     if (it.get_local_linear_id() == 0) {
-        float * sp = (float *) (row + (ABITS == 8 ? K : K / 2));
+        float * sp = (float *) (row + (ABITS != 4 ? K : K / 2));
         *sp = scale;
     }
 }
@@ -588,8 +588,9 @@ bool run_act(sycl::queue & q, ggml_tensor * dst, const FqActSpec & s) {
     a.eps         = s.eps;
     a.inv_sqrt_bs = s.rot_block > 1 ? fqref::inv_sqrt_block(s.rot_block) : 1.0f;
     if (a.M == 0) return true;
+    // ABITS 44: INT4 range, one code per byte (FqActSpec::wide4).
     return s.abits == 8 ? launch_act_bits<8>(q, a, s.rot_block)
-         : s.abits == 4 ? launch_act_bits<4>(q, a, s.rot_block)
+         : s.abits == 4 ? (s.wide4 ? launch_act_bits<44>(q, a, s.rot_block) : launch_act_bits<4>(q, a, s.rot_block))
          : false;
 }
 
@@ -889,7 +890,7 @@ bool fq_dispatch(ggml_tensor * dst, void * queue) {
         const FqActSpec & s = *static_cast<const FqActSpec *>(ud);
         if (!run_act(q, dst, s)) return false;
         if (check)
-            check_against_host(q, dst, fq_act_cpu, const_cast<void *>(ud), (size_t) fq_act_kpack(s.K, s.abits) + 4,
+            check_against_host(q, dst, fq_act_cpu, const_cast<void *>(ud), (size_t) fq_act_kpack(s.K, fq_act_store_bits(s)) + 4,
                                (size_t) dst->ne[0]);
         return true;
     }

@@ -46,7 +46,7 @@ inline ggml_tensor * fq_act(ggml_context * C, const FqLinear & s, ggml_tensor * 
     int n_args = 1;
     if (s.gamma)  args[n_args++] = s.gamma;
     if (s.ascale) args[n_args++] = s.ascale;
-    ggml_tensor * t = ggml_custom_4d(C, GGML_TYPE_I8, fq_act_row_bytes(s.act.K, s.act.abits), rows, 1, 1,
+    ggml_tensor * t = ggml_custom_4d(C, GGML_TYPE_I8, fq_act_row_bytes(s.act.K, fq_act_store_bits(s.act)), rows, 1, 1,
                                      args, n_args, fq_act_cpu, GGML_N_TASKS_MAX, (void *) &s.act);
     ggml_format_name(t, "%s.fq_act", ggml_get_name(s.w));
     return t;
@@ -69,7 +69,7 @@ inline bool fq_glu_enabled() {
 }
 
 inline ggml_tensor * fq_gemm(ggml_context * C, const FqLinear & s, ggml_tensor * xq, ggml_tensor * residual = nullptr) {
-    GGML_ASSERT(xq->type == GGML_TYPE_I8 && xq->ne[0] == fq_act_row_bytes(s.act.K, s.act.abits));
+    GGML_ASSERT(xq->type == GGML_TYPE_I8 && xq->ne[0] == fq_act_row_bytes(s.act.K, fq_act_store_bits(s.act)));
     const int64_t T = xq->ne[1];
     const int64_t N_out = s.gemm.glu ? s.gemm.N / 2 : s.gemm.N;
     const bool fuse = residual && fq_fuse_residual() && !s.gemm.heads && !s.gemm.glu && residual->type == GGML_TYPE_F32 &&

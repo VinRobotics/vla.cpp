@@ -114,7 +114,7 @@ void act_row(const float * x, const float * ascale, const float * gamma, const F
     // kernels do, so the deployed engines and this runtime round alike.
     const float inv = 1.0f / scale;
 
-    if (s.abits == 4) {
+    if (s.abits == 4 && !s.wide4) {
         for (int64_t k = 0; k < K; k += 2) {
             float q0 = std::nearbyint(tmp[k]     * inv);
             float q1 = std::nearbyint(tmp[k + 1] * inv);
@@ -168,8 +168,8 @@ void fq_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
 
     const int64_t K   = s.K;
     const int64_t T   = dst->ne[1];
-    const int64_t rb  = fq_act_row_bytes(K, s.abits);
-    const int64_t kp  = fq_act_kpack(K, s.abits);
+    const int64_t rb  = fq_act_row_bytes(K, fq_act_store_bits(s));
+    const int64_t kp  = fq_act_kpack(K, fq_act_store_bits(s));
     const int64_t per = (T + nth - 1) / nth;
 
     // VLA_FQ_STATS=1: one line per node with checksums of every input, so two
