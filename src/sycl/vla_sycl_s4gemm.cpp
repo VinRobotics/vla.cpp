@@ -36,8 +36,12 @@ namespace {
 using namespace cute;
 
 using MmaOp   = XE_DPAS_TT<8, int32_t, int4_t, int4_t>;
-using SGL8x4  = Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>;   // 8x4 sub-groups, n-major
-using MmaFull = typename TiledMMAHelper<MMA_Atom<MmaOp>, Layout<Shape<_256, _256, _128>>, SGL8x4>::TiledMMA;
+// s32 kernels, by K (Arc B390, 561 rows): 128 x 128 for the long-K down site
+// (0.33 -> 0.31 ms), 64 x 256 otherwise (q/k/v 0.058 -> 0.044, o 0.047 -> 0.038).
+using SGL4x4  = Layout<Shape<_4, _4, _1>, Stride<_4, _1, _0>>;
+using SGL2x8s = Layout<Shape<_2, _8, _1>, Stride<_8, _1, _0>>;
+using MmaLongK  = typename TiledMMAHelper<MMA_Atom<MmaOp>, Layout<Shape<_128, _128, _128>>, SGL4x4>::TiledMMA;
+using MmaShortK = typename TiledMMAHelper<MMA_Atom<MmaOp>, Layout<Shape<_64, _256, _128>>, SGL2x8s>::TiledMMA;
 // The GEGLU kernel: two accumulators (gate, up) per work-group; 64 x 256 measured
 // best among 5 tilings on the Arc B390 (561 x 2 x 16384 x 2048: 0.84 ms).
 using SGL2x8  = Layout<Shape<_2, _8, _1>, Stride<_8, _1, _0>>;
@@ -58,9 +62,9 @@ inline float gelu_tanh_dev(float x) {
 }
 
 // C (M,N) s32 = A (M,K) s4 x B (N,K)^T s4.
-template <class AT, class BT, class CT>
+template <class Mma, class AT, class BT, class CT>
 void gemm_s32_device(AT const & A, BT const & B, CT & C) {
-    MmaFull mma{};
+    Mma mma{};
     auto item = sycl::ext::oneapi::this_work_item::get_nd_item<2>();
     const int wg_m = int(item.get_group(1)), wg_n = int(item.get_group(0)), lid = int(item.get_local_id(0));
     Tensor cA = make_identity_tensor(A.shape());
@@ -188,6 +192,10 @@ void gemm_glu_device(AT const & A, BT const & Bg, BT const & Bu, OT & O, const i
 }
 
 template <class> class S4Gemm32Name;
+
+template <class Mma, int TM, int TN>
+void launch_s32(sycl::queue & q, const int8_t * blob, int64_t M, int64_t K, int64_t row_bytes, const int8_t * w,
+                int64_t N, int32_t * out);
 template <class> class S4GemmGluName;
 
 namespace syclex  = sycl::ext::oneapi::experimental;
@@ -195,21 +203,30 @@ namespace intelex = sycl::ext::intel::experimental;
 
 }  // namespace
 
+namespace {
+template <class Mma, int TM, int TN>
+void launch_s32(sycl::queue & q, const int8_t * blob, int64_t M, int64_t K, int64_t row_bytes, const int8_t * w,
+                int64_t N, int32_t * out) {
+    auto A = row_major(reinterpret_cast<int4_t *>(const_cast<int8_t *>(blob)), (int) M, (int) K, (int) (row_bytes * 2));
+    auto B = row_major(reinterpret_cast<int4_t *>(const_cast<int8_t *>(w)), (int) N, (int) K, (int) K);
+    auto C = row_major(out, (int) M, (int) N, (int) N);
+    Mma mma{};
+    const sycl::range<2> local = { (size_t) size(mma), 1 };
+    const sycl::range<2> global = { local[0] * (size_t) ceil_div((int) N, TN), (size_t) ceil_div((int) M, TM) };
+    syclex::properties props{ syclex::sub_group_size<16>, intelex::grf_size<256> };
+    q.parallel_for<S4Gemm32Name<Mma>>(sycl::nd_range<2>(global, local), props, [=](auto) {
+        auto Cm = C;
+        gemm_s32_device<Mma>(A, B, Cm);
+    });
+}
+}  // namespace
+
 bool sycl_s4_gemm_s32(void * queue, const int8_t * blob, int64_t M, int64_t K, int64_t row_bytes, const int8_t * w,
                       int64_t N, int32_t * out) {
     if (K % 128 != 0 || N % 256 != 0 || (row_bytes % 16) != 0 || M <= 0) return false;
     sycl::queue & q = *static_cast<sycl::queue *>(queue);
-    auto A = row_major(reinterpret_cast<int4_t *>(const_cast<int8_t *>(blob)), (int) M, (int) K, (int) (row_bytes * 2));
-    auto B = row_major(reinterpret_cast<int4_t *>(const_cast<int8_t *>(w)), (int) N, (int) K, (int) K);
-    auto C = row_major(out, (int) M, (int) N, (int) N);
-    MmaFull mma{};
-    const sycl::range<2> local = { (size_t) size(mma), 1 };
-    const sycl::range<2> global = { local[0] * (size_t) ceil_div((int) N, 256), (size_t) ceil_div((int) M, 256) };
-    syclex::properties props{ syclex::sub_group_size<16>, intelex::grf_size<256> };
-    q.parallel_for<S4Gemm32Name<void>>(sycl::nd_range<2>(global, local), props, [=](auto) {
-        auto Cm = C;
-        gemm_s32_device(A, B, Cm);
-    });
+    if (K >= 8192) launch_s32<MmaLongK, 128, 128>(q, blob, M, K, row_bytes, w, N, out);
+    else           launch_s32<MmaShortK, 64, 256>(q, blob, M, K, row_bytes, w, N, out);
     return true;
 }
 
