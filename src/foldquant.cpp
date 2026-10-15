@@ -310,11 +310,12 @@ bool fill_specs(WeightLoader & L, const FqModuleSpec & mod, const char * site_ke
     r.act.clip        = abits == 4 ? mod.clip : 1.0f;
     r.act.eps         = eps;
 #ifdef GGML_USE_SYCL
-    // oneDNN's int8 matmul takes byte codes: store INT4 activations unpacked.
-    // VLA_FQ_A4_PACKED=1 keeps the nibble layout (A/B runs, native kernels).
+    // oneDNN's int8 matmul takes byte codes: store INT4 activations unpacked,
+    // for archs that opt in (mod.wide4: pi0.5). VLA_FQ_A4_PACKED=1 keeps the
+    // nibble layout (A/B runs, native kernels).
     {
         const char * e = std::getenv("VLA_FQ_A4_PACKED");
-        r.act.wide4 = abits == 4 && !(e && *e && *e != '0');
+        r.act.wide4 = mod.wide4 && abits == 4 && !(e && *e && *e != '0');
     }
 #endif
     r.gemm.K          = K;

@@ -89,7 +89,7 @@ struct ActParams {
     // gelu_tanh(((acc[m][k] * xs_m) * ws[k]) (+ b[k])) * (same at k + K), xs_m the
     // gate/up input row's scale, read from its blob; the glu epilogue's math.
     const int32_t * glu_acc       = nullptr;   // [M][2K]
-    const sycl::ext::oneapi::bfloat16 * glu_bf = nullptr;   // or [M][2K] BF16 sums x weight scales
+    const uint16_t * glu_bf       = nullptr;   // or [M][2K] BF16 bits: sums x weight scales
     const float *   glu_ws        = nullptr;   // [2K]
     const float *   glu_bias      = nullptr;   // [2K] or null
     const int8_t *  glu_blob      = nullptr;
@@ -284,9 +284,12 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
                 std::memcpy(&xs, a.glu_blob + m * a.glu_row_bytes + a.glu_kp, sizeof(float));
                 float g0, g1, u0, u1;
                 if (a.glu_bf) {
-                    const sycl::ext::oneapi::bfloat16 * br = a.glu_bf + m * 2 * K;
-                    g0 = (float) br[k0] * xs;     g1 = (float) br[k0 + 1] * xs;
-                    u0 = (float) br[K + k0] * xs; u1 = (float) br[K + k0 + 1] * xs;
+                    // BF16 -> F32 by its bits: a bfloat16 type in this kernel changed the
+                    // other acts' rounding (VLA_FQ_CHECK mismatches on non-GLU nodes).
+                    const uint16_t * br = a.glu_bf + m * 2 * K;
+                    auto bf = [](uint16_t b) { return sycl::bit_cast<float>((uint32_t) b << 16); };
+                    g0 = bf(br[k0]) * xs;     g1 = bf(br[k0 + 1]) * xs;
+                    u0 = bf(br[K + k0]) * xs; u1 = bf(br[K + k0 + 1]) * xs;
                 } else {
                     const int32_t * ar = a.glu_acc + m * 2 * K;
                     g0 = ((float) ar[k0]     * xs) * a.glu_ws[k0];
@@ -945,7 +948,7 @@ bool run_glu_act(sycl::queue & q, ggml_tensor * dst, const FqGluActSpec & gs) {
     a.eps           = as.eps;
     a.inv_sqrt_bs   = as.rot_block > 1 ? fqref::inv_sqrt_block(as.rot_block) : 1.0f;
     a.glu_acc       = bf ? nullptr : acc;
-    a.glu_bf        = bf ? reinterpret_cast<const sycl::ext::oneapi::bfloat16 *>(acc) : nullptr;
+    a.glu_bf        = bf ? reinterpret_cast<const uint16_t *>(acc) : nullptr;
     a.glu_ws        = g.wscale;
     a.glu_bias      = g.bias;
     a.glu_blob      = g.blob;
@@ -988,7 +991,18 @@ void check_against_host(sycl::queue & q, ggml_tensor * dst, void (*ref)(ggml_ten
         }
     std::printf("vla(fq) CHECK %-40s ne=[%lld,%lld] %s", ggml_get_name(dst), (long long) dst->ne[0],
                 (long long) dst->ne[1], bad ? "MISMATCH" : "ok\n");
-    if (bad) std::printf(" rows %lld/%lld (first %lld)\n", (long long) bad, (long long) rows, (long long) first);
+    if (bad) {
+        double md = 0, mv = 0;
+        if (dst->type == GGML_TYPE_F32)
+            for (size_t i = 0; i < got.size() / 4; ++i) {
+                const float x = ((const float *) got.data())[i], y = ((const float *) want.data())[i];
+                md = std::max(md, (double) std::fabs(x - y));
+                mv = std::max(mv, (double) std::fabs(y));
+            }
+        std::printf(" rows %lld/%lld (first %lld)", (long long) bad, (long long) rows, (long long) first);
+        if (dst->type == GGML_TYPE_F32) std::printf(" max|d| %.4g of max|y| %.4g", md, mv);
+        std::printf("\n");
+    }
 }
 
 bool fq_dispatch(ggml_tensor * dst, void * queue) {

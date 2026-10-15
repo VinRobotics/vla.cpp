@@ -69,6 +69,7 @@ struct FqModuleSpec {
     std::string scheme;
     bool  dequant     = false;  // read every site back as a float weight (see above)
     bool  no_heads    = false;  // keep plain [N][T] GEMM outputs (no fq_set_heads layout)
+    bool  wide4       = false;  // SYCL: store INT4 activations one code per byte (FqActSpec::wide4); arch opt-in
 
     int wbits_for(const char * site_key) const;
     int abits_for(const char * site_key) const;
