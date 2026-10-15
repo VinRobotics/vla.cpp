@@ -30,11 +30,15 @@
 
 #include <zmq.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -176,9 +180,44 @@ int find_non_finite(const float * data, int n) {
     return -1;
 }
 
+// A few predicts on synthetic inputs (two 224x224 views, 32 tokens, zero state)
+// before the socket opens: the GPU backends compile kernels on first use, which
+// would otherwise land on the first client request. Archs whose prompts need
+// special tokens may reject these inputs; that is reported and not fatal.
+void warm_up(vla::Model * model, const vla::Config & cfg, int n) {
+    const int side = 224, n_views = 2;
+    std::vector<std::vector<uint8_t>> pixels(n_views, std::vector<uint8_t>((size_t) 3*side*side));
+    std::vector<vla::ImageView> views(n_views);
+    for (int v=0; v<n_views; ++v) {
+        for (size_t i=0; i<pixels[v].size(); ++i)
+            pixels[v][i] = (uint8_t) ((i*7 + 31*v) & 0xFF);
+        views[v] = vla::ImageView{ pixels[v].data(), side, side, vla::PixelFormat::U8 };
+    }
+    std::vector<int32_t> lang(32);
+    for (size_t i=0; i<lang.size(); ++i)
+        lang[i] = 1+(int32_t) (i%100);
+    std::vector<float> state((size_t) std::max<int64_t>(cfg.max_state_dim, 1), 0.0f);
+    std::vector<float> noise((size_t) std::max<int64_t>(cfg.max_action_dim*cfg.n_suffix, 1), 0.0f);
+    vla::Inputs in{};
+    in.images      = views.data();
+    in.n_images    = n_views;
+    in.lang_tokens = lang.data();
+    in.n_lang      = (int) lang.size();
+    in.state       = state.data();
+    in.noise       = noise.data();
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i=0; i<n; ++i)
+        if (vla::predict(model, in).empty()) {
+            std::fprintf(stderr, "vla-server: warmup predict failed (synthetic inputs); continuing\n");
+            return;
+        }
+    std::printf("vla-server: warmup %d predict(s) in %.0f ms\n", n,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-t0).count());
+}
+
 void usage(const char * prog) {
     std::fprintf(stderr,
-        "usage: %s [--bind ADDR] [--timing-detail none|phase] [--config PATH] "
+        "usage: %s [--bind ADDR] [--timing-detail none|phase] [--warmup N] [--config PATH] "
         "([<mmproj.gguf>] <ckpt> | -hf user/repo[:file.gguf|:tag])\n"
         "  <mmproj.gguf>           ignored; every arch bundles its vision tower in the\n"
         "                          ckpt GGUF. Accepted so older command lines still work.\n"
@@ -194,6 +233,9 @@ void usage(const char * prog) {
         "                          'phase' : ms_prefill + ms_denoise broken out\n"
         "                          (only SmolVLA, BitVLA and VLA-JEPA report the split;\n"
         "                          the others report ms_inference only)\n"
+        "  --warmup N              dummy predicts before binding (default 1), so the\n"
+        "                          first client request does not pay the GPU's kernel\n"
+        "                          compilation (seconds on SYCL). 0 skips it.\n"
         "%s"
         "  --config PATH           policy config.json. Its \"runtime\" object sets the\n"
         "                          runtime flags above for any arch; flags given on\n"
@@ -222,6 +264,7 @@ int main(int argc, char ** argv) {
     std::string hf_spec;
     std::string config_path;
     vla::TimingDetail timing_detail = vla::TimingDetail::NONE;
+    int warmup = 1;
     vla::Options opts;
     std::string  opt_err;
 
@@ -234,6 +277,8 @@ int main(int argc, char ** argv) {
             hf_spec = argv[++i];
         } else if (a == "--config" && i+1 < argc) {
             config_path = argv[++i];
+        } else if (a == "--warmup" && i+1 < argc) {
+            warmup = std::atoi(argv[++i]);
         } else if (a == "--timing-detail" && i+1 < argc) {
             const std::string v = argv[++i];
             if      (v == "none")
@@ -307,6 +352,8 @@ int main(int argc, char ** argv) {
                 (long long) cfg.n_suffix, (long long) cfg.max_action_dim,
                 (long long) cfg.n_lang, (long long) cfg.hidden, (long long) cfg.expert_h,
                 timing_detail == vla::TimingDetail::PHASE ? "phase" : "none");
+    if (warmup > 0)
+        warm_up(model, cfg, warmup);
 
     zmq::context_t zctx( 1);
     zmq::socket_t  sock(zctx, zmq::socket_type::rep);
