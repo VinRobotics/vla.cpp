@@ -17,6 +17,7 @@
 #include "layers/attn.h"
 #include "layers/ffn.h"
 #include "layers/fmha_kv.h"
+#include "layers/vit_fused.h"
 #include "layers/linear.h"
 #include "layers/norm.h"
 
@@ -67,7 +68,11 @@ static ggml_tensor * block_fused(ggml_context * C, const EncCfg & cfg, const Enc
     const float   scale = 1.0f/std::sqrt((float)hd);
     ggml_tensor * x2 = ggml_reshape_2d(C, ggml_is_contiguous(x) ? x : ggml_cont(C, x), E, T);
 
-    ggml_tensor * qkv = linear(C, w.Wqkv, w.bqkv, layer_norm(C, x2, w.ln1w, w.ln1b, cfg.ln_eps));   // [3E, T]
+    const bool fz = vit_fused_enabled();   // one-kernel LayerNorm / bias+gelu / bias+residual
+    auto ln = [&](ggml_tensor * t, ggml_tensor * g, ggml_tensor * b) {
+        return fz ? vit_ln(C, t, g, b, cfg.ln_eps) : layer_norm(C, t, g, b, cfg.ln_eps);
+    };
+    ggml_tensor * qkv = linear(C, w.Wqkv, w.bqkv, ln(x2, w.ln1w, w.ln1b));   // [3E, T]
     const size_t es = ggml_element_size(qkv);
     auto split = [&](int b) {   // [hd, heads, seq, nv] view of block b
         return ggml_view_4d(C, qkv, hd, heads, seq, nv, (size_t) hd*es, (size_t) 3*E*es, (size_t) 3*E*seq*es,
@@ -89,6 +94,11 @@ static ggml_tensor * block_fused(ggml_context * C, const EncCfg & cfg, const Enc
                                            scale, E, seq, nv), E, T);
     }
 
+    if (fz) {
+        ggml_tensor * h1 = vit_bias_res(C, ggml_mul_mat(C, w.Wo, att), w.bo, x2);
+        ggml_tensor * f1 = vit_bias_gelu(C, ggml_mul_mat(C, w.Wfc1, ln(h1, w.ln2w, w.ln2b)), w.bfc1);
+        return ggml_reshape(C, vit_bias_res(C, ggml_mul_mat(C, w.Wfc2, f1), w.bfc2, h1), x);
+    }
     ggml_tensor * h1 = ggml_add(C, x2, linear(C, w.Wo, w.bo, att));
     ggml_tensor * n2 = layer_norm(C, h1, w.ln2w, w.ln2b, cfg.ln_eps);
     ggml_tensor * y  = ggml_add(C, h1, ffn_gelu(C, w.Wfc1, w.bfc1, w.Wfc2, w.bfc2, n2));

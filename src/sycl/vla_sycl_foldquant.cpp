@@ -35,6 +35,7 @@
 
 #include "sycl/vla_sycl_foldquant.h"
 #include "sycl/vla_sycl_fmha.h"
+#include "sycl/vla_sycl_fused.h"
 
 #include "foldquant.h"
 #include "foldquant_ref.h"
@@ -913,6 +914,7 @@ bool supports(const ggml_tensor * op) {
 // sycl-tla flash attention (and its cached-KV node) when it was built in.
 bool dispatch(ggml_tensor * dst, void * queue) {
     if (fq_dispatch(dst, queue)) return true;
+    if (sycl_vit_fused_forward(dst, queue)) return true;
 #ifdef VLA_SYCL_FMHA
     if (sycl_fmha_forward(dst, queue)) return true;
     if (sycl_fmha_kv_forward(dst, queue)) return true;
@@ -922,6 +924,7 @@ bool dispatch(ggml_tensor * dst, void * queue) {
 
 bool ext_supports(const ggml_tensor * op) {
     if (supports(op)) return true;
+    if (sycl_vit_fused_supports(op)) return true;
 #ifdef VLA_SYCL_FMHA
     if (sycl_fmha_kv_supports(op)) return true;
 #endif

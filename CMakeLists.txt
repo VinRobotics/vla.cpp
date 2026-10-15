@@ -365,9 +365,11 @@ if(GGML_SYCL AND NOT GGML_CUDA)
     # rides in the executable's device image. One image per kernel, so a device
     # JIT-compiles only what it launches (not the XMX kernel on a device without
     # XMX: the OpenCL CPU device's compiler has crashed on the whole module).
-    target_sources(vla_core PRIVATE src/sycl/vla_sycl_foldquant.cpp)
+    target_sources(vla_core PRIVATE src/sycl/vla_sycl_foldquant.cpp src/sycl/vla_sycl_fused.cpp)
     set_source_files_properties(src/sycl/vla_sycl_foldquant.cpp PROPERTIES
         COMPILE_OPTIONS "-fsycl;-ffp-contract=off")
+    # Fused ViT elementwise nodes (src/layers/vit_fused.h), same hook.
+    set_source_files_properties(src/sycl/vla_sycl_fused.cpp PROPERTIES COMPILE_OPTIONS "-fsycl")
     target_link_options(vla_core PUBLIC -fsycl -fsycl-device-code-split=per_kernel
         "SHELL:-Xsycl-target-backend=spir64 \"-cl-fp32-correctly-rounded-divide-sqrt\"")
     target_compile_definitions(vla_core PRIVATE VLA_FQ_SYCL)
