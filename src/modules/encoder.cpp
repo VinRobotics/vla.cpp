@@ -72,6 +72,18 @@ static ggml_tensor * block_fused(ggml_context * C, const EncCfg & cfg, const Enc
     auto ln = [&](ggml_tensor * t, ggml_tensor * g, ggml_tensor * b) {
         return fz ? vit_ln(C, t, g, b, cfg.ln_eps) : layer_norm(C, t, g, b, cfg.ln_eps);
     };
+    // BF16 weights on SYCL: every projection one oneDNN matmul with its bias and
+    // post-op, LayerNorms and attention handing it BF16 (vit_fused.h).
+    if (fz && w.Wqkv->type == GGML_TYPE_BF16 && w.Wo->type == GGML_TYPE_BF16 && w.Wfc1->type == GGML_TYPE_BF16 &&
+        w.Wfc2->type == GGML_TYPE_BF16 && cfg.flash_attn && hd == 72 && fmha_kv_enabled()) {
+        ggml_tensor * qkv = vit_linear(C, vit_ln(C, x2, w.ln1w, w.ln1b, cfg.ln_eps, GGML_TYPE_BF16), w.Wqkv, w.bqkv,
+                                       VitPost::NONE, nullptr, GGML_TYPE_F32);
+        ggml_tensor * att = vit_attn(C, qkv, (int) heads, (int) hd, seq);
+        ggml_tensor * h1  = vit_linear(C, att, w.Wo, w.bo, VitPost::RES, x2, GGML_TYPE_F32);
+        ggml_tensor * f1  = vit_linear(C, vit_ln(C, h1, w.ln2w, w.ln2b, cfg.ln_eps, GGML_TYPE_BF16), w.Wfc1, w.bfc1,
+                                       VitPost::GELU, nullptr, GGML_TYPE_BF16);
+        return ggml_reshape(C, vit_linear(C, f1, w.Wfc2, w.bfc2, VitPost::RES, h1, GGML_TYPE_F32), x);
+    }
     ggml_tensor * qkv = linear(C, w.Wqkv, w.bqkv, ln(x2, w.ln1w, w.ln1b));   // [3E, T]
     const size_t es = ggml_element_size(qkv);
     auto split = [&](int b) {   // [hd, heads, seq, nv] view of block b

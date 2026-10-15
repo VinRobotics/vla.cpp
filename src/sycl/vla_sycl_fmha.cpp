@@ -33,6 +33,7 @@
 
 #include "sycl/vla_sycl_fmha.h"
 #include "layers/fmha_kv.h"
+#include "layers/vit_fused.h"
 
 #include "ggml.h"
 
@@ -327,6 +328,36 @@ bool fmha_vit(sycl::queue & q, ggml_tensor * dst, const ggml_tensor * Q, const g
     return true;
 }
 
+// vit_attn (src/layers/vit_fused.h): Q/K/V straight from the fused [3E, T]
+// projection, packed in one pass to F16 [B][H][S][96] (head_dim 72 zero-padded),
+// the kernel above, then BF16 [T][E] out for the o projection.
+bool vit_attn(sycl::queue & q, ggml_tensor * dst, const VitFusedSpec & sp) {
+    const ggml_tensor * x = dst->src[0];
+    if (sp.hd != 72 || !x || x->type != GGML_TYPE_F32 || !ggml_is_contiguous(x) || dst->type != GGML_TYPE_BF16 ||
+        !ggml_is_contiguous(dst))
+        return false;
+    const int64_t H = sp.heads, D = sp.hd, E = H * D, S = sp.seq, T = ggml_nrows(x), B = S > 0 ? T / S : 0;
+    if (x->ne[0] != 3 * E || B * S != T || dst->ne[0] != E) return false;
+    const int64_t Dp = kPadDim, n = B * H * S * Dp;
+    Elt * buf = scratch(q, (size_t) (3 * n + 2 * n));   // F16 Q, K, V, then the F32 output
+    if (!buf) return false;
+    Elt * q16 = buf, * k16 = q16 + n, * v16 = k16 + n;
+    float * o32 = reinterpret_cast<float *>(v16 + n);
+    const float * src = static_cast<const float *>(x->data);
+    q.parallel_for(sycl::range<3>(3, (size_t) (B * H * S), (size_t) Dp), [=](sycl::id<3> i) {
+        const int64_t w = i[0], r = i[1], d = i[2];
+        const int64_t b = r / (H * S), h = (r / S) % H, s = r % S;
+        const float v = d < D ? src[(b * S + s) * 3 * E + w * E + h * D + d] : 0.f;
+        (w == 0 ? q16 : w == 1 ? k16 : v16)[r * Dp + d] = Elt(v);
+    });
+    launch_batched<FmhaVit>(q, q16, k16, v16, B, S, S, H, Dp, 1.f / std::sqrt((float) D), o32);
+    auto * out = static_cast<sycl::ext::oneapi::bfloat16 *>(dst->data);
+    q.parallel_for(sycl::range<2>((size_t) (T * H), (size_t) D), [=](sycl::id<2> i) {
+        out[i[0] * D + i[1]] = sycl::ext::oneapi::bfloat16(o32[i[0] * Dp + i[1]]);
+    });
+    return true;
+}
+
 uint32_t custom_magic(const ggml_tensor * op) {
     if (op == nullptr || op->op != GGML_OP_CUSTOM) return 0;
     struct custom_params { void * fun; int n_tasks; void * userdata; };   // ggml_custom_op_params
@@ -378,6 +409,16 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
     const Elt * k16 = f16_of(q, K, spare), * v16 = f16_of(q, V, spare);
     launch<Fmha<128, 16, false>>(q, q16, Sq, Hq, Hkv, k16, v16, Skv, nullptr, nullptr, 0, scale, static_cast<float *>(dst->data));
     return true;
+}
+
+bool sycl_vit_attn_forward(ggml_tensor * dst, void * queue) {
+    if (dst->op != GGML_OP_CUSTOM || env_off()) return false;
+    struct custom_params { void * fun; int n_tasks; void * userdata; };
+    custom_params cp;
+    std::memcpy(&cp, dst->op_params, sizeof(cp));
+    const auto * sp = static_cast<const VitFusedSpec *>(cp.userdata);
+    if (!sp || sp->magic != VIT_FUSED_MAGIC || sp->kind != VitFusedKind::ATTN) return false;
+    return vit_attn(*static_cast<sycl::queue *>(queue), dst, *sp);
 }
 
 bool sycl_fmha_kv_supports(const ggml_tensor * op) {

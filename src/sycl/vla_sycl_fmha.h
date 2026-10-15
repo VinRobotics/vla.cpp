@@ -28,4 +28,7 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue);
 bool sycl_fmha_kv_forward(ggml_tensor * dst, void * queue);
 bool sycl_fmha_kv_supports(const ggml_tensor * op);
 
+// vit_attn of src/layers/vit_fused.h (head_dim 72).
+bool sycl_vit_attn_forward(ggml_tensor * dst, void * queue);
+
 }  // namespace vla

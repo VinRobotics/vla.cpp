@@ -918,6 +918,7 @@ bool dispatch(ggml_tensor * dst, void * queue) {
 #ifdef VLA_SYCL_FMHA
     if (sycl_fmha_forward(dst, queue)) return true;
     if (sycl_fmha_kv_forward(dst, queue)) return true;
+    if (sycl_vit_attn_forward(dst, queue)) return true;
 #endif
     return false;
 }
