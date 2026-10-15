@@ -22,8 +22,8 @@
  * them apart instead: the prefix K/V once as F16 (cast once per layer, outside
  * the loop) and the new K/V as F32 views, all heads non-causal, no mask.
  *
- * It is a GGML_OP_CUSTOM claimed on SYCL by src/sycl/vla_sycl_fmha.cpp (sycl-tla
- * flash attention on whole KV tiles + an exact merge of the rest). Elsewhere the
+ * It is a GGML_OP_CUSTOM claimed on SYCL by src/sycl/vla_sycl_fmha.cpp (sycl-tla's
+ * cached-KV flash attention, reading the F16 prefix in place). Elsewhere the
  * CPU function below runs it, slowly but exactly; graphs only build it when that
  * SYCL kernel is compiled in (fmha_kv_enabled).
  */

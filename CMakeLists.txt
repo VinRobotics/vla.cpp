@@ -379,6 +379,15 @@ if(GGML_SYCL AND NOT GGML_CUDA)
         if(NOT EXISTS "${VLA_SYCL_TLA_DIR}/applications/flash_attention_v2/kernel/xe_fmha_fwd_kernel.hpp")
             message(FATAL_ERROR "VLA_SYCL_TLA_DIR=${VLA_SYCL_TLA_DIR} is not a sycl-tla checkout")
         endif()
+        # Its FMHA drops or mis-masks the last partial key tile; the patch fixes both
+        # (in place, idempotent) and the kernel is wrong without it.
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_sycl_tla_fmha.py ${VLA_SYCL_TLA_DIR}
+            RESULT_VARIABLE _vla_tla_patch)
+        if(NOT _vla_tla_patch EQUAL 0)
+            message(FATAL_ERROR "scripts/patch_sycl_tla_fmha.py failed on ${VLA_SYCL_TLA_DIR}")
+        endif()
         target_sources(vla_core PRIVATE src/sycl/vla_sycl_fmha.cpp)
         set_source_files_properties(src/sycl/vla_sycl_fmha.cpp PROPERTIES
             COMPILE_OPTIONS "-fsycl;-fno-sycl-instrument-device-code;-w"
