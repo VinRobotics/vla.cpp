@@ -340,16 +340,14 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
             // FoldQuant sites (action recipe): the adaRMS output is quantized per
             // site group with the shipped SmoothQuant vector (ascale), no gamma.
             const FqModuleSpec & a = fq.action;
-            w.fq_q    = fq_declare_linear(L, a, "qkv",    false, nullptr, 0.0f, "aex.blk.%lld.attn_q",   ii);
-            w.fq_k    = fq_declare_linear(L, a, "qkv",    false, nullptr, 0.0f, "aex.blk.%lld.attn_k",   ii);
-            w.fq_v    = fq_declare_linear(L, a, "qkv",    false, nullptr, 0.0f, "aex.blk.%lld.attn_v",   ii);
+            gemma_declare_fq_qkv(L, w, a, "aex.blk." + std::to_string(ii), nullptr, 0.0f);
             w.fq_o    = fq_declare_linear(L, a, "o",      false, nullptr, 0.0f, "aex.blk.%lld.attn_o",   ii);
             gemma_declare_fq_gateup(L, w, a, "aex.blk." + std::to_string(ii), nullptr, 0.0f);
             w.fq_down = fq_declare_linear(L, a, "down",   false, nullptr, 0.0f, "aex.blk.%lld.ffn_down", ii);
             if (!w.fq_q != !w.fq_k || !w.fq_q != !w.fq_v || !w.fq_gate != !w.fq_up)
                 L.fail("FoldQuant: an expert layer's q/k/v (and gate/up) must all be INT or all float");
         }
-        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), !w.fq_q, !w.fq_gate && !w.fq_gu);
+        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), !w.fq_q && !w.fq_qkv, !w.fq_gate && !w.fq_gu);
         if (!w.fq_o)
             w.Wo    = L.gemm("aex.blk.%lld.attn_o.weight",   ii);
         if (!w.fq_down)
