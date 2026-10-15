@@ -58,18 +58,11 @@ using namespace cute;
 
 using Elt = cute::half_t;
 
-// q128 x 16 subgroups: the fastest of the four tile shapes measured on the
-// Arc B390 for pi0.5's prefix (528x528) and action-expert (50x578) attention.
-using ShapeQK  = Shape<_128, _64, _32>;
-using ShapePV  = Shape<_128, _32, _64>;
-using ShapeOut = Shape<_128, _256>;
-using SubgroupLayoutQK = Layout<Shape<_16, _1, _1>>;
+// Tile shapes. q128 x 16 sub-groups: the fastest of four measured on the Arc
+// B390 for pi0.5's prefix (561 queries x 8 heads). q64 x 8: the action expert
+// with its 8 query heads folded into the rows (one KV head), 400 rows.
 constexpr int kHeadDim = 256;
 constexpr int kPipelineStages = 2;
-
-constexpr int SGTileQ = get<0>(shape_div(ShapeQK{}, shape(SubgroupLayoutQK{})))();
-using MMAOp = XE_DPAS_TT<cute::gcd(SGTileQ, 8), float, Elt>;
-using SubgroupLayoutPV = decltype(cutlass::fmha::collective::get_sg_layout_pv(SubgroupLayoutQK{}));
 
 using StrideQ = Stride<int, _1, int, int>;   // (seq, d, head, batch)
 using StrideK = Stride<int, _1, int, int>;
@@ -86,26 +79,32 @@ using TensorK = DummyTensor<Elt, StrideK>;
 using TensorV = DummyTensor<Elt, StrideV>;
 using TensorO = DummyTensor<float, StrideO>;
 using TensorS = DummyTensor<float, StrideS>;
-
-using TiledMMAQK = typename TiledMMAHelper<MMA_Atom<MMAOp>, Layout<ShapeQK>, SubgroupLayoutQK>::TiledMMA;
-using TiledMMAPV = typename TiledMMAHelper<MMA_Atom<MMAOp>, Layout<ShapePV>, SubgroupLayoutPV>::TiledMMA;
-constexpr int VTiles = get<1>(ShapeOut{}) / get<1>(ShapePV{});
-
-template <bool CachedKV>
-using Mainloop = cutlass::fmha::collective::FMHAFwdMainloop<
-    cutlass::fmha::XeDefault<kPipelineStages>, /*Causal=*/false, /*BlockScale=*/false,
-    /*F8kvF16mma=*/false, /*PerTensorScale=*/false, CachedKV, /*PagedKV=*/false,
-    TiledMMAQK, TiledMMAPV, VTiles,
-    TensorQ, TensorK, TensorV, TensorS, TensorS, TensorS,
-    TensorK, TensorV,
-    void, void, void, void, void>;
-template <bool CachedKV>
-using Epilogue = cutlass::fmha::collective::FMHAFwdEpilogue<Mainloop<CachedKV>, ShapeOut, TensorO, void>;
 using ProblemShape = cutlass::fmha::kernel::FMHAProblemShape<false>;
 // Batch 1, grouped heads allowed (pi0.5 has 8 query heads per KV head).
 using Scheduler = cutlass::fmha::kernel::XeFHMAIndividualTileScheduler<true, false>;
-template <bool CachedKV>
-using Kernel = cutlass::fmha::kernel::XeFMHAFwdKernel<ProblemShape, Mainloop<CachedKV>, Epilogue<CachedKV>, Scheduler>;
+
+template <int QM, int SGN, bool CachedKV>
+struct Fmha {
+    using ShapeQK  = Shape<Int<QM>, _64, _32>;
+    using ShapePV  = Shape<Int<QM>, _32, _64>;
+    using ShapeOut = Shape<Int<QM>, _256>;
+    using SubgroupLayoutQK = Layout<Shape<Int<SGN>, _1, _1>>;
+    static constexpr int SGTileQ = get<0>(shape_div(ShapeQK{}, shape(SubgroupLayoutQK{})))();
+    using MMAOp = XE_DPAS_TT<cute::gcd(SGTileQ, 8), float, Elt>;
+    using SubgroupLayoutPV = decltype(cutlass::fmha::collective::get_sg_layout_pv(SubgroupLayoutQK{}));
+    using TiledMMAQK = typename TiledMMAHelper<MMA_Atom<MMAOp>, Layout<ShapeQK>, SubgroupLayoutQK>::TiledMMA;
+    using TiledMMAPV = typename TiledMMAHelper<MMA_Atom<MMAOp>, Layout<ShapePV>, SubgroupLayoutPV>::TiledMMA;
+    static constexpr int VTiles = get<1>(ShapeOut{}) / get<1>(ShapePV{});
+    using Mainloop = cutlass::fmha::collective::FMHAFwdMainloop<
+        cutlass::fmha::XeDefault<kPipelineStages>, /*Causal=*/false, /*BlockScale=*/false,
+        /*F8kvF16mma=*/false, /*PerTensorScale=*/false, CachedKV, /*PagedKV=*/false,
+        TiledMMAQK, TiledMMAPV, VTiles,
+        TensorQ, TensorK, TensorV, TensorS, TensorS, TensorS,
+        TensorK, TensorV,
+        void, void, void, void, void>;
+    using Epilogue = cutlass::fmha::collective::FMHAFwdEpilogue<Mainloop, ShapeOut, TensorO, void>;
+    using Kernel = cutlass::fmha::kernel::XeFMHAFwdKernel<ProblemShape, Mainloop, Epilogue, Scheduler>;
+};
 
 bool env_off() {
     static const bool off = [] {
@@ -143,8 +142,9 @@ int eu_count(sycl::queue & q) {
     return n;
 }
 
-// [D, S, H] tensor (F32 or F16, rows contiguous, any row/head strides) -> packed F16 [H][S][D].
-void to_f16(sycl::queue & q, const ggml_tensor * t, Elt * dst) {
+// [D, S, H] tensor (F32 or F16, rows contiguous, any row/head strides) -> packed
+// F16, [H][S][D], or [S][H][D] with fold (query heads folded into the rows).
+void to_f16(sycl::queue & q, const ggml_tensor * t, Elt * dst, bool fold = false) {
     const int64_t S = t->ne[1], H = t->ne[2];
     const size_t nb1 = t->nb[1], nb2 = t->nb[2];
     const bool f16 = t->type == GGML_TYPE_F16;
@@ -153,7 +153,7 @@ void to_f16(sycl::queue & q, const ggml_tensor * t, Elt * dst) {
         const int64_t h = i[0], s = i[1], d = i[2];
         const char * e = src + h * nb2 + s * nb1;
         const float v = f16 ? (float) reinterpret_cast<const sycl::half *>(e)[d] : reinterpret_cast<const float *>(e)[d];
-        dst[(h * S + s) * kHeadDim + d] = Elt(v);
+        dst[(fold ? s * H + h : h * S + s) * kHeadDim + d] = Elt(v);
     });
 }
 
@@ -178,10 +178,10 @@ const Elt * f16_of(sycl::queue & q, const ggml_tensor * t, Elt *& spare) {
 
 // One kernel launch. K/V: S_kv keys of each KV head, packed F16 [Hkv][S_kv][D];
 // with CachedKV, Kc/Vc hold S_c keys that come first. O: [D, Hq, Sq] F32.
-template <bool CachedKV>
+template <class Cfg>
 void launch(sycl::queue & q, const Elt * q16, int64_t Sq, int64_t Hq, int64_t Hkv, const Elt * k16, const Elt * v16,
             int64_t Skv, const Elt * kc16, const Elt * vc16, int64_t Sc, float scale, float * O) {
-    using K = Kernel<CachedKV>;
+    using K = typename Cfg::Kernel;
     ProblemShape shape{};
     shape.batch = 1;
     shape.num_heads_q = (int) Hq;
@@ -271,7 +271,7 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
     to_f16(q, Q, spare);
     spare += (size_t) Hq * Sq * kHeadDim;
     const Elt * k16 = f16_of(q, K, spare), * v16 = f16_of(q, V, spare);
-    launch<false>(q, q16, Sq, Hq, Hkv, k16, v16, Skv, nullptr, nullptr, 0, scale, static_cast<float *>(dst->data));
+    launch<Fmha<128, 16, false>>(q, q16, Sq, Hq, Hkv, k16, v16, Skv, nullptr, nullptr, 0, scale, static_cast<float *>(dst->data));
     return true;
 }
 
@@ -293,12 +293,20 @@ bool sycl_fmha_kv_forward(ggml_tensor * dst, void * queue) {
     sycl::queue & q = *static_cast<sycl::queue *>(queue);
     Elt * spare = scratch(q, (size_t) (Hq * Sq + 2 * Hkv * (Sc + Sn)) * kHeadDim);
     if (!spare) return false;
+    // One KV head: the query heads fold into the rows (token-major, so row
+    // s*Hq + h is exactly dst's row), and every row of a q64 tile is a real
+    // query instead of 50 of 128, with K/V streamed once per tile, not per head.
+    const bool fold = Hkv == 1;
     const Elt * q16 = spare;
-    to_f16(q, Q, spare);
+    to_f16(q, Q, spare, fold);
     spare += (size_t) Hq * Sq * kHeadDim;
     const Elt * kc16 = f16_of(q, Kc, spare), * vc16 = f16_of(q, Vc, spare);
     const Elt * kn16 = f16_of(q, Kn, spare), * vn16 = f16_of(q, Vn, spare);
-    launch<true>(q, q16, Sq, Hq, Hkv, kn16, vn16, Sn, kc16, vc16, Sc, scale, static_cast<float *>(dst->data));
+    float * O = static_cast<float *>(dst->data);
+    if (fold)
+        launch<Fmha<64, 8, true>>(q, q16, Sq * Hq, 1, 1, kn16, vn16, Sn, kc16, vc16, Sc, scale, O);
+    else
+        launch<Fmha<128, 16, true>>(q, q16, Sq, Hq, Hkv, kn16, vn16, Sn, kc16, vc16, Sc, scale, O);
     return true;
 }
 
