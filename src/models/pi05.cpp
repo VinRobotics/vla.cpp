@@ -350,17 +350,9 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
             if (!w.fq_q != !w.fq_k || !w.fq_q != !w.fq_v || !w.fq_gate != !w.fq_up)
                 L.fail("FoldQuant: an expert layer's q/k/v (and gate/up) must all be INT or all float");
         }
-        if (!w.fq_q) {
-            w.Wq    = L.gemm("aex.blk.%lld.attn_q.weight",   ii);
-            w.Wk    = L.gemm("aex.blk.%lld.attn_k.weight",   ii);
-            w.Wv    = L.gemm("aex.blk.%lld.attn_v.weight",   ii);
-        }
+        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), !w.fq_q, !w.fq_gate);
         if (!w.fq_o)
             w.Wo    = L.gemm("aex.blk.%lld.attn_o.weight",   ii);
-        if (!w.fq_gate) {
-            w.Wgate = L.gemm("aex.blk.%lld.ffn_gate.weight", ii);
-            w.Wup   = L.gemm("aex.blk.%lld.ffn_up.weight",   ii);
-        }
         if (!w.fq_down)
             w.Wdown = L.gemm("aex.blk.%lld.ffn_down.weight", ii);
     }
@@ -384,6 +376,7 @@ ggml_tensor * Pi05ModelArch::vision_forward(const ImageView* images, int n_image
     const int64_t K = vis.n_tokens, grid = vis.image_size/vis.patch_size, S = vis.image_size;
     const bool built = vis_graph.ensure(backend, (int64_t) n_images, (size_t) 128*1024*1024,
                                         [&](ggml_context * VC, VisIO & vio) -> ggml_cgraph * {
+        vis.vit.enc.cfg.flash_attn = flash_attn_enabled();
         vio.t_px = ggml_new_tensor_4d(VC, GGML_TYPE_F32, S, S, 3, n_images); ggml_set_input(vio.t_px);
         ggml_tensor * h = vis.vit.build(VC, vis.vit.embed_conv(VC, vio.t_px, vis.patch_size, grid), K, n_images);
         // PaliGemma projector: linear (+ optional bias).
