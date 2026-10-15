@@ -51,6 +51,7 @@ class  WeightLoader;
 
 constexpr uint32_t FQ_ACT_MAGIC  = 0x31414651u;  // "FQA1"
 constexpr uint32_t FQ_GEMM_MAGIC = 0x31474651u;  // "FQG1"
+constexpr uint32_t FQ_GLU_ACT_MAGIC = 0x31554651u;  // "FQU1": GEGLU gate/up GEMM + the next site's act
 
 // Bytes after the codes in every row of the activation blob: the per-token
 // float scale sits at byte K_pack, the rest is padding that keeps rows 16-byte
@@ -100,6 +101,7 @@ struct FqActSpec {
     bool     has_shift   = false;
 };
 
+
 /// Bits per stored activation code: 4 only for nibble-packed INT4.
 inline int fq_act_store_bits(const FqActSpec & s) { return (s.abits == 4 && !s.wide4) ? 4 : 8; }
 
@@ -124,6 +126,15 @@ struct FqGemmSpec {
     // node outputs [N/2, T] = gelu_tanh(gate) * up instead of [N, T]. SYCL only
     // for now (gemma_declare_fq_gateup); 0 = plain.
     int      glu      = 0;
+};
+
+/// A gate/up GEMM with its GEGLU and the down site's act in one node: the
+/// [N/2, T] F32 GEGLU output is never stored (fq_glu_act, SYCL). Both specs live
+/// in the layer's weight struct.
+struct FqGluActSpec {
+    uint32_t           magic = FQ_GLU_ACT_MAGIC;
+    const FqGemmSpec * gemm  = nullptr;   // the fused gate/up site (glu set)
+    const FqActSpec *  act   = nullptr;   // the down site's act (no gamma)
 };
 
 struct FqLinear {

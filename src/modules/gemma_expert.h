@@ -63,6 +63,8 @@ struct GemmaLayerW {
     // pi0.5's expert on SYCL: the q/k/v and gate/up act specs with the adaRMS
     // fused (has_shift set when in use; see fq_act_mod).
     FqActSpec act_mod_qkv{}, act_mod_gu{};
+    // gate/up GEMM + GEGLU + the down act in one node (gemma_link_glu_act).
+    FqGluActSpec glu_act{ 0 };
 };
 
 /// Declare a float layer's q/k/v and gate/up GEMMs, `p` being the tensor-name
@@ -106,6 +108,23 @@ inline void gemma_declare_fq_qkv(WeightLoader & L, GemmaLayerW & w, const FqModu
     w.fq_v = fq_declare_linear(L, fq, "qkv", false, gamma, eps, "%s.attn_v", p.c_str());
 }
 
+/// SYCL with oneDNN: the fused gate/up site's GEGLU feeds the down act directly
+/// (fq_glu_act), when both sites are FoldQuant. VLA_FQ_NO_GLU_ACT=1: apart.
+inline void gemma_link_glu_act(GemmaLayerW & w) {
+#if defined(GGML_USE_SYCL) && defined(VLA_FQ_SYCL_DNNL)
+    // Needs oneDNN's int32 sums: off when VLA_FQ_SYCL_GEMM picks the native GEMMs.
+    const char * e = std::getenv("VLA_FQ_NO_GLU_ACT");
+    if (w.fq_gu && w.fq_down && !w.fq_down.act.has_gamma && w.fq_down.act.K == w.fq_gu.gemm.N / 2 &&
+        w.fq_down.act.K <= 16384 && !(e && *e && *e != '0') && !std::getenv("VLA_FQ_SYCL_GEMM")) {
+        w.glu_act.magic = FQ_GLU_ACT_MAGIC;
+        w.glu_act.gemm  = &w.fq_gu.gemm;
+        w.glu_act.act   = &w.fq_down.act;
+    }
+#else
+    (void) w;
+#endif
+}
+
 /// FoldQuant gate/up of a layer, `p` the tensor-name prefix. On SYCL, one fused
 /// site whose epilogue applies the GEGLU, so neither the [2*inter, T] GEMM
 /// output nor a separate GLU pass exists; elsewhere two sites as shipped.
@@ -143,6 +162,7 @@ struct GemmaStack {
                 w.fq_o    = fq_declare_linear(L, *fq, "o",      false, nullptr,   0.0f,    "%s.blk.%lld.attn_o",   prefix, ii);
                 gemma_declare_fq_gateup(L, w, *fq, std::string(prefix) + ".blk." + std::to_string(ii), w.ln_post, rms_eps);
                 w.fq_down = fq_declare_linear(L, *fq, "down",   false, nullptr,   0.0f,    "%s.blk.%lld.ffn_down", prefix, ii);
+                gemma_link_glu_act(w);
                 if (!w.fq_q != !w.fq_k || !w.fq_q != !w.fq_v || !w.fq_gate != !w.fq_up)
                     L.fail("FoldQuant: a Gemma layer's q/k/v (and gate/up) must all be INT or all float");
             }
@@ -269,6 +289,10 @@ inline ggml_tensor * gemma_attn(
 inline ggml_tensor * gemma_mlp(ggml_context * ctx, const GemmaLayerW & w, ggml_tensor * x_norm, ggml_type at,
                                ggml_tensor * fq_x = nullptr, ggml_tensor * fq_res = nullptr,
                                ggml_tensor * fq_xq = nullptr, ggml_tensor * fq_gate = nullptr) {
+    if (w.fq_gu && w.glu_act.magic == FQ_GLU_ACT_MAGIC) {   // GEGLU straight into the down act
+        ggml_tensor * xq_down = fq_glu_act(ctx, &w.glu_act, w.fq_gu, w.fq_down, fq_xq ? fq_xq : fq_act(ctx, w.fq_gu, fq_x));
+        return fq_gemm(ctx, w.fq_down, xq_down, fq_res, fq_gate);
+    }
     if (w.fq_gu) {   // one FoldQuant GEMM, GEGLU in its epilogue
         ggml_tensor * inter = fq_gemm(ctx, w.fq_gu, fq_xq ? fq_xq : fq_act(ctx, w.fq_gu, fq_x));
         if (w.fq_down)

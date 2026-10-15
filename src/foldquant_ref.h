@@ -97,5 +97,9 @@ inline void fq_act_srcs(const ggml_tensor * dst, const FqActSpec & s,
 
 void fq_act_cpu (ggml_tensor * dst, int ith, int nth, void * userdata);
 void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata);
+// fq_glu_act: src[0]=gate/up W, src[1]=act blob, src[2]=wscale, src[3]=bias|null,
+// src[4]=the down site's ascale|null; dst = the down site's act blob. One thread
+// does it all (a reference for the SYCL node, never on a hot path).
+void fq_glu_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata);
 
 }  // namespace vla

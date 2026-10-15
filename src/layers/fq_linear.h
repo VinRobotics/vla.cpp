@@ -90,6 +90,19 @@ inline ggml_tensor * fq_gemm(ggml_context * C, const FqLinear & s, ggml_tensor *
     return y;
 }
 
+// The gate/up GEMM (fused glu site gu) and the down site's act in one node:
+// returns the down act blob (fq_gemm(down, ...) takes it). SYCL with oneDNN.
+inline ggml_tensor * fq_glu_act(ggml_context * C, const FqGluActSpec * spec, const FqLinear & gu, const FqLinear & down,
+                                ggml_tensor * xq) {
+    GGML_ASSERT(gu.gemm.glu && xq->type == GGML_TYPE_I8 && down.act.K == gu.gemm.N / 2 && !down.act.has_gamma);
+    ggml_tensor * args[5] = { gu.w, xq, gu.wscale, gu.bias, down.ascale };
+    ggml_tensor * t = ggml_custom_4d(C, GGML_TYPE_I8, fq_act_row_bytes(down.act.K, fq_act_store_bits(down.act)),
+                                     xq->ne[1], 1, 1, args, down.ascale ? 5 : 4, fq_glu_act_cpu, GGML_N_TASKS_MAX,
+                                     (void *) spec);
+    ggml_format_name(t, "%s.fq_glu_act", ggml_get_name(gu.w));
+    return t;
+}
+
 // An act node with its own spec (outliving the graph) and per-node gamma and
 // shift: pi0.5's adaRMS, gamma = 1 + scale, quantized in the same pass. x is
 // the pre-norm hidden state; s supplies the site's ascale.

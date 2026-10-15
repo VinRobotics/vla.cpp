@@ -331,4 +331,35 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     }
 }
 
+void fq_glu_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
+    (void) nth;
+    const FqGluActSpec & gs = *(const FqGluActSpec *) userdata;
+    if (gs.magic != FQ_GLU_ACT_MAGIC || ith != 0) return;
+    const FqGemmSpec & s  = *gs.gemm;
+    const FqActSpec &  as = *gs.act;
+    const int64_t K = s.K, N = s.N, Nh = N / 2, T = dst->ne[1];
+    // The GEGLU output, exactly as the glu fq_gemm node computes it.
+    ggml_tensor tmp = *dst;
+    std::vector<float> inter((size_t) Nh * T);
+    tmp.type = GGML_TYPE_F32;
+    tmp.ne[0] = Nh;
+    tmp.nb[0] = sizeof(float);
+    tmp.nb[1] = (size_t) Nh * sizeof(float);
+    tmp.nb[2] = tmp.nb[3] = tmp.nb[1] * (size_t) T;
+    tmp.data = inter.data();
+    tmp.src[4] = nullptr;
+    tmp.src[5] = nullptr;
+    fq_gemm_cpu(&tmp, 0, 1, (void *) &s);
+    const float * ap = dst->src[4] ? (const float *) dst->src[4]->data : nullptr;
+    const int64_t rb = fq_act_row_bytes(Nh, fq_act_store_bits(as)), kp = fq_act_kpack(Nh, fq_act_store_bits(as));
+    std::vector<float> buf((size_t) Nh);
+    float partial[fqref::NT];
+    for (int64_t t = 0; t < T; ++t) {
+        uint8_t * row = (uint8_t *) dst->data + (size_t) t * rb;
+        fqref::act_row(inter.data() + (size_t) t * Nh, ap, nullptr, as, buf.data(), partial, (int8_t *) row,
+                       (float *) (row + kp));
+    }
+    (void) K;
+}
+
 }  // namespace vla
