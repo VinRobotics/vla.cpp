@@ -89,6 +89,7 @@ struct ActParams {
     // gelu_tanh(((acc[m][k] * xs_m) * ws[k]) (+ b[k])) * (same at k + K), xs_m the
     // gate/up input row's scale, read from its blob; the glu epilogue's math.
     const int32_t * glu_acc       = nullptr;   // [M][2K]
+    const sycl::ext::oneapi::bfloat16 * glu_bf = nullptr;   // or [M][2K] BF16 sums x weight scales
     const float *   glu_ws        = nullptr;   // [2K]
     const float *   glu_bias      = nullptr;   // [2K] or null
     const int8_t *  glu_blob      = nullptr;
@@ -278,14 +279,21 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
         if (c < nchunks) {
             const int64_t k0 = (int64_t) c * CHUNK + 2 * lane;
             float e0, e1;
-            if (a.glu_acc) {
+            if (a.glu_acc || a.glu_bf) {
                 float xs;
                 std::memcpy(&xs, a.glu_blob + m * a.glu_row_bytes + a.glu_kp, sizeof(float));
-                const int32_t * ar = a.glu_acc + m * 2 * K;
-                float g0 = ((float) ar[k0]     * xs) * a.glu_ws[k0];
-                float g1 = ((float) ar[k0 + 1] * xs) * a.glu_ws[k0 + 1];
-                float u0 = ((float) ar[K + k0]     * xs) * a.glu_ws[K + k0];
-                float u1 = ((float) ar[K + k0 + 1] * xs) * a.glu_ws[K + k0 + 1];
+                float g0, g1, u0, u1;
+                if (a.glu_bf) {
+                    const sycl::ext::oneapi::bfloat16 * br = a.glu_bf + m * 2 * K;
+                    g0 = (float) br[k0] * xs;     g1 = (float) br[k0 + 1] * xs;
+                    u0 = (float) br[K + k0] * xs; u1 = (float) br[K + k0 + 1] * xs;
+                } else {
+                    const int32_t * ar = a.glu_acc + m * 2 * K;
+                    g0 = ((float) ar[k0]     * xs) * a.glu_ws[k0];
+                    g1 = ((float) ar[k0 + 1] * xs) * a.glu_ws[k0 + 1];
+                    u0 = ((float) ar[K + k0]     * xs) * a.glu_ws[K + k0];
+                    u1 = ((float) ar[K + k0 + 1] * xs) * a.glu_ws[K + k0 + 1];
+                }
                 if (a.glu_bias) {
                     g0 = g0 + a.glu_bias[k0];     g1 = g1 + a.glu_bias[k0 + 1];
                     u0 = u0 + a.glu_bias[K + k0]; u1 = u1 + a.glu_bias[K + k0 + 1];
@@ -706,21 +714,22 @@ void launch_epilogue(sycl::queue & q, const GemmParams & g, const int32_t * acc,
 }
 
 bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res,
-                    int32_t ** acc_out = nullptr);
+                    int32_t ** acc_out = nullptr, bool bf16ws = false);
 
 // oneDNN on a GPU, unless it cannot drive it (no engine, no int8 matmul): then
 // this file's kernels, for good on that queue. GPUs only: on a CPU device
 // oneDNN's int8 matmul is not exact everywhere (on CPUs without VNNI it sums
 // pairs in saturating 16-bit lanes, vpmaddubsw), and vla.cpp only runs ggml-sycl
 // on GPUs anyway; the CPU device is test_foldquant_sycl_op's stand-in.
-// acc_out: stop after the matmul and hand back the int32 sums (fq_glu_act).
+// acc_out: stop after the matmul and hand back the int32 sums (fq_glu_act);
+// with bf16ws, BF16 sums already times the weight scales instead (same buffer).
 bool gemm_dnnl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res,
-               int32_t ** acc_out = nullptr) {
+               int32_t ** acc_out = nullptr, bool bf16ws = false) {
     static std::unordered_map<sycl::queue *, bool> unusable;
     if (unusable.find(&q) == unusable.end()) unusable[&q] = !q.get_device().is_gpu();
     if (unusable[&q]) return false;
     try {
-        if (gemm_dnnl_impl(q, g, wbits, abits, has_bias, has_res, acc_out)) return true;
+        if (gemm_dnnl_impl(q, g, wbits, abits, has_bias, has_res, acc_out, bf16ws)) return true;
     } catch (const std::exception & e) {
         std::fprintf(stderr, "FoldQuant SYCL: oneDNN unavailable on this device (%s); using the native GEMMs\n", e.what());
     }
@@ -729,7 +738,8 @@ bool gemm_dnnl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool
 }
 
 bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res,
-                    int32_t ** acc_out) {
+                    int32_t ** acc_out, bool bf16ws) {
+    bf16ws = bf16ws && acc_out;
     using dt  = dnnl::memory::data_type;
     using md  = dnnl::memory::desc;
     DnnlState & st = dnnl_state(q);
@@ -746,10 +756,12 @@ bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits,
     auto make = [&](bool w4) {
         const md src_md({ M, K }, dt::s8, { lda, 1 });
         const md wei_md({ K, N }, w4 ? dt::s4 : dt::s8, { 1, K });
-        const md dst_md({ M, N }, dt::s32, { N, 1 });
-        return dnnl::matmul(dnnl::matmul::primitive_desc(st.eng, src_md, wei_md, dst_md));
+        const md dst_md({ M, N }, bf16ws ? dt::bf16 : dt::s32, { N, 1 });
+        dnnl::primitive_attr attr;
+        if (bf16ws) attr.set_scales_mask(DNNL_ARG_WEIGHTS, 1 << 1);   // per output column
+        return dnnl::matmul(dnnl::matmul::primitive_desc(st.eng, src_md, wei_md, dst_md, attr));
     };
-    auto key = std::make_tuple(M, N, K, lda, s4 ? 1 : 0);
+    auto key = std::make_tuple(M, N, K, lda, (s4 ? 1 : 0) | (bf16ws ? 2 : 0));
     auto it  = st.prims.find(key);
     if (it == st.prims.end()) {
         try {
@@ -759,7 +771,7 @@ bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits,
             st.s4_ok = false;   // no s4 x s8 matmul here: unpack the weights instead
             std::fprintf(stderr, "FoldQuant SYCL: oneDNN has no s8 x s4 matmul here; INT4 weights are unpacked per call\n");
             s4  = false;
-            key = std::make_tuple(M, N, K, lda, 0);
+            key = std::make_tuple(M, N, K, lda, bf16ws ? 2 : 0);
             it  = st.prims.find(key);
             if (it == st.prims.end()) it = st.prims.emplace(key, make(false)).first;
         }
@@ -774,11 +786,17 @@ bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits,
     using dnnl::sycl_interop::memory_kind;
     const md src_md({ M, K }, dt::s8, { lda, 1 });
     const md wei_md({ K, N }, s4 ? dt::s4 : dt::s8, { 1, K });
-    const md dst_md({ M, N }, dt::s32, { N, 1 });
+    const md dst_md({ M, N }, bf16ws ? dt::bf16 : dt::s32, { N, 1 });
     auto src_m = make_memory(src_md, st.eng, memory_kind::usm, const_cast<int8_t *>(a));
     auto wei_m = make_memory(wei_md, st.eng, memory_kind::usm, const_cast<int8_t *>(w));
     auto dst_m = make_memory(dst_md, st.eng, memory_kind::usm, acc);
-    it->second.execute(st.strm, { { DNNL_ARG_SRC, src_m }, { DNNL_ARG_WEIGHTS, wei_m }, { DNNL_ARG_DST, dst_m } });
+    if (bf16ws) {
+        auto sc_m = make_memory(md({ N }, dt::f32, { 1 }), st.eng, memory_kind::usm, const_cast<float *>(g.wscale));
+        it->second.execute(st.strm, { { DNNL_ARG_SRC, src_m }, { DNNL_ARG_WEIGHTS, wei_m }, { DNNL_ARG_DST, dst_m },
+                                      { DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, sc_m } });
+    } else {
+        it->second.execute(st.strm, { { DNNL_ARG_SRC, src_m }, { DNNL_ARG_WEIGHTS, wei_m }, { DNNL_ARG_DST, dst_m } });
+    }
     if (acc_out) {
         *acc_out = acc;
         return true;
@@ -910,8 +928,12 @@ bool run_glu_act(sycl::queue & q, ggml_tensor * dst, const FqGluActSpec & gs) {
     g.row_bytes = blob->ne[0];
     if (g.M == 0) return true;
     const int abits = blob_abits(blob, s.K);
+    // BF16 sums with the weight scales applied by oneDNN: the matmul writes and
+    // this act reads half the bytes (prefix gate/up: 1.07 -> 0.85 ms on the Arc
+    // B390), at a BF16 rounding of the pre-GELU values. VLA_FQ_GLU_BF16=0: int32.
+    static const bool bf = [] { const char * e = std::getenv("VLA_FQ_GLU_BF16"); return !(e && std::strcmp(e, "0") == 0); }();
     int32_t * acc = nullptr;
-    if (!gemm_dnnl(q, g, s.wbits, abits, false, false, &acc) || !acc) return false;
+    if (!gemm_dnnl(q, g, s.wbits, abits, false, false, &acc, bf) || !acc) return false;
     ActParams a{};
     a.ascale        = ascale ? (const float *) ascale->data : nullptr;
     a.blob          = (int8_t *) dst->data;
@@ -922,7 +944,8 @@ bool run_glu_act(sycl::queue & q, ggml_tensor * dst, const FqGluActSpec & gs) {
     a.clip          = as.clip;
     a.eps           = as.eps;
     a.inv_sqrt_bs   = as.rot_block > 1 ? fqref::inv_sqrt_block(as.rot_block) : 1.0f;
-    a.glu_acc       = acc;
+    a.glu_acc       = bf ? nullptr : acc;
+    a.glu_bf        = bf ? reinterpret_cast<const sycl::ext::oneapi::bfloat16 *>(acc) : nullptr;
     a.glu_ws        = g.wscale;
     a.glu_bias      = g.bias;
     a.glu_blob      = g.blob;
