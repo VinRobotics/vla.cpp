@@ -24,7 +24,8 @@
 //
 // Q, K and V arrive as F32 (src/backend.h fa_kv keeps them F32 off Hexagon);
 // one kernel converts them to F16 in a scratch buffer, the FMHA kernel reads
-// that, accumulates in F32 and writes F32 straight into dst.
+// that, accumulates in F32 and writes F32 straight into dst. It takes the keys
+// in whole 64-key tiles only; the remainder is merged in by merge_tail.
 //
 // VLA_SYCL_FMHA=0 turns the claim off.
 
@@ -65,6 +66,7 @@ using ShapePV  = Shape<_128, _32, _64>;
 using ShapeOut = Shape<_128, _256>;
 using SubgroupLayoutQK = Layout<Shape<_16, _1, _1>>;
 constexpr int kHeadDim = 256;
+constexpr int kTileKV  = 64;   // get<1>(ShapeQK)
 constexpr int kPipelineStages = 2;
 
 constexpr int SGTileQ = get<0>(shape_div(ShapeQK{}, shape(SubgroupLayoutQK{})))();
@@ -98,7 +100,8 @@ using Mainloop = cutlass::fmha::collective::FMHAFwdMainloop<
     TensorQ, TensorK, TensorV, TensorS, TensorS, TensorS,
     TensorK, TensorV,
     void, void, void, void, void>;
-using Epilogue = cutlass::fmha::collective::FMHAFwdEpilogue<Mainloop, ShapeOut, TensorO, void>;
+// LSE out: the KV tail past the last full 64-key tile is merged in afterwards.
+using Epilogue = cutlass::fmha::collective::FMHAFwdEpilogue<Mainloop, ShapeOut, TensorO, void, /*EnableLSE=*/true>;
 using ProblemShape = cutlass::fmha::kernel::FMHAProblemShape<false>;
 // Batch 1, grouped heads allowed (pi0.5 has 8 query heads per KV head).
 using Scheduler = cutlass::fmha::kernel::XeFHMAIndividualTileScheduler<true, false>;
@@ -109,26 +112,26 @@ bool env_off() {
     return e && std::strcmp(e, "0") == 0;
 }
 
-// F16 scratch for the converted Q, K and V; grows, never shrinks. The queue is
-// in-order, so one buffer serves every node in turn.
+// Device scratch for the F16 Q, K, V and the LSE; grows, never shrinks. The
+// queue is in-order, so one buffer serves every node in turn.
 struct Scratch {
     std::mutex mu;
     sycl::context ctx;
-    Elt * ptr = nullptr;
+    char * ptr = nullptr;
     size_t n = 0;
 };
 
-Elt * scratch(sycl::queue & q, size_t n) {
+char * scratch(sycl::queue & q, size_t bytes) {
     static Scratch s;
     std::lock_guard<std::mutex> lk(s.mu);
-    if (s.ptr && s.ctx == q.get_context() && s.n >= n) return s.ptr;
+    if (s.ptr && s.ctx == q.get_context() && s.n >= bytes) return s.ptr;
     if (s.ptr) {
         q.wait();
         sycl::free(s.ptr, s.ctx);
     }
     s.ctx = q.get_context();
-    s.ptr = sycl::malloc_device<Elt>(n, q);
-    s.n = s.ptr ? n : 0;
+    s.ptr = sycl::malloc_device<char>(bytes, q);
+    s.n = s.ptr ? bytes : 0;
     return s.ptr;
 }
 
@@ -137,15 +140,63 @@ int eu_count(sycl::queue & q) {
     return n;
 }
 
-// [D, S, H] F32 view with byte strides -> packed [H][S][D] F16.
-void to_f16(sycl::queue & q, const ggml_tensor * t, Elt * dst) {
-    const int64_t D = t->ne[0], S = t->ne[1], H = t->ne[2];
+// First S rows of a [D, *, H] F32 view with byte strides -> packed [H][S][D] F16.
+void to_f16(sycl::queue & q, const ggml_tensor * t, Elt * dst, int64_t S) {
+    const int64_t D = t->ne[0], H = t->ne[2];
     const size_t nb1 = t->nb[1], nb2 = t->nb[2];
     const char * src = static_cast<const char *>(t->data);
     q.parallel_for(sycl::range<3>(H, S, D), [=](sycl::id<3> i) {
         const int64_t h = i[0], s = i[1], d = i[2];
         const float v = *reinterpret_cast<const float *>(src + h * nb2 + s * nb1 + d * sizeof(float));
         dst[(h * S + s) * D + d] = Elt(v);
+    });
+}
+
+// The keys past the last full KV tile, merged into the FMHA output. On the Arc
+// B390 the kernel's own remainder masking gives wrong rows (any S_kv % 64 != 0;
+// tests/fmha_sycl_check), so the kernel only sees whole tiles and this does the
+// rest exactly: one work-group per (head, query) row, one work-item per channel.
+// lse2 is the kernel's log2(sum exp(scale * s)) over its keys; empty when
+// kv0 == 0. The tail is read from the F32 inputs.
+void merge_tail(sycl::queue & q, const ggml_tensor * Q, const ggml_tensor * K, const ggml_tensor * V,
+                float * O, const float * lse2, int64_t kv0, float scale) {
+    const int64_t Sq = Q->ne[1], Hq = Q->ne[2], Skv = K->ne[1], Hkv = K->ne[2];
+    const int64_t grp = Hq / Hkv, ntail = Skv - kv0;
+    const char * qp = static_cast<const char *>(Q->data);
+    const char * kp = static_cast<const char *>(K->data);
+    const char * vp = static_cast<const char *>(V->data);
+    const size_t qb1 = Q->nb[1], qb2 = Q->nb[2], kb1 = K->nb[1], kb2 = K->nb[2], vb1 = V->nb[1], vb2 = V->nb[2];
+    q.submit([&](sycl::handler & h) {
+        sycl::local_accessor<float, 1> sc(sycl::range<1>(kTileKV), h);
+        h.parallel_for(sycl::nd_range<1>(sycl::range<1>(Hq * Sq * kHeadDim), sycl::range<1>(kHeadDim)),
+                       [=](sycl::nd_item<1> it) {
+            const int64_t row = it.get_group(0), d = it.get_local_id(0);
+            const int64_t hq = row / Sq, s = row % Sq, hk = hq / grp;
+            const float qd = *reinterpret_cast<const float *>(qp + hq * qb2 + s * qb1 + d * sizeof(float));
+            float m = -INFINITY;
+            for (int64_t t = 0; t < ntail; ++t) {
+                const float kd = *reinterpret_cast<const float *>(kp + hk * kb2 + (kv0 + t) * kb1 + d * sizeof(float));
+                const float st = sycl::reduce_over_group(it.get_group(), qd * kd, sycl::plus<float>()) * scale;
+                if (d == 0) sc[t] = st;
+                m = sycl::fmax(m, st);
+            }
+            sycl::group_barrier(it.get_group());
+            float l = 0.f, acc = 0.f;
+            for (int64_t t = 0; t < ntail; ++t) {
+                const float w = sycl::exp(sc[t] - m);
+                l += w;
+                acc += w * *reinterpret_cast<const float *>(vp + hk * vb2 + (kv0 + t) * vb1 + d * sizeof(float));
+            }
+            float * o = O + (s * Hq + hq) * kHeadDim + d;
+            if (kv0 == 0) {
+                *o = acc / l;
+                return;
+            }
+            // Natural-log mass of each part, then the usual two-way softmax merge.
+            const float a = lse2[hq * Sq + s] * 0.69314718056f, b = m + sycl::log(l);
+            const float mx = sycl::fmax(a, b), wa = sycl::exp(a - mx), wb = sycl::exp(b - mx);
+            *o = (wa * *o + wb * (acc / l)) / (wa + wb);
+        });
     });
 }
 
@@ -221,20 +272,26 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
     if (V->ne[1] != Skv || V->ne[2] != Hkv || Hkv < 1 || Hq % Hkv != 0) return false;
 
     sycl::queue & q = *static_cast<sycl::queue *>(queue);
-    const size_t nq = (size_t) Hq * Sq * kHeadDim, nkv = (size_t) Hkv * Skv * kHeadDim;
-    Elt * buf = scratch(q, nq + 2 * nkv);
+    const int64_t kv0 = Skv / kTileKV * kTileKV;   // keys the kernel takes; the rest is the tail
+    const size_t nq = (size_t) Hq * Sq * kHeadDim, nkv = (size_t) Hkv * kv0 * kHeadDim;
+    char * buf = scratch(q, (nq + 2 * nkv) * sizeof(Elt) + (size_t) Hq * Sq * sizeof(float));
     if (!buf) return false;
-    Elt * q16 = buf, * k16 = buf + nq, * v16 = buf + nq + nkv;
-    to_f16(q, Q, q16);
-    to_f16(q, K, k16);
-    to_f16(q, V, v16);
+    Elt * q16 = reinterpret_cast<Elt *>(buf), * k16 = q16 + nq, * v16 = k16 + nkv;
+    float * lse2 = reinterpret_cast<float *>(v16 + nkv);
+    if (kv0 == 0) {   // shorter than one tile: the tail pass is the whole attention
+        merge_tail(q, Q, K, V, static_cast<float *>(dst->data), nullptr, 0, scale);
+        return true;
+    }
+    to_f16(q, Q, q16, Sq);
+    to_f16(q, K, k16, kv0);
+    to_f16(q, V, v16, kv0);
 
     ProblemShape shape{};
     shape.batch = 1;
     shape.num_heads_q = (int) Hq;
     shape.num_heads_kv = (int) Hkv;
     shape.seq_len_qo = (int) Sq;
-    shape.seq_len_kv = (int) Skv;
+    shape.seq_len_kv = (int) kv0;
     shape.seq_len_kv_cache = 0;
     shape.head_size_qk = kHeadDim;
     shape.head_size_vo = kHeadDim;
@@ -242,11 +299,12 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
     typename Kernel::KernelArguments ka{};
     ka.shape = shape;
     ka.Q = q16; ka.dQ = StrideQ{kHeadDim, _1{}, (int) (Sq * kHeadDim), (int) nq};
-    ka.K = k16; ka.dK = StrideK{kHeadDim, _1{}, (int) (Skv * kHeadDim), (int) nkv};
-    ka.V = v16; ka.dV = StrideV{_1{}, kHeadDim, (int) (Skv * kHeadDim), (int) nkv};
+    ka.K = k16; ka.dK = StrideK{kHeadDim, _1{}, (int) (kv0 * kHeadDim), (int) nkv};
+    ka.V = v16; ka.dV = StrideV{_1{}, kHeadDim, (int) (kv0 * kHeadDim), (int) nkv};
     // dst is [D, Hq, Sq]: a row of D floats per (token, head).
     ka.O = static_cast<float *>(dst->data);
     ka.dO = StrideO{(int) (Hq * kHeadDim), _1{}, kHeadDim, (int) (Sq * Hq * kHeadDim)};
+    ka.Lse = kv0 < Skv ? lse2 : nullptr;
     ka.K_cache = nullptr;
     ka.V_cache = nullptr;
 
@@ -271,6 +329,8 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
                                                compat::dim3(block.x, block.y, block.z),
                                                launch_props, kernel_props};
     compat::experimental::launch<cutlass::device_kernel<Kernel>, Kernel, false>(policy, q, params);
+    if (kv0 < Skv)
+        merge_tail(q, Q, K, V, static_cast<float *>(dst->data), lse2, kv0, scale);
     static const bool check = [] { const char * e = std::getenv("VLA_SYCL_FMHA_CHECK"); return e && *e && *e != '0'; }();
     if (check) check_against_host(q, dst, Q, K, V, scale);
     return true;
