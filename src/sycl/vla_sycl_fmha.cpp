@@ -406,13 +406,15 @@ void * split_scratch(sycl::queue & q, size_t bytes) {
     return p;
 }
 
-// Chunks over S keys: 128 keys (two 64-key tiles) each, measured best on the
-// Arc B390 for 80 and 400 folded rows over ~600 keys; no split under 256 keys.
-// VLA_FMHA_SPLITS=n forces n (1 = no split).
-int64_t split_count(int64_t S) {
+// Chunks over S keys for R folded rows: 128 keys (two 64-key tiles) each, and
+// only while the rows alone give few work-groups (R <= 192, three q64 tiles).
+// On the Arc B390, 80 rows over ~600 keys: 0.12 -> 0.05 ms; 400 rows (pi0.5's
+// 50 action tokens x 8 heads) gain less in the kernel than the pack and
+// combine passes cost. VLA_FMHA_SPLITS=n forces n (1 = no split).
+int64_t split_count(int64_t R, int64_t S) {
     static const int forced = [] { const char * e = std::getenv("VLA_FMHA_SPLITS"); return e ? std::atoi(e) : 0; }();
     if (forced > 0) return std::min<int64_t>(forced, S);
-    return S < 256 ? 1 : (S + 127) / 128;
+    return (R > 192 || S < 256) ? 1 : (S + 127) / 128;
 }
 
 bool fmha_kv_split(sycl::queue & q, const ggml_tensor * Q, const Elt * kc16, const Elt * vc16, int64_t Sc,
@@ -538,7 +540,7 @@ bool sycl_fmha_kv_forward(ggml_tensor * dst, void * queue) {
     const bool fold = Hkv == 1;
     float * O = static_cast<float *>(dst->data);
     if (fold && packed_f16(Kc) && packed_f16(Vc)) {
-        const int64_t ns = split_count(Sc + Sn);
+        const int64_t ns = split_count(Sq * Hq, Sc + Sn);
         if (ns > 1)
             return fmha_kv_split(q, Q, static_cast<const Elt *>(Kc->data), static_cast<const Elt *>(Vc->data), Sc, Kn, Vn,
                                  scale, O, ns);

@@ -69,7 +69,7 @@ struct Pi05ModelArch : public ModelArchBase {
         }
     };
     struct MainIO {
-        ggml_tensor *t_image_emb=nullptr,*t_lang_emb=nullptr,*t_prefix_pos=nullptr;
+        ggml_tensor *t_prefix=nullptr,*t_prefix_pos=nullptr;
         ggml_tensor *t_x0=nullptr,*t_suffix_pos=nullptr,*x_final=nullptr;
     };
     graph_cache<MainKey, MainIO> main_graph;
@@ -473,14 +473,13 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     const bool built = main_graph.ensure(backend, mkey,
                                          ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false),
                                          [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
-    ggml_tensor * t_image_emb = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_img_tokens); ggml_set_input(t_image_emb);
-    ggml_tensor * t_lang_emb  = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_lang);       ggml_set_input(t_lang_emb);
+    // One prefix input, image rows then language rows (the latter scaled on the
+    // host): no CONCAT node, which also keeps the graph SYCL-graph compatible.
+    ggml_tensor * prefix_embs = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_prefix);     ggml_set_input(prefix_embs);
     ggml_tensor * t_prefix_pos= ggml_new_tensor_1d(C, GGML_TYPE_I32, n_prefix);                ggml_set_input(t_prefix_pos);
     ggml_tensor * t_x0        = ggml_new_tensor_2d(C, GGML_TYPE_F32, max_ad, chunk);           ggml_set_input(t_x0);
     ggml_tensor * t_suffix_pos= ggml_new_tensor_1d(C, GGML_TYPE_I32, n_suf);                   ggml_set_input(t_suffix_pos);
 
-    const float lang_scale = (float) std::sqrt((double) hidden_pl);
-    ggml_tensor * prefix_embs = ggml_concat(C, t_image_emb, ggml_scale(C, t_lang_emb, lang_scale),  1);
 
     std::vector<ggml_tensor *> cK(n_layers), cV(n_layers);
     {
@@ -521,7 +520,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     ggml_tensor * x_final = x_t;
     ggml_set_output(x_final);
 
-    gio.t_image_emb=t_image_emb; gio.t_lang_emb=t_lang_emb; gio.t_prefix_pos=t_prefix_pos;
+    gio.t_prefix=prefix_embs; gio.t_prefix_pos=t_prefix_pos;
     gio.t_x0=t_x0; gio.t_suffix_pos=t_suffix_pos; gio.x_final=x_final;
 
     ggml_cgraph * gf = ggml_new_graph_custom(C, max_nodes, false);
@@ -532,7 +531,14 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
 
     MainIO & gio = main_graph.io();
     ggml_cgraph * gf = main_graph.graph();
-    ggml_tensor * t_image_emb = gio.t_image_emb, * t_lang_emb = gio.t_lang_emb;
+    ggml_tensor * t_prefix = gio.t_prefix;
+    // Rows [0, n_img_tokens) of the prefix input, as a tensor of its own layout
+    // (for ggml_backend_tensor_copy); the language rows follow.
+    ggml_tensor img_rows = *t_prefix;
+    img_rows.ne[1] = n_img_tokens;
+    img_rows.nb[2] = img_rows.nb[3] = img_rows.nb[1] * (size_t) n_img_tokens;
+    ggml_tensor * t_image_emb = &img_rows;
+    const size_t lang_off = (size_t) n_img_tokens * t_prefix->nb[1];
     ggml_tensor * t_prefix_pos = gio.t_prefix_pos, * t_x0 = gio.t_x0;
     ggml_tensor * t_suffix_pos = gio.t_suffix_pos, * x_final = gio.x_final;
 
@@ -545,7 +551,11 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_copy(emb, t_image_emb);
         stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now()-tv0).count();
     }
-    ggml_backend_tensor_set(t_lang_emb,  lang_rows.data(),    0, ggml_nbytes(t_lang_emb));
+    {   // Gemma scales the token embeddings by sqrt(hidden): x * s in F32, as ggml_scale did on device.
+        const float lang_scale = (float) std::sqrt((double) hidden_pl);
+        for (float & v : lang_rows) v *= lang_scale;
+    }
+    ggml_backend_tensor_set(t_prefix, lang_rows.data(), lang_off, lang_rows.size() * sizeof(float));
     {
         std::vector<int32_t> pp(n_prefix); for (int64_t i=0; i<n_prefix; ++i) pp[i] = (int32_t) i;
         ggml_backend_tensor_set(t_prefix_pos, pp.data(), 0, ggml_nbytes(t_prefix_pos));
