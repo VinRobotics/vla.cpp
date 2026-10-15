@@ -70,6 +70,7 @@ struct FqModuleSpec {
     bool  dequant     = false;  // read every site back as a float weight (see above)
     bool  no_heads    = false;  // keep plain [N][T] GEMM outputs (no fq_set_heads layout)
     bool  wide4       = false;  // SYCL: store INT4 activations one code per byte (FqActSpec::wide4); arch opt-in
+    bool  s4gemm      = false;  // SYCL: W4A4 sites on the INT4 DPAS GEMMs (FqGemmSpec::s4); arch opt-in
 
     int wbits_for(const char * site_key) const;
     int abits_for(const char * site_key) const;
@@ -127,6 +128,9 @@ struct FqGemmSpec {
     // node outputs [N/2, T] = gelu_tanh(gate) * up instead of [N, T]. SYCL only
     // for now (gemma_declare_fq_gateup); 0 = plain.
     int      glu      = 0;
+    // SYCL: run W4A4 instances on the INT4 x INT4 DPAS kernels
+    // (src/sycl/vla_sycl_s4gemm.cpp); needs nibble-packed activations.
+    int      s4       = 0;
 };
 
 /// A gate/up GEMM with its GEGLU and the down site's act in one node: the

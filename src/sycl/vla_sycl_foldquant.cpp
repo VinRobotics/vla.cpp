@@ -36,6 +36,9 @@
 #include "sycl/vla_sycl_foldquant.h"
 #include "sycl/vla_sycl_fmha.h"
 #include "sycl/vla_sycl_fused.h"
+#ifdef VLA_SYCL_S4GEMM
+#include "sycl/vla_sycl_s4gemm.h"
+#endif
 
 #include "foldquant.h"
 #include "foldquant_ref.h"
@@ -90,6 +93,7 @@ struct ActParams {
     // gate/up input row's scale, read from its blob; the glu epilogue's math.
     const int32_t * glu_acc       = nullptr;   // [M][2K]
     const uint16_t * glu_bf       = nullptr;   // or [M][2K] BF16 bits: sums x weight scales
+    const uint16_t * x_bf         = nullptr;   // or [M][K] BF16 bits: the input itself (the INT4 GEGLU kernel's)
     const float *   glu_ws        = nullptr;   // [2K]
     const float *   glu_bias      = nullptr;   // [2K] or null
     const int8_t *  glu_blob      = nullptr;
@@ -303,6 +307,10 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
                 }
                 e0 = gelu_tanh(g0) * u0;
                 e1 = gelu_tanh(g1) * u1;
+            } else if (a.x_bf) {
+                const uint16_t * xr = a.x_bf + m * K;
+                e0 = sycl::bit_cast<float>((uint32_t) xr[k0] << 16);
+                e1 = sycl::bit_cast<float>((uint32_t) xr[k0 + 1] << 16);
             } else {
                 e0 = x[k0];
                 e1 = x[k0 + 1];
@@ -817,6 +825,24 @@ bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits,
 // XMX, else the plain tiled one.
 bool run_gemm_plain(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool bias, bool simple, bool res = false);
 
+#if defined(VLA_FQ_SYCL_DNNL) && defined(VLA_SYCL_S4GEMM)
+// INT4 x INT4 on DPAS for sites that opt in (FqGemmSpec::s4, nibble-packed
+// activations). Exact integer sums like oneDNN's, so the epilogues and the
+// VLA_FQ_CHECK comparison are unchanged. VLA_FQ_NO_S4GEMM=1: oneDNN instead.
+bool s4_ok(const FqGemmSpec & s, int abits, const GemmParams & g) {
+    static const bool off = env_flag("VLA_FQ_NO_S4GEMM");
+    return !off && s.s4 && s.wbits == 4 && abits == 4 && g.K % 128 == 0 && g.row_bytes % 16 == 0 && g.M > 0;
+}
+
+int32_t * s4_acc(sycl::queue & q, const GemmParams & g) {
+    if (g.N % 256 != 0) return nullptr;
+    DnnlState & st = dnnl_state(q);
+    int32_t * acc = grow(q, st.acc, st.acc_cap, (size_t) (g.M * g.N));
+    if (!acc || !sycl_s4_gemm_s32(&q, g.blob, g.M, g.K, g.row_bytes, g.w, g.N, acc)) return nullptr;
+    return acc;
+}
+#endif
+
 // Device scratch for a GLU node's [M][N] intermediate on the native path.
 float * glu_scratch(sycl::queue & q, size_t n) {
     static std::mutex mu;
@@ -851,6 +877,14 @@ bool run_gemm(sycl::queue & q, ggml_tensor * dst, const FqGemmSpec & s, int abit
     g.glu_n     = s.glu ? s.N / 2 : 0;
     if (g.M == 0) return true;
     if (g.glu_n && (res || s.N % 2)) return false;
+#if defined(VLA_FQ_SYCL_DNNL) && defined(VLA_SYCL_S4GEMM)
+    if (s4_ok(s, abits, g))
+        if (int32_t * acc = s4_acc(q, g)) {
+            if (g.glu_n) launch_epilogue_glu<4>(q, g, acc, bias != nullptr);
+            else         launch_epilogue<4>(q, g, acc, bias != nullptr, res != nullptr);
+            return true;
+        }
+#endif
     // oneDNN when built with it; VLA_FQ_SYCL_GEMM=native picks this file's kernels
     // (the GEMV for M <= SM_MAX, else XMX) and =simple the plain tiled one. Read
     // per call so test_foldquant_sycl_op can cover every path.
@@ -931,6 +965,29 @@ bool run_glu_act(sycl::queue & q, ggml_tensor * dst, const FqGluActSpec & gs) {
     g.row_bytes = blob->ne[0];
     if (g.M == 0) return true;
     const int abits = blob_abits(blob, s.K);
+#ifdef VLA_SYCL_S4GEMM
+    if (s4_ok(s, abits, g) && (s.N / 2) % 256 == 0) {
+        // INT4 DPAS with the GEGLU in its epilogue: BF16 [M][N/2] out, read by the act.
+        const int64_t Nh = s.N / 2;
+        uint16_t * h = reinterpret_cast<uint16_t *>(glu_scratch(q, (size_t) ((g.M * Nh + 1) / 2)));
+        if (h && sycl_s4_gemm_glu(&q, g.blob, g.M, g.K, g.row_bytes, fq_act_kpack(s.K, 4), g.w, g.wscale, g.bias, Nh, h)) {
+            ActParams a{};
+            a.ascale      = ascale ? (const float *) ascale->data : nullptr;
+            a.blob        = (int8_t *) dst->data;
+            a.row_bytes   = dst->ne[0];
+            a.M           = g.M;
+            a.K           = as.K;
+            a.fold_before = as.fold_before;
+            a.clip        = as.clip;
+            a.eps         = as.eps;
+            a.inv_sqrt_bs = as.rot_block > 1 ? fqref::inv_sqrt_block(as.rot_block) : 1.0f;
+            a.x_bf        = h;
+            return as.abits == 8 ? launch_act_bits<8>(q, a, as.rot_block)
+                 : as.abits == 4 ? (as.wide4 ? launch_act_bits<44>(q, a, as.rot_block) : launch_act_bits<4>(q, a, as.rot_block))
+                 : false;
+        }
+    }
+#endif
     // BF16 sums with the weight scales applied by oneDNN: the matmul writes and
     // this act reads half the bytes (prefix gate/up: 1.07 -> 0.85 ms on the Arc
     // B390), at a BF16 rounding of the pre-GELU values. VLA_FQ_GLU_BF16=0: int32.
@@ -1081,6 +1138,10 @@ int32_t * sycl_fq_gemm_acc(void * queue, const ggml_tensor * w, const ggml_tenso
     g.row_bytes = blob->ne[0];
     const int abits = blob_abits(blob, s.K);
     *xs_off = fq_act_kpack(s.K, abits);
+#ifdef VLA_SYCL_S4GEMM
+    if (s4_ok(s, abits, g))
+        if (int32_t * acc4 = s4_acc(q, g)) return acc4;
+#endif
     int32_t * acc = nullptr;
     if (g.M == 0 || !gemm_dnnl(q, g, s.wbits, abits, false, false, &acc)) return nullptr;
     return acc;

@@ -319,6 +319,7 @@ bool fill_specs(WeightLoader & L, const FqModuleSpec & mod, const char * site_ke
     }
 #endif
     r.gemm.K          = K;
+    r.gemm.s4         = mod.s4gemm ? 1 : 0;
     r.gemm.N          = N;
     r.gemm.wbits      = wbits;
     r.heads_off       = mod.no_heads;

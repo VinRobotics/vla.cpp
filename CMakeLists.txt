@@ -390,7 +390,13 @@ if(GGML_SYCL AND NOT GGML_CUDA)
         if(NOT _vla_tla_patch EQUAL 0)
             message(FATAL_ERROR "scripts/patch_sycl_tla_fmha.py failed on ${VLA_SYCL_TLA_DIR}")
         endif()
-        target_sources(vla_core PRIVATE src/sycl/vla_sycl_fmha.cpp)
+        target_sources(vla_core PRIVATE src/sycl/vla_sycl_fmha.cpp src/sycl/vla_sycl_s4gemm.cpp)
+        # INT4 x INT4 DPAS GEMMs (CuTe) for FoldQuant W4A4 sites, same flags.
+        set_source_files_properties(src/sycl/vla_sycl_s4gemm.cpp PROPERTIES
+            COMPILE_OPTIONS "-fsycl;-fno-sycl-instrument-device-code;-w"
+            COMPILE_DEFINITIONS "CUTLASS_ENABLE_SYCL;SYCL_INTEL_TARGET"
+            INCLUDE_DIRECTORIES "${VLA_SYCL_TLA_DIR}/include;${VLA_SYCL_TLA_DIR}/tools/util/include")
+        target_compile_definitions(vla_core PRIVATE VLA_SYCL_S4GEMM)
         set_source_files_properties(src/sycl/vla_sycl_fmha.cpp PROPERTIES
             COMPILE_OPTIONS "-fsycl;-fno-sycl-instrument-device-code;-w"
             COMPILE_DEFINITIONS "CUTLASS_ENABLE_SYCL;SYCL_INTEL_TARGET"
