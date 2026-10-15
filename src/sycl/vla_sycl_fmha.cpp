@@ -47,6 +47,8 @@
 #include "flash_attention_v2/kernel/xe_tile_scheduler.hpp"
 
 #include <cstdint>
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -83,12 +85,15 @@ using ProblemShape = cutlass::fmha::kernel::FMHAProblemShape<false>;
 // Batch 1, grouped heads allowed (pi0.5 has 8 query heads per KV head).
 using Scheduler = cutlass::fmha::kernel::XeFHMAIndividualTileScheduler<true, false>;
 
-template <int QM, int SGN, bool CachedKV, int HD = kHeadDim, class Sched = Scheduler>
+// QM query rows x KT keys per tile; SGN sub-groups along the rows, SGK along
+// the keys (SGK > 1: the decode shape, partial softmaxes reduced in the epilogue).
+template <int QM, int SGN, bool CachedKV, int HD = kHeadDim, class Sched = Scheduler, int KT = 64, int SGK = 1,
+          int Stages = kPipelineStages, bool VarLen = false, bool Lse = false>
 struct Fmha {
-    using ShapeQK  = Shape<Int<QM>, _64, _32>;
-    using ShapePV  = Shape<Int<QM>, _32, _64>;
+    using ShapeQK  = Shape<Int<QM>, Int<KT>, _32>;
+    using ShapePV  = Shape<Int<QM>, _32, Int<KT>>;
     using ShapeOut = Shape<Int<QM>, Int<HD>>;
-    using SubgroupLayoutQK = Layout<Shape<Int<SGN>, _1, _1>>;
+    using SubgroupLayoutQK = Layout<Shape<Int<SGN>, Int<SGK>, _1>>;
     static constexpr int SGTileQ = get<0>(shape_div(ShapeQK{}, shape(SubgroupLayoutQK{})))();
     using MMAOp = XE_DPAS_TT<cute::gcd(SGTileQ, 8), float, Elt>;
     using SubgroupLayoutPV = decltype(cutlass::fmha::collective::get_sg_layout_pv(SubgroupLayoutQK{}));
@@ -96,14 +101,15 @@ struct Fmha {
     using TiledMMAPV = typename TiledMMAHelper<MMA_Atom<MMAOp>, Layout<ShapePV>, SubgroupLayoutPV>::TiledMMA;
     static constexpr int VTiles = get<1>(ShapeOut{}) / get<1>(ShapePV{});
     using Mainloop = cutlass::fmha::collective::FMHAFwdMainloop<
-        cutlass::fmha::XeDefault<kPipelineStages>, /*Causal=*/false, /*BlockScale=*/false,
+        cutlass::fmha::XeDefault<Stages>, /*Causal=*/false, /*BlockScale=*/false,
         /*F8kvF16mma=*/false, /*PerTensorScale=*/false, CachedKV, /*PagedKV=*/false,
         TiledMMAQK, TiledMMAPV, VTiles,
         TensorQ, TensorK, TensorV, TensorS, TensorS, TensorS,
         TensorK, TensorV,
         void, void, void, void, void>;
-    using Epilogue = cutlass::fmha::collective::FMHAFwdEpilogue<Mainloop, ShapeOut, TensorO, void>;
-    using Kernel = cutlass::fmha::kernel::XeFMHAFwdKernel<ProblemShape, Mainloop, Epilogue, Sched>;
+    using Epilogue = cutlass::fmha::collective::FMHAFwdEpilogue<Mainloop, ShapeOut, TensorO, void, Lse>;
+    using Kernel = cutlass::fmha::kernel::XeFMHAFwdKernel<cutlass::fmha::kernel::FMHAProblemShape<VarLen>, Mainloop,
+                                                          Epilogue, Sched>;
 };
 
 // SigLIP's head_dim 72, padded with zeros to the kernel's 96 (zero columns add
@@ -378,6 +384,142 @@ bool sycl_fmha_kv_supports(const ggml_tensor * op) {
     return custom_magic(op) == FMHA_KV_MAGIC && fmha_kv_shape_ok(op);
 }
 
+// Split-KV: the keys [Kc; Kn] cut into ns chunks, one batch entry per chunk
+// (varlen, so the last chunk may be shorter), every chunk against all R folded
+// query rows, each writing its partial O and log2-sum-exp; a combine pass
+// merges them. One q64 tile walks ~S/ns keys instead of S, and the launch has
+// ns times the work-groups: pi0.5's expert has 400 rows (7 tiles) over ~611 keys.
+using FmhaSplit = Fmha<64, 8, false, kHeadDim, cutlass::fmha::kernel::XeFHMAIndividualTileScheduler<false, true>, 64, 1,
+                       kPipelineStages, true, true>;
+
+void * split_scratch(sycl::queue & q, size_t bytes) {
+    static std::mutex mu;
+    static void * p = nullptr;
+    static size_t cap = 0;
+    static sycl::context ctx = q.get_context();
+    std::lock_guard<std::mutex> lk(mu);
+    if (p && cap >= bytes && ctx == q.get_context()) return p;
+    if (p) { q.wait(); sycl::free(p, ctx); }
+    ctx = q.get_context();
+    p = sycl::malloc_device(bytes, q);
+    cap = p ? bytes : 0;
+    return p;
+}
+
+// Chunks over S keys: 128 keys (two 64-key tiles) each, measured best on the
+// Arc B390 for 80 and 400 folded rows over ~600 keys; no split under 256 keys.
+// VLA_FMHA_SPLITS=n forces n (1 = no split).
+int64_t split_count(int64_t S) {
+    static const int forced = [] { const char * e = std::getenv("VLA_FMHA_SPLITS"); return e ? std::atoi(e) : 0; }();
+    if (forced > 0) return std::min<int64_t>(forced, S);
+    return S < 256 ? 1 : (S + 127) / 128;
+}
+
+bool fmha_kv_split(sycl::queue & q, const ggml_tensor * Q, const Elt * kc16, const Elt * vc16, int64_t Sc,
+                   const ggml_tensor * Kn, const ggml_tensor * Vn, float scale, float * out, int64_t ns) {
+    const int64_t Sq = Q->ne[1], Hq = Q->ne[2], R = Sq * Hq, Sn = Kn->ne[1], S = Sc + Sn, D = kHeadDim;
+    const int64_t c = (S + ns - 1) / ns;
+    ns = (S + c - 1) / c;
+    // F16 Q x ns, K, V | F32 partial O, LSE | int cumulative lengths (q, kv, cache)
+    const size_t b_q = (size_t) ns * R * D * sizeof(Elt), b_kv = (size_t) S * D * sizeof(Elt);
+    const size_t b_o = (size_t) ns * R * D * sizeof(float), b_l = (size_t) ns * R * sizeof(float);
+    const size_t b_c = (size_t) 3 * (ns + 1) * sizeof(int);
+    char * base = static_cast<char *>(split_scratch(q, b_q + 2 * b_kv + b_o + b_l + b_c));
+    if (!base) return false;
+    Elt * q16 = reinterpret_cast<Elt *>(base);
+    Elt * k16 = reinterpret_cast<Elt *>(base + b_q);
+    Elt * v16 = reinterpret_cast<Elt *>(base + b_q + b_kv);
+    float * op = reinterpret_cast<float *>(base + b_q + 2 * b_kv);
+    float * lse = reinterpret_cast<float *>(base + b_q + 2 * b_kv + b_o);
+    int * cu = reinterpret_cast<int *>(base + b_q + 2 * b_kv + b_o + b_l);
+
+    const char * qs = static_cast<const char *>(Q->data);
+    const size_t qnb1 = Q->nb[1], qnb2 = Q->nb[2];
+    const bool qf16 = Q->type == GGML_TYPE_F16;
+    const char * kn = static_cast<const char *>(Kn->data), * vn = static_cast<const char *>(Vn->data);
+    const size_t knb1 = Kn->nb[1], vnb1 = Vn->nb[1];
+    const bool kf16 = Kn->type == GGML_TYPE_F16, vf16 = Vn->type == GGML_TYPE_F16;
+    const int64_t rows = std::max(ns * R, S);
+    q.parallel_for(sycl::range<2>((size_t) rows, (size_t) D), [=](sycl::id<2> i) {
+        const int64_t r = i[0], d = i[1];
+        if (r < ns * R) {   // Q row r % R (token-major: s * Hq + h), copy r / R
+            const int64_t rr = r % R, s = rr / Hq, h = rr % Hq;
+            const char * e = qs + h * qnb2 + s * qnb1;
+            q16[r * D + d] = Elt(qf16 ? (float) reinterpret_cast<const sycl::half *>(e)[d] : reinterpret_cast<const float *>(e)[d]);
+        }
+        if (r < S) {
+            if (r < Sc) {
+                k16[r * D + d] = kc16[r * D + d];
+                v16[r * D + d] = vc16[r * D + d];
+            } else {
+                const char * ek = kn + (r - Sc) * knb1, * ev = vn + (r - Sc) * vnb1;
+                k16[r * D + d] = Elt(kf16 ? (float) reinterpret_cast<const sycl::half *>(ek)[d] : reinterpret_cast<const float *>(ek)[d]);
+                v16[r * D + d] = Elt(vf16 ? (float) reinterpret_cast<const sycl::half *>(ev)[d] : reinterpret_cast<const float *>(ev)[d]);
+            }
+        }
+        if (r <= ns && d == 0) {
+            cu[r]              = (int) (r * R);
+            cu[ns + 1 + r]     = (int) std::min<int64_t>(r * c, S);
+            cu[2 * (ns + 1) + r] = 0;
+        }
+    });
+
+    using K = FmhaSplit::Kernel;
+    using VL = cutlass::fmha::collective::VariableLength;
+    cutlass::fmha::kernel::FMHAProblemShape<true> shape{};
+    shape.batch = (int) ns;
+    shape.num_heads_q = 1;
+    shape.num_heads_kv = 1;
+    shape.seq_len_qo = VL{ (int) R, cu };
+    shape.seq_len_kv = VL{ (int) c, cu + ns + 1 };
+    shape.seq_len_kv_cache = VL{ 0, cu + 2 * (ns + 1) };
+    shape.head_size_qk = (int) D;
+    shape.head_size_vo = (int) D;
+
+    typename K::KernelArguments ka{};
+    ka.shape = shape;
+    ka.Q = q16; ka.dQ = StrideQ{(int) D, _1{}, (int) (R * D), (int) (R * D)};
+    ka.K = k16; ka.dK = StrideK{(int) D, _1{}, (int) (S * D), 0};
+    ka.V = v16; ka.dV = StrideV{_1{}, (int) D, (int) (S * D), 0};
+    ka.O = op;  ka.dO = StrideO{(int) D, _1{}, (int) (R * D), (int) (R * D)};
+
+    cutlass::KernelHardwareInfo hw{};
+    hw.sm_count = eu_count(q);
+    typename K::Arguments args{ka, {scale, nullptr, 0, nullptr}, {lse, (int) R, 1}, hw};
+    const auto params = K::to_underlying_arguments(args, nullptr);
+
+    namespace syclex  = sycl::ext::oneapi::experimental;
+    namespace intelex = sycl::ext::intel::experimental;
+    const dim3 block = K::get_block_shape();
+    const dim3 grid  = K::get_grid_shape(params);
+    compat::experimental::launch_properties launch_props{
+        syclex::work_group_scratch_size(K::SharedStorageSize),
+    };
+    compat::experimental::kernel_properties kernel_props{
+        syclex::sub_group_size<cute::intel::sg_size>,
+        intelex::grf_size<256>,
+    };
+    compat::experimental::launch_policy policy{compat::dim3(grid.x, grid.y, grid.z),
+                                               compat::dim3(block.x, block.y, block.z),
+                                               launch_props, kernel_props};
+    compat::experimental::launch<cutlass::device_kernel<K>, K, false>(policy, q, params);
+
+    // out[r] = sum_b 2^(lse_b - m) O_b[r] / sum_b 2^(lse_b - m)
+    q.parallel_for(sycl::range<2>((size_t) R, (size_t) D), [=](sycl::id<2> i) {
+        const int64_t r = i[0], d = i[1];
+        float m = -INFINITY;
+        for (int64_t b = 0; b < ns; ++b) m = sycl::fmax(m, lse[b * R + r]);
+        float num = 0.f, den = 0.f;
+        for (int64_t b = 0; b < ns; ++b) {
+            const float w = sycl::exp2(lse[b * R + r] - m);
+            num += w * op[(b * R + r) * D + d];
+            den += w;
+        }
+        out[r * D + d] = num / den;
+    });
+    return true;
+}
+
 bool sycl_fmha_kv_forward(ggml_tensor * dst, void * queue) {
     if (custom_magic(dst) != FMHA_KV_MAGIC || env_off() || !fmha_kv_shape_ok(dst)) return false;
     struct custom_params { void * fun; int n_tasks; void * userdata; };
@@ -390,18 +532,24 @@ bool sycl_fmha_kv_forward(ggml_tensor * dst, void * queue) {
     // The cache is read in place when it is packed F16 (the graph casts it once
     // per layer); the new keys and Q are converted on the way.
     sycl::queue & q = *static_cast<sycl::queue *>(queue);
-    Elt * spare = scratch(q, (size_t) (Hq * Sq + 2 * Hkv * (Sc + Sn)) * kHeadDim);
-    if (!spare) return false;
     // One KV head: the query heads fold into the rows (token-major, so row
     // s*Hq + h is exactly dst's row), and every row of a q64 tile is a real
     // query instead of 50 of 128, with K/V streamed once per tile, not per head.
     const bool fold = Hkv == 1;
+    float * O = static_cast<float *>(dst->data);
+    if (fold && packed_f16(Kc) && packed_f16(Vc)) {
+        const int64_t ns = split_count(Sc + Sn);
+        if (ns > 1)
+            return fmha_kv_split(q, Q, static_cast<const Elt *>(Kc->data), static_cast<const Elt *>(Vc->data), Sc, Kn, Vn,
+                                 scale, O, ns);
+    }
+    Elt * spare = scratch(q, (size_t) (Hq * Sq + 2 * Hkv * (Sc + Sn)) * kHeadDim);
+    if (!spare) return false;
     const Elt * q16 = spare;
     to_f16(q, Q, spare, fold);
     spare += (size_t) Hq * Sq * kHeadDim;
     const Elt * kc16 = f16_of(q, Kc, spare), * vc16 = f16_of(q, Vc, spare);
     const Elt * kn16 = f16_of(q, Kn, spare), * vn16 = f16_of(q, Vn, spare);
-    float * O = static_cast<float *>(dst->data);
     if (fold)
         launch<Fmha<64, 8, true>>(q, q16, Sq * Hq, 1, 1, kn16, vn16, Sn, kc16, vc16, Sc, scale, O);
     else
