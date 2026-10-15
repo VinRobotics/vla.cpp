@@ -34,6 +34,8 @@
 #include "sycl/vla_sycl_fmha.h"
 #include "layers/fmha_kv.h"
 #include "layers/vit_fused.h"
+#include "layers/fq_rope_attn.h"
+#include "sycl/vla_sycl_foldquant.h"
 
 #include "ggml.h"
 
@@ -408,6 +410,67 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
     spare += (size_t) Hq * Sq * kHeadDim;
     const Elt * k16 = f16_of(q, K, spare), * v16 = f16_of(q, V, spare);
     launch<Fmha<128, 16, false>>(q, q16, Sq, Hq, Hkv, k16, v16, Skv, nullptr, nullptr, 0, scale, static_cast<float *>(dst->data));
+    return true;
+}
+
+// fq_rope_attn (src/layers/fq_rope_attn.h): the q|k|v int32 sums from oneDNN, one
+// pass that dequantizes (the GEMM epilogue's math), applies NeoX RoPE to q and k
+// and packs Q folded [S*Hq][D], K and V [S][D] as F16, then the cached-KV kernel.
+bool sycl_fq_rope_attn_forward(ggml_tensor * dst, void * queue) {
+    if (dst->op != GGML_OP_CUSTOM || env_off()) return false;
+    struct custom_params { void * fun; int n_tasks; void * userdata; };
+    custom_params cp;
+    std::memcpy(&cp, dst->op_params, sizeof(cp));
+    const auto * sp = static_cast<const FqRopeAttnSpec *>(cp.userdata);
+    if (!sp || sp->magic != FQ_ROPE_ATTN_MAGIC || sp->hd != kHeadDim) return false;
+    const ggml_tensor * w = dst->src[0], * blob = dst->src[1], * ws = dst->src[2], * bias = dst->src[3];
+    const ggml_tensor * pos = dst->src[4], * Kc = dst->src[5], * Vc = dst->src[6];
+    if (!w || !blob || !ws || !pos || pos->type != GGML_TYPE_I32 || !packed_f16(Kc) || !packed_f16(Vc) ||
+        dst->type != GGML_TYPE_F32 || !ggml_is_contiguous(dst))
+        return false;
+    const int64_t D = sp->hd, H = sp->nq, N = sp->gemm->N, Sn = blob->ne[1], Sc = Kc->ne[1], R = Sn * H;
+    if (N != (H + 2) * D || Kc->ne[2] != 1 || pos->ne[0] != Sn) return false;
+    sycl::queue & q = *static_cast<sycl::queue *>(queue);
+    int64_t xs_off = 0;
+    const int32_t * acc = sycl_fq_gemm_acc(queue, w, blob, ws, *sp->gemm, &xs_off);
+    if (!acc) return false;
+    Elt * spare = scratch(q, (size_t) (R + 2 * Sn) * D);
+    if (!spare) return false;
+    Elt * q16 = spare, * kn16 = q16 + R * D, * vn16 = kn16 + Sn * D;
+    const int8_t * bl = static_cast<const int8_t *>(blob->data);
+    const int64_t rb = blob->ne[0];
+    const float * wsp = static_cast<const float *>(ws->data);
+    const float * bp = bias ? static_cast<const float *>(bias->data) : nullptr;
+    const int32_t * pp = static_cast<const int32_t *>(pos->data);
+    const float theta_scale = std::pow(sp->freq_base, -2.0f / (float) D);
+    const int64_t half = D / 2;
+    // Row r < R: Q of token r / H, head r % H (dst's own row order); then the
+    // Sn K rows, then the Sn V rows. Each item writes one pair (i, i + half).
+    q.parallel_for(sycl::range<2>((size_t) (R + 2 * Sn), (size_t) half), [=](sycl::id<2> it) {
+        const int64_t r = it[0], i = it[1];
+        int64_t t, col;
+        Elt * out;
+        bool rot = true;
+        if (r < R)           { t = r / H; col = (r % H) * D;       out = q16 + r * D; }
+        else if (r < R + Sn) { t = r - R; col = H * D;             out = kn16 + t * D; }
+        else                 { t = r - R - Sn; col = (H + 1) * D;  out = vn16 + t * D; rot = false; }
+        float xs;
+        std::memcpy(&xs, bl + t * rb + xs_off, sizeof(float));
+        const int32_t * ar = acc + t * N;
+        float x0 = ((float) ar[col + i] * xs) * wsp[col + i];
+        float x1 = ((float) ar[col + i + half] * xs) * wsp[col + i + half];
+        if (bp) { x0 = x0 + bp[col + i]; x1 = x1 + bp[col + i + half]; }
+        if (rot) {
+            const float th = (float) pp[t] * sycl::pow(theta_scale, (float) i);
+            const float c = sycl::cos(th), s = sycl::sin(th);
+            const float y0 = x0 * c - x1 * s, y1 = x0 * s + x1 * c;
+            x0 = y0; x1 = y1;
+        }
+        out[i] = Elt(x0);
+        out[i + half] = Elt(x1);
+    });
+    launch<Fmha<64, 8, true>>(q, q16, R, 1, 1, kn16, vn16, Sn, static_cast<const Elt *>(Kc->data),
+                              static_cast<const Elt *>(Vc->data), Sc, sp->scale, static_cast<float *>(dst->data));
     return true;
 }
 

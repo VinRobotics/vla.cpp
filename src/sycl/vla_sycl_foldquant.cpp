@@ -1013,6 +1013,7 @@ bool dispatch(ggml_tensor * dst, void * queue) {
     if (sycl_fmha_forward(dst, queue)) return true;
     if (sycl_fmha_kv_forward(dst, queue)) return true;
     if (sycl_vit_attn_forward(dst, queue)) return true;
+    if (sycl_fq_rope_attn_forward(dst, queue)) return true;
 #endif
     return false;
 }
@@ -1027,6 +1028,29 @@ bool ext_supports(const ggml_tensor * op) {
 }
 
 }  // namespace
+
+int32_t * sycl_fq_gemm_acc(void * queue, const ggml_tensor * w, const ggml_tensor * blob, const ggml_tensor * ws,
+                           const FqGemmSpec & s, int64_t * xs_off) {
+#ifdef VLA_FQ_SYCL_DNNL
+    sycl::queue & q = *static_cast<sycl::queue *>(queue);
+    GemmParams g{};
+    g.w         = (const int8_t *) w->data;
+    g.blob      = (const int8_t *) blob->data;
+    g.wscale    = (const float *) ws->data;
+    g.M         = blob->ne[1];
+    g.N         = s.N;
+    g.K         = s.K;
+    g.row_bytes = blob->ne[0];
+    const int abits = blob_abits(blob, s.K);
+    *xs_off = fq_act_kpack(s.K, abits);
+    int32_t * acc = nullptr;
+    if (g.M == 0 || !gemm_dnnl(q, g, s.wbits, abits, false, false, &acc)) return nullptr;
+    return acc;
+#else
+    (void) queue; (void) w; (void) blob; (void) ws; (void) s; (void) xs_off;
+    return nullptr;
+#endif
+}
 
 void sycl_register_ext_ops() {
     ggml_sycl_ext_forward  = dispatch;

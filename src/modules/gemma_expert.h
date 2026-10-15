@@ -25,6 +25,7 @@
 #include "foldquant.h"
 #include "layers/fq_linear.h"
 #include "layers/fmha_kv.h"
+#include "layers/fq_rope_attn.h"
 #include "loader.h"
 #include "model.h"
 #include "modules/siglip_vit.h"
@@ -65,6 +66,8 @@ struct GemmaLayerW {
     FqActSpec act_mod_qkv{}, act_mod_gu{};
     // gate/up GEMM + GEGLU + the down act in one node (gemma_link_glu_act).
     FqGluActSpec glu_act{ 0 };
+    // q/k/v GEMM + RoPE + cached-KV attention in one node (pi0.5's expert, SYCL).
+    FqRopeAttnSpec rope_attn{};
 };
 
 /// Declare a float layer's q/k/v and gate/up GEMMs, `p` being the tensor-name
@@ -200,6 +203,13 @@ inline ggml_tensor * gemma_attn(
 
     // Q/K/V land in F32: RoPE, the KV cache the suffix passes re-read, and the
     // score/softmax core all stay full precision.
+    if (w.rope_attn.magic == FQ_ROPE_ATTN_MAGIC && w.fq_qkv && w.fq_o && flash && cached_K16 && cached_V16 && !mask &&
+        !k_out && !v_out && (fq_xq || fq_x) && seq * nq > 192) {
+        // One node for q/k/v, RoPE and the attention (src/layers/fq_rope_attn.h).
+        ggml_tensor * fa = fq_rope_attn(ctx, &w.rope_attn, w.fq_qkv, fq_xq ? fq_xq : fq_act(ctx, w.fq_qkv, fq_x),
+                                        positions, cached_K16, cached_V16);
+        return fq_linear(ctx, w.fq_o, ggml_reshape_2d(ctx, fa, qf, seq), fq_res, fq_gate);
+    }
     ggml_tensor *q = nullptr, *k = nullptr, *v = nullptr, *qkv_fq = nullptr;
     if (w.fq_qkv) {
         qkv_fq = fq_gemm(ctx, w.fq_qkv, fq_xq ? fq_xq : fq_act(ctx, w.fq_qkv, fq_x));

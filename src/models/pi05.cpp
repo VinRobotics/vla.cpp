@@ -363,6 +363,20 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
                 L.fail("FoldQuant: an expert layer's q/k/v (and gate/up) must all be INT or all float");
         }
         gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), !w.fq_q && !w.fq_qkv, !w.fq_gate && !w.fq_gu);
+#if defined(GGML_USE_SYCL) && defined(VLA_SYCL_FMHA) && defined(VLA_FQ_SYCL_DNNL)
+        // q/k/v GEMM, RoPE and the cached-KV attention as one node (gemma_attn).
+        // VLA_FQ_NO_ROPE_ATTN=1 keeps them apart (A/B runs).
+        if (w.fq_qkv && cfg.n_kv_heads == 1 && cfg.head_dim == 256 &&
+            !(std::getenv("VLA_FQ_NO_ROPE_ATTN") && std::strcmp(std::getenv("VLA_FQ_NO_ROPE_ATTN"), "0")) &&
+            !std::getenv("VLA_FQ_SYCL_GEMM")) {
+            w.rope_attn.magic     = FQ_ROPE_ATTN_MAGIC;
+            w.rope_attn.gemm      = &w.fq_qkv.gemm;
+            w.rope_attn.hd        = (int) cfg.head_dim;
+            w.rope_attn.nq        = (int) cfg.n_q_heads;
+            w.rope_attn.freq_base = cfg.rope_freq_base;
+            w.rope_attn.scale     = 1.0f / std::sqrt((float) cfg.head_dim);
+        }
+#endif
 #ifdef GGML_USE_SYCL
         // The adaRMS fused into the q/k/v and gate/up act nodes (build_expert_layer).
         // VLA_FQ_NO_ADA=1 keeps them apart (A/B runs).
