@@ -16,6 +16,7 @@
 
 #include "layers/attn.h"
 #include "layers/ffn.h"
+#include "layers/fmha_kv.h"
 #include "layers/linear.h"
 #include "layers/norm.h"
 
@@ -32,12 +33,20 @@ void EncStack::declare(WeightLoader & L, const char * prefix, int64_t layers, co
         w.ln1b = L.f32 ("%s.%lld.%s.bias",        prefix, (long long)i, n.ln1);
         w.ln2w = L.f32 ("%s.%lld.%s.weight",      prefix, (long long)i, n.ln2);
         w.ln2b = L.f32 ("%s.%lld.%s.bias",        prefix, (long long)i, n.ln2);
+#ifdef GGML_USE_SYCL
+        {
+            const std::string p = std::string(prefix) + "." + std::to_string(i) + ".attn_";
+            w.Wqkv = L.fuse_gemm((p + "qkv.fused.weight").c_str(), { p + "q.weight", p + "k.weight", p + "v.weight" });
+            w.bqkv = L.fuse_f32 ((p + "qkv.fused.bias").c_str(),   { p + "q.bias",   p + "k.bias",   p + "v.bias" });
+        }
+#else
         w.Wq   = L.gemm("%s.%lld.attn_q.weight",  prefix, (long long)i);
         w.bq   = L.f32 ("%s.%lld.attn_q.bias",    prefix, (long long)i);
         w.Wk   = L.gemm("%s.%lld.attn_k.weight",  prefix, (long long)i);
         w.bk   = L.f32 ("%s.%lld.attn_k.bias",    prefix, (long long)i);
         w.Wv   = L.gemm("%s.%lld.attn_v.weight",  prefix, (long long)i);
         w.bv   = L.f32 ("%s.%lld.attn_v.bias",    prefix, (long long)i);
+#endif
         w.Wo   = L.gemm("%s.%lld.attn_o.weight",  prefix, (long long)i);
         w.bo   = L.f32 ("%s.%lld.attn_o.bias",    prefix, (long long)i);
         w.Wfc1 = L.gemm("%s.%lld.%s.weight",      prefix, (long long)i, n.fc1);
@@ -47,8 +56,49 @@ void EncStack::declare(WeightLoader & L, const char * prefix, int64_t layers, co
     }
 }
 
+// The fused-q/k/v block (SYCL). Every view's tokens go through each GEMM at
+// once ([hidden, seq*nv], not nv batched [hidden, seq] products), and the heads
+// are strided views of the one projection. With the sycl-tla kernel (head_dim
+// 72) those views feed the attention node directly: no per-head copies, no F16
+// casts; it packs them itself.
+static ggml_tensor * block_fused(ggml_context * C, const EncCfg & cfg, const EncBlockW & w, ggml_tensor * x,
+                                 int64_t seq, int64_t nv) {
+    const int64_t hd = cfg.head_dim, heads = cfg.heads, E = cfg.hidden, T = seq * nv;
+    const float   scale = 1.0f/std::sqrt((float)hd);
+    ggml_tensor * x2 = ggml_reshape_2d(C, ggml_is_contiguous(x) ? x : ggml_cont(C, x), E, T);
+
+    ggml_tensor * qkv = linear(C, w.Wqkv, w.bqkv, layer_norm(C, x2, w.ln1w, w.ln1b, cfg.ln_eps));   // [3E, T]
+    const size_t es = ggml_element_size(qkv);
+    auto split = [&](int b) {   // [hd, heads, seq, nv] view of block b
+        return ggml_view_4d(C, qkv, hd, heads, seq, nv, (size_t) hd*es, (size_t) 3*E*es, (size_t) 3*E*seq*es,
+                            (size_t) b*E*es);
+    };
+    auto as_heads = [&](int b) { return ggml_permute(C, split(b), 0, 2, 1, 3); };   // [hd, seq, heads, nv]
+
+    ggml_tensor * att;
+    if (cfg.flash_attn && hd == 72 && fmha_kv_enabled()) {
+        ggml_tensor * o = ggml_flash_attn_ext(C, as_heads(0), as_heads(1), as_heads(2), nullptr, scale, 0.0f, 0.0f);
+        ggml_prec_set_acc(o, GGML_PREC_F32);
+        att = ggml_reshape_2d(C, o, E, T);
+    } else if (cfg.flash_attn) {
+        att = ggml_reshape_2d(C, flash_attention(C, ggml_cont(C, as_heads(0)), ggml_cont(C, as_heads(1)),
+                                                 ggml_cont(C, as_heads(2)), nullptr, scale), E, T);
+    } else {
+        ggml_tensor * vt = ggml_cont(C, ggml_permute(C, split(2), 1, 2, 0, 3));
+        att = ggml_reshape_2d(C, attention(C, ggml_cont(C, as_heads(0)), ggml_cont(C, as_heads(1)), vt, nullptr,
+                                           scale, E, seq, nv), E, T);
+    }
+
+    ggml_tensor * h1 = ggml_add(C, x2, linear(C, w.Wo, w.bo, att));
+    ggml_tensor * n2 = layer_norm(C, h1, w.ln2w, w.ln2b, cfg.ln_eps);
+    ggml_tensor * y  = ggml_add(C, h1, ffn_gelu(C, w.Wfc1, w.bfc1, w.Wfc2, w.bfc2, n2));
+    return ggml_reshape(C, y, x);
+}
+
 ggml_tensor * EncStack::block(ggml_context * C, const EncBlockW & w, ggml_tensor * x,
                               int64_t seq, int64_t nv) const {
+    if (w.Wqkv)
+        return block_fused(C, cfg, w, x, seq, nv);
     const int64_t hd    = cfg.head_dim;
     const int64_t heads = cfg.heads;
     const float   scale = 1.0f/std::sqrt((float)hd);
