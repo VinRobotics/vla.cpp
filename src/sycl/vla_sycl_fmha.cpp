@@ -42,10 +42,14 @@
 #include "flash_attention_v2/kernel/xe_fmha_fwd_kernel.hpp"
 #include "flash_attention_v2/kernel/xe_tile_scheduler.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 namespace vla {
 namespace {
@@ -145,6 +149,53 @@ void to_f16(sycl::queue & q, const ggml_tensor * t, Elt * dst) {
     });
 }
 
+// VLA_SYCL_FMHA_CHECK=1: after each claimed node, recompute it on the host in
+// double from the F32 inputs and print the worst error and the input ranges.
+void check_against_host(sycl::queue & q, const ggml_tensor * dst, const ggml_tensor * Q,
+                        const ggml_tensor * K, const ggml_tensor * V, float scale) {
+    auto fetch = [&](const ggml_tensor * t) {
+        std::vector<float> h(ggml_nbytes(t) / sizeof(float));
+        q.memcpy(h.data(), t->data, ggml_nbytes(t)).wait();
+        return h;
+    };
+    q.wait();
+    const auto hq = fetch(Q), hk = fetch(K), hv = fetch(V), ho = fetch(dst);
+    const int64_t D = Q->ne[0], Sq = Q->ne[1], Hq = Q->ne[2], Skv = K->ne[1], Hkv = K->ne[2];
+    auto at = [](const std::vector<float> & h, const ggml_tensor * t, int64_t d, int64_t s, int64_t hh) {
+        return h[(hh * t->nb[2] + s * t->nb[1]) / sizeof(float) + d];
+    };
+    float amax_q = 0, amax_k = 0, amax_v = 0;
+    for (float x : hq) amax_q = std::max(amax_q, std::fabs(x));
+    for (float x : hk) amax_k = std::max(amax_k, std::fabs(x));
+    for (float x : hv) amax_v = std::max(amax_v, std::fabs(x));
+    double worst = 0, ref_max = 0;
+    std::vector<double> sc(Skv), o(D);
+    for (int64_t h = 0; h < Hq; ++h) {
+        const int64_t hk_i = h / (Hq / Hkv);
+        for (int64_t s = 0; s < Sq; s += std::max<int64_t>(1, Sq / 7)) {
+            double m = -1e300;
+            for (int64_t t = 0; t < Skv; ++t) {
+                double a = 0;
+                for (int64_t d = 0; d < D; ++d) a += (double) at(hq, Q, d, s, h) * at(hk, K, d, t, hk_i);
+                sc[t] = a * scale; m = std::max(m, sc[t]);
+            }
+            double z = 0;
+            for (int64_t t = 0; t < Skv; ++t) { sc[t] = std::exp(sc[t] - m); z += sc[t]; }
+            std::fill(o.begin(), o.end(), 0.0);
+            for (int64_t t = 0; t < Skv; ++t)
+                for (int64_t d = 0; d < D; ++d) o[d] += sc[t] / z * at(hv, V, d, t, hk_i);
+            for (int64_t d = 0; d < D; ++d) {
+                const double got = ho[(s * Hq + h) * D + d];
+                worst = std::max(worst, std::fabs(got - o[d]));
+                ref_max = std::max(ref_max, std::fabs(o[d]));
+            }
+        }
+    }
+    std::fprintf(stderr, "vla(fmha) CHECK %-28s Sq=%lld Skv=%lld Hq=%lld Hkv=%lld  max|err| %.3g (ref max %.3g)  "
+                "absmax q %.3g k %.3g v %.3g\n", ggml_get_name(dst), (long long) Sq, (long long) Skv,
+                (long long) Hq, (long long) Hkv, worst, ref_max, amax_q, amax_k, amax_v);
+}
+
 }  // namespace
 
 bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
@@ -220,6 +271,8 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
                                                compat::dim3(block.x, block.y, block.z),
                                                launch_props, kernel_props};
     compat::experimental::launch<cutlass::device_kernel<Kernel>, Kernel, false>(policy, q, params);
+    static const bool check = [] { const char * e = std::getenv("VLA_SYCL_FMHA_CHECK"); return e && *e && *e != '0'; }();
+    if (check) check_against_host(q, dst, Q, K, V, scale);
     return true;
 }
 
