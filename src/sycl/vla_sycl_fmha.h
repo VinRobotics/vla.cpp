@@ -24,4 +24,8 @@ namespace vla {
 // shape is one the kernel was checked on; false leaves the node to ggml-sycl.
 bool sycl_fmha_forward(ggml_tensor * dst, void * queue);
 
+// The cached-KV attention node of src/layers/fmha_kv.h: claim and run it.
+bool sycl_fmha_kv_forward(ggml_tensor * dst, void * queue);
+bool sycl_fmha_kv_supports(const ggml_tensor * op);
+
 }  // namespace vla

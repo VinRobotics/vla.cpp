@@ -24,6 +24,7 @@
 #include "layers/norm.h"
 #include "foldquant.h"
 #include "layers/fq_linear.h"
+#include "layers/fmha_kv.h"
 #include "loader.h"
 #include "model.h"
 #include "modules/siglip_vit.h"
@@ -102,7 +103,8 @@ inline ggml_tensor * gemma_attn(
         const Config & cfg, int64_t seq,
         ggml_tensor * cached_K, ggml_tensor * cached_V, ggml_tensor * mask,
         ggml_tensor ** k_out, ggml_tensor ** v_out, ggml_type at, bool flash,
-        ggml_tensor * fq_x = nullptr, ggml_tensor * fq_res = nullptr) {
+        ggml_tensor * fq_x = nullptr, ggml_tensor * fq_res = nullptr,
+        ggml_tensor * cached_K16 = nullptr, ggml_tensor * cached_V16 = nullptr) {
     // FoldQuant: q/k/v share one act node over fq_x (the raw residual stream when
     // the RMSNorm and its folded gamma ride in the act node, the adaRMS output
     // otherwise), and fq_res, when given, rides in the o GEMM epilogue. A float
@@ -143,6 +145,19 @@ inline ggml_tensor * gemma_attn(
     if (v_out)
         *v_out = v_h;
 
+    const float scale = 1.f/std::sqrt((float) hd);
+    ggml_tensor * att_pre;
+    if (flash && cached_K16 && cached_V16 && !mask) {
+        // Cached prefix (F16, cast once per layer) + this step's keys, without
+        // concatenating them: src/layers/fmha_kv.h.
+        ggml_tensor * fa = fmha_kv(ctx, ggml_permute(ctx, q_rope, 0, 2, 1, 3), cached_K16, cached_V16,
+                                   ggml_permute(ctx, k_rope, 0, 2, 1, 3), ggml_permute(ctx, v_h, 0, 2, 1, 3), scale);
+        att_pre = ggml_reshape_2d(ctx, fa, qf, seq);
+        if (w.fq_o)
+            return fq_linear(ctx, w.fq_o, att_pre, fq_res);
+        return mm_act(ctx, w.Wo, as_type(ctx, att_pre, at), at);
+    }
+
     ggml_tensor * K_full = k_rope;
     ggml_tensor * V_full = v_h;
     if (cached_K && cached_V) {
@@ -150,10 +165,8 @@ inline ggml_tensor * gemma_attn(
         V_full = ggml_concat(ctx, cached_V, v_h,    2);
     }
 
-    const float scale = 1.f/std::sqrt((float) hd);
     ggml_tensor * Q = ggml_cont(ctx, ggml_permute(ctx, q_rope, 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(ctx, ggml_permute(ctx, K_full, 0, 2, 1, 3));
-    ggml_tensor * att_pre;
     if (flash) {
         ggml_tensor * V = ggml_cont(ctx, ggml_permute(ctx, V_full, 0, 2, 1, 3));
         // ggml_flash_attn_ext asserts an F16 mask. The mask holds only 0 and

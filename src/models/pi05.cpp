@@ -111,7 +111,8 @@ ggml_tensor * build_expert_layer(
         ggml_context * ctx, const GemmaLayerW & w,
         ggml_tensor * x_in, ggml_tensor * positions, ggml_tensor * mod_attn, ggml_tensor * mod_ffn,
         const Config & cfg, int64_t seq,
-        ggml_tensor * cached_K, ggml_tensor * cached_V, bool flash) {
+        ggml_tensor * cached_K, ggml_tensor * cached_V, bool flash,
+        ggml_tensor * cached_K16 = nullptr, ggml_tensor * cached_V16 = nullptr) {
     const int64_t h = cfg.expert_h;
 
     ggml_tensor * gate_attn = nullptr;
@@ -119,7 +120,8 @@ ggml_tensor * build_expert_layer(
     // FoldQuant: the act nodes quantize the adaRMS outputs; the residuals are
     // gated (out * gate + x), so they stay out of the GEMM epilogues.
     ggml_tensor * o_out  = gemma_attn(ctx, w, x_norm, positions, cfg, seq, cached_K, cached_V, nullptr,
-                                      nullptr, nullptr, GGML_TYPE_F32, flash, x_norm);
+                                      nullptr, nullptr, GGML_TYPE_F32, flash, x_norm, nullptr,
+                                      cached_K16, cached_V16);
 
     ggml_tensor * h1 = ggml_add(ctx, x_in, ggml_mul(ctx, o_out, gate_attn));
 
@@ -463,6 +465,14 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         }
         (void) h;
     }
+    // With the SYCL flash-attention kernel, the expert reads the prefix KV as
+    // F16 cast here once per layer, not concatenated and copied every step.
+    std::vector<ggml_tensor *> cK16(n_layers, nullptr), cV16(n_layers, nullptr);
+    if (fa && fmha_kv_enabled())
+        for (int64_t i=0; i<n_layers; ++i) {
+            cK16[i] = ggml_cast(C, ggml_permute(C, cK[i], 0, 2, 1, 3), GGML_TYPE_F16);
+            cV16[i] = ggml_cast(C, ggml_permute(C, cV[i], 0, 2, 1, 3), GGML_TYPE_F16);
+        }
 
     ggml_tensor * x_t = t_x0;
     for (int step=0; step<num_steps; ++step) {
@@ -473,7 +483,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         ggml_tensor * h = ggml_add(C, ggml_mul_mat(C, W_ain, x_t), b_ain);
         for (int64_t i=0; i<n_layers; ++i) {
             h = build_expert_layer(C, ex_layers[i], h, t_suffix_pos, mod(2*i), mod(2*i+1), cfg, n_suf,
-                                   cK[i], cV[i], fa);
+                                   cK[i], cV[i], fa, cK16[i], cV16[i]);
         }
 
         ggml_tensor * h_final = build_adarms(C, h, mod(2*n_layers), hidden_ex, cfg.rms_eps, nullptr);

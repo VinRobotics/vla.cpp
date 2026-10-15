@@ -24,12 +24,14 @@
 //
 // Q, K and V arrive as F32 (src/backend.h fa_kv keeps them F32 off Hexagon);
 // one kernel converts them to F16 in a scratch buffer, the FMHA kernel reads
-// that, accumulates in F32 and writes F32 straight into dst. It takes the keys
-// in whole 64-key tiles only; the remainder is merged in by merge_tail.
+// that, accumulates in F32 and writes F32 into dst. It takes the keys in whole
+// 64-key tiles only, split along its batch axis when there are too few query
+// tiles to fill the GPU; merge() folds the splits and the remaining keys in.
 //
 // VLA_SYCL_FMHA=0 turns the claim off.
 
 #include "sycl/vla_sycl_fmha.h"
+#include "layers/fmha_kv.h"
 
 #include "ggml.h"
 
@@ -103,8 +105,9 @@ using Mainloop = cutlass::fmha::collective::FMHAFwdMainloop<
 // LSE out: the KV tail past the last full 64-key tile is merged in afterwards.
 using Epilogue = cutlass::fmha::collective::FMHAFwdEpilogue<Mainloop, ShapeOut, TensorO, void, /*EnableLSE=*/true>;
 using ProblemShape = cutlass::fmha::kernel::FMHAProblemShape<false>;
-// Batch 1, grouped heads allowed (pi0.5 has 8 query heads per KV head).
-using Scheduler = cutlass::fmha::kernel::XeFHMAIndividualTileScheduler<true, false>;
+// Grouped heads (pi0.5 has 8 query heads per KV head) and a batch axis, which
+// carries the KV splits (see sycl_fmha_forward).
+using Scheduler = cutlass::fmha::kernel::XeFHMAIndividualTileScheduler<false, false>;
 using Kernel = cutlass::fmha::kernel::XeFMHAFwdKernel<ProblemShape, Mainloop, Epilogue, Scheduler>;
 
 bool env_off() {
@@ -140,64 +143,208 @@ int eu_count(sycl::queue & q) {
     return n;
 }
 
-// First S rows of a [D, *, H] F32 view with byte strides -> packed [H][S][D] F16.
-void to_f16(sycl::queue & q, const ggml_tensor * t, Elt * dst, int64_t S) {
-    const int64_t D = t->ne[0], H = t->ne[2];
-    const size_t nb1 = t->nb[1], nb2 = t->nb[2];
-    const char * src = static_cast<const char *>(t->data);
-    q.parallel_for(sycl::range<3>(H, S, D), [=](sycl::id<3> i) {
+// Rows of D values in a ggml tensor: element (d, s, h) at p + s*nbs + h*nbh.
+struct Rows {
+    const char * p;
+    size_t nbs, nbh;
+    bool f16;
+};
+
+Rows rows_of(const ggml_tensor * t, int64_t s0 = 0) {
+    return { static_cast<const char *>(t->data) + s0 * t->nb[1], t->nb[1], t->nb[2], t->type == GGML_TYPE_F16 };
+}
+
+// n rows of each of H heads -> packed F16 [H][n][D].
+void to_f16(sycl::queue & q, Rows r, int64_t n, int64_t H, Elt * dst) {
+    q.parallel_for(sycl::range<3>(H, n, kHeadDim), [=](sycl::id<3> i) {
         const int64_t h = i[0], s = i[1], d = i[2];
-        const float v = *reinterpret_cast<const float *>(src + h * nb2 + s * nb1 + d * sizeof(float));
-        dst[(h * S + s) * D + d] = Elt(v);
+        const char * e = r.p + h * r.nbh + s * r.nbs;
+        const float v = r.f16 ? (float) reinterpret_cast<const sycl::half *>(e)[d] : reinterpret_cast<const float *>(e)[d];
+        dst[(h * n + s) * kHeadDim + d] = Elt(v);
     });
 }
 
-// The keys past the last full KV tile, merged into the FMHA output. On the Arc
-// B390 the kernel's own remainder masking gives wrong rows (any S_kv % 64 != 0;
-// tests/fmha_sycl_check), so the kernel only sees whole tiles and this does the
-// rest exactly: one work-group per (head, query) row, one work-item per channel.
-// lse2 is the kernel's log2(sum exp(scale * s)) over its keys; empty when
-// kv0 == 0. The tail is read from the F32 inputs.
-void merge_tail(sycl::queue & q, const ggml_tensor * Q, const ggml_tensor * K, const ggml_tensor * V,
-                float * O, const float * lse2, int64_t kv0, float scale) {
-    const int64_t Sq = Q->ne[1], Hq = Q->ne[2], Skv = K->ne[1], Hkv = K->ne[2];
-    const int64_t grp = Hq / Hkv, ntail = Skv - kv0;
-    const char * qp = static_cast<const char *>(Q->data);
-    const char * kp = static_cast<const char *>(K->data);
-    const char * vp = static_cast<const char *>(V->data);
-    const size_t qb1 = Q->nb[1], qb2 = Q->nb[2], kb1 = K->nb[1], kb2 = K->nb[2], vb1 = V->nb[1], vb2 = V->nb[2];
-    q.submit([&](sycl::handler & h) {
-        sycl::local_accessor<float, 1> sc(sycl::range<1>(kTileKV), h);
-        h.parallel_for(sycl::nd_range<1>(sycl::range<1>(Hq * Sq * kHeadDim), sycl::range<1>(kHeadDim)),
-                       [=](sycl::nd_item<1> it) {
-            const int64_t row = it.get_group(0), d = it.get_local_id(0);
-            const int64_t hq = row / Sq, s = row % Sq, hk = hq / grp;
-            const float qd = *reinterpret_cast<const float *>(qp + hq * qb2 + s * qb1 + d * sizeof(float));
-            float m = -INFINITY;
-            for (int64_t t = 0; t < ntail; ++t) {
-                const float kd = *reinterpret_cast<const float *>(kp + hk * kb2 + (kv0 + t) * kb1 + d * sizeof(float));
-                const float st = sycl::reduce_over_group(it.get_group(), qd * kd, sycl::plus<float>()) * scale;
-                if (d == 0) sc[t] = st;
-                m = sycl::fmax(m, st);
-            }
-            sycl::group_barrier(it.get_group());
-            float l = 0.f, acc = 0.f;
-            for (int64_t t = 0; t < ntail; ++t) {
-                const float w = sycl::exp(sc[t] - m);
-                l += w;
-                acc += w * *reinterpret_cast<const float *>(vp + hk * vb2 + (kv0 + t) * vb1 + d * sizeof(float));
-            }
-            float * o = O + (s * Hq + hq) * kHeadDim + d;
-            if (kv0 == 0) {
-                *o = acc / l;
-                return;
-            }
-            // Natural-log mass of each part, then the usual two-way softmax merge.
-            const float a = lse2[hq * Sq + s] * 0.69314718056f, b = m + sycl::log(l);
-            const float mx = sycl::fmax(a, b), wa = sycl::exp(a - mx), wb = sycl::exp(b - mx);
-            *o = (wa * *o + wb * (acc / l)) / (wa + wb);
-        });
+// n rows of each of H heads -> F32 rows [off, off + n) of a [H][ld][D] buffer.
+void to_f32(sycl::queue & q, Rows r, int64_t n, int64_t H, float * dst, int64_t ld, int64_t off) {
+    if (n <= 0) return;
+    q.parallel_for(sycl::range<3>(H, n, kHeadDim), [=](sycl::id<3> i) {
+        const int64_t h = i[0], s = i[1], d = i[2];
+        const char * e = r.p + h * r.nbh + s * r.nbs;
+        dst[(h * ld + off + s) * kHeadDim + d] =
+            r.f16 ? (float) reinterpret_cast<const sycl::half *>(e)[d] : reinterpret_cast<const float *>(e)[d];
     });
+}
+
+// Folds the kernel's per-split partial outputs and the keys it did not see into
+// O, exactly. On the Arc B390 the kernel's own remainder masking gives wrong rows
+// for any S_kv % 64 != 0 (tests/fmha_sycl_check), so it only ever gets whole KV
+// tiles; the rest (kt/vt, F32 [Hkv][ntail][D]) is scored here. ob/lse2 hold
+// nsplit partial outputs [split][head][query][D] and their log2(sum exp(scale*s)).
+// Three light passes: tail scores, a row of mixing weights per (head, query),
+// then a weighted sum per output element.
+void merge(sycl::queue & q, Rows qr, int64_t Sq, int64_t Hq, int64_t Hkv, const float * kt, const float * vt,
+           int64_t ntail, float * O, const float * ob, const float * lse2, float * coef, int nsplit, float scale) {
+    const int64_t grp = Hq / Hkv, rows = Hq * Sq, nc = nsplit + ntail;
+    // coef[row][0..nsplit) weigh the splits, coef[row][nsplit + t] tail key t.
+    if (ntail > 0)
+        q.parallel_for(sycl::range<2>(rows, ntail), [=](sycl::id<2> i) {
+            const int64_t row = i[0], t = i[1], hq = row / Sq, s = row % Sq, hk = hq / grp;
+            const sycl::float4 * a4 = reinterpret_cast<const sycl::float4 *>(qr.p + hq * qr.nbh + s * qr.nbs);
+            const sycl::float4 * k4 = reinterpret_cast<const sycl::float4 *>(kt + (hk * ntail + t) * kHeadDim);
+            sycl::float4 a{0.f};
+            for (int j = 0; j < kHeadDim / 4; ++j) a += a4[j] * k4[j];
+            coef[row * nc + nsplit + t] = (a.x() + a.y() + a.z() + a.w()) * scale;
+        });
+    q.parallel_for(sycl::range<1>(rows), [=](sycl::id<1> i) {
+        const int64_t row = i[0];
+        float * c = coef + row * nc;
+        // Each split stands for exp(lse) of softmax mass at once; each tail key for exp(score).
+        float mx = -INFINITY;
+        for (int b = 0; b < nsplit; ++b) mx = sycl::fmax(mx, lse2[b * rows + row] * 0.69314718056f);
+        for (int64_t t = 0; t < ntail; ++t) mx = sycl::fmax(mx, c[nsplit + t]);
+        float den = 0.f;
+        for (int b = 0; b < nsplit; ++b) { c[b] = sycl::exp(lse2[b * rows + row] * 0.69314718056f - mx); den += c[b]; }
+        for (int64_t t = 0; t < ntail; ++t) { c[nsplit + t] = sycl::exp(c[nsplit + t] - mx); den += c[nsplit + t]; }
+        const float inv = 1.f / den;
+        for (int64_t j = 0; j < nc; ++j) c[j] *= inv;
+    });
+    q.parallel_for(sycl::range<2>(rows, kHeadDim), [=](sycl::id<2> i) {
+        const int64_t row = i[0], d = i[1], hq = row / Sq, s = row % Sq, hk = hq / grp;
+        const float * c = coef + row * nc;
+        float acc = 0.f;
+        for (int b = 0; b < nsplit; ++b) acc += c[b] * ob[(b * rows + row) * kHeadDim + d];
+        for (int64_t t = 0; t < ntail; ++t) acc += c[nsplit + t] * vt[(hk * ntail + t) * kHeadDim + d];
+        O[(s * Hq + hq) * kHeadDim + d] = acc;
+    });
+}
+
+// How many ways to split the whole KV tiles, each split a whole number of
+// tiles. On the Arc B390 splitting did not pay end to end for pi0.5 (the extra
+// merge passes cost what the fuller GPU saves), so the default is 1.
+// VLA_SYCL_FMHA_SPLIT=n forces n (rounded down to a divisor).
+int pick_split(int64_t nblk) {
+    static const int forced = [] { const char * e = std::getenv("VLA_SYCL_FMHA_SPLIT"); return e ? std::atoi(e) : 0; }();
+    int64_t want = std::min<int64_t>(std::max(forced, 1), nblk);
+    while (nblk % want) --want;
+    return (int) want;
+}
+
+// The kernel over keys [0, kv0) (kv0 a whole number of tiles) of K/V, packed
+// F16 [Hkv][ldk][D]. Writes O ([D, Hq, Sq] F32) itself when direct, else
+// nsplit partial outputs to ob and their LSE to lse2.
+void run_kernel(sycl::queue & q, const Elt * q16, const Elt * k16, const Elt * v16, int64_t ldk, int64_t kv0,
+                int64_t Sq, int64_t Hq, int64_t Hkv, float scale, int nsplit, bool direct, float * O, float * ob,
+                float * lse2) {
+    const int64_t chunk = kv0 / nsplit, nq = Hq * Sq * kHeadDim;
+    ProblemShape shape{};
+    shape.batch = nsplit;
+    shape.num_heads_q = (int) Hq;
+    shape.num_heads_kv = (int) Hkv;
+    shape.seq_len_qo = (int) Sq;
+    shape.seq_len_kv = (int) chunk;
+    shape.seq_len_kv_cache = 0;
+    shape.head_size_qk = kHeadDim;
+    shape.head_size_vo = kHeadDim;
+
+    // Batch b is split b: the same Q (batch stride 0) against keys
+    // [b*chunk, (b+1)*chunk) of each KV head.
+    typename Kernel::KernelArguments ka{};
+    ka.shape = shape;
+    ka.Q = q16; ka.dQ = StrideQ{kHeadDim, _1{}, (int) (Sq * kHeadDim), 0};
+    ka.K = k16; ka.dK = StrideK{kHeadDim, _1{}, (int) (ldk * kHeadDim), (int) (chunk * kHeadDim)};
+    ka.V = v16; ka.dV = StrideV{_1{}, kHeadDim, (int) (ldk * kHeadDim), (int) (chunk * kHeadDim)};
+    if (direct) {
+        // O is [D, Hq, Sq]: a row of D floats per (token, head).
+        ka.O = O;
+        ka.dO = StrideO{(int) (Hq * kHeadDim), _1{}, kHeadDim, 0};
+    } else {
+        ka.O = ob;
+        ka.dO = StrideO{kHeadDim, _1{}, (int) (Sq * kHeadDim), (int) nq};
+        ka.Lse = lse2;
+    }
+    ka.K_cache = nullptr;
+    ka.V_cache = nullptr;
+
+    cutlass::KernelHardwareInfo hw{};
+    hw.sm_count = eu_count(q);
+    typename Kernel::Arguments args{ka, {scale, nullptr, 0, nullptr}, {}, hw};
+    const auto params = Kernel::to_underlying_arguments(args, nullptr);
+
+    namespace syclex  = sycl::ext::oneapi::experimental;
+    namespace intelex = sycl::ext::intel::experimental;
+    const dim3 block = Kernel::get_block_shape();
+    const dim3 grid  = Kernel::get_grid_shape(params);
+    compat::experimental::launch_properties launch_props{
+        syclex::work_group_scratch_size(Kernel::SharedStorageSize),
+    };
+    compat::experimental::kernel_properties kernel_props{
+        syclex::sub_group_size<cute::intel::sg_size>,
+        intelex::grf_size<256>,
+    };
+    compat::experimental::launch_policy policy{compat::dim3(grid.x, grid.y, grid.z),
+                                               compat::dim3(block.x, block.y, block.z),
+                                               launch_props, kernel_props};
+    compat::experimental::launch<cutlass::device_kernel<Kernel>, Kernel, false>(policy, q, params);
+}
+
+// Device scratch carved for one node.
+struct Buffers {
+    Elt * q16, * k16, * v16;
+    float * kt, * vt, * ob, * lse2, * coef;
+};
+
+// Attention of Q rows against cache rows [0, kv0) (F16, packed [Hkv][ldk][D],
+// or converted from kc/vc when they are not) plus ntail tail rows already in
+// b.kt/b.vt, written into O.
+bool attend(sycl::queue & q, Rows qr, int64_t Sq, int64_t Hq, int64_t Hkv, const Elt * k16, const Elt * v16,
+            int64_t ldk, int64_t kv0, int64_t ntail, float scale, const Buffers & b, float * O) {
+    const int nsplit = kv0 ? pick_split(kv0 / kTileKV) : 0;
+    const bool direct = nsplit == 1 && ntail == 0;
+    if (nsplit > 0) {
+        to_f16(q, qr, Sq, Hq, b.q16);
+        run_kernel(q, b.q16, k16, v16, ldk, kv0, Sq, Hq, Hkv, scale, nsplit, direct, O, b.ob, b.lse2);
+    }
+    if (!direct)
+        merge(q, qr, Sq, Hq, Hkv, b.kt, b.vt, ntail, O, b.ob, b.lse2, b.coef, nsplit, scale);
+    return true;
+}
+
+Buffers carve(sycl::queue & q, int64_t Sq, int64_t Hq, int64_t Hkv, int64_t nkv16, int64_t kv0, int64_t ntail,
+              bool & ok) {
+    const int nsplit = kv0 ? pick_split(kv0 / kTileKV) : 0;
+    const size_t nq = (size_t) Hq * Sq * kHeadDim, nkv = (size_t) Hkv * nkv16 * kHeadDim;
+    const size_t nt = (size_t) Hkv * ntail * kHeadDim, nob = (size_t) nsplit * nq, nlse = (size_t) nsplit * Hq * Sq;
+    const size_t ncoef = (size_t) Hq * Sq * (nsplit + ntail);
+    // F16 first (multiples of D elements), then the F32 rows (float4 reads), then the rest.
+    char * buf = scratch(q, (nq + 2 * nkv) * sizeof(Elt) + (2 * nt + nob + nlse + ncoef) * sizeof(float));
+    Buffers b{};
+    ok = buf != nullptr;
+    if (!ok) return b;
+    b.q16 = reinterpret_cast<Elt *>(buf);
+    b.k16 = b.q16 + nq;
+    b.v16 = b.k16 + nkv;
+    b.kt = reinterpret_cast<float *>(b.v16 + nkv);
+    b.vt = b.kt + nt;
+    b.ob = b.vt + nt;
+    b.lse2 = b.ob + nob;
+    b.coef = b.lse2 + nlse;
+    return b;
+}
+
+bool rows_ok(const ggml_tensor * t, bool f16_ok) {
+    return t->ne[0] == kHeadDim && t->ne[3] == 1 &&
+           (t->type == GGML_TYPE_F32 || (f16_ok && t->type == GGML_TYPE_F16)) &&
+           t->nb[0] == ggml_type_size(t->type) && t->nb[1] % 16 == 0 && t->nb[2] % 16 == 0;
+}
+
+uint32_t custom_magic(const ggml_tensor * op) {
+    if (op == nullptr || op->op != GGML_OP_CUSTOM) return 0;
+    struct custom_params { void * fun; int n_tasks; void * userdata; };   // ggml_custom_op_params
+    custom_params p;
+    std::memcpy(&p, op->op_params, sizeof(p));
+    uint32_t m = 0;
+    if (p.userdata) std::memcpy(&m, p.userdata, sizeof(m));
+    return m;
 }
 
 // VLA_SYCL_FMHA_CHECK=1: after each claimed node, recompute it on the host in
@@ -263,77 +410,82 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
     std::memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(float));
     std::memcpy(&softcap,  (const float *) dst->op_params + 2, sizeof(float));
     if (max_bias != 0.0f || softcap != 0.0f) return false;
-    if (Q->type != GGML_TYPE_F32 || K->type != GGML_TYPE_F32 || V->type != GGML_TYPE_F32) return false;
+    if (!rows_ok(Q, false) || !rows_ok(K, false) || !rows_ok(V, false)) return false;
     if (dst->type != GGML_TYPE_F32 || !ggml_is_contiguous(dst)) return false;
-    if (Q->ne[0] != kHeadDim || K->ne[0] != kHeadDim || V->ne[0] != kHeadDim) return false;
-    if (Q->ne[3] != 1 || K->ne[3] != 1 || V->ne[3] != 1) return false;
-    if (Q->nb[0] != sizeof(float) || K->nb[0] != sizeof(float) || V->nb[0] != sizeof(float)) return false;
     const int64_t Sq = Q->ne[1], Hq = Q->ne[2], Skv = K->ne[1], Hkv = K->ne[2];
     if (V->ne[1] != Skv || V->ne[2] != Hkv || Hkv < 1 || Hq % Hkv != 0) return false;
 
     sycl::queue & q = *static_cast<sycl::queue *>(queue);
-    const int64_t kv0 = Skv / kTileKV * kTileKV;   // keys the kernel takes; the rest is the tail
-    const size_t nq = (size_t) Hq * Sq * kHeadDim, nkv = (size_t) Hkv * kv0 * kHeadDim;
-    char * buf = scratch(q, (nq + 2 * nkv) * sizeof(Elt) + (size_t) Hq * Sq * sizeof(float));
-    if (!buf) return false;
-    Elt * q16 = reinterpret_cast<Elt *>(buf), * k16 = q16 + nq, * v16 = k16 + nkv;
-    float * lse2 = reinterpret_cast<float *>(v16 + nkv);
-    if (kv0 == 0) {   // shorter than one tile: the tail pass is the whole attention
-        merge_tail(q, Q, K, V, static_cast<float *>(dst->data), nullptr, 0, scale);
-        return true;
+    const int64_t kv0 = Skv / kTileKV * kTileKV, ntail = Skv - kv0;   // whole tiles to the kernel
+    bool ok = false;
+    const Buffers b = carve(q, Sq, Hq, Hkv, kv0, kv0, ntail, ok);
+    if (!ok) return false;
+    if (kv0) {
+        to_f16(q, rows_of(K), kv0, Hkv, b.k16);
+        to_f16(q, rows_of(V), kv0, Hkv, b.v16);
     }
-    to_f16(q, Q, q16, Sq);
-    to_f16(q, K, k16, kv0);
-    to_f16(q, V, v16, kv0);
-
-    ProblemShape shape{};
-    shape.batch = 1;
-    shape.num_heads_q = (int) Hq;
-    shape.num_heads_kv = (int) Hkv;
-    shape.seq_len_qo = (int) Sq;
-    shape.seq_len_kv = (int) kv0;
-    shape.seq_len_kv_cache = 0;
-    shape.head_size_qk = kHeadDim;
-    shape.head_size_vo = kHeadDim;
-
-    typename Kernel::KernelArguments ka{};
-    ka.shape = shape;
-    ka.Q = q16; ka.dQ = StrideQ{kHeadDim, _1{}, (int) (Sq * kHeadDim), (int) nq};
-    ka.K = k16; ka.dK = StrideK{kHeadDim, _1{}, (int) (kv0 * kHeadDim), (int) nkv};
-    ka.V = v16; ka.dV = StrideV{_1{}, kHeadDim, (int) (kv0 * kHeadDim), (int) nkv};
-    // dst is [D, Hq, Sq]: a row of D floats per (token, head).
-    ka.O = static_cast<float *>(dst->data);
-    ka.dO = StrideO{(int) (Hq * kHeadDim), _1{}, kHeadDim, (int) (Sq * Hq * kHeadDim)};
-    ka.Lse = kv0 < Skv ? lse2 : nullptr;
-    ka.K_cache = nullptr;
-    ka.V_cache = nullptr;
-
-    cutlass::KernelHardwareInfo hw{};
-    hw.sm_count = eu_count(q);
-    typename Kernel::Arguments args{ka, {scale, nullptr, 0, nullptr}, {}, hw};
-    if (!Kernel::can_implement(args)) return false;
-    const auto params = Kernel::to_underlying_arguments(args, nullptr);
-
-    namespace syclex  = sycl::ext::oneapi::experimental;
-    namespace intelex = sycl::ext::intel::experimental;
-    const dim3 block = Kernel::get_block_shape();
-    const dim3 grid  = Kernel::get_grid_shape(params);
-    compat::experimental::launch_properties launch_props{
-        syclex::work_group_scratch_size(Kernel::SharedStorageSize),
-    };
-    compat::experimental::kernel_properties kernel_props{
-        syclex::sub_group_size<cute::intel::sg_size>,
-        intelex::grf_size<256>,
-    };
-    compat::experimental::launch_policy policy{compat::dim3(grid.x, grid.y, grid.z),
-                                               compat::dim3(block.x, block.y, block.z),
-                                               launch_props, kernel_props};
-    compat::experimental::launch<cutlass::device_kernel<Kernel>, Kernel, false>(policy, q, params);
-    if (kv0 < Skv)
-        merge_tail(q, Q, K, V, static_cast<float *>(dst->data), lse2, kv0, scale);
+    to_f32(q, rows_of(K, kv0), ntail, Hkv, b.kt, ntail, 0);
+    to_f32(q, rows_of(V, kv0), ntail, Hkv, b.vt, ntail, 0);
+    attend(q, rows_of(Q), Sq, Hq, Hkv, b.k16, b.v16, kv0, kv0, ntail, scale, b, static_cast<float *>(dst->data));
     static const bool check = [] { const char * e = std::getenv("VLA_SYCL_FMHA_CHECK"); return e && *e && *e != '0'; }();
     if (check) check_against_host(q, dst, Q, K, V, scale);
     return true;
+}
+
+namespace {
+
+bool fmha_kv_shape_ok(const ggml_tensor * op) {
+    const ggml_tensor * Q = op->src[0], * Kc = op->src[1], * Vc = op->src[2], * Kn = op->src[3], * Vn = op->src[4];
+    if (!Q || !Kc || !Vc || !Kn || !Vn) return false;
+    if (!rows_ok(Q, false) || !rows_ok(Kc, true) || !rows_ok(Vc, true) || !rows_ok(Kn, false) || !rows_ok(Vn, false))
+        return false;
+    const int64_t Hq = Q->ne[2], Hkv = Kc->ne[2];
+    return Vc->ne[1] == Kc->ne[1] && Vn->ne[1] == Kn->ne[1] && Vc->ne[2] == Hkv && Kn->ne[2] == Hkv &&
+           Vn->ne[2] == Hkv && Hkv >= 1 && Hq % Hkv == 0 && op->type == GGML_TYPE_F32 && ggml_is_contiguous(op) &&
+           Kc->ne[1] + Kn->ne[1] > 0;
+}
+
+bool packed_f16(const ggml_tensor * t) {
+    return t->type == GGML_TYPE_F16 && ggml_is_contiguous(t);
+}
+
+}  // namespace
+
+bool sycl_fmha_kv_supports(const ggml_tensor * op) {
+    return custom_magic(op) == FMHA_KV_MAGIC && fmha_kv_shape_ok(op);
+}
+
+bool sycl_fmha_kv_forward(ggml_tensor * dst, void * queue) {
+    if (custom_magic(dst) != FMHA_KV_MAGIC) return false;
+    if (!fmha_kv_shape_ok(dst)) return false;
+    struct custom_params { void * fun; int n_tasks; void * userdata; };
+    custom_params cp;
+    std::memcpy(&cp, dst->op_params, sizeof(cp));
+    const float scale = static_cast<const FmhaKvSpec *>(cp.userdata)->scale;
+    const ggml_tensor * Q = dst->src[0], * Kc = dst->src[1], * Vc = dst->src[2], * Kn = dst->src[3], * Vn = dst->src[4];
+    const int64_t Sq = Q->ne[1], Hq = Q->ne[2], Sc = Kc->ne[1], Sn = Kn->ne[1], Hkv = Kc->ne[2];
+
+    sycl::queue & q = *static_cast<sycl::queue *>(queue);
+    // Whole tiles of the cache go to the kernel, read in place when they are
+    // already packed F16 (the graph casts them once per layer); the rest of the
+    // cache and every new key are the tail.
+    const int64_t kv0 = Sc / kTileKV * kTileKV, ntail = Sc - kv0 + Sn;
+    const bool in_place = packed_f16(Kc) && packed_f16(Vc);
+    bool ok = false;
+    const Buffers b = carve(q, Sq, Hq, Hkv, in_place ? 0 : kv0, kv0, ntail, ok);
+    if (!ok) return false;
+    const Elt * k16 = in_place ? static_cast<const Elt *>(Kc->data) : b.k16;
+    const Elt * v16 = in_place ? static_cast<const Elt *>(Vc->data) : b.v16;
+    const int64_t ldk = in_place ? Sc : kv0;
+    if (!in_place && kv0) {
+        to_f16(q, rows_of(Kc), kv0, Hkv, b.k16);
+        to_f16(q, rows_of(Vc), kv0, Hkv, b.v16);
+    }
+    to_f32(q, rows_of(Kc, kv0), Sc - kv0, Hkv, b.kt, ntail, 0);
+    to_f32(q, rows_of(Vc, kv0), Sc - kv0, Hkv, b.vt, ntail, 0);
+    to_f32(q, rows_of(Kn), Sn, Hkv, b.kt, ntail, Sc - kv0);
+    to_f32(q, rows_of(Vn), Sn, Hkv, b.vt, ntail, Sc - kv0);
+    return attend(q, rows_of(Q), Sq, Hq, Hkv, k16, v16, ldk, kv0, ntail, scale, b, static_cast<float *>(dst->data));
 }
 
 }  // namespace vla

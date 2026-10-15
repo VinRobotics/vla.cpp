@@ -837,11 +837,20 @@ bool supports(const ggml_tensor * op) {
 }
 
 // The one function behind the hook: FoldQuant's custom nodes first, then the
-// sycl-tla flash attention when it was built in.
+// sycl-tla flash attention (and its cached-KV node) when it was built in.
 bool dispatch(ggml_tensor * dst, void * queue) {
     if (fq_dispatch(dst, queue)) return true;
 #ifdef VLA_SYCL_FMHA
     if (sycl_fmha_forward(dst, queue)) return true;
+    if (sycl_fmha_kv_forward(dst, queue)) return true;
+#endif
+    return false;
+}
+
+bool ext_supports(const ggml_tensor * op) {
+    if (supports(op)) return true;
+#ifdef VLA_SYCL_FMHA
+    if (sycl_fmha_kv_supports(op)) return true;
 #endif
     return false;
 }
@@ -850,7 +859,7 @@ bool dispatch(ggml_tensor * dst, void * queue) {
 
 void sycl_register_ext_ops() {
     ggml_sycl_ext_forward  = dispatch;
-    ggml_sycl_ext_supports = supports;
+    ggml_sycl_ext_supports = ext_supports;
 }
 
 void sycl_register_foldquant_ops() {
