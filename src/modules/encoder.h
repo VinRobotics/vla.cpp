@@ -53,6 +53,10 @@ struct EncCfg {
 struct EncStack {
     EncCfg                 cfg;
     std::vector<EncBlockW> blk;
+    // SYCL: declare q/k/v as one fused projection (Wqkv/bqkv; Wq/Wk/Wv null) for
+    // block()'s fused path. Opt-in: archs that build their own blocks from
+    // EncBlockW (pi0) need the separate weights. Set before declare().
+    bool                   fuse_qkv = false;
 
     void declare(WeightLoader & L, const char * prefix, int64_t layers, const EncNames & n = EncNames{});
 

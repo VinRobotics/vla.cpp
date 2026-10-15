@@ -35,19 +35,20 @@ void EncStack::declare(WeightLoader & L, const char * prefix, int64_t layers, co
         w.ln2w = L.f32 ("%s.%lld.%s.weight",      prefix, (long long)i, n.ln2);
         w.ln2b = L.f32 ("%s.%lld.%s.bias",        prefix, (long long)i, n.ln2);
 #ifdef GGML_USE_SYCL
-        {
+        if (fuse_qkv) {
             const std::string p = std::string(prefix) + "." + std::to_string(i) + ".attn_";
             w.Wqkv = L.fuse_gemm((p + "qkv.fused.weight").c_str(), { p + "q.weight", p + "k.weight", p + "v.weight" });
             w.bqkv = L.fuse_f32 ((p + "qkv.fused.bias").c_str(),   { p + "q.bias",   p + "k.bias",   p + "v.bias" });
-        }
-#else
-        w.Wq   = L.gemm("%s.%lld.attn_q.weight",  prefix, (long long)i);
-        w.bq   = L.f32 ("%s.%lld.attn_q.bias",    prefix, (long long)i);
-        w.Wk   = L.gemm("%s.%lld.attn_k.weight",  prefix, (long long)i);
-        w.bk   = L.f32 ("%s.%lld.attn_k.bias",    prefix, (long long)i);
-        w.Wv   = L.gemm("%s.%lld.attn_v.weight",  prefix, (long long)i);
-        w.bv   = L.f32 ("%s.%lld.attn_v.bias",    prefix, (long long)i);
+        } else
 #endif
+        {
+            w.Wq   = L.gemm("%s.%lld.attn_q.weight",  prefix, (long long)i);
+            w.bq   = L.f32 ("%s.%lld.attn_q.bias",    prefix, (long long)i);
+            w.Wk   = L.gemm("%s.%lld.attn_k.weight",  prefix, (long long)i);
+            w.bk   = L.f32 ("%s.%lld.attn_k.bias",    prefix, (long long)i);
+            w.Wv   = L.gemm("%s.%lld.attn_v.weight",  prefix, (long long)i);
+            w.bv   = L.f32 ("%s.%lld.attn_v.bias",    prefix, (long long)i);
+        }
         w.Wo   = L.gemm("%s.%lld.attn_o.weight",  prefix, (long long)i);
         w.bo   = L.f32 ("%s.%lld.attn_o.bias",    prefix, (long long)i);
         w.Wfc1 = L.gemm("%s.%lld.%s.weight",      prefix, (long long)i, n.fc1);

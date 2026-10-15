@@ -342,6 +342,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     }
     WeightLoader L("pi05", g, m->ctx_weights, m->matmul_type);
 
+    m->vis.vit.enc.fuse_qkv = true;   // SYCL: one q/k/v GEMM per SigLIP block (EncStack::block)
     m->vis.declare(L);
 
     m->pl.declare(L, "vlm", cfg.n_layers, false, fq.present ? &fq.llm : nullptr, cfg.rms_eps);
