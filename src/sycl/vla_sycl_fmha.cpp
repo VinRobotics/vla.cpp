@@ -36,6 +36,10 @@
 #include "layers/vit_fused.h"
 #include "layers/fq_rope_attn.h"
 #include "sycl/vla_sycl_foldquant.h"
+#ifdef VLA_FQ_SYCL_DNNL
+#include <dnnl.hpp>
+#include <dnnl_sycl.hpp>
+#endif
 
 #include "ggml.h"
 
@@ -54,6 +58,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
+#include <map>
 #include <mutex>
 
 namespace vla {
@@ -414,6 +420,90 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
     return true;
 }
 
+#ifdef VLA_FQ_SYCL_DNNL
+// Attention as two oneDNN GEMMs and a softmax, all keys contiguous: S = Q K^T
+// (F16 in, F32 out), P = softmax(scale * S) in F16, O = P V (F32 out). For
+// pi0.5's expert (400 folded rows, ~611 keys) 0.06 ms against 0.10-0.13 for the
+// tiled flash kernel, which runs only 7 work-groups of 10 serial key tiles.
+struct AttnDnnl {
+    dnnl::engine eng;
+    dnnl::stream strm;
+    std::map<std::pair<int64_t, int64_t>, std::pair<dnnl::matmul, dnnl::matmul>> prims;   // (R, S)
+    float * s = nullptr; size_t s_cap = 0;
+    sycl::half * p = nullptr; size_t p_cap = 0;
+};
+
+AttnDnnl & attn_dnnl(sycl::queue & q) {
+    static std::unordered_map<sycl::queue *, AttnDnnl> states;
+    auto it = states.find(&q);
+    if (it == states.end()) {
+        AttnDnnl st;
+        st.eng  = dnnl::sycl_interop::make_engine(q.get_device(), q.get_context());
+        st.strm = dnnl::sycl_interop::make_stream(st.eng, q);
+        it = states.emplace(&q, std::move(st)).first;
+    }
+    return it->second;
+}
+
+template <class T>
+T * attn_grow(sycl::queue & q, T *& p, size_t & cap, size_t n) {
+    if (p && cap >= n) return p;
+    if (p) { q.wait(); sycl::free(p, q); }
+    p = sycl::malloc_device<T>(n, q);
+    cap = p ? n : 0;
+    return p;
+}
+
+// q16 [R][D], k16 / v16 [S][D] F16 contiguous; O [R][D] F32.
+bool attn_gemm(sycl::queue & q, const Elt * q16, const Elt * k16, const Elt * v16, int64_t R, int64_t S, float scale,
+               float * O) {
+    using dt = dnnl::memory::data_type;
+    using tag = dnnl::memory::format_tag;
+    using md = dnnl::memory::desc;
+    const int64_t D = kHeadDim;
+    AttnDnnl & st = attn_dnnl(q);
+    const md q_md({ R, D }, dt::f16, tag::ab), kT_md({ D, S }, dt::f16, tag::ba), s_md({ R, S }, dt::f32, tag::ab);
+    const md p_md({ R, S }, dt::f16, tag::ab), v_md({ S, D }, dt::f16, tag::ab), o_md({ R, D }, dt::f32, tag::ab);
+    auto it = st.prims.find({ R, S });
+    if (it == st.prims.end()) {
+        try {
+            it = st.prims.emplace(std::make_pair(R, S),
+                                  std::make_pair(dnnl::matmul(dnnl::matmul::primitive_desc(st.eng, q_md, kT_md, s_md)),
+                                                 dnnl::matmul(dnnl::matmul::primitive_desc(st.eng, p_md, v_md, o_md)))).first;
+        } catch (const dnnl::error &) {
+            return false;
+        }
+    }
+    float * sb = attn_grow(q, st.s, st.s_cap, (size_t) (R * S));
+    sycl::half * pb = attn_grow(q, st.p, st.p_cap, (size_t) (R * S));
+    if (!sb || !pb) return false;
+    using dnnl::sycl_interop::make_memory;
+    const auto U = dnnl::sycl_interop::memory_kind::usm;
+    it->second.first.execute(st.strm, { { DNNL_ARG_SRC, make_memory(q_md, st.eng, U, const_cast<Elt *>(q16)) },
+                                        { DNNL_ARG_WEIGHTS, make_memory(kT_md, st.eng, U, const_cast<Elt *>(k16)) },
+                                        { DNNL_ARG_DST, make_memory(s_md, st.eng, U, sb) } });
+    const int iS = (int) S;
+    q.parallel_for(sycl::nd_range<1>((size_t) R * 32, 32), [=](sycl::nd_item<1> it2) [[sycl::reqd_sub_group_size(32)]] {
+        const auto sg = it2.get_sub_group();
+        const int r = (int) it2.get_group(0), l = (int) sg.get_local_linear_id();
+        const float * srow = sb + (size_t) r * iS;
+        float m = -INFINITY;
+        for (int j = l; j < iS; j += 32) m = sycl::fmax(m, srow[j]);
+        m = sycl::reduce_over_group(sg, m, sycl::maximum<float>());
+        float z = 0.f;
+        for (int j = l; j < iS; j += 32) z += sycl::exp((srow[j] - m) * scale);
+        z = sycl::reduce_over_group(sg, z, sycl::plus<float>());
+        const float iz = 1.0f / z;
+        sycl::half * prow = pb + (size_t) r * iS;
+        for (int j = l; j < iS; j += 32) prow[j] = sycl::half(sycl::exp((srow[j] - m) * scale) * iz);
+    });
+    it->second.second.execute(st.strm, { { DNNL_ARG_SRC, make_memory(p_md, st.eng, U, pb) },
+                                         { DNNL_ARG_WEIGHTS, make_memory(v_md, st.eng, U, const_cast<Elt *>(v16)) },
+                                         { DNNL_ARG_DST, make_memory(o_md, st.eng, U, O) } });
+    return true;
+}
+#endif
+
 // fq_rope_attn (src/layers/fq_rope_attn.h): the q|k|v int32 sums from oneDNN, one
 // pass that dequantizes (the GEMM epilogue's math), applies NeoX RoPE to q and k
 // and packs Q folded [S*Hq][D], K and V [S][D] as F16, then the cached-KV kernel.
@@ -429,7 +519,10 @@ bool sycl_fq_rope_attn_forward(ggml_tensor * dst, void * queue) {
     if (!w || !blob || !ws || !pos || pos->type != GGML_TYPE_I32 || !packed_f16(Kc) || !packed_f16(Vc) ||
         dst->type != GGML_TYPE_F32 || !ggml_is_contiguous(dst))
         return false;
-    const int64_t D = sp->hd, H = sp->nq, N = sp->gemm->N, Sn = blob->ne[1], Sc = Kc->ne[1], R = Sn * H;
+    const int64_t D = sp->hd, H = sp->nq, N = sp->gemm->N, Sn = blob->ne[1], R = Sn * H;
+    const bool    tail = sp->extra > 0;   // Kc/Vc end in Sn free rows for this step's K/V
+    const int64_t Sc = Kc->ne[1] - (tail ? Sn : 0);
+    if (tail && sp->extra != Sn) return false;
     if (N != (H + 2) * D || Kc->ne[2] != 1 || pos->ne[0] != Sn) return false;
     sycl::queue & q = *static_cast<sycl::queue *>(queue);
     int64_t xs_off = 0;
@@ -438,6 +531,10 @@ bool sycl_fq_rope_attn_forward(ggml_tensor * dst, void * queue) {
     Elt * spare = scratch(q, (size_t) (R + 2 * Sn) * D);
     if (!spare) return false;
     Elt * q16 = spare, * kn16 = q16 + R * D, * vn16 = kn16 + Sn * D;
+    if (tail) {   // write this step's K/V right after the cached ones
+        kn16 = static_cast<Elt *>(Kc->data) + Sc * D;
+        vn16 = static_cast<Elt *>(Vc->data) + Sc * D;
+    }
     const int8_t * bl = static_cast<const int8_t *>(blob->data);
     const int64_t rb = blob->ne[0];
     const float * wsp = static_cast<const float *>(ws->data);
@@ -470,6 +567,12 @@ bool sycl_fq_rope_attn_forward(ggml_tensor * dst, void * queue) {
         out[i] = Elt(x0);
         out[i + half] = Elt(x1);
     });
+#ifdef VLA_FQ_SYCL_DNNL
+    if (tail)
+        return attn_gemm(q, q16, static_cast<const Elt *>(Kc->data), static_cast<const Elt *>(Vc->data), R, Sc + Sn,
+                         sp->scale, static_cast<float *>(dst->data));
+#endif
+    if (tail) return false;
     launch<Fmha<64, 8, true>>(q, q16, R, 1, 1, kn16, vn16, Sn, static_cast<const Elt *>(Kc->data),
                               static_cast<const Elt *>(Vc->data), Sc, sp->scale, static_cast<float *>(dst->data));
     return true;
@@ -487,15 +590,16 @@ bool sycl_fq_rope_pack_forward(ggml_tensor * dst, void * queue) {
     if (!sp || sp->magic != FQ_ROPE_PACK_MAGIC) return false;
     const ggml_tensor * w = dst->src[0], * blob = dst->src[1], * ws = dst->src[2], * bias = dst->src[3], * pos = dst->src[4];
     const int64_t D = sp->hd, H = sp->nq, N = sp->gemm->N, T = blob->ne[1];
+    const int64_t E = sp->extra;
     if (!pos || pos->type != GGML_TYPE_I32 || pos->ne[0] != T || N != (H + 2) * D || dst->type != GGML_TYPE_F16 ||
-        dst->ne[0] != D || dst->ne[1] != (H + 2) * T || (D % 2) != 0)
+        dst->ne[0] != D || dst->ne[1] != H * T + 2 * (T + E) || (D % 2) != 0)
         return false;
     int64_t xs_off = 0;
     const int32_t * acc = sycl_fq_gemm_acc(queue, w, blob, ws, *sp->gemm, &xs_off);
     if (!acc) return false;
     sycl::queue & q = *static_cast<sycl::queue *>(queue);
     const int8_t * bl = static_cast<const int8_t *>(blob->data);
-    const int rb = (int) blob->ne[0], xo = (int) xs_off, iN = (int) N, iD = (int) D, iH = (int) H, iT = (int) T;
+    const int rb = (int) blob->ne[0], xo = (int) xs_off, iN = (int) N, iD = (int) D, iH = (int) H, iT = (int) T, iE = (int) E;
     const float * wsp = static_cast<const float *>(ws->data);
     const float * bp = bias ? static_cast<const float *>(bias->data) : nullptr;
     const int32_t * pp = static_cast<const int32_t *>(pos->data);
@@ -518,7 +622,7 @@ bool sycl_fq_rope_pack_forward(ggml_tensor * dst, void * queue) {
             const float y0 = x0 * c - x1 * s, y1 = x0 * s + x1 * c;
             x0 = y0; x1 = y1;
         }
-        sycl::half * o = out + (size_t) (h < iH ? h * iT + t : iH * iT + (h - iH) * iT + t) * iD;
+        sycl::half * o = out + (size_t) (h < iH ? h * iT + t : iH * iT + (h - iH) * (iT + iE) + t) * iD;
         o[i] = sycl::half(x0);
         o[i + half] = sycl::half(x1);
     });

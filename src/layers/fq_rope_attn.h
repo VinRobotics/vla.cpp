@@ -52,6 +52,10 @@ struct FqRopeAttnSpec {
     int                nq        = 0;
     float              freq_base = 10000.0f;
     float              scale     = 0.0f;
+    // rope_pack: K and V rows left free after the prefix's own, for the action
+    // tokens; rope_attn: its cached K/V carry those rows, and it writes this
+    // step's K/V there so all keys are contiguous (attention as two GEMMs).
+    int                extra     = 0;
 };
 
 /// NeoX RoPE angle of pair i (of hd/2) at position p, as ggml-sycl computes it.
@@ -68,7 +72,7 @@ inline void fq_rope_attn_cpu(ggml_tensor * dst, int ith, int nth, void * userdat
     if (ith != 0) return;
     const int64_t D = s.hd, H = s.nq, N = s.gemm->N, T = dst->ne[2], half = D / 2;
     const ggml_tensor * pos = dst->src[4], * Kc = dst->src[5], * Vc = dst->src[6];
-    const int64_t Sc = Kc->ne[1];
+    const int64_t Sc = Kc->ne[1] - (s.extra ? T : 0);
     // q|k|v rows [T][N], as the FoldQuant GEMM node writes them.
     std::vector<float> qkv((size_t) N * T);
     ggml_tensor tmp = *dst;
@@ -130,8 +134,8 @@ inline ggml_tensor * fq_rope_attn(ggml_context * C, const FqRopeAttnSpec * spec,
     return t;
 }
 
-/// fq_rope_pack's CPU reference: src[0..4] as fq_rope_attn; dst F16 [hd, H*seq + 2*seq]:
-/// Q rows (head-major, h * seq + t), then K rows, then V rows, q and k rotated.
+/// fq_rope_pack's CPU reference: src[0..4] as fq_rope_attn; dst F16 [hd, H*seq + 2*(seq+extra)]:
+/// Q rows (head-major, h * seq + t), then K rows (+ extra free), then V rows (+ extra), q and k rotated.
 inline void fq_rope_pack_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     (void) nth;
     const FqRopeAttnSpec & s = *static_cast<const FqRopeAttnSpec *>(userdata);
@@ -150,7 +154,7 @@ inline void fq_rope_pack_cpu(ggml_tensor * dst, int ith, int nth, void * userdat
     for (int64_t t = 0; t < T; ++t) {
         const float * row = qkv.data() + (size_t) t * N;
         for (int64_t h = 0; h < H + 2; ++h) {
-            ggml_fp16_t * o = out + (h < H ? h * T + t : H * T + (h - H) * T + t) * D;
+            ggml_fp16_t * o = out + (h < H ? h * T + t : H * T + (h - H) * (T + s.extra) + t) * D;
             for (int64_t i = 0; i < half; ++i) {
                 float x0 = row[h * D + i], x1 = row[h * D + i + half];
                 if (h <= H) {   // q heads and k
@@ -172,7 +176,7 @@ inline ggml_tensor * fq_rope_pack(ggml_context * C, const FqRopeAttnSpec * spec,
     GGML_ASSERT(spec->magic == FQ_ROPE_PACK_MAGIC && xq->type == GGML_TYPE_I8);
     const int64_t T = xq->ne[1];
     ggml_tensor * args[5] = { qkv.w, xq, qkv.wscale, qkv.bias, positions };
-    ggml_tensor * t = ggml_custom_4d(C, GGML_TYPE_F16, spec->hd, (int64_t) spec->nq * T + 2 * T, 1, 1, args, 5,
+    ggml_tensor * t = ggml_custom_4d(C, GGML_TYPE_F16, spec->hd, (int64_t) spec->nq * T + 2 * (T + spec->extra), 1, 1, args, 5,
                                      fq_rope_pack_cpu, GGML_N_TASKS_MAX, (void *) spec);
     ggml_format_name(t, "%s.rope_pack", ggml_get_name(qkv.w));
     return t;

@@ -217,11 +217,12 @@ inline ggml_tensor * gemma_attn(
         (fq_xq || fq_x) && fmha_kv_enabled()) {
         ggml_tensor * pk = fq_rope_pack(ctx, &w.rope_pack, w.fq_qkv, fq_xq ? fq_xq : fq_act(ctx, w.fq_qkv, fq_x), positions);
         const size_t  rs = pk->nb[1];   // one hd row
+        const int64_t E  = w.rope_pack.extra, kv = seq + E;   // E rows free for the expert's keys
         ggml_tensor * Q  = ggml_view_3d(ctx, pk, hd, seq, nq, rs, rs * seq, 0);
-        ggml_tensor * K  = ggml_view_3d(ctx, pk, hd, seq, 1,  rs, rs * seq, rs * seq * nq);
-        ggml_tensor * V  = ggml_view_3d(ctx, pk, hd, seq, 1,  rs, rs * seq, rs * seq * (nq + 1));
-        if (k_out) *k_out = K;
-        if (v_out) *v_out = V;
+        ggml_tensor * K  = ggml_view_3d(ctx, pk, hd, seq, 1,  rs, rs * kv, rs * seq * nq);
+        ggml_tensor * V  = ggml_view_3d(ctx, pk, hd, seq, 1,  rs, rs * kv, rs * (seq * nq + kv));
+        if (k_out) *k_out = E ? ggml_view_3d(ctx, pk, hd, kv, 1, rs, rs * kv, rs * seq * nq) : K;
+        if (v_out) *v_out = E ? ggml_view_3d(ctx, pk, hd, kv, 1, rs, rs * kv, rs * (seq * nq + kv)) : V;
         ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, 1.f/std::sqrt((float) hd), 0.0f, 0.0f);
         ggml_prec_set_acc(fa, GGML_PREC_F32);
         return fq_linear(ctx, w.fq_o, ggml_reshape_2d(ctx, fa, qf, seq), fq_res, fq_gate);

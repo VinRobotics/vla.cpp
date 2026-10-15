@@ -411,6 +411,20 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
         if (!w.fq_down)
             w.Wdown = L.gemm("aex.blk.%lld.ffn_down.weight", ii);
     }
+    // Expert attention over contiguous keys (fq_rope_attn, two oneDNN GEMMs): the
+    // prefix pack leaves chunk free K/V rows per layer, the expert writes its own
+    // there. Only when every layer takes both fused nodes. VLA_FQ_NO_KV_TAIL=1: off.
+    {
+        bool all = cfg.n_suffix * cfg.n_q_heads > 192 && !(std::getenv("VLA_FQ_NO_KV_TAIL") && std::strcmp(std::getenv("VLA_FQ_NO_KV_TAIL"), "0"));
+        for (int64_t i=0; i<cfg.n_layers && all; ++i)
+            all = m->pl.blk[i].rope_pack.magic == FQ_ROPE_PACK_MAGIC && m->ex_layers[i].rope_attn.magic == FQ_ROPE_ATTN_MAGIC;
+        if (all)
+            for (int64_t i=0; i<cfg.n_layers; ++i) {
+                m->pl.blk[i].rope_pack.extra = (int) cfg.n_suffix;
+                m->ex_layers[i].rope_attn.extra = (int) cfg.n_suffix;
+            }
+    }
+
 
     m->W_ain  = L.f32("action_in_proj.weight");   m->b_ain  = L.f32("action_in_proj.bias");
     m->W_aout = L.f32("action_out_proj.weight");  m->b_aout = L.f32("action_out_proj.bias");
