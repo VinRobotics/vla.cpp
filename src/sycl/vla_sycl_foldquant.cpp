@@ -34,6 +34,7 @@
 // across rounding ties. test_foldquant_sycl_op checks every path byte for byte.
 
 #include "sycl/vla_sycl_foldquant.h"
+#include "sycl/vla_sycl_fmha.h"
 
 #include "foldquant.h"
 #include "foldquant_ref.h"
@@ -806,7 +807,7 @@ void check_against_host(sycl::queue & q, ggml_tensor * dst, void (*ref)(ggml_ten
     if (bad) std::printf(" rows %lld/%lld (first %lld)\n", (long long) bad, (long long) rows, (long long) first);
 }
 
-bool dispatch(ggml_tensor * dst, void * queue) {
+bool fq_dispatch(ggml_tensor * dst, void * queue) {
     const void * ud = fq_userdata(dst);
     const uint32_t m = fq_magic(ud);
     if (m != FQ_ACT_MAGIC && m != FQ_GEMM_MAGIC) return false;
@@ -835,11 +836,25 @@ bool supports(const ggml_tensor * op) {
     return false;
 }
 
+// The one function behind the hook: FoldQuant's custom nodes first, then the
+// sycl-tla flash attention when it was built in.
+bool dispatch(ggml_tensor * dst, void * queue) {
+    if (fq_dispatch(dst, queue)) return true;
+#ifdef VLA_SYCL_FMHA
+    if (sycl_fmha_forward(dst, queue)) return true;
+#endif
+    return false;
+}
+
 }  // namespace
 
-void sycl_register_foldquant_ops() {
+void sycl_register_ext_ops() {
     ggml_sycl_ext_forward  = dispatch;
     ggml_sycl_ext_supports = supports;
+}
+
+void sycl_register_foldquant_ops() {
+    sycl_register_ext_ops();
 }
 
 }  // namespace vla

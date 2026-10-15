@@ -371,6 +371,25 @@ if(GGML_SYCL AND NOT GGML_CUDA)
     target_link_options(vla_core PUBLIC -fsycl -fsycl-device-code-split=per_kernel
         "SHELL:-Xsycl-target-backend=spir64 \"-cl-fp32-correctly-rounded-divide-sqrt\"")
     target_compile_definitions(vla_core PRIVATE VLA_FQ_SYCL)
+    # Fused flash attention from sycl-tla (header-only CUTLASS for SYCL), behind
+    # the same hook: src/sycl/vla_sycl_fmha.cpp. Off unless VLA_SYCL_TLA_DIR
+    # points at a sycl-tla checkout; its templates take a minute or two to build.
+    set(VLA_SYCL_TLA_DIR "" CACHE PATH "sycl-tla checkout for the SYCL flash-attention kernel (empty: off)")
+    if(VLA_SYCL_TLA_DIR)
+        if(NOT EXISTS "${VLA_SYCL_TLA_DIR}/applications/flash_attention_v2/kernel/xe_fmha_fwd_kernel.hpp")
+            message(FATAL_ERROR "VLA_SYCL_TLA_DIR=${VLA_SYCL_TLA_DIR} is not a sycl-tla checkout")
+        endif()
+        target_sources(vla_core PRIVATE src/sycl/vla_sycl_fmha.cpp)
+        set_source_files_properties(src/sycl/vla_sycl_fmha.cpp PROPERTIES
+            COMPILE_OPTIONS "-fsycl;-fno-sycl-instrument-device-code;-w"
+            COMPILE_DEFINITIONS "CUTLASS_ENABLE_SYCL;SYCL_INTEL_TARGET"
+            INCLUDE_DIRECTORIES "${VLA_SYCL_TLA_DIR}/include;${VLA_SYCL_TLA_DIR}/tools/util/include;${VLA_SYCL_TLA_DIR}/applications")
+        target_compile_definitions(vla_core PRIVATE VLA_SYCL_FMHA)
+        # The kernel uses Xe 2D block loads, DPAS and split barriers.
+        target_link_options(vla_core PUBLIC
+            "SHELL:-Xspirv-translator -spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,+SPV_INTEL_subgroup_matrix_multiply_accumulate")
+        message(STATUS "vla.cpp: SYCL flash attention from sycl-tla at ${VLA_SYCL_TLA_DIR}")
+    endif()
     # Prefill-sized FoldQuant GEMMs go to oneDNN's int8 matmul when ggml-sycl
     # was built with it (GGML_SYCL_DNN, the default).
     if(GGML_SYCL_DNN)

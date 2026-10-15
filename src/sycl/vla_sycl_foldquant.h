@@ -22,4 +22,8 @@ namespace vla {
 // FoldQuant kernels. Idempotent; call once the SYCL backend is up.
 void sycl_register_foldquant_ops();
 
+// Points the hook at every in-tree SYCL kernel: FoldQuant's, and the sycl-tla
+// flash attention when the build has it (VLA_SYCL_TLA_DIR). Idempotent.
+void sycl_register_ext_ops();
+
 }  // namespace vla
