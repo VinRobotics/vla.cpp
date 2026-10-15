@@ -345,6 +345,21 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     m->vis.declare(L);
 
     m->pl.declare(L, "vlm", cfg.n_layers, false, fq.present ? &fq.llm : nullptr, cfg.rms_eps);
+#if defined(GGML_USE_SYCL) && defined(VLA_SYCL_FMHA) && defined(VLA_FQ_SYCL_DNNL)
+    // Prefix q/k/v GEMM, RoPE and F16 packing as one node (gemma_attn).
+    // VLA_FQ_NO_ROPE_PACK=1 keeps them apart (A/B runs).
+    if (cfg.n_kv_heads == 1 && cfg.head_dim == 256 && !std::getenv("VLA_FQ_SYCL_GEMM") &&
+        !(std::getenv("VLA_FQ_NO_ROPE_PACK") && std::strcmp(std::getenv("VLA_FQ_NO_ROPE_PACK"), "0")))
+        for (GemmaLayerW & w : m->pl.blk)
+            if (w.fq_qkv) {
+                w.rope_pack.magic     = FQ_ROPE_PACK_MAGIC;
+                w.rope_pack.gemm      = &w.fq_qkv.gemm;
+                w.rope_pack.hd        = (int) cfg.head_dim;
+                w.rope_pack.nq        = (int) cfg.n_q_heads;
+                w.rope_pack.freq_base = cfg.rope_freq_base;
+                w.rope_pack.scale     = 1.0f / std::sqrt((float) cfg.head_dim);
+            }
+#endif
 
     m->ex_layers.resize(cfg.n_layers);
     for (int64_t i=0; i<cfg.n_layers; ++i) {
@@ -534,6 +549,11 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     std::vector<ggml_tensor *> cK16(n_layers, nullptr), cV16(n_layers, nullptr);
     if (fa && fmha_kv_enabled())
         for (int64_t i=0; i<n_layers; ++i) {
+            if (cK[i]->type == GGML_TYPE_F16) {   // already F16 [hd, seq, 1] (fq_rope_pack)
+                cK16[i] = cK[i];
+                cV16[i] = cV[i];
+                continue;
+            }
             cK16[i] = ggml_cast(C, ggml_permute(C, cK[i], 0, 2, 1, 3), GGML_TYPE_F16);
             cV16[i] = ggml_cast(C, ggml_permute(C, cV[i], 0, 2, 1, 3), GGML_TYPE_F16);
         }

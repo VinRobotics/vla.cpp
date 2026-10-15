@@ -1014,6 +1014,7 @@ bool dispatch(ggml_tensor * dst, void * queue) {
     if (sycl_fmha_kv_forward(dst, queue)) return true;
     if (sycl_vit_attn_forward(dst, queue)) return true;
     if (sycl_fq_rope_attn_forward(dst, queue)) return true;
+    if (sycl_fq_rope_pack_forward(dst, queue)) return true;
 #endif
     return false;
 }

@@ -28,6 +28,9 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue);
 bool sycl_fmha_kv_forward(ggml_tensor * dst, void * queue);
 bool sycl_fmha_kv_supports(const ggml_tensor * op);
 
+// fq_rope_pack of src/layers/fq_rope_attn.h (pi0.5's prefix q/k/v).
+bool sycl_fq_rope_pack_forward(ggml_tensor * dst, void * queue);
+
 // fq_rope_attn of src/layers/fq_rope_attn.h (pi0.5's expert attention).
 bool sycl_fq_rope_attn_forward(ggml_tensor * dst, void * queue);
 

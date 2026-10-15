@@ -68,6 +68,9 @@ struct GemmaLayerW {
     FqGluActSpec glu_act{ 0 };
     // q/k/v GEMM + RoPE + cached-KV attention in one node (pi0.5's expert, SYCL).
     FqRopeAttnSpec rope_attn{};
+    // q/k/v GEMM + RoPE + F16 packing in one node (pi0.5's prefix, SYCL); the
+    // attention reads it in place and k_out / v_out are F16 [hd, seq, 1] views.
+    FqRopeAttnSpec rope_pack{};
 };
 
 /// Declare a float layer's q/k/v and gate/up GEMMs, `p` being the tensor-name
@@ -208,6 +211,19 @@ inline ggml_tensor * gemma_attn(
         // One node for q/k/v, RoPE and the attention (src/layers/fq_rope_attn.h).
         ggml_tensor * fa = fq_rope_attn(ctx, &w.rope_attn, w.fq_qkv, fq_xq ? fq_xq : fq_act(ctx, w.fq_qkv, fq_x),
                                         positions, cached_K16, cached_V16);
+        return fq_linear(ctx, w.fq_o, ggml_reshape_2d(ctx, fa, qf, seq), fq_res, fq_gate);
+    }
+    if (w.rope_pack.magic == FQ_ROPE_PACK_MAGIC && w.fq_qkv && flash && !mask && !cached_K && !cached_V && nkv == 1 &&
+        (fq_xq || fq_x) && fmha_kv_enabled()) {
+        ggml_tensor * pk = fq_rope_pack(ctx, &w.rope_pack, w.fq_qkv, fq_xq ? fq_xq : fq_act(ctx, w.fq_qkv, fq_x), positions);
+        const size_t  rs = pk->nb[1];   // one hd row
+        ggml_tensor * Q  = ggml_view_3d(ctx, pk, hd, seq, nq, rs, rs * seq, 0);
+        ggml_tensor * K  = ggml_view_3d(ctx, pk, hd, seq, 1,  rs, rs * seq, rs * seq * nq);
+        ggml_tensor * V  = ggml_view_3d(ctx, pk, hd, seq, 1,  rs, rs * seq, rs * seq * (nq + 1));
+        if (k_out) *k_out = K;
+        if (v_out) *v_out = V;
+        ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, 1.f/std::sqrt((float) hd), 0.0f, 0.0f);
+        ggml_prec_set_acc(fa, GGML_PREC_F32);
         return fq_linear(ctx, w.fq_o, ggml_reshape_2d(ctx, fa, qf, seq), fq_res, fq_gate);
     }
     ggml_tensor *q = nullptr, *k = nullptr, *v = nullptr, *qkv_fq = nullptr;

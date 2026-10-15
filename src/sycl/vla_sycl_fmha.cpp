@@ -401,16 +401,14 @@ bool sycl_fmha_forward(ggml_tensor * dst, void * queue) {
     if (dst->type != GGML_TYPE_F32 || !ggml_is_contiguous(dst)) return false;
     if (Q->ne[0] == 72)
         return fmha_vit(*static_cast<sycl::queue *>(queue), dst, Q, K, V, scale);
-    if (!rows_ok(Q, false) || !rows_ok(K, true) || !rows_ok(V, true)) return false;
+    if (!rows_ok(Q, true) || !rows_ok(K, true) || !rows_ok(V, true)) return false;
     const int64_t Sq = Q->ne[1], Hq = Q->ne[2], Skv = K->ne[1], Hkv = K->ne[2];
     if (V->ne[1] != Skv || V->ne[2] != Hkv || Hkv < 1 || Hq % Hkv != 0) return false;
 
     sycl::queue & q = *static_cast<sycl::queue *>(queue);
     Elt * spare = scratch(q, (size_t) (Hq * Sq + 2 * Hkv * Skv) * kHeadDim);
     if (!spare) return false;
-    const Elt * q16 = spare;
-    to_f16(q, Q, spare);
-    spare += (size_t) Hq * Sq * kHeadDim;
+    const Elt * q16 = f16_of(q, Q, spare);   // in place when packed F16 (fq_rope_pack)
     const Elt * k16 = f16_of(q, K, spare), * v16 = f16_of(q, V, spare);
     launch<Fmha<128, 16, false>>(q, q16, Sq, Hq, Hkv, k16, v16, Skv, nullptr, nullptr, 0, scale, static_cast<float *>(dst->data));
     return true;
@@ -474,6 +472,56 @@ bool sycl_fq_rope_attn_forward(ggml_tensor * dst, void * queue) {
     });
     launch<Fmha<64, 8, true>>(q, q16, R, 1, 1, kn16, vn16, Sn, static_cast<const Elt *>(Kc->data),
                               static_cast<const Elt *>(Vc->data), Sc, sp->scale, static_cast<float *>(dst->data));
+    return true;
+}
+
+// fq_rope_pack: the prefix's q|k|v int32 sums, dequantized, RoPE on q and k,
+// packed F16 (Q head-major rows, then K, then V) for the flash-attention node
+// and the expert's cached K/V.
+bool sycl_fq_rope_pack_forward(ggml_tensor * dst, void * queue) {
+    if (dst->op != GGML_OP_CUSTOM) return false;
+    struct custom_params { void * fun; int n_tasks; void * userdata; };
+    custom_params cp;
+    std::memcpy(&cp, dst->op_params, sizeof(cp));
+    const auto * sp = static_cast<const FqRopeAttnSpec *>(cp.userdata);
+    if (!sp || sp->magic != FQ_ROPE_PACK_MAGIC) return false;
+    const ggml_tensor * w = dst->src[0], * blob = dst->src[1], * ws = dst->src[2], * bias = dst->src[3], * pos = dst->src[4];
+    const int64_t D = sp->hd, H = sp->nq, N = sp->gemm->N, T = blob->ne[1];
+    if (!pos || pos->type != GGML_TYPE_I32 || pos->ne[0] != T || N != (H + 2) * D || dst->type != GGML_TYPE_F16 ||
+        dst->ne[0] != D || dst->ne[1] != (H + 2) * T || (D % 2) != 0)
+        return false;
+    int64_t xs_off = 0;
+    const int32_t * acc = sycl_fq_gemm_acc(queue, w, blob, ws, *sp->gemm, &xs_off);
+    if (!acc) return false;
+    sycl::queue & q = *static_cast<sycl::queue *>(queue);
+    const int8_t * bl = static_cast<const int8_t *>(blob->data);
+    const int rb = (int) blob->ne[0], xo = (int) xs_off, iN = (int) N, iD = (int) D, iH = (int) H, iT = (int) T;
+    const float * wsp = static_cast<const float *>(ws->data);
+    const float * bp = bias ? static_cast<const float *>(bias->data) : nullptr;
+    const int32_t * pp = static_cast<const int32_t *>(pos->data);
+    const float theta_scale = std::pow(sp->freq_base, -2.0f / (float) D);
+    const int half = (int) D / 2;
+    auto * out = static_cast<sycl::half *>(dst->data);
+    // Item (part, t, i): part < H a q head, H = k, H + 1 = v; pair (i, i + half).
+    q.parallel_for(sycl::range<3>((size_t) (H + 2), (size_t) T, (size_t) half), [=](sycl::id<3> it) {
+        const int h = (int) it[0], t = (int) it[1], i = (int) it[2];
+        const int col = h * iD;
+        float xs;
+        std::memcpy(&xs, bl + (size_t) t * rb + xo, sizeof(float));
+        const int32_t * ar = acc + (size_t) t * iN;
+        float x0 = ((float) ar[col + i] * xs) * wsp[col + i];
+        float x1 = ((float) ar[col + i + half] * xs) * wsp[col + i + half];
+        if (bp) { x0 = x0 + bp[col + i]; x1 = x1 + bp[col + i + half]; }
+        if (h <= iH) {
+            const float th = (float) pp[t] * sycl::pow(theta_scale, (float) i);
+            const float c = sycl::cos(th), s = sycl::sin(th);
+            const float y0 = x0 * c - x1 * s, y1 = x0 * s + x1 * c;
+            x0 = y0; x1 = y1;
+        }
+        sycl::half * o = out + (size_t) (h < iH ? h * iT + t : iH * iT + (h - iH) * iT + t) * iD;
+        o[i] = sycl::half(x0);
+        o[i + half] = sycl::half(x1);
+    });
     return true;
 }
 
