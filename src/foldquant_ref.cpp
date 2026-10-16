@@ -77,7 +77,7 @@ float qmax_for(int bits) {
 // One activation row: x[K] -> codes + scale. tmp and partial are scratch
 // (K floats and NT floats).
 void act_row(const float * x, const float * ascale, const float * gamma, const FqActSpec & s,
-                    float * tmp, float * partial, int8_t * codes_out, float * scale_out) {
+                    float * tmp, float * partial, int8_t * codes_out, float * scale_out, const float * shift) {
     const int64_t K = s.K;
 
     if (s.has_gamma && gamma) {
@@ -90,6 +90,8 @@ void act_row(const float * x, const float * ascale, const float * gamma, const F
         const float sumsq = block_sum(partial);
         const float rstd  = 1.0f / std::sqrt(sumsq / (float) K + s.eps);
         for (int64_t k = 0; k < K; ++k) tmp[k] = (x[k] * rstd) * gamma[k];
+        if (shift)
+            for (int64_t k = 0; k < K; ++k) tmp[k] = tmp[k] + shift[k];
     } else {
         for (int64_t k = 0; k < K; ++k) tmp[k] = x[k];
     }
@@ -114,7 +116,7 @@ void act_row(const float * x, const float * ascale, const float * gamma, const F
     // kernels do, so the deployed engines and this runtime round alike.
     const float inv = 1.0f / scale;
 
-    if (s.abits == 4) {
+    if (s.abits == 4 && !s.wide4) {
         for (int64_t k = 0; k < K; k += 2) {
             float q0 = std::nearbyint(tmp[k]     * inv);
             float q1 = std::nearbyint(tmp[k + 1] * inv);
@@ -163,13 +165,13 @@ void fq_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     if (s.magic != FQ_ACT_MAGIC) return;
 
     const ggml_tensor * x = dst->src[0];
-    const ggml_tensor * g = nullptr, * as = nullptr;
-    fq_act_srcs(dst, s, &g, &as);
+    const ggml_tensor * g = nullptr, * sh = nullptr, * as = nullptr;
+    fq_act_srcs(dst, s, &g, &sh, &as);
 
     const int64_t K   = s.K;
     const int64_t T   = dst->ne[1];
-    const int64_t rb  = fq_act_row_bytes(K, s.abits);
-    const int64_t kp  = fq_act_kpack(K, s.abits);
+    const int64_t rb  = fq_act_row_bytes(K, fq_act_store_bits(s));
+    const int64_t kp  = fq_act_kpack(K, fq_act_store_bits(s));
     const int64_t per = (T + nth - 1) / nth;
 
     // VLA_FQ_STATS=1: one line per node with checksums of every input, so two
@@ -212,7 +214,7 @@ void fq_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     for (int64_t t = t0; t < t1; ++t) {
         uint8_t * row = (uint8_t *) dst->data + (size_t) t * rb;
         fqref::act_row((const float *) ((const char *) xp + (size_t) t * x->nb[1]), ap, gp, s, tmp.data(), partial,
-                       (int8_t *) row, (float *) (row + kp));
+                       (int8_t *) row, (float *) (row + kp), sh ? (const float *) sh->data : nullptr);
     }
 }
 
@@ -236,6 +238,7 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     const ggml_tensor * ws = dst->src[2];
     const ggml_tensor * b  = dst->src[3];
     const ggml_tensor * r  = dst->src[4];          // optional residual [N, T]
+    const ggml_tensor * gt = r ? dst->src[5] : nullptr;   // optional gate [N]: r + y * gate
 
     const int64_t K     = s.K;
     const int64_t N     = s.N;
@@ -266,6 +269,7 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     const float * wsp = (const float *) ws->data;
     const float * bp  = b ? (const float *) b->data : nullptr;
     const float * rp  = r ? (const float *) r->data : nullptr;
+    const float * gtp = gt ? (const float *) gt->data : nullptr;
     float * y = (float *) dst->data;
 
     // Activations unpacked once per thread when they are nibbles.
@@ -277,6 +281,33 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
     }
     std::vector<int8_t> wrow_buf(s.wbits == 4 ? (size_t) K : 0);
 
+    if (s.glu) {
+        // [gate | up] rows -> gelu_tanh(gate) * up, [N/2, T].
+        const int64_t Nh  = N / 2;
+        const int64_t per = (Nh + nth - 1) / nth;
+        const int64_t n0  = (int64_t) ith * per, n1 = std::min(Nh, n0 + per);
+        std::vector<int8_t> urow_buf(s.wbits == 4 ? (size_t) K : 0);
+        for (int64_t n = n0; n < n1; ++n) {
+            const int8_t * grow = wp + (size_t) n * kp_w;
+            const int8_t * urow = wp + (size_t) (n + Nh) * kp_w;
+            if (s.wbits == 4) {
+                fqref::unpack_nibbles(grow, K, wrow_buf.data());
+                fqref::unpack_nibbles(urow, K, urow_buf.data());
+                grow = wrow_buf.data();
+                urow = urow_buf.data();
+            }
+            for (int64_t t = 0; t < T; ++t) {
+                const uint8_t * row = xp + (size_t) t * rb;
+                const int8_t * xrow = (abits == 4) ? xa.data() + (size_t) t * K : (const int8_t *) row;
+                float xs;
+                std::memcpy(&xs, row + kp_a, sizeof(float));
+                const float g = fqref::gemm_dot(grow, xrow, K, xs, wsp[n],      bp ? bp[n]      : 0.0f);
+                const float u = fqref::gemm_dot(urow, xrow, K, xs, wsp[n + Nh], bp ? bp[n + Nh] : 0.0f);
+                y[(size_t) t * Nh + n] = fqref::gelu_tanh(g) * u;
+            }
+        }
+        return;
+    }
     const int64_t per = (N + nth - 1) / nth;
     const int64_t n0  = (int64_t) ith * per;
     const int64_t n1  = std::min(N, n0 + per);
@@ -294,10 +325,41 @@ void fq_gemm_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
             float xs;
             std::memcpy(&xs, row + kp_a, sizeof(float));
             float v = fqref::gemm_dot(wrow, xrow, K, xs, wsn, bn);
-            if (rp) v = v + rp[(size_t) t * N + n];
+            if (rp) v = gtp ? rp[(size_t) t * N + n] + v * gtp[n] : v + rp[(size_t) t * N + n];
             y[fq_out_index(s, T, t, n)] = v;
         }
     }
+}
+
+void fq_glu_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
+    (void) nth;
+    const FqGluActSpec & gs = *(const FqGluActSpec *) userdata;
+    if (gs.magic != FQ_GLU_ACT_MAGIC || ith != 0) return;
+    const FqGemmSpec & s  = *gs.gemm;
+    const FqActSpec &  as = *gs.act;
+    const int64_t K = s.K, N = s.N, Nh = N / 2, T = dst->ne[1];
+    // The GEGLU output, exactly as the glu fq_gemm node computes it.
+    ggml_tensor tmp = *dst;
+    std::vector<float> inter((size_t) Nh * T);
+    tmp.type = GGML_TYPE_F32;
+    tmp.ne[0] = Nh;
+    tmp.nb[0] = sizeof(float);
+    tmp.nb[1] = (size_t) Nh * sizeof(float);
+    tmp.nb[2] = tmp.nb[3] = tmp.nb[1] * (size_t) T;
+    tmp.data = inter.data();
+    tmp.src[4] = nullptr;
+    tmp.src[5] = nullptr;
+    fq_gemm_cpu(&tmp, 0, 1, (void *) &s);
+    const float * ap = dst->src[4] ? (const float *) dst->src[4]->data : nullptr;
+    const int64_t rb = fq_act_row_bytes(Nh, fq_act_store_bits(as)), kp = fq_act_kpack(Nh, fq_act_store_bits(as));
+    std::vector<float> buf((size_t) Nh);
+    float partial[fqref::NT];
+    for (int64_t t = 0; t < T; ++t) {
+        uint8_t * row = (uint8_t *) dst->data + (size_t) t * rb;
+        fqref::act_row(inter.data() + (size_t) t * Nh, ap, nullptr, as, buf.data(), partial, (int8_t *) row,
+                       (float *) (row + kp));
+    }
+    (void) K;
 }
 
 }  // namespace vla

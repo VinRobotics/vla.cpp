@@ -24,6 +24,8 @@
 #include "layers/norm.h"
 #include "foldquant.h"
 #include "layers/fq_linear.h"
+#include "layers/fmha_kv.h"
+#include "layers/fq_rope_attn.h"
 #include "loader.h"
 #include "model.h"
 #include "modules/siglip_vit.h"
@@ -48,10 +50,105 @@ struct GemmaLayerW {
     ggml_tensor * Wgate   = nullptr;
     ggml_tensor * Wup     = nullptr;
     ggml_tensor * Wdown   = nullptr;
+    // q/k/v and gate/up concatenated into one GEMM each (SYCL; see gemma_declare_float).
+    ggml_tensor * Wqkv    = nullptr;
+    ggml_tensor * Wgu     = nullptr;
     // FoldQuant sites (pi0.5 prefix tower). The RMSNorm and its folded gamma
     // (ln_in / ln_post, loaded as 1 + w) ride in the q/k/v and gate/up act nodes.
     FqLinear fq_q, fq_k, fq_v, fq_o, fq_gate, fq_up, fq_down;
+    // gate and up fused into one FoldQuant GEMM with the GEGLU in its epilogue
+    // (SYCL; see gemma_declare_fq_gateup); fq_gate/fq_up stay empty then.
+    FqLinear fq_gu;
+    // q/k/v as one FoldQuant GEMM (SYCL; gemma_declare_fq_qkv); fq_q/k/v empty then.
+    FqLinear fq_qkv;
+    // pi0.5's expert on SYCL: the q/k/v and gate/up act specs with the adaRMS
+    // fused (has_shift set when in use; see fq_act_mod).
+    FqActSpec act_mod_qkv{}, act_mod_gu{};
+    // gate/up GEMM + GEGLU + the down act in one node (gemma_link_glu_act).
+    FqGluActSpec glu_act{ 0 };
+    // q/k/v GEMM + RoPE + cached-KV attention in one node (pi0.5's expert, SYCL).
+    FqRopeAttnSpec rope_attn{};
+    // q/k/v GEMM + RoPE + F16 packing in one node (pi0.5's prefix, SYCL); the
+    // attention reads it in place and k_out / v_out are F16 [hd, seq, 1] views.
+    FqRopeAttnSpec rope_pack{};
 };
+
+/// Declare a float layer's q/k/v and gate/up GEMMs, `p` being the tensor-name
+/// prefix ("vlm.blk.3"). On SYCL each group is one concatenated weight: one GEMM
+/// and one F32->BF16 input conversion instead of three (two), which is most of a
+/// small-M layer's cost there (pi0.5's action expert runs 50 tokens, 180 times).
+inline void gemma_declare_float(WeightLoader & L, GemmaLayerW & w, const std::string & p, bool qkv, bool gateup) {
+#ifdef GGML_USE_SYCL
+    if (qkv)
+        w.Wqkv = L.fuse_gemm((p + ".attn_qkv.fused.weight").c_str(),
+                             { p + ".attn_q.weight", p + ".attn_k.weight", p + ".attn_v.weight" });
+    if (gateup)
+        w.Wgu = L.fuse_gemm((p + ".ffn_gate_up.fused.weight").c_str(), { p + ".ffn_gate.weight", p + ".ffn_up.weight" });
+#else
+    if (qkv) {
+        w.Wq = L.gemm("%s.attn_q.weight", p.c_str());
+        w.Wk = L.gemm("%s.attn_k.weight", p.c_str());
+        w.Wv = L.gemm("%s.attn_v.weight", p.c_str());
+    }
+    if (gateup) {
+        w.Wgate = L.gemm("%s.ffn_gate.weight", p.c_str());
+        w.Wup   = L.gemm("%s.ffn_up.weight",   p.c_str());
+    }
+#endif
+}
+
+/// FoldQuant q/k/v of a layer, `p` the tensor-name prefix. On SYCL, one fused
+/// site (one GEMM and epilogue instead of three); elsewhere three sites.
+inline void gemma_declare_fq_qkv(WeightLoader & L, GemmaLayerW & w, const FqModuleSpec & fq, const std::string & p,
+                                 ggml_tensor * gamma, float eps) {
+#ifdef GGML_USE_SYCL
+    if (!fq.dequant) {
+        w.fq_qkv = fq_declare_fused(L, fq, "qkv", false, p + ".attn_qkv.fused",
+                                    { p + ".attn_q", p + ".attn_k", p + ".attn_v" }, gamma, eps);
+        if (w.fq_qkv)
+            return;
+    }
+#endif
+    w.fq_q = fq_declare_linear(L, fq, "qkv", false, gamma, eps, "%s.attn_q", p.c_str());
+    w.fq_k = fq_declare_linear(L, fq, "qkv", false, gamma, eps, "%s.attn_k", p.c_str());
+    w.fq_v = fq_declare_linear(L, fq, "qkv", false, gamma, eps, "%s.attn_v", p.c_str());
+}
+
+/// SYCL with oneDNN: the fused gate/up site's GEGLU feeds the down act directly
+/// (fq_glu_act), when both sites are FoldQuant. VLA_FQ_NO_GLU_ACT=1: apart.
+inline void gemma_link_glu_act(GemmaLayerW & w) {
+#if defined(GGML_USE_SYCL) && defined(VLA_FQ_SYCL_DNNL)
+    // Needs oneDNN's int32 sums: off when VLA_FQ_SYCL_GEMM picks the native GEMMs.
+    const char * e = std::getenv("VLA_FQ_NO_GLU_ACT");
+    if (w.fq_gu && w.fq_down && !w.fq_down.act.has_gamma && w.fq_down.act.K == w.fq_gu.gemm.N / 2 &&
+        w.fq_down.act.K <= 16384 && !(e && *e && *e != '0') && !std::getenv("VLA_FQ_SYCL_GEMM")) {
+        w.glu_act.magic = FQ_GLU_ACT_MAGIC;
+        w.glu_act.gemm  = &w.fq_gu.gemm;
+        w.glu_act.act   = &w.fq_down.act;
+    }
+#else
+    (void) w;
+#endif
+}
+
+/// FoldQuant gate/up of a layer, `p` the tensor-name prefix. On SYCL, one fused
+/// site whose epilogue applies the GEGLU, so neither the [2*inter, T] GEMM
+/// output nor a separate GLU pass exists; elsewhere two sites as shipped.
+inline void gemma_declare_fq_gateup(WeightLoader & L, GemmaLayerW & w, const FqModuleSpec & fq, const std::string & p,
+                                    ggml_tensor * gamma, float eps) {
+#ifdef GGML_USE_SYCL
+    if (!fq.dequant && fq_glu_enabled()) {
+        w.fq_gu = fq_declare_fused(L, fq, "gateup", false, p + ".ffn_gate_up.fused", { p + ".ffn_gate", p + ".ffn_up" },
+                                   gamma, eps);
+        if (w.fq_gu) {
+            w.fq_gu.gemm.glu = 1;
+            return;
+        }
+    }
+#endif
+    w.fq_gate = fq_declare_linear(L, fq, "gateup", false, gamma, eps, "%s.ffn_gate", p.c_str());
+    w.fq_up   = fq_declare_linear(L, fq, "gateup", false, gamma, eps, "%s.ffn_up",   p.c_str());
+}
 
 struct GemmaStack {
     std::vector<GemmaLayerW> blk;
@@ -67,27 +164,18 @@ struct GemmaStack {
             w.ln_in   = L.f32_gemma_norm("%s.blk.%lld.attn_norm.weight", prefix, ii);
             w.ln_post = L.f32_gemma_norm("%s.blk.%lld.ffn_norm.weight",  prefix, ii);
             if (fq) {
-                w.fq_q    = fq_declare_linear(L, *fq, "qkv",    false, w.ln_in,   rms_eps, "%s.blk.%lld.attn_q",   prefix, ii);
-                w.fq_k    = fq_declare_linear(L, *fq, "qkv",    false, w.ln_in,   rms_eps, "%s.blk.%lld.attn_k",   prefix, ii);
-                w.fq_v    = fq_declare_linear(L, *fq, "qkv",    false, w.ln_in,   rms_eps, "%s.blk.%lld.attn_v",   prefix, ii);
+                gemma_declare_fq_qkv(L, w, *fq, std::string(prefix) + ".blk." + std::to_string(ii), w.ln_in, rms_eps);
                 w.fq_o    = fq_declare_linear(L, *fq, "o",      false, nullptr,   0.0f,    "%s.blk.%lld.attn_o",   prefix, ii);
-                w.fq_gate = fq_declare_linear(L, *fq, "gateup", false, w.ln_post, rms_eps, "%s.blk.%lld.ffn_gate", prefix, ii);
-                w.fq_up   = fq_declare_linear(L, *fq, "gateup", false, w.ln_post, rms_eps, "%s.blk.%lld.ffn_up",   prefix, ii);
+                gemma_declare_fq_gateup(L, w, *fq, std::string(prefix) + ".blk." + std::to_string(ii), w.ln_post, rms_eps);
                 w.fq_down = fq_declare_linear(L, *fq, "down",   false, nullptr,   0.0f,    "%s.blk.%lld.ffn_down", prefix, ii);
+                gemma_link_glu_act(w);
                 if (!w.fq_q != !w.fq_k || !w.fq_q != !w.fq_v || !w.fq_gate != !w.fq_up)
                     L.fail("FoldQuant: a Gemma layer's q/k/v (and gate/up) must all be INT or all float");
             }
-            if (!w.fq_q) {
-                w.Wq  = L.gemm("%s.blk.%lld.attn_q.weight", prefix, ii);
-                w.Wk  = L.gemm("%s.blk.%lld.attn_k.weight", prefix, ii);
-                w.Wv  = L.gemm("%s.blk.%lld.attn_v.weight", prefix, ii);
-            }
+            const std::string p = std::string(prefix) + ".blk." + std::to_string(ii);
+            gemma_declare_float(L, w, p, !w.fq_q && !w.fq_qkv, !w.fq_gate && !w.fq_gu);
             if (!w.fq_o)
                 w.Wo  = L.gemm("%s.blk.%lld.attn_o.weight", prefix, ii);
-            if (!w.fq_gate) {
-                w.Wgate = L.gemm("%s.blk.%lld.ffn_gate.weight", prefix, ii);
-                w.Wup   = L.gemm("%s.blk.%lld.ffn_up.weight",   prefix, ii);
-            }
             if (!w.fq_down)
                 w.Wdown = L.gemm("%s.blk.%lld.ffn_down.weight", prefix, ii);
         }
@@ -102,7 +190,11 @@ inline ggml_tensor * gemma_attn(
         const Config & cfg, int64_t seq,
         ggml_tensor * cached_K, ggml_tensor * cached_V, ggml_tensor * mask,
         ggml_tensor ** k_out, ggml_tensor ** v_out, ggml_type at, bool flash,
-        ggml_tensor * fq_x = nullptr, ggml_tensor * fq_res = nullptr) {
+        ggml_tensor * fq_x = nullptr, ggml_tensor * fq_res = nullptr,
+        ggml_tensor * cached_K16 = nullptr, ggml_tensor * cached_V16 = nullptr,
+        ggml_tensor * fq_xq = nullptr, ggml_tensor * fq_gate = nullptr) {
+    // fq_xq: the q/k/v act blob already made (fq_act_mod); fq_gate: the gate of a
+    // gated residual fq_res + o * gate, fused into the o epilogue on SYCL.
     // FoldQuant: q/k/v share one act node over fq_x (the raw residual stream when
     // the RMSNorm and its folded gamma ride in the act node, the adaRMS output
     // otherwise), and fq_res, when given, rides in the o GEMM epilogue. A float
@@ -114,21 +206,54 @@ inline ggml_tensor * gemma_attn(
 
     // Q/K/V land in F32: RoPE, the KV cache the suffix passes re-read, and the
     // score/softmax core all stay full precision.
-    ggml_tensor *q, *k, *v;
-    if (w.fq_q) {
+    if (w.rope_attn.magic == FQ_ROPE_ATTN_MAGIC && w.fq_qkv && w.fq_o && flash && cached_K16 && cached_V16 && !mask &&
+        !k_out && !v_out && (fq_xq || fq_x) && seq * nq > 192) {
+        // One node for q/k/v, RoPE and the attention (src/layers/fq_rope_attn.h).
+        ggml_tensor * fa = fq_rope_attn(ctx, &w.rope_attn, w.fq_qkv, fq_xq ? fq_xq : fq_act(ctx, w.fq_qkv, fq_x),
+                                        positions, cached_K16, cached_V16);
+        return fq_linear(ctx, w.fq_o, ggml_reshape_2d(ctx, fa, qf, seq), fq_res, fq_gate);
+    }
+    if (w.rope_pack.magic == FQ_ROPE_PACK_MAGIC && w.fq_qkv && flash && !mask && !cached_K && !cached_V && nkv == 1 &&
+        (fq_xq || fq_x) && fmha_kv_enabled()) {
+        ggml_tensor * pk = fq_rope_pack(ctx, &w.rope_pack, w.fq_qkv, fq_xq ? fq_xq : fq_act(ctx, w.fq_qkv, fq_x), positions);
+        const size_t  rs = pk->nb[1];   // one hd row
+        const int64_t E  = w.rope_pack.extra, kv = seq + E;   // E rows free for the expert's keys
+        ggml_tensor * Q  = ggml_view_3d(ctx, pk, hd, seq, nq, rs, rs * seq, 0);
+        ggml_tensor * K  = ggml_view_3d(ctx, pk, hd, seq, 1,  rs, rs * kv, rs * seq * nq);
+        ggml_tensor * V  = ggml_view_3d(ctx, pk, hd, seq, 1,  rs, rs * kv, rs * (seq * nq + kv));
+        if (k_out) *k_out = E ? ggml_view_3d(ctx, pk, hd, kv, 1, rs, rs * kv, rs * seq * nq) : K;
+        if (v_out) *v_out = E ? ggml_view_3d(ctx, pk, hd, kv, 1, rs, rs * kv, rs * (seq * nq + kv)) : V;
+        ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, 1.f/std::sqrt((float) hd), 0.0f, 0.0f);
+        ggml_prec_set_acc(fa, GGML_PREC_F32);
+        return fq_linear(ctx, w.fq_o, ggml_reshape_2d(ctx, fa, qf, seq), fq_res, fq_gate);
+    }
+    ggml_tensor *q = nullptr, *k = nullptr, *v = nullptr, *qkv_fq = nullptr;
+    if (w.fq_qkv) {
+        qkv_fq = fq_gemm(ctx, w.fq_qkv, fq_xq ? fq_xq : fq_act(ctx, w.fq_qkv, fq_x));
+    } else if (w.fq_q) {
         ggml_tensor * xq = fq_act(ctx, w.fq_q, fq_x);
         q = fq_gemm(ctx, w.fq_q, xq);
         k = fq_gemm(ctx, w.fq_k, xq);
         v = fq_gemm(ctx, w.fq_v, xq);
-    } else {
+    } else if (!w.Wqkv) {
         q = as_type(ctx, mm_act(ctx, w.Wq, x_norm, at), GGML_TYPE_F32);
         k = as_type(ctx, mm_act(ctx, w.Wk, x_norm, at), GGML_TYPE_F32);
         v = as_type(ctx, mm_act(ctx, w.Wv, x_norm, at), GGML_TYPE_F32);
     }
 
-    ggml_tensor * q_h = ggml_reshape_3d(ctx, q, hd, nq,  seq);
-    ggml_tensor * k_h = ggml_reshape_3d(ctx, k, hd, nkv, seq);
-    ggml_tensor * v_h = ggml_reshape_3d(ctx, v, hd, nkv, seq);
+    ggml_tensor *q_h, *k_h, *v_h;
+    if (w.Wqkv || qkv_fq) {
+        // One GEMM; q, k and v are row ranges of each token's output.
+        ggml_tensor * qkv = qkv_fq ? qkv_fq : as_type(ctx, mm_act(ctx, w.Wqkv, x_norm, at), GGML_TYPE_F32);
+        const size_t es = ggml_element_size(qkv);
+        q_h = ggml_view_3d(ctx, qkv, hd, nq,  seq, hd*es, qkv->nb[1], 0);
+        k_h = ggml_view_3d(ctx, qkv, hd, nkv, seq, hd*es, qkv->nb[1], (size_t) qf*es);
+        v_h = ggml_view_3d(ctx, qkv, hd, nkv, seq, hd*es, qkv->nb[1], (size_t) (qf + nkv*hd)*es);
+    } else {
+        q_h = ggml_reshape_3d(ctx, q, hd, nq,  seq);
+        k_h = ggml_reshape_3d(ctx, k, hd, nkv, seq);
+        v_h = ggml_reshape_3d(ctx, v, hd, nkv, seq);
+    }
 
     auto rope_call = [&](ggml_tensor * t) {
         return ggml_rope_ext(ctx, t, positions, nullptr,
@@ -143,6 +268,19 @@ inline ggml_tensor * gemma_attn(
     if (v_out)
         *v_out = v_h;
 
+    const float scale = 1.f/std::sqrt((float) hd);
+    ggml_tensor * att_pre;
+    if (flash && cached_K16 && cached_V16 && !mask) {
+        // Cached prefix (F16, cast once per layer) + this step's keys, without
+        // concatenating them: src/layers/fmha_kv.h.
+        ggml_tensor * fa = fmha_kv(ctx, ggml_permute(ctx, q_rope, 0, 2, 1, 3), cached_K16, cached_V16,
+                                   ggml_permute(ctx, k_rope, 0, 2, 1, 3), ggml_permute(ctx, v_h, 0, 2, 1, 3), scale);
+        att_pre = ggml_reshape_2d(ctx, fa, qf, seq);
+        if (w.fq_o)
+            return fq_linear(ctx, w.fq_o, att_pre, fq_res, fq_gate);
+        return mm_act(ctx, w.Wo, as_type(ctx, att_pre, at), at);
+    }
+
     ggml_tensor * K_full = k_rope;
     ggml_tensor * V_full = v_h;
     if (cached_K && cached_V) {
@@ -150,10 +288,8 @@ inline ggml_tensor * gemma_attn(
         V_full = ggml_concat(ctx, cached_V, v_h,    2);
     }
 
-    const float scale = 1.f/std::sqrt((float) hd);
     ggml_tensor * Q = ggml_cont(ctx, ggml_permute(ctx, q_rope, 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(ctx, ggml_permute(ctx, K_full, 0, 2, 1, 3));
-    ggml_tensor * att_pre;
     if (flash) {
         ggml_tensor * V = ggml_cont(ctx, ggml_permute(ctx, V_full, 0, 2, 1, 3));
         // ggml_flash_attn_ext asserts an F16 mask. The mask holds only 0 and
@@ -178,7 +314,24 @@ inline ggml_tensor * gemma_attn(
 
 // fq_x / fq_res: as in gemma_attn, for the gate/up act node and the down epilogue.
 inline ggml_tensor * gemma_mlp(ggml_context * ctx, const GemmaLayerW & w, ggml_tensor * x_norm, ggml_type at,
-                               ggml_tensor * fq_x = nullptr, ggml_tensor * fq_res = nullptr) {
+                               ggml_tensor * fq_x = nullptr, ggml_tensor * fq_res = nullptr,
+                               ggml_tensor * fq_xq = nullptr, ggml_tensor * fq_gate = nullptr) {
+    if (w.fq_gu && w.glu_act.magic == FQ_GLU_ACT_MAGIC) {   // GEGLU straight into the down act
+        ggml_tensor * xq_down = fq_glu_act(ctx, &w.glu_act, w.fq_gu, w.fq_down, fq_xq ? fq_xq : fq_act(ctx, w.fq_gu, fq_x));
+        return fq_gemm(ctx, w.fq_down, xq_down, fq_res, fq_gate);
+    }
+    if (w.fq_gu) {   // one FoldQuant GEMM, GEGLU in its epilogue
+        ggml_tensor * inter = fq_gemm(ctx, w.fq_gu, fq_xq ? fq_xq : fq_act(ctx, w.fq_gu, fq_x));
+        if (w.fq_down)
+            return fq_linear(ctx, w.fq_down, inter, fq_res, fq_gate);
+        return mm_act(ctx, w.Wdown, inter, at);
+    }
+    if (w.Wgu) {   // one GEMM; ggml_geglu splits its rows into gate | up
+        ggml_tensor * inter = ggml_geglu(ctx, mm_act(ctx, w.Wgu, x_norm, at));
+        if (w.fq_down)
+            return fq_linear(ctx, w.fq_down, as_type(ctx, inter, GGML_TYPE_F32), fq_res);
+        return mm_act(ctx, w.Wdown, inter, at);
+    }
     ggml_tensor *gate, *up;
     if (w.fq_gate) {
         ggml_tensor * xq = fq_act(ctx, w.fq_gate, fq_x);
@@ -204,12 +357,12 @@ inline ggml_tensor * gemma_layer(
     // FoldQuant (pi0.5 prefix): the RMSNorm and its folded gamma ride in the
     // q/k/v and gate/up act nodes, the residual adds in the o / down epilogues.
     ggml_tensor * h1 = w.fq_o
-        ? gemma_attn(ctx, w, w.fq_q ? nullptr : rms_norm(ctx, x_in, w.ln_in, cfg.rms_eps), positions, cfg, seq,
+        ? gemma_attn(ctx, w, (w.fq_q || w.fq_qkv) ? nullptr : rms_norm(ctx, x_in, w.ln_in, cfg.rms_eps), positions, cfg, seq,
                      cached_K, cached_V, mask, k_out, v_out, at, flash, x_in, x_in)
         : ggml_add(ctx, x_in,
-            gemma_attn(ctx, w, w.fq_q ? nullptr : rms_norm(ctx, x_in, w.ln_in, cfg.rms_eps), positions, cfg, seq,
+            gemma_attn(ctx, w, (w.fq_q || w.fq_qkv) ? nullptr : rms_norm(ctx, x_in, w.ln_in, cfg.rms_eps), positions, cfg, seq,
                        cached_K, cached_V, mask, k_out, v_out, at, flash, x_in));
-    ggml_tensor * x_norm_mlp = w.fq_gate ? nullptr : rms_norm(ctx, h1, w.ln_post, cfg.rms_eps);
+    ggml_tensor * x_norm_mlp = (w.fq_gate || w.fq_gu) ? nullptr : rms_norm(ctx, h1, w.ln_post, cfg.rms_eps);
     return w.fq_down ? gemma_mlp(ctx, w, x_norm_mlp, at, h1, h1)
                      : ggml_add(ctx, h1, gemma_mlp(ctx, w, x_norm_mlp, at, h1));
 }

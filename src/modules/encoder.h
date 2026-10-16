@@ -31,6 +31,8 @@ struct EncBlockW {
     ggml_tensor *ln1w, *ln1b, *ln2w, *ln2b;
     ggml_tensor *Wq, *bq, *Wk, *bk, *Wv, *bv, *Wo, *bo;
     ggml_tensor *Wfc1, *bfc1, *Wfc2, *bfc2;
+    // SYCL: q/k/v as one [3*hidden] projection (Wq/Wk/Wv/bq/bk/bv stay null then).
+    ggml_tensor *Wqkv = nullptr, *bqkv = nullptr;
 };
 
 struct EncNames {
@@ -51,6 +53,10 @@ struct EncCfg {
 struct EncStack {
     EncCfg                 cfg;
     std::vector<EncBlockW> blk;
+    // SYCL: declare q/k/v as one fused projection (Wqkv/bqkv; Wq/Wk/Wv null) for
+    // block()'s fused path. Opt-in: archs that build their own blocks from
+    // EncBlockW (pi0) need the separate weights. Set before declare().
+    bool                   fuse_qkv = false;
 
     void declare(WeightLoader & L, const char * prefix, int64_t layers, const EncNames & n = EncNames{});
 

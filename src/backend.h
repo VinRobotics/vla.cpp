@@ -40,6 +40,7 @@
 #endif
 #ifdef GGML_USE_SYCL
 #include "ggml-sycl.h"
+#include "sycl/vla_sycl_foldquant.h"
 #endif
 #ifdef GGML_USE_METAL
 #include "ggml-metal.h"
@@ -201,7 +202,7 @@ inline ggml_tensor * gelu(ggml_context * ctx, ggml_tensor * x) {
 }
 
 inline ggml_tensor * geglu(ggml_context * ctx, ggml_tensor * gate, ggml_tensor * up) {
-#if !defined(GGML_USE_SYCL) && !defined(GGML_USE_METAL) && !defined(GGML_USE_OPENVINO) && \
+#if !defined(GGML_USE_METAL) && !defined(GGML_USE_OPENVINO) && \
     !defined(GGML_USE_HEXAGON) && !defined(GGML_USE_OPENCL)
     if (gate->type == GGML_TYPE_F32)
         return ggml_geglu_split(ctx, gate, up);
@@ -306,6 +307,9 @@ inline Backend backend_init(const char * tag, int n_threads) {
             char desc[256] = { 0 };
             ggml_backend_sycl_get_device_description(dev, desc, sizeof(desc));
             std::printf("%s: backend = SYCL (device %d: %s)\n", tag, dev, desc);
+            // In-tree kernels behind ggml-sycl's extension hook (FoldQuant, and
+            // flash attention when built with sycl-tla); unclaimed nodes run as before.
+            sycl_register_ext_ops();
         } else {
             std::fprintf(stderr, "%s: ggml_backend_sycl_init failed; falling back to CPU\n", tag);
         }

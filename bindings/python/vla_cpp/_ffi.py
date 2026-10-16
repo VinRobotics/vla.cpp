@@ -154,6 +154,12 @@ def load_library() -> ctypes.CDLL:
     lib.vla_free_actions.restype = None
     lib.vla_free_actions.argtypes = [POINTER(c_float)]
 
+    # Added after ABI 1 shipped; absent from older libraries.
+    if hasattr(lib, "vla_encode_images"):
+        lib.vla_encode_images.restype = c_int32
+        lib.vla_encode_images.argtypes = [c_void_p, POINTER(Image), c_int32,
+                                          POINTER(POINTER(c_float)), POINTER(c_int64)]
+
     lib.vla_last_stats.restype = c_int32
     lib.vla_last_stats.argtypes = [c_void_p, POINTER(Stats)]
 

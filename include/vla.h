@@ -157,6 +157,14 @@ VLA_API int32_t vla_predict(vla_model * m, const vla_inputs * in,
 
 VLA_API void vla_free_actions(float * actions);
 
+/// Runs only the vision tower. On VLA_OK, *out_emb points to *out_n floats laid
+/// out [n_images * tokens_per_view, hidden], ready for vla_inputs.precomputed_img_emb
+/// (with n_img_views = n_images), possibly in another process or on another device.
+/// Release with vla_free_actions. Returns VLA_ERR_PREDICT if the arch does not
+/// support it (pi0.5 does).
+VLA_API int32_t vla_encode_images(vla_model * m, const vla_image * images, int32_t n_images,
+                                  float ** out_emb, int64_t * out_n);
+
 /// Timings of the most recent vla_predict on this handle.
 VLA_API int32_t vla_last_stats(const vla_model * m, vla_stats * out);
 

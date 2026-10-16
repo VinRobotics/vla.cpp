@@ -29,8 +29,11 @@
 #include "foldquant.h"
 #include "layers/fq_linear.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -44,13 +47,22 @@ struct Pi05ModelArch : public ModelArchBase {
     ~Pi05ModelArch() override;
 
     std::vector<float> predict(const Inputs& in) override;
+    bool encode_images(const ImageView* images, int n_images, std::vector<float>& out) override;
+
+    /// Runs the vision tower + projector on every view in one graph; returns its
+    /// [hidden, n_images*n_tokens] output, valid until the next call, or null.
+    ggml_tensor * vision_forward(const ImageView* images, int n_images);
 
     ggml_backend_t        backend     = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_context *        ctx_weights = nullptr;
     ggml_context *        ctx_const   = nullptr;
     ggml_backend_buffer_t const_buf   = nullptr;
-    scratch_ctx           vision_scratch;
+    // Vision tower for all views at once, kept while the view count holds.
+    struct VisIO {
+        ggml_tensor *t_px=nullptr,*emb=nullptr;
+    };
+    graph_cache<int64_t, VisIO> vis_graph;
 
     struct MainKey {
         int64_t n_img=-1, n_lang=-1, nsteps=-1;
@@ -59,7 +71,7 @@ struct Pi05ModelArch : public ModelArchBase {
         }
     };
     struct MainIO {
-        ggml_tensor *t_image_emb=nullptr,*t_lang_emb=nullptr,*t_prefix_pos=nullptr;
+        ggml_tensor *t_prefix=nullptr,*t_prefix_pos=nullptr;
         ggml_tensor *t_x0=nullptr,*t_suffix_pos=nullptr,*x_final=nullptr;
     };
     graph_cache<MainKey, MainIO> main_graph;
@@ -75,6 +87,10 @@ struct Pi05ModelArch : public ModelArchBase {
     ggml_tensor * W_aout = nullptr, * b_aout = nullptr;
 
     ggml_tensor * ada_mod = nullptr;
+    // Per (step, slot): 1+scale and shift as their own tensors, so adaRMS reads
+    // rms_norm -> mul -> add with no view nodes between (ggml-sycl fuses that
+    // chain into one kernel). Slot j: 2*layer (attn), 2*layer+1 (ffn), 2*n_layers (out).
+    std::vector<ggml_tensor *> ada_scale1, ada_shift;
 
     std::vector<float> action_mean, action_std;
     std::vector<float> action_q01, action_q99;
@@ -85,34 +101,60 @@ struct Pi05ModelArch : public ModelArchBase {
 
 namespace {
 
-ggml_tensor * build_adarms(
-        ggml_context * ctx, ggml_tensor * x, ggml_tensor * mod, int64_t h, float eps,
-        ggml_tensor ** gate_out) {
-    ggml_tensor * scale = ggml_view_1d(ctx, mod, h, 0);
-    ggml_tensor * shift = ggml_view_1d(ctx, mod, h, (size_t) h * sizeof(float));
-    ggml_tensor * gate  = ggml_view_1d(ctx, mod, h, (size_t) 2*h * sizeof(float));
-    ggml_tensor * normed = ggml_rms_norm(ctx, x, eps);
+// One adaRMS slot: the [scale, shift, gate] row of the baked table, and the
+// same scale (as 1+scale) and shift as standalone tensors.
+struct AdaSlot {
+    ggml_tensor * mod;
+    ggml_tensor * scale1;
+    ggml_tensor * shift;
+};
 
+ggml_tensor * build_adarms(
+        ggml_context * ctx, ggml_tensor * x, const AdaSlot & a, int64_t h, float eps,
+        ggml_tensor ** gate_out) {
+    ggml_tensor * normed = ggml_rms_norm(ctx, x, eps);
+#ifdef GGML_USE_SYCL
+    // x*(1+scale) + shift: rms_norm -> mul -> add, which ggml-sycl runs as one kernel.
+    (void) h;
+    ggml_tensor * out = ggml_add(ctx, ggml_mul(ctx, normed, a.scale1), a.shift);
+#else
+    ggml_tensor * scale = ggml_view_1d(ctx, a.mod, h, 0);
+    ggml_tensor * shift = ggml_view_1d(ctx, a.mod, h, (size_t) h * sizeof(float));
     ggml_tensor * out = ggml_add(ctx,
         ggml_add(ctx, normed, ggml_mul(ctx, normed, scale)), shift);
+#endif
     if (gate_out)
-        *gate_out = gate;
+        *gate_out = ggml_view_1d(ctx, a.mod, h, (size_t) 2*h * sizeof(float));
     return out;
 }
 
 ggml_tensor * build_expert_layer(
         ggml_context * ctx, const GemmaLayerW & w,
-        ggml_tensor * x_in, ggml_tensor * positions, ggml_tensor * mod_attn, ggml_tensor * mod_ffn,
+        ggml_tensor * x_in, ggml_tensor * positions, const AdaSlot & mod_attn, const AdaSlot & mod_ffn,
         const Config & cfg, int64_t seq,
-        ggml_tensor * cached_K, ggml_tensor * cached_V) {
+        ggml_tensor * cached_K, ggml_tensor * cached_V, bool flash,
+        ggml_tensor * cached_K16 = nullptr, ggml_tensor * cached_V16 = nullptr) {
     const int64_t h = cfg.expert_h;
+
+    if (w.act_mod_qkv.has_shift && w.act_mod_gu.has_shift && w.fq_o && w.fq_down) {
+        // SYCL: each adaRMS rides in its act node (rms * (1 + scale) + shift, then
+        // quantized), each gated residual in its GEMM epilogue (x + y * gate).
+        ggml_tensor * gate_attn = ggml_view_1d(ctx, mod_attn.mod, h, (size_t) 2*h * sizeof(float));
+        ggml_tensor * gate_ffn  = ggml_view_1d(ctx, mod_ffn.mod,  h, (size_t) 2*h * sizeof(float));
+        ggml_tensor * xq_attn = fq_act_mod(ctx, &w.act_mod_qkv, w.fq_qkv, x_in, mod_attn.scale1, mod_attn.shift);
+        ggml_tensor * h1 = gemma_attn(ctx, w, nullptr, positions, cfg, seq, cached_K, cached_V, nullptr, nullptr, nullptr,
+                                      GGML_TYPE_F32, flash, nullptr, x_in, cached_K16, cached_V16, xq_attn, gate_attn);
+        ggml_tensor * xq_ffn = fq_act_mod(ctx, &w.act_mod_gu, w.fq_gu, h1, mod_ffn.scale1, mod_ffn.shift);
+        return gemma_mlp(ctx, w, nullptr, GGML_TYPE_F32, nullptr, h1, xq_ffn, gate_ffn);
+    }
 
     ggml_tensor * gate_attn = nullptr;
     ggml_tensor * x_norm = build_adarms(ctx, x_in, mod_attn, h, cfg.rms_eps, &gate_attn);
     // FoldQuant: the act nodes quantize the adaRMS outputs; the residuals are
     // gated (out * gate + x), so they stay out of the GEMM epilogues.
     ggml_tensor * o_out  = gemma_attn(ctx, w, x_norm, positions, cfg, seq, cached_K, cached_V, nullptr,
-                                      nullptr, nullptr, GGML_TYPE_F32, false, x_norm);
+                                      nullptr, nullptr, GGML_TYPE_F32, flash, x_norm, nullptr,
+                                      cached_K16, cached_V16);
 
     ggml_tensor * h1 = ggml_add(ctx, x_in, ggml_mul(ctx, o_out, gate_attn));
 
@@ -190,19 +232,32 @@ bool bake_adarms(gguf_reader & g, Pi05ModelArch & m) {
     for (size_t k=0; k<mods.size(); ++k)
         ggml_backend_tensor_get(mods[k], table.data()+k*3*h, 0, ggml_nbytes(mods[k]));
 
-    ggml_init_params p = { ggml_tensor_overhead(), nullptr, true };
+    ggml_init_params p = { (size_t) (1 + 2*ns*nj)*ggml_tensor_overhead(), nullptr, true };
     m.ctx_const = ggml_init(p);
     if (!m.ctx_const) {
         std::fprintf(stderr, "vla(pi05): ggml_init(ctx_const) failed\n");
         return false;
     }
     m.ada_mod   = ggml_new_tensor_3d(m.ctx_const, GGML_TYPE_F32, 3*h, nj, ns);
+    m.ada_scale1.resize((size_t) ns*nj);
+    m.ada_shift.resize((size_t) ns*nj);
+    for (size_t k=0; k<(size_t) ns*nj; ++k) {
+        m.ada_scale1[k] = ggml_new_tensor_1d(m.ctx_const, GGML_TYPE_F32, h);
+        m.ada_shift[k]  = ggml_new_tensor_1d(m.ctx_const, GGML_TYPE_F32, h);
+    }
     m.const_buf = alloc_weights(m.ctx_const, m.backend);
     if (!m.const_buf) {
         std::fprintf(stderr, "vla(pi05): alloc_weights(adaRMS table) failed\n");
         return false;
     }
     ggml_backend_tensor_set(m.ada_mod, table.data(), 0, ggml_nbytes(m.ada_mod));
+    std::vector<float> scale1((size_t) h);
+    for (size_t k=0; k<(size_t) ns*nj; ++k) {
+        const float * row = table.data() + k*3*h;
+        for (int64_t c=0; c<h; ++c) scale1[c] = 1.0f + row[c];
+        ggml_backend_tensor_set(m.ada_scale1[k], scale1.data(), 0, ggml_nbytes(m.ada_scale1[k]));
+        ggml_backend_tensor_set(m.ada_shift[k], row + h, 0, ggml_nbytes(m.ada_shift[k]));
+    }
     return true;
 }
 
@@ -252,6 +307,15 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
         return nullptr;
     const Config & cfg = m->cfg;
     FoldQuantSpec fq = foldquant_parse(g, "pi05");
+    // SYCL: W4A4 sites on the INT4 DPAS GEMMs (nibble-packed activations), the
+    // prefix's and the expert's: at 50 rows they beat oneDNN's s8 x s4 by 2-3x.
+    // INT4 activations stay bytes (oneDNN) only where VLA_FQ_NO_S4GEMM=1.
+    {
+        const char * e = std::getenv("VLA_FQ_NO_S4GEMM");
+        const bool s4 = !(e && *e && *e != '0');
+        fq.llm.s4gemm = fq.action.s4gemm = s4;
+        fq.llm.wide4  = fq.action.wide4  = !s4;
+    }
     m->quantile_norm = g.has("pi05.norm_mode") && g.str("pi05.norm_mode") == "quantiles";
     std::printf("vla(pi05): hidden=%lld inter=%lld heads=%lldq/%lldkv x%lld n_layers=%lld "
                 "expert_h=%lld expert_inter=%lld chunk=%lld steps=%d real_state=%lld real_action=%lld "
@@ -287,9 +351,25 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     }
     WeightLoader L("pi05", g, m->ctx_weights, m->matmul_type);
 
+    m->vis.vit.enc.fuse_qkv = true;   // SYCL: one q/k/v GEMM per SigLIP block (EncStack::block)
     m->vis.declare(L);
 
     m->pl.declare(L, "vlm", cfg.n_layers, false, fq.present ? &fq.llm : nullptr, cfg.rms_eps);
+#if defined(GGML_USE_SYCL) && defined(VLA_SYCL_FMHA) && defined(VLA_FQ_SYCL_DNNL)
+    // Prefix q/k/v GEMM, RoPE and F16 packing as one node (gemma_attn).
+    // VLA_FQ_NO_ROPE_PACK=1 keeps them apart (A/B runs).
+    if (cfg.n_kv_heads == 1 && cfg.head_dim == 256 && !std::getenv("VLA_FQ_SYCL_GEMM") &&
+        !(std::getenv("VLA_FQ_NO_ROPE_PACK") && std::strcmp(std::getenv("VLA_FQ_NO_ROPE_PACK"), "0")))
+        for (GemmaLayerW & w : m->pl.blk)
+            if (w.fq_qkv) {
+                w.rope_pack.magic     = FQ_ROPE_PACK_MAGIC;
+                w.rope_pack.gemm      = &w.fq_qkv.gemm;
+                w.rope_pack.hd        = (int) cfg.head_dim;
+                w.rope_pack.nq        = (int) cfg.n_q_heads;
+                w.rope_pack.freq_base = cfg.rope_freq_base;
+                w.rope_pack.scale     = 1.0f / std::sqrt((float) cfg.head_dim);
+            }
+#endif
 
     m->ex_layers.resize(cfg.n_layers);
     for (int64_t i=0; i<cfg.n_layers; ++i) {
@@ -299,30 +379,60 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
             // FoldQuant sites (action recipe): the adaRMS output is quantized per
             // site group with the shipped SmoothQuant vector (ascale), no gamma.
             const FqModuleSpec & a = fq.action;
-            w.fq_q    = fq_declare_linear(L, a, "qkv",    false, nullptr, 0.0f, "aex.blk.%lld.attn_q",   ii);
-            w.fq_k    = fq_declare_linear(L, a, "qkv",    false, nullptr, 0.0f, "aex.blk.%lld.attn_k",   ii);
-            w.fq_v    = fq_declare_linear(L, a, "qkv",    false, nullptr, 0.0f, "aex.blk.%lld.attn_v",   ii);
+            gemma_declare_fq_qkv(L, w, a, "aex.blk." + std::to_string(ii), nullptr, 0.0f);
             w.fq_o    = fq_declare_linear(L, a, "o",      false, nullptr, 0.0f, "aex.blk.%lld.attn_o",   ii);
-            w.fq_gate = fq_declare_linear(L, a, "gateup", false, nullptr, 0.0f, "aex.blk.%lld.ffn_gate", ii);
-            w.fq_up   = fq_declare_linear(L, a, "gateup", false, nullptr, 0.0f, "aex.blk.%lld.ffn_up",   ii);
+            gemma_declare_fq_gateup(L, w, a, "aex.blk." + std::to_string(ii), nullptr, 0.0f);
             w.fq_down = fq_declare_linear(L, a, "down",   false, nullptr, 0.0f, "aex.blk.%lld.ffn_down", ii);
+            gemma_link_glu_act(w);
             if (!w.fq_q != !w.fq_k || !w.fq_q != !w.fq_v || !w.fq_gate != !w.fq_up)
                 L.fail("FoldQuant: an expert layer's q/k/v (and gate/up) must all be INT or all float");
         }
-        if (!w.fq_q) {
-            w.Wq    = L.gemm("aex.blk.%lld.attn_q.weight",   ii);
-            w.Wk    = L.gemm("aex.blk.%lld.attn_k.weight",   ii);
-            w.Wv    = L.gemm("aex.blk.%lld.attn_v.weight",   ii);
+        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), !w.fq_q && !w.fq_qkv, !w.fq_gate && !w.fq_gu);
+#if defined(GGML_USE_SYCL) && defined(VLA_SYCL_FMHA) && defined(VLA_FQ_SYCL_DNNL)
+        // q/k/v GEMM, RoPE and the cached-KV attention as one node (gemma_attn).
+        // VLA_FQ_NO_ROPE_ATTN=1 keeps them apart (A/B runs).
+        if (w.fq_qkv && cfg.n_kv_heads == 1 && cfg.head_dim == 256 &&
+            !(std::getenv("VLA_FQ_NO_ROPE_ATTN") && std::strcmp(std::getenv("VLA_FQ_NO_ROPE_ATTN"), "0")) &&
+            !std::getenv("VLA_FQ_SYCL_GEMM")) {
+            w.rope_attn.magic     = FQ_ROPE_ATTN_MAGIC;
+            w.rope_attn.gemm      = &w.fq_qkv.gemm;
+            w.rope_attn.hd        = (int) cfg.head_dim;
+            w.rope_attn.nq        = (int) cfg.n_q_heads;
+            w.rope_attn.freq_base = cfg.rope_freq_base;
+            w.rope_attn.scale     = 1.0f / std::sqrt((float) cfg.head_dim);
         }
+#endif
+#ifdef GGML_USE_SYCL
+        // The adaRMS fused into the q/k/v and gate/up act nodes (build_expert_layer).
+        // VLA_FQ_NO_ADA=1 keeps them apart (A/B runs).
+        if (w.fq_qkv && w.fq_gu && !(std::getenv("VLA_FQ_NO_ADA") && std::strcmp(std::getenv("VLA_FQ_NO_ADA"), "0"))) {
+            for (auto * p : { &w.act_mod_qkv, &w.act_mod_gu }) {
+                *p = (p == &w.act_mod_qkv) ? w.fq_qkv.act : w.fq_gu.act;
+                p->has_gamma = true;
+                p->has_shift = true;
+                p->eps       = cfg.rms_eps;
+            }
+        }
+#endif
         if (!w.fq_o)
             w.Wo    = L.gemm("aex.blk.%lld.attn_o.weight",   ii);
-        if (!w.fq_gate) {
-            w.Wgate = L.gemm("aex.blk.%lld.ffn_gate.weight", ii);
-            w.Wup   = L.gemm("aex.blk.%lld.ffn_up.weight",   ii);
-        }
         if (!w.fq_down)
             w.Wdown = L.gemm("aex.blk.%lld.ffn_down.weight", ii);
     }
+    // Expert attention over contiguous keys (fq_rope_attn, two oneDNN GEMMs): the
+    // prefix pack leaves chunk free K/V rows per layer, the expert writes its own
+    // there. Only when every layer takes both fused nodes. VLA_FQ_NO_KV_TAIL=1: off.
+    {
+        bool all = cfg.n_suffix * cfg.n_q_heads > 192 && !(std::getenv("VLA_FQ_NO_KV_TAIL") && std::strcmp(std::getenv("VLA_FQ_NO_KV_TAIL"), "0"));
+        for (int64_t i=0; i<cfg.n_layers && all; ++i)
+            all = m->pl.blk[i].rope_pack.magic == FQ_ROPE_PACK_MAGIC && m->ex_layers[i].rope_attn.magic == FQ_ROPE_ATTN_MAGIC;
+        if (all)
+            for (int64_t i=0; i<cfg.n_layers; ++i) {
+                m->pl.blk[i].rope_pack.extra = (int) cfg.n_suffix;
+                m->ex_layers[i].rope_attn.extra = (int) cfg.n_suffix;
+            }
+    }
+
 
     m->W_ain  = L.f32("action_in_proj.weight");   m->b_ain  = L.f32("action_in_proj.bias");
     m->W_aout = L.f32("action_out_proj.weight");  m->b_aout = L.f32("action_out_proj.bias");
@@ -339,6 +449,56 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     return m;
 }
 
+ggml_tensor * Pi05ModelArch::vision_forward(const ImageView* images, int n_images) {
+    const int64_t K = vis.n_tokens, grid = vis.image_size/vis.patch_size, S = vis.image_size;
+    const bool built = vis_graph.ensure(backend, (int64_t) n_images, (size_t) 128*1024*1024,
+                                        [&](ggml_context * VC, VisIO & vio) -> ggml_cgraph * {
+        vis.vit.enc.cfg.flash_attn = flash_attn_enabled();
+        vio.t_px = ggml_new_tensor_4d(VC, GGML_TYPE_F32, S, S, 3, n_images); ggml_set_input(vio.t_px);
+        ggml_tensor * h = vis.vit.build(VC, vis.vit.embed_conv(VC, vio.t_px, vis.patch_size, grid), K, n_images);
+        // PaliGemma projector: linear (+ optional bias).
+        // [hidden, K, views] -> [hidden, views*K], the LM input's shape (same layout).
+        ggml_tensor * emb = linear(VC, vis.proj_w, vis.proj_b, h);
+        vio.emb = ggml_reshape_2d(VC, emb, emb->ne[0], K * n_images);
+        ggml_set_output(vio.emb);
+        ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
+        ggml_build_forward_expand(vg, vio.emb);
+        return vg;
+    });
+    if (!built) { std::fprintf(stderr, "vla(pi05): vision graph build failed\n"); return nullptr; }
+    const VisIO & vio = vis_graph.io();
+    ggml_cgraph * vg = vis_graph.graph();
+
+    const size_t per_view = (size_t) 3*S*S;
+    std::vector<float> chw, px(per_view * n_images);
+    for (int v=0; v<n_images; ++v) {
+        if (!preprocess_image_chw("pi05", images[v], vis.image_size, chw)) return nullptr;
+        std::copy(chw.begin(), chw.begin() + per_view, px.begin() + per_view * v);
+    }
+    ggml_backend_tensor_set(vio.t_px, px.data(), 0, ggml_nbytes(vio.t_px));
+    graph_unique_names(vg);
+    if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(pi05): vision compute failed\n");
+        return nullptr;
+    }
+    return vio.emb;
+}
+
+bool Pi05ModelArch::encode_images(const ImageView* images, int n_images, std::vector<float>& out) {
+    using clk = std::chrono::high_resolution_clock;
+    const auto t0 = clk::now();
+    stats = Stats{};
+    ggml_tensor * emb = vision_forward(images, n_images);
+    const bool ok = emb != nullptr;
+    if (ok) {
+        out.resize(ggml_nelements(emb));
+        ggml_backend_tensor_get(emb, out.data(), 0, ggml_nbytes(emb));
+    }
+    stats.ms_vision = stats.ms_total = std::chrono::duration<float, std::milli>(clk::now()-t0).count();
+    if (!ok) out.clear();
+    return ok;
+}
+
 std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     using clk = std::chrono::high_resolution_clock;
     const auto t0 = clk::now();
@@ -352,6 +512,9 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     const int64_t n_layers  = cfg.n_layers;
     const int64_t max_ad    = cfg.max_action_dim;
     const int     num_steps = cfg.num_steps;
+    // --flash-attn: fused attention in the prefix and the expert. Fixed per
+    // model (Options), so it need not be part of the cached graph's key.
+    const bool    fa        = flash_attn_enabled();
     const float   dt        = -1.0f/(float) num_steps;
 
     int64_t n_img_tokens = 0;
@@ -388,35 +551,49 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     const bool built = main_graph.ensure(backend, mkey,
                                          ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false),
                                          [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
-    ggml_tensor * t_image_emb = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_img_tokens); ggml_set_input(t_image_emb);
-    ggml_tensor * t_lang_emb  = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_lang);       ggml_set_input(t_lang_emb);
+    // One prefix input, image rows then language rows (the latter scaled on the
+    // host): no CONCAT node, which also keeps the graph SYCL-graph compatible.
+    ggml_tensor * prefix_embs = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_prefix);     ggml_set_input(prefix_embs);
     ggml_tensor * t_prefix_pos= ggml_new_tensor_1d(C, GGML_TYPE_I32, n_prefix);                ggml_set_input(t_prefix_pos);
     ggml_tensor * t_x0        = ggml_new_tensor_2d(C, GGML_TYPE_F32, max_ad, chunk);           ggml_set_input(t_x0);
     ggml_tensor * t_suffix_pos= ggml_new_tensor_1d(C, GGML_TYPE_I32, n_suf);                   ggml_set_input(t_suffix_pos);
 
-    const float lang_scale = (float) std::sqrt((double) hidden_pl);
-    ggml_tensor * prefix_embs = ggml_concat(C, t_image_emb, ggml_scale(C, t_lang_emb, lang_scale),  1);
 
     std::vector<ggml_tensor *> cK(n_layers), cV(n_layers);
     {
         ggml_tensor * h = prefix_embs;
         for (int64_t i=0; i<n_layers; ++i) {
             h = gemma_layer(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix,
-                            nullptr, nullptr, nullptr, &cK[i], &cV[i]);
+                            nullptr, nullptr, nullptr, &cK[i], &cV[i], GGML_TYPE_F32, fa);
         }
         (void) h;
     }
+    // With the SYCL flash-attention kernel, the expert reads the prefix KV as
+    // F16 cast here once per layer, not concatenated and copied every step.
+    std::vector<ggml_tensor *> cK16(n_layers, nullptr), cV16(n_layers, nullptr);
+    if (fa && fmha_kv_enabled())
+        for (int64_t i=0; i<n_layers; ++i) {
+            if (cK[i]->type == GGML_TYPE_F16) {   // already F16 [hd, seq, 1] (fq_rope_pack)
+                cK16[i] = cK[i];
+                cV16[i] = cV[i];
+                continue;
+            }
+            cK16[i] = ggml_cast(C, ggml_permute(C, cK[i], 0, 2, 1, 3), GGML_TYPE_F16);
+            cV16[i] = ggml_cast(C, ggml_permute(C, cV[i], 0, 2, 1, 3), GGML_TYPE_F16);
+        }
 
     ggml_tensor * x_t = t_x0;
     for (int step=0; step<num_steps; ++step) {
         auto mod = [&](int64_t j) {
-            return ggml_view_1d(C, ada_mod, 3*hidden_ex, step*ada_mod->nb[2]+j*ada_mod->nb[1]);
+            const size_t k = (size_t) step*(2*n_layers+1) + (size_t) j;
+            return AdaSlot{ ggml_view_1d(C, ada_mod, 3*hidden_ex, step*ada_mod->nb[2]+j*ada_mod->nb[1]),
+                            ada_scale1[k], ada_shift[k] };
         };
 
         ggml_tensor * h = ggml_add(C, ggml_mul_mat(C, W_ain, x_t), b_ain);
         for (int64_t i=0; i<n_layers; ++i) {
             h = build_expert_layer(C, ex_layers[i], h, t_suffix_pos, mod(2*i), mod(2*i+1), cfg, n_suf,
-                                   cK[i], cV[i]);
+                                   cK[i], cV[i], fa, cK16[i], cV16[i]);
         }
 
         ggml_tensor * h_final = build_adarms(C, h, mod(2*n_layers), hidden_ex, cfg.rms_eps, nullptr);
@@ -426,7 +603,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     ggml_tensor * x_final = x_t;
     ggml_set_output(x_final);
 
-    gio.t_image_emb=t_image_emb; gio.t_lang_emb=t_lang_emb; gio.t_prefix_pos=t_prefix_pos;
+    gio.t_prefix=prefix_embs; gio.t_prefix_pos=t_prefix_pos;
     gio.t_x0=t_x0; gio.t_suffix_pos=t_suffix_pos; gio.x_final=x_final;
 
     ggml_cgraph * gf = ggml_new_graph_custom(C, max_nodes, false);
@@ -437,49 +614,31 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
 
     MainIO & gio = main_graph.io();
     ggml_cgraph * gf = main_graph.graph();
-    ggml_tensor * t_image_emb = gio.t_image_emb, * t_lang_emb = gio.t_lang_emb;
+    ggml_tensor * t_prefix = gio.t_prefix;
+    // Rows [0, n_img_tokens) of the prefix input, as a tensor of its own layout
+    // (for ggml_backend_tensor_copy); the language rows follow.
+    ggml_tensor img_rows = *t_prefix;
+    img_rows.ne[1] = n_img_tokens;
+    img_rows.nb[2] = img_rows.nb[3] = img_rows.nb[1] * (size_t) n_img_tokens;
+    ggml_tensor * t_image_emb = &img_rows;
+    const size_t lang_off = (size_t) n_img_tokens * t_prefix->nb[1];
     ggml_tensor * t_prefix_pos = gio.t_prefix_pos, * t_x0 = gio.t_x0;
     ggml_tensor * t_suffix_pos = gio.t_suffix_pos, * x_final = gio.x_final;
 
     if (in.precomputed_img_emb) {
         ggml_backend_tensor_set(t_image_emb, in.precomputed_img_emb, 0, ggml_nbytes(t_image_emb));
     } else {
-        const int64_t K = vis.n_tokens, H = hidden_pl, grid = vis.image_size/vis.patch_size;
-        ggml_context * VC = vision_scratch.reset((size_t) 128*1024*1024);
-        if (!VC) { std::fprintf(stderr, "vla(pi05): ggml_init(vision ctx) failed\n"); return {}; }
-        ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vis.image_size, vis.image_size, 3); ggml_set_input(t_px);
-        ggml_tensor * h = vis.vit.build(VC, vis.vit.embed_conv(VC, t_px, vis.patch_size, grid), K);
-        // PaliGemma projector: linear (+ optional bias).
-        ggml_tensor * vit_emb = linear(VC, vis.proj_w, vis.proj_b, h);
-        ggml_set_output(vit_emb);
-
-        ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
-        ggml_build_forward_expand(vg, vit_emb);
-
-        if (!vision_scratch.alloc(backend, vg)) {
-            std::fprintf(stderr, "vla(pi05): vision gallocr alloc failed\n");
-            return {};
-        }
         const auto tv0 = clk::now();
-        std::vector<float> chw;
-        for (int v=0; v<in.n_images; ++v) {
-            if (!preprocess_image_chw("pi05", in.images[v], vis.image_size, chw)) { return {}; }
-            ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
-            graph_unique_names(vg);
-            if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
-                std::fprintf(stderr, "vla(pi05): vision compute failed (view %d)\n", v);
-                return {};
-            }
-            ggml_tensor * dst = ggml_view_2d(VC, t_image_emb, H, K, t_image_emb->nb[1], (size_t) v * K * t_image_emb->nb[1]);
-            if (ggml_backend_view_init(dst) != GGML_STATUS_SUCCESS) {
-                std::fprintf(stderr, "vla(pi05): image embedding view failed (view %d)\n", v);
-                return {};
-            }
-            ggml_backend_tensor_copy(vit_emb, dst);
-        }
+        ggml_tensor * emb = vision_forward(in.images, in.n_images);
+        if (!emb) return {};
+        ggml_backend_tensor_copy(emb, t_image_emb);
         stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now()-tv0).count();
     }
-    ggml_backend_tensor_set(t_lang_emb,  lang_rows.data(),    0, ggml_nbytes(t_lang_emb));
+    {   // Gemma scales the token embeddings by sqrt(hidden): x * s in F32, as ggml_scale did on device.
+        const float lang_scale = (float) std::sqrt((double) hidden_pl);
+        for (float & v : lang_rows) v *= lang_scale;
+    }
+    ggml_backend_tensor_set(t_prefix, lang_rows.data(), lang_off, lang_rows.size() * sizeof(float));
     {
         std::vector<int32_t> pp(n_prefix); for (int64_t i=0; i<n_prefix; ++i) pp[i] = (int32_t) i;
         ggml_backend_tensor_set(t_prefix_pos, pp.data(), 0, ggml_nbytes(t_prefix_pos));
