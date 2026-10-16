@@ -255,8 +255,8 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
             return nullptr;
         }
     }
-    if (opts.act_dtype == GGML_TYPE_BF16 && arch != Arch::PI0 && arch != Arch::EVO1) {
-        std::fprintf(stderr, "vla: act_dtype bf16 is only supported by pi0 and evo1\n");
+    if (opts.act_dtype == GGML_TYPE_BF16 && arch != Arch::PI0 && arch != Arch::PI05 && arch != Arch::EVO1) {
+        std::fprintf(stderr, "vla: act_dtype bf16 is only supported by pi0, pi0.5 and evo1\n");
         return nullptr;
     }
 
@@ -332,7 +332,11 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
 
     auto* m = new Model();
     m->impl = std::move(impl);
-    m->fa = fa;
+    // Read back rather than reuse `fa`: an arch may pick its own default during
+    // create when --flash-attn was not given (pi0 and pi0.5 turn it on
+    // on SYCL, where it runs on oneDNN's fused SDPA), and predict() re-applies
+    // this value on every call.
+    m->fa = flash_attn_enabled();
     m->mm = mm;
     return m;
 }

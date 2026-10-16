@@ -114,6 +114,14 @@ if(NOT VLA_LLAMA_TAG STREQUAL _vla_llama_tag_default)
         "-DVLA_LLAMA_TAG=${_vla_llama_tag_default} or use a fresh one.")
 endif()
 
+# Ahead-of-time device code for the SYCL build: a device list in ocloc's
+# spelling (e.g. "ptl-u,ptl-h" or "bmg") compiles native binaries for those parts
+# and keeps SPIR-V for any other GPU. Empty (the default) JITs at first use.
+set(VLA_SYCL_DEVICE_ARCH "" CACHE STRING "ocloc device list for SYCL AOT (empty = JIT)")
+if(GGML_SYCL AND VLA_SYCL_DEVICE_ARCH AND NOT GGML_SYCL_DEVICE_ARCH)
+    set(GGML_SYCL_DEVICE_ARCH "${VLA_SYCL_DEVICE_ARCH}" CACHE STRING "" FORCE)
+endif()
+
 include(FetchContent)
 FetchContent_Declare(llama
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp
@@ -357,6 +365,33 @@ if(GGML_SYCL AND NOT GGML_CUDA)
             "See docs/backend/sycl.md.")
     endif()
     target_compile_definitions(vla_core PUBLIC GGML_USE_SYCL)
+
+    # Intel GPU ops behind the ggml-sycl hook (src/sycl/vla_sycl_ext.cpp): BF16
+    # matmul/norm/scale, flash attention on oneDNN's fused SDPA, the fused
+    # elementwise nodes and the W8A8 linear. oneDNN ships with oneAPI.
+    find_package(DNNL REQUIRED)
+    add_library(vla_sycl_ops STATIC src/sycl/vla_sycl_ext.cpp src/sycl/vla_sycl_bf16.cpp src/sycl/vla_sycl_attn.cpp
+                src/sycl/vla_sycl_fused.cpp)
+    target_include_directories(vla_sycl_ops PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${llama_SOURCE_DIR}/ggml/include
+    )
+    set_target_properties(vla_sycl_ops PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_compile_features(vla_sycl_ops PRIVATE cxx_std_17)
+    # icpx defaults to -fp-model=fast (reassociation); keep IEEE semantics.
+    target_compile_options(vla_sycl_ops PRIVATE
+        -O3 -fsycl -fp-model=precise -foffload-fp32-prec-div -foffload-fp32-prec-sqrt)
+    # PUBLIC: the device images live in this static archive, so whoever links it
+    # must run the SYCL device link, or the first kernel launch fails.
+    target_link_options(vla_sycl_ops PUBLIC -fsycl)
+    if(VLA_SYCL_DEVICE_ARCH)
+        set(_vla_aot -fsycl-targets=spir64_gen,spir64
+                     "SHELL:-Xsycl-target-backend=spir64_gen \"-device ${VLA_SYCL_DEVICE_ARCH}\"")
+        target_compile_options(vla_sycl_ops PRIVATE ${_vla_aot})
+        target_link_options(vla_sycl_ops PUBLIC ${_vla_aot})
+    endif()
+    target_link_libraries(vla_sycl_ops PUBLIC DNNL::dnnl ggml ggml-sycl)
+    target_link_libraries(vla_core PRIVATE vla_sycl_ops)
 
     # FoldQuant kernels for Intel GPUs, behind the hook the patch above adds. Built
     # without FMA contraction, and with the device JIT told to round division and

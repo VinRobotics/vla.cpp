@@ -25,6 +25,9 @@ namespace vla {
 
 namespace {
 
+// f32 and bf16 only, on purpose. A quantised tensor keeps the type the GGUF
+// stores it in (gguf_reader::resident_type); this flag only chooses what the
+// tensors the file stores dense convert to.
 bool parse_dtype(const std::string & v, ggml_type & out) {
     if (v == "f32"  || v == "fp32")  {
         out = GGML_TYPE_F32;
@@ -71,6 +74,10 @@ void set_flash_attn(bool on) {
 bool flash_attn_enabled()    {
     return g_flash_attn;
 }
+
+namespace { bool g_fa_views = false; }
+void set_fa_takes_views(bool on) { g_fa_views = on; }
+bool fa_takes_views() { return g_fa_views; }
 
 void set_mm_prec_f32(bool on)  {
     g_mm_prec_f32 = on;

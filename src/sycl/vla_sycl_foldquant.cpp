@@ -34,6 +34,7 @@
 // across rounding ties. test_foldquant_sycl_op checks every path byte for byte.
 
 #include "sycl/vla_sycl_foldquant.h"
+#include "sycl/vla_sycl_ext.h"
 
 #include "foldquant.h"
 #include "foldquant_ref.h"
@@ -55,13 +56,6 @@
 #include <dnnl.hpp>
 #include <dnnl_sycl.hpp>
 #endif
-
-extern "C" {
-typedef bool (*ggml_sycl_ext_forward_t)(struct ggml_tensor * dst, void * queue);
-typedef bool (*ggml_sycl_ext_supports_t)(const struct ggml_tensor * op);
-extern ggml_sycl_ext_forward_t  ggml_sycl_ext_forward;
-extern ggml_sycl_ext_supports_t ggml_sycl_ext_supports;
-}
 
 namespace vla {
 
@@ -838,8 +832,7 @@ bool supports(const ggml_tensor * op) {
 }  // namespace
 
 void sycl_register_foldquant_ops() {
-    ggml_sycl_ext_forward  = dispatch;
-    ggml_sycl_ext_supports = supports;
+    sycl_ext_register(dispatch, supports);
 }
 
 }  // namespace vla

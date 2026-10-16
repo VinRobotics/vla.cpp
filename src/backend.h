@@ -40,6 +40,9 @@
 #endif
 #ifdef GGML_USE_SYCL
 #include "ggml-sycl.h"
+#include "options.h"
+#include "layers/fused_ew.h"
+#include "sycl/vla_sycl_ops.h"
 #endif
 #ifdef GGML_USE_METAL
 #include "ggml-metal.h"
@@ -97,6 +100,9 @@ struct Backend {
     /// activation path needs the CUDA BF16 GEMM and elementwise kernels, so
     /// archs gate on this rather than on the compiled-in accelerator.
     bool           is_cuda = false;
+    /// Same, for a live SYCL backend. The BF16 activation path is served there
+    /// by src/sycl/vla_sycl_bf16.cpp plus ggml-sycl's own BF16 add/mul/unary.
+    bool           is_sycl = false;
 };
 
 /**
@@ -201,10 +207,17 @@ inline ggml_tensor * gelu(ggml_context * ctx, ggml_tensor * x) {
 }
 
 inline ggml_tensor * geglu(ggml_context * ctx, ggml_tensor * gate, ggml_tensor * up) {
-#if !defined(GGML_USE_SYCL) && !defined(GGML_USE_METAL) && !defined(GGML_USE_OPENVINO) && \
+#if !defined(GGML_USE_METAL) && !defined(GGML_USE_OPENVINO) && \
     !defined(GGML_USE_HEXAGON) && !defined(GGML_USE_OPENCL)
-    if (gate->type == GGML_TYPE_F32)
+    // ggml-sycl's fused GEGLU (b11223+) handles F32/F16 only and asserts on BF16
+    // without declining it in supports_op, hence the type check.
+    if (gate->type == GGML_TYPE_F32 && up->type == GGML_TYPE_F32)
         return ggml_geglu_split(ctx, gate, up);
+#endif
+#ifdef GGML_USE_SYCL
+    // BF16 goes through the in-tree fused node, when a model registered it.
+    if (gate->type == GGML_TYPE_BF16 && up->type == GGML_TYPE_BF16 && fused_ew_registered())
+        return fused_geglu(ctx, gate, up);
 #endif
     return ggml_mul(ctx, gelu(ctx, gate), up);
 }
@@ -303,6 +316,12 @@ inline Backend backend_init(const char * tag, int n_threads) {
             std::fprintf(stderr, "%s: SYCL device %d out of range (%d visible); falling back to CPU\n",
                          tag, dev, n_dev);
         } else if ((b.handle = ggml_backend_sycl_init(dev)) != nullptr) {
+            b.is_sycl = true;
+            // The in-tree hook declines every op it does not own, so it is safe
+            // on F32 graphs. FLASH_ATTN_EXT, which it does own, runs on oneDNN's
+            // SDPA for every activation dtype.
+            vla::sycl_register_bf16_ops();
+            vla::set_fa_takes_views(true);
             char desc[256] = { 0 };
             ggml_backend_sycl_get_device_description(dev, desc, sizeof(desc));
             std::printf("%s: backend = SYCL (device %d: %s)\n", tag, dev, desc);

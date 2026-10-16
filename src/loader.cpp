@@ -17,6 +17,7 @@
 #include "backend.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 
@@ -215,6 +216,51 @@ ggml_tensor * WeightLoader::fuse(ggml_type want, const char * out_name, const st
     return t;
 }
 
+WeightLoader::QWeight WeightLoader::quant_i8(const std::string & out_name, const std::vector<std::string> & srcs) {
+    return quant(out_name, srcs, 8, 0);
+}
+
+WeightLoader::QWeight WeightLoader::quant_i4(const std::string & out_name, const std::vector<std::string> & srcs,
+                                             int64_t group) {
+    return quant(out_name, srcs, 4, group);
+}
+
+WeightLoader::QWeight WeightLoader::quant(const std::string & out_name, const std::vector<std::string> & srcs,
+                                          int bits, int64_t group) {
+    int64_t K = -1, N = 0;
+    for (const std::string & s : srcs) {
+        const ggml_tensor * gs = g_.meta(s.c_str());
+        if (!gs || ggml_n_dims(gs) != 2 || (K >= 0 && gs->ne[0] != K)) {
+            std::fprintf(stderr, "vla(%s): %s missing or not a [%lld, N] weight for INT%d\n", arch_, s.c_str(),
+                         (long long) K, bits);
+            ok_ = false;
+            return {};
+        }
+        K = gs->ne[0];
+        N += gs->ne[1];
+    }
+    QWeight q;
+    q.bits  = bits;
+    q.group = bits == 4 ? (group > 0 ? group : K) : 0;
+    if (bits == 4 && (K % 2 || K % q.group)) {
+        std::fprintf(stderr, "vla(%s): %s: K %lld not a multiple of the INT4 group %lld\n", arch_, out_name.c_str(),
+                     (long long) K, (long long) q.group);
+        ok_ = false;
+        return {};
+    }
+    q.w = ggml_new_tensor_2d(ctx_, GGML_TYPE_I8, bits == 4 ? K / 2 : K, N);
+    q.s = ggml_new_tensor_1d(ctx_, GGML_TYPE_F32, bits == 4 ? (K / q.group) * N : N);
+    if (!q.w || !q.s) {
+        std::fprintf(stderr, "vla(%s): ggml_new_tensor failed for %s\n", arch_, out_name.c_str());
+        ok_ = false;
+        return {};
+    }
+    ggml_set_name(q.w, out_name.c_str());
+    ggml_set_name(q.s, (out_name + ".scale").c_str());
+    quant_.push_back(Quant{q, K, srcs});
+    return q;
+}
+
 bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_buf) {
     if (!ok_) {
         std::fprintf(stderr, "vla(%s): weight tensor setup failed\n", arch_);
@@ -231,7 +277,9 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
     for (ggml_tensor * t=ggml_get_first_tensor(ctx_); t; t=ggml_get_next_tensor(ctx_, t)) {
         const char * name = ggml_get_name(t);
         const bool fused = std::any_of(fused_.begin(), fused_.end(),
-                                       [&](const Fused & f) { return f.dst == t; });
+                                       [&](const Fused & f) { return f.dst == t; }) ||
+                           std::any_of(quant_.begin(), quant_.end(),
+                                       [&](const Quant & f) { return f.q.w == t || f.q.s == t; });
         if (fused)
             continue;
 
@@ -263,6 +311,53 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
             return false;
         }
         ggml_backend_tensor_set(f.dst, parts.data(), 0, parts.size());
+    }
+
+    for (const Quant & f : quant_) {
+        const int64_t K = f.K;
+        const int64_t g = f.q.bits == 4 ? f.q.group : K;
+        const float   qmax = f.q.bits == 4 ? 7.0f : 127.0f;
+        std::vector<int8_t> codes;   // INT8: one per byte; INT4: packed below
+        std::vector<float>  scales;  // [n][K/g] while filling
+        for (const std::string & s : f.srcs) {
+            std::vector<uint8_t> b;
+            if (!read_resident(s, GGML_TYPE_F32, false, b) || b.size() % (K * sizeof(float))) {
+                std::fprintf(stderr, "vla(%s): INT fill: read %s failed\n", arch_, s.c_str());
+                return false;
+            }
+            const float * w = (const float *) b.data();
+            const int64_t n = (int64_t) (b.size() / (K * sizeof(float)));
+            for (int64_t r = 0; r < n; ++r) {
+                const float * row = w + r * K;
+                for (int64_t k0 = 0; k0 < K; k0 += g) {
+                    float amax = 0.0f;
+                    for (int64_t k = k0; k < k0 + g; ++k) amax = std::max(amax, std::fabs(row[k]));
+                    const float sc = amax > 0.0f ? amax / qmax : 1.0f;
+                    scales.push_back(sc);
+                    for (int64_t k = k0; k < k0 + g; ++k)
+                        codes.push_back((int8_t) std::lrint(std::min(qmax, std::max(-qmax, row[k] / sc))));
+                }
+            }
+        }
+        const int64_t N = (int64_t) (codes.size() / K);
+        if (N != f.q.w->ne[1]) {
+            std::fprintf(stderr, "vla(%s): INT fill: %s rows %lld vs %lld\n", arch_, ggml_get_name(f.q.w),
+                         (long long) N, (long long) f.q.w->ne[1]);
+            return false;
+        }
+        if (f.q.bits == 4) {
+            std::vector<uint8_t> packed((size_t) (N * K / 2));
+            for (size_t i = 0; i < packed.size(); ++i)
+                packed[i] = (uint8_t) ((codes[2 * i] & 0xf) | ((codes[2 * i + 1] & 0xf) << 4));
+            std::vector<float> st((size_t) ((K / g) * N));  // [K/g][N]
+            for (int64_t n = 0; n < N; ++n)
+                for (int64_t j = 0; j < K / g; ++j) st[j * N + n] = scales[n * (K / g) + j];
+            ggml_backend_tensor_set(f.q.w, packed.data(), 0, packed.size());
+            ggml_backend_tensor_set(f.q.s, st.data(), 0, st.size() * sizeof(float));
+            continue;
+        }
+        ggml_backend_tensor_set(f.q.w, codes.data(), 0, codes.size());
+        ggml_backend_tensor_set(f.q.s, scales.data(), 0, scales.size() * sizeof(float));
     }
     return true;
 }

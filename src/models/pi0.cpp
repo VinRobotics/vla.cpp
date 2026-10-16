@@ -29,6 +29,7 @@
 #include "modules/prompt.h"
 #include "act_dtype.h"
 #include "cuda/vla_cuda_ops.h"
+#include "sycl/vla_sycl_ops.h"
 
 #include <chrono>
 #include <cmath>
@@ -107,6 +108,23 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_ten
                                  int64_t seq, const EncCfg & c, ggml_type at) {
     const float scale = 1.0f/std::sqrt((float) c.head_dim);
     ggml_tensor * n1 = layer_norm(C, x, w.ln1w, w.ln1b, c.ln_eps);
+    if (vla::flash_attn_enabled() && vla::fa_takes_views()) {
+        // A view-taking FA reads the projections in place in any float type and
+        // stride, so no F32 cast or contiguous copy is needed per operand.
+        auto heads_view = [&](ggml_tensor * t) {
+            return ggml_permute(C, ggml_reshape_3d(C, t, c.head_dim, c.heads, seq), 0, 2, 1, 3);
+        };
+        ggml_tensor * fa = ggml_flash_attn_ext(C, heads_view(ggml_add(C, mm_act(C, w.Wq, n1, at), w.bq)),
+                                               heads_view(ggml_add(C, mm_act(C, w.Wk, n1, at), w.bk)),
+                                               heads_view(ggml_add(C, mm_act(C, w.Wv, n1, at), w.bv)),
+                                               nullptr, scale, 0.0f, 0.0f);
+        ggml_prec_set_acc(fa, GGML_PREC_F32);
+        ggml_tensor * att = ggml_reshape_2d(C, fa, c.hidden, seq);
+        ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, mm_act(C, w.Wo, as_type(C, att, at), at), w.bo));
+        ggml_tensor * n2 = layer_norm(C, h1, w.ln2w, w.ln2b, c.ln_eps);
+        ggml_tensor * ff = ggml_add(C, mm_act(C, w.Wfc2, vla::gelu(C, ggml_add(C, mm_act(C, w.Wfc1, n2, at), w.bfc1)), at), w.bfc2);
+        return ggml_add(C, h1, ff);
+    }
     ggml_tensor * q = as_type(C, ggml_add(C, mm_act(C, w.Wq, n1, at), w.bq), GGML_TYPE_F32);
     ggml_tensor * k = as_type(C, ggml_add(C, mm_act(C, w.Wk, n1, at), w.bk), GGML_TYPE_F32);
     ggml_tensor * v = as_type(C, ggml_add(C, mm_act(C, w.Wv, n1, at), w.bv), GGML_TYPE_F32);
@@ -203,14 +221,24 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
         }
         m->backend = b.handle;
 
-        // BF16 activations need BF16-resident weights and the CUDA BF16 GEMM path.
+        // On SYCL, flash attention runs on oneDNN's fused SDPA, so it is the
+        // default there unless --flash-attn was given either way.
+        if (b.is_sycl && !opts.flash_attn.has_value() && vla::fa_takes_views()) {
+            vla::set_flash_attn(true);
+            std::printf("vla(pi0): flash attention = on (SYCL default; --flash-attn 0 to disable)\n");
+        }
+
+        // BF16 activations need BF16-resident weights and a GPU BF16 GEMM path
+        // (src/cuda/vla_cuda_bf16.cu, src/sycl/vla_sycl_bf16.cpp). Only one of
+        // the two register calls below is ever more than an empty inline.
         if (opts.act_dtype.value_or(GGML_TYPE_F32) == GGML_TYPE_BF16) {
-            if (b.is_cuda && m->matmul_type == GGML_TYPE_BF16) {
+            if ((b.is_cuda || b.is_sycl) && m->matmul_type == GGML_TYPE_BF16) {
                 m->act_type = GGML_TYPE_BF16;
                 cuda_register_bf16_ops();   // installs the in-tree BF16 CUDA kernels
+                sycl_register_bf16_ops();   // ... or the SYCL ones
                 std::printf("vla(pi0): activations = BF16\n");
             } else {
-                std::fprintf(stderr, "vla(pi0): --act-dtype bf16 ignored - needs CUDA and BF16 weights\n");
+                std::fprintf(stderr, "vla(pi0): --act-dtype bf16 ignored - needs CUDA or SYCL and BF16 weights\n");
             }
         }
     }
@@ -419,6 +447,7 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
             return {};
         }
         const auto tv0 = clk::now();
+
         std::vector<float> chw;
         for (int v=0; v<in.n_images; ++v) {
             if (!preprocess_image_chw("pi0", in.images[v], vis.image_size, chw)) { return {}; }
