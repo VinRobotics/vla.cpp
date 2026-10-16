@@ -18,8 +18,8 @@
 
 namespace vla {
 
-// Points the SYCL extension hook (scripts/patch_ggml_sycl_ext_hook.py) at the
-// FoldQuant kernels. Idempotent; call once the SYCL backend is up.
+// Adds the FoldQuant kernels to the SYCL extension hook (sycl/vla_sycl_ext.h,
+// scripts/patch_ggml_sycl_ext_hook.py). Idempotent; call once the SYCL backend is up.
 void sycl_register_foldquant_ops();
 
 }  // namespace vla

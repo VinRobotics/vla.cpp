@@ -63,6 +63,12 @@ const char * dtype_name(ggml_type t);
 // every signature.
 void set_flash_attn(bool on);
 bool flash_attn_enabled();
+// Whether the active backend's FLASH_ATTN_EXT reads Q/K/V of any float type
+// through arbitrary strides (true on SYCL, where src/sycl/vla_sycl_attn.cpp
+// converts them itself). Graph builders then pass the projection views directly
+// instead of casting to F32 and ggml_cont-ing them first.
+void set_fa_takes_views(bool on);
+bool fa_takes_views();
 
 void set_mm_prec_f32(bool on);
 bool mm_prec_f32_enabled();

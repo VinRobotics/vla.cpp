@@ -20,10 +20,12 @@
 
 #include "act_dtype.h"
 #include "backend.h"
+#include "env_flag.h"
 #include "gguf_reader.h"
 #include "layers/norm.h"
 #include "foldquant.h"
 #include "layers/fq_linear.h"
+#include "layers/qlinear.h"
 #include "loader.h"
 #include "model.h"
 #include "modules/siglip_vit.h"
@@ -48,19 +50,83 @@ struct GemmaLayerW {
     ggml_tensor * Wgate   = nullptr;
     ggml_tensor * Wup     = nullptr;
     ggml_tensor * Wdown   = nullptr;
+    // q|k|v and gate|up fused into one GEMM each (declare(..., fuse_proj)); the
+    // separate weights above are then null.
+    ggml_tensor * Wqkv    = nullptr;
+    ggml_tensor * Wgu     = nullptr;
+    // W8A8 (layers/qlinear.h): the same four GEMMs as INT8 codes + scales, in
+    // place of the float weights.
+    QWeight       q_qkv, q_o, q_gu, q_down;
     // FoldQuant sites (pi0.5 prefix tower). The RMSNorm and its folded gamma
     // (ln_in / ln_post, loaded as 1 + w) ride in the q/k/v and gate/up act nodes.
     FqLinear fq_q, fq_k, fq_v, fq_o, fq_gate, fq_up, fq_down;
 };
 
+// The float GEMM weights of one layer, under GGUF prefix `b` (e.g. "vlm.blk.3"):
+// separate, or with q|k|v and gate|up each concatenated along N (fuse), so one
+// GEMM reads the activation row once. FoldQuant sites already declared are left
+// alone. int8: the four GEMMs as W8A8 instead (layers/qlinear.h); w4_group != 0
+// makes their weights INT4 with that many K-elements per scale (< 0: per channel).
+inline void gemma_declare_float(WeightLoader & L, GemmaLayerW & w, const std::string & b, bool fuse,
+                                bool int8 = false, int64_t w4_group = 0) {
+    const char * p = b.c_str();
+    if (int8 && !w.fq_q && !w.fq_o && !w.fq_gate && !w.fq_down) {
+        // q|k|v and gate|up fused as with fuse.
+        auto q = [&](const std::string & name, const std::vector<std::string> & srcs) {
+            return w4_group != 0 ? L.quant_i4(name, srcs, w4_group) : L.quant_i8(name, srcs);
+        };
+        w.q_qkv  = q(b + ".attn_qkv.q8", {b + ".attn_q.weight", b + ".attn_k.weight", b + ".attn_v.weight"});
+        w.q_o    = q(b + ".attn_o.q8", {b + ".attn_o.weight"});
+        w.q_gu   = q(b + ".ffn_gateup.q8", {b + ".ffn_gate.weight", b + ".ffn_up.weight"});
+        w.q_down = q(b + ".ffn_down.q8", {b + ".ffn_down.weight"});
+        return;
+    }
+    if (!w.fq_q) {
+        if (fuse) {
+            w.Wqkv = L.fuse_gemm((b + ".attn_qkv.weight").c_str(),
+                                 {b + ".attn_q.weight", b + ".attn_k.weight", b + ".attn_v.weight"});
+        } else {
+            w.Wq = L.gemm("%s.attn_q.weight", p);
+            w.Wk = L.gemm("%s.attn_k.weight", p);
+            w.Wv = L.gemm("%s.attn_v.weight", p);
+        }
+    }
+    if (!w.fq_o)
+        w.Wo = L.gemm("%s.attn_o.weight", p);
+    if (!w.fq_gate) {
+        if (fuse) {
+            w.Wgu = L.fuse_gemm((b + ".ffn_gateup.weight").c_str(), {b + ".ffn_gate.weight", b + ".ffn_up.weight"});
+        } else {
+            w.Wgate = L.gemm("%s.ffn_gate.weight", p);
+            w.Wup   = L.gemm("%s.ffn_up.weight", p);
+        }
+    }
+    if (!w.fq_down)
+        w.Wdown = L.gemm("%s.ffn_down.weight", p);
+}
+
+// One layer's K/V as F16 buffers [hd, n_kv, n_ctx] that the projections write
+// into in place (gemma_attn with a KvSlot; view-taking FA only). The prefix pass
+// writes rows [0, n_prefix), every expert step overwrites the rows after them,
+// and the fused attention reads the buffer as is, with no per-step concat.
+struct KvSlot {
+    ggml_tensor * k = nullptr, * v = nullptr;
+    // The prefix pass's writes: a dependency of every later read of the buffer.
+    ggml_tensor * k_pre = nullptr, * v_pre = nullptr;
+};
+
 struct GemmaStack {
     std::vector<GemmaLayerW> blk;
     ggml_tensor *            output_norm = nullptr;
+    FusedRmsSpec             rms_spec;  // gemma_layer_q8's norms
 
     // fq: the LLM FoldQuant spec when the GGUF carries one (pi0.5), else null.
+    // fuse_proj: q|k|v and gate|up as one weight each; int8: those as W8A8.
     void declare(WeightLoader & L, const char * prefix, int64_t layers, bool with_output_norm,
-                 const FqModuleSpec * fq = nullptr, float rms_eps = 1e-6f) {
+                 const FqModuleSpec * fq = nullptr, float rms_eps = 1e-6f, bool fuse_proj = false,
+                 bool int8 = false) {
         blk.resize(layers);
+        rms_spec.eps = rms_eps;
         for (int64_t i=0; i<layers; ++i) {
             GemmaLayerW & w = blk[i];
             const long long ii = (long long) i;
@@ -77,24 +143,113 @@ struct GemmaStack {
                 if (!w.fq_q != !w.fq_k || !w.fq_q != !w.fq_v || !w.fq_gate != !w.fq_up)
                     L.fail("FoldQuant: a Gemma layer's q/k/v (and gate/up) must all be INT or all float");
             }
-            if (!w.fq_q) {
-                w.Wq  = L.gemm("%s.blk.%lld.attn_q.weight", prefix, ii);
-                w.Wk  = L.gemm("%s.blk.%lld.attn_k.weight", prefix, ii);
-                w.Wv  = L.gemm("%s.blk.%lld.attn_v.weight", prefix, ii);
-            }
-            if (!w.fq_o)
-                w.Wo  = L.gemm("%s.blk.%lld.attn_o.weight", prefix, ii);
-            if (!w.fq_gate) {
-                w.Wgate = L.gemm("%s.blk.%lld.ffn_gate.weight", prefix, ii);
-                w.Wup   = L.gemm("%s.blk.%lld.ffn_up.weight",   prefix, ii);
-            }
-            if (!w.fq_down)
-                w.Wdown = L.gemm("%s.blk.%lld.ffn_down.weight", prefix, ii);
+            const std::string b = std::string(prefix) + ".blk." + std::to_string(ii);
+            gemma_declare_float(L, w, b, fuse_proj && !fq, int8 && !fq);
         }
         if (with_output_norm)
             output_norm = L.f32_gemma_norm("%s.output_norm.weight", prefix);
     }
 };
+
+// gemma_attn_kv after Q/K/V: attention over the cache rows written so far,
+// then the o projection. k_w / v_w: this call's cache writes (dependencies).
+inline ggml_tensor * gemma_attn_kv_tail(ggml_context * ctx, const GemmaLayerW & w, ggml_tensor * q16,
+                                        ggml_tensor * k_w, ggml_tensor * v_w, const Config & cfg, int64_t seq,
+                                        int64_t row0, KvSlot & kv, ggml_tensor * mask, ggml_type at,
+                                        ggml_tensor * o_res, ggml_tensor * o_gate, ggml_type o_type) {
+    const int64_t hd  = cfg.head_dim;
+    const int64_t nkv = cfg.n_kv_heads;
+    const int64_t qf  = cfg.n_q_heads * hd;
+    const int64_t n_all = row0 + seq;
+    auto rows = [&](ggml_tensor * buf) {
+        return ggml_permute(ctx, ggml_view_3d(ctx, buf, hd, nkv, n_all, buf->nb[1], buf->nb[2], 0), 0, 2, 1, 3);
+    };
+    ggml_tensor * mask_f16 = mask ? ggml_cast(ctx, mask, GGML_TYPE_F16) : nullptr;
+    ggml_tensor * fa = ggml_flash_attn_ext(ctx, ggml_permute(ctx, q16, 0, 2, 1, 3), rows(kv.k), rows(kv.v), mask_f16,
+                                           1.f / std::sqrt((float) hd), 0.0f, 0.0f);
+    ggml_prec_set_acc(fa, GGML_PREC_F32);
+    // The buffers are read through views of the leaf, so order the reads after
+    // this call's writes and the prefix's.
+    add_dep(fa, k_w);
+    add_dep(fa, v_w);
+    add_dep(fa, kv.k_pre);
+    add_dep(fa, kv.v_pre);
+    // VLA_FA_Q8=1: the attention writes the o GEMM's INT8 input itself, saving
+    // one pass. Opt-in until validated end to end.
+    static const bool fa_q8 = env_flag("VLA_FA_Q8");
+    if (w.q_o && fa_q8 && fused_ew_registered() && !mask)
+        return qlinear(ctx, w.q_o, retype_blob(fa, seq * (qf + 4)), nullptr, o_res,
+                       o_type == GGML_TYPE_COUNT ? at : o_type, false, o_gate);
+    if (at == GGML_TYPE_BF16)
+        retype(fa, GGML_TYPE_BF16);
+    ggml_tensor * att = ggml_reshape_2d(ctx, fa, qf, seq);
+    if (w.q_o)
+        return qlinear(ctx, w.q_o, att, nullptr, o_res, o_type == GGML_TYPE_COUNT ? at : o_type, false, o_gate);
+    GGML_ASSERT(!o_res && !o_gate);
+    return mm_act(ctx, w.Wo, as_type(ctx, att, at), at);
+}
+
+// gemma_attn over a KvSlot: this call's K/V rows land in the slot's buffers at
+// the rows after whatever the prefix pass wrote (none, for the prefix pass
+// itself), and the fused attention reads every row written so far. Q goes in
+// as F16 straight from RoPE; the result comes out in the activation type.
+// Float weights only (no FoldQuant), view-taking flash attention only.
+inline ggml_tensor * gemma_attn_kv(
+        ggml_context * ctx, const GemmaLayerW & w, ggml_tensor * x_norm, ggml_tensor * positions,
+        const Config & cfg, int64_t seq, KvSlot & kv, ggml_tensor * mask, ggml_type at,
+        ggml_tensor * o_res = nullptr, ggml_tensor * o_gate = nullptr, ggml_type o_type = GGML_TYPE_COUNT) {
+    // o_res / o_gate / o_type: the o GEMM's epilogue on W8A8 weights, computing
+    // res + out * gate in o_type (default: at). Float weights take neither.
+    const int64_t hd  = cfg.head_dim;
+    const int64_t nq  = cfg.n_q_heads;
+    const int64_t nkv = cfg.n_kv_heads;
+    const int64_t qf  = nq * hd, kvf = nkv * hd;
+    const int64_t row0 = kv.k_pre ? kv.k_pre->ne[2] : 0;
+    GGML_ASSERT(!w.fq_q && !w.fq_o && kv.k && kv.v && kv.k->ne[2] >= row0 + seq);
+
+    // Q, K, V as [hd, heads, seq] views of one F32 projection (fused weights),
+    // or of three.
+    ggml_tensor *q_h, *k_h, *v_h;
+    if (w.Wqkv || w.q_qkv) {
+        ggml_tensor * qkv = w.q_qkv ? qlinear(ctx, w.q_qkv, x_norm, nullptr, nullptr, GGML_TYPE_F32)
+                                    : mm_f32(ctx, w.Wqkv, x_norm);
+        const size_t  es  = ggml_element_size(qkv);
+        q_h = ggml_view_3d(ctx, qkv, hd, nq,  seq, hd * es, qkv->nb[1], 0);
+        k_h = ggml_view_3d(ctx, qkv, hd, nkv, seq, hd * es, qkv->nb[1], qf * es);
+        v_h = ggml_view_3d(ctx, qkv, hd, nkv, seq, hd * es, qkv->nb[1], (qf + kvf) * es);
+    } else {
+        q_h = ggml_reshape_3d(ctx, mm_f32(ctx, w.Wq, x_norm), hd, nq, seq);
+        k_h = ggml_reshape_3d(ctx, mm_f32(ctx, w.Wk, x_norm), hd, nkv, seq);
+        v_h = ggml_reshape_3d(ctx, mm_act(ctx, w.Wv, x_norm, at), hd, nkv, seq);
+    }
+
+    static const bool rope_fuse = !env_flag("VLA_NO_ROPE_KV_FUSE");
+    if (rope_fuse && fused_ew_registered() && (w.Wqkv || w.q_qkv) && q_h->view_src && kv.k->ne[1] == nkv) {
+        // One node: RoPE on q and k, k and v into the cache rows.
+        ggml_tensor * qkv = q_h->view_src;
+        ggml_tensor * q16 = fused_rope_kv(ctx, qkv, positions, kv.k, kv.v, (int) nq, (int) nkv, (int) hd, row0,
+                                          cfg.rope_freq_base);
+        if (!kv.k_pre)
+            kv.k_pre = kv.v_pre = q16;
+        return gemma_attn_kv_tail(ctx, w, q16, q16, q16, cfg, seq, row0, kv, mask, at, o_res, o_gate, o_type);
+    }
+    auto rope_f16 = [&](ggml_tensor * t) {
+        return retype(ggml_rope_ext(ctx, t, positions, nullptr, (int) hd, GGML_ROPE_TYPE_NEOX, 0,
+                                    cfg.rope_freq_base, 1.f, 0.f, 1.f, 32.f, 1.f),
+                      GGML_TYPE_F16);
+    };
+    // Round to F16 here, as the attention kernel would on loading F32 Q/K/V.
+    ggml_tensor * q16 = rope_f16(q_h);
+    ggml_tensor * k_w = write_rows(rope_f16(k_h), kv.k, row0);
+    ggml_tensor * v_w = ggml_cpy(ctx, v_h, ggml_view_3d(ctx, kv.v, hd, nkv, seq, kv.v->nb[1], kv.v->nb[2],
+                                                        (size_t) row0 * kv.v->nb[2]));
+    if (!kv.k_pre) {
+        kv.k_pre = k_w;
+        kv.v_pre = v_w;
+    }
+
+    return gemma_attn_kv_tail(ctx, w, q16, k_w, v_w, cfg, seq, row0, kv, mask, at, o_res, o_gate, o_type);
+}
 
 inline ggml_tensor * gemma_attn(
         ggml_context * ctx, const GemmaLayerW & w,
@@ -102,7 +257,9 @@ inline ggml_tensor * gemma_attn(
         const Config & cfg, int64_t seq,
         ggml_tensor * cached_K, ggml_tensor * cached_V, ggml_tensor * mask,
         ggml_tensor ** k_out, ggml_tensor ** v_out, ggml_type at, bool flash,
-        ggml_tensor * fq_x = nullptr, ggml_tensor * fq_res = nullptr) {
+        ggml_tensor * fq_x = nullptr, ggml_tensor * fq_res = nullptr, KvSlot * kv = nullptr) {
+    if (kv)
+        return gemma_attn_kv(ctx, w, x_norm, positions, cfg, seq, *kv, mask, at);
     // FoldQuant: q/k/v share one act node over fq_x (the raw residual stream when
     // the RMSNorm and its folded gamma ride in the act node, the adaRMS output
     // otherwise), and fq_res, when given, rides in the o GEMM epilogue. A float
@@ -113,17 +270,28 @@ inline ggml_tensor * gemma_attn(
     const int64_t qf  = nq * hd;
 
     // Q/K/V land in F32: RoPE, the KV cache the suffix passes re-read, and the
-    // score/softmax core all stay full precision.
+    // score/softmax core all stay full precision. With a view-taking FA
+    // (fa_takes_views), V skips the F32 cast since only the kernel reads it and
+    // converts on load, and Q/K/V reach the kernel as strided views.
+    const bool fa_views = flash && fa_takes_views();
     ggml_tensor *q, *k, *v;
     if (w.fq_q) {
         ggml_tensor * xq = fq_act(ctx, w.fq_q, fq_x);
         q = fq_gemm(ctx, w.fq_q, xq);
         k = fq_gemm(ctx, w.fq_k, xq);
         v = fq_gemm(ctx, w.fq_v, xq);
+    } else if (w.Wqkv) {
+        ggml_tensor * qkv = mm_f32(ctx, w.Wqkv, x_norm);
+        const size_t  es  = ggml_element_size(qkv);
+        q = ggml_view_2d(ctx, qkv, qf, seq, qkv->nb[1], 0);
+        k = ggml_cont(ctx, ggml_view_2d(ctx, qkv, cfg.kv_full_dim, seq, qkv->nb[1], qf * es));
+        v = ggml_cont(ctx, ggml_view_2d(ctx, qkv, cfg.kv_full_dim, seq, qkv->nb[1], (qf + cfg.kv_full_dim) * es));
+        q = ggml_cont(ctx, q);
     } else {
         q = as_type(ctx, mm_act(ctx, w.Wq, x_norm, at), GGML_TYPE_F32);
         k = as_type(ctx, mm_act(ctx, w.Wk, x_norm, at), GGML_TYPE_F32);
-        v = as_type(ctx, mm_act(ctx, w.Wv, x_norm, at), GGML_TYPE_F32);
+        v = fa_views ? mm_act(ctx, w.Wv, x_norm, at)
+                     : as_type(ctx, mm_act(ctx, w.Wv, x_norm, at), GGML_TYPE_F32);
     }
 
     ggml_tensor * q_h = ggml_reshape_3d(ctx, q, hd, nq,  seq);
@@ -151,11 +319,17 @@ inline ggml_tensor * gemma_attn(
     }
 
     const float scale = 1.f/std::sqrt((float) hd);
-    ggml_tensor * Q = ggml_cont(ctx, ggml_permute(ctx, q_rope, 0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(ctx, ggml_permute(ctx, K_full, 0, 2, 1, 3));
+    ggml_tensor * Q = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
+    ggml_tensor * K = ggml_permute(ctx, K_full, 0, 2, 1, 3);
+    if (!fa_views) {
+        Q = ggml_cont(ctx, Q);
+        K = ggml_cont(ctx, K);
+    }
     ggml_tensor * att_pre;
     if (flash) {
-        ggml_tensor * V = ggml_cont(ctx, ggml_permute(ctx, V_full, 0, 2, 1, 3));
+        ggml_tensor * V = ggml_permute(ctx, V_full, 0, 2, 1, 3);
+        if (!fa_views)
+            V = ggml_cont(ctx, V);
         // ggml_flash_attn_ext asserts an F16 mask. The mask holds only 0 and
         // -inf, both exactly representable in F16, so the cast is lossless.
         ggml_tensor * mask_f16 = mask ? ggml_cast(ctx, mask, GGML_TYPE_F16) : nullptr;
@@ -184,6 +358,15 @@ inline ggml_tensor * gemma_mlp(ggml_context * ctx, const GemmaLayerW & w, ggml_t
         ggml_tensor * xq = fq_act(ctx, w.fq_gate, fq_x);
         gate = fq_gemm(ctx, w.fq_gate, xq);
         up   = fq_gemm(ctx, w.fq_up,   xq);
+    } else if (w.Wgu || w.q_gu) {
+        ggml_tensor * gu = w.q_gu ? qlinear(ctx, w.q_gu, x_norm, nullptr, nullptr, at) : mm_act(ctx, w.Wgu, x_norm, at);
+        const int64_t n  = gu->ne[0] / 2;
+        gate = ggml_view_2d(ctx, gu, n, gu->ne[1], gu->nb[1], 0);
+        up   = ggml_view_2d(ctx, gu, n, gu->ne[1], gu->nb[1], n * ggml_element_size(gu));
+        if (!fused_ew_registered() || gu->type != GGML_TYPE_BF16) {
+            gate = ggml_cont(ctx, gate);
+            up   = ggml_cont(ctx, up);
+        }
     } else {
         gate = mm_act(ctx, w.Wgate, x_norm, at);
         up   = mm_act(ctx, w.Wup,   x_norm, at);
@@ -191,7 +374,22 @@ inline ggml_tensor * gemma_mlp(ggml_context * ctx, const GemmaLayerW & w, ggml_t
     ggml_tensor * inter = geglu(ctx, gate, up);
     if (w.fq_down)
         return fq_linear(ctx, w.fq_down, as_type(ctx, inter, GGML_TYPE_F32), fq_res);
+    if (w.q_down)
+        return qlinear(ctx, w.q_down, inter, nullptr, nullptr, at);
     return mm_act(ctx, w.Wdown, inter, at);
+}
+
+// The MLP on W8A8 weights: xq is the q8 blob of the normed input; geglu writes
+// the down GEMM's INT8 input, and res + out * gate (gate optional) is that
+// GEMM's epilogue, in out_type (default: at).
+inline ggml_tensor * gemma_mlp_q8(ggml_context * ctx, const GemmaLayerW & w, ggml_tensor * xq, ggml_tensor * res,
+                                  ggml_type at, ggml_tensor * gate = nullptr, ggml_type out_type = GGML_TYPE_COUNT) {
+    ggml_tensor * gu = qlinear(ctx, w.q_gu, xq, nullptr, nullptr, at);
+    const int64_t n  = gu->ne[0] / 2;
+    ggml_tensor * g  = ggml_view_2d(ctx, gu, n, gu->ne[1], gu->nb[1], 0);
+    ggml_tensor * u  = ggml_view_2d(ctx, gu, n, gu->ne[1], gu->nb[1], n * ggml_element_size(gu));
+    return qlinear(ctx, w.q_down, fused_geglu(ctx, g, u, GGML_TYPE_I8), nullptr, res,
+                   out_type == GGML_TYPE_COUNT ? at : out_type, false, gate);
 }
 
 inline ggml_tensor * gemma_layer(
@@ -200,7 +398,7 @@ inline ggml_tensor * gemma_layer(
         const Config & cfg, int64_t seq,
         ggml_tensor * cached_K, ggml_tensor * cached_V, ggml_tensor * mask,
         ggml_tensor ** k_out, ggml_tensor ** v_out,
-        ggml_type at = GGML_TYPE_F32, bool flash = false) {
+        ggml_type at = GGML_TYPE_F32, bool flash = false, KvSlot * kv = nullptr) {
     // FoldQuant (pi0.5 prefix): the RMSNorm and its folded gamma ride in the
     // q/k/v and gate/up act nodes, the residual adds in the o / down epilogues.
     ggml_tensor * h1 = w.fq_o
@@ -208,10 +406,24 @@ inline ggml_tensor * gemma_layer(
                      cached_K, cached_V, mask, k_out, v_out, at, flash, x_in, x_in)
         : ggml_add(ctx, x_in,
             gemma_attn(ctx, w, w.fq_q ? nullptr : rms_norm(ctx, x_in, w.ln_in, cfg.rms_eps), positions, cfg, seq,
-                       cached_K, cached_V, mask, k_out, v_out, at, flash, x_in));
+                       cached_K, cached_V, mask, k_out, v_out, at, flash, x_in, nullptr, kv));
     ggml_tensor * x_norm_mlp = w.fq_gate ? nullptr : rms_norm(ctx, h1, w.ln_post, cfg.rms_eps);
     return w.fq_down ? gemma_mlp(ctx, w, x_norm_mlp, at, h1, h1)
                      : ggml_add(ctx, h1, gemma_mlp(ctx, w, x_norm_mlp, at, h1));
+}
+
+// gemma_layer on W8A8 weights over a KvSlot (layers/qlinear.h), with every
+// elementwise step folded into the kernel next to it: each RMSNorm writes the
+// INT8 activation its GEMM reads, geglu writes the down GEMM's, and both
+// residual adds ride in the o and down GEMM epilogues. x_in: the residual
+// stream in at; rms: the norm spec (eps), whose address the graph keeps.
+inline ggml_tensor * gemma_layer_q8(ggml_context * ctx, const GemmaLayerW & w, ggml_tensor * x_in,
+                                    ggml_tensor * positions, const Config & cfg, int64_t seq, KvSlot & kv,
+                                    ggml_tensor * mask, ggml_type at, const FusedRmsSpec & rms) {
+    GGML_ASSERT(w.q_qkv && w.q_o && w.q_gu && w.q_down);
+    ggml_tensor * h1 = gemma_attn_kv(ctx, w, fused_rms_q8(ctx, x_in, w.ln_in, rms), positions, cfg, seq, kv, mask,
+                                     at, x_in);
+    return gemma_mlp_q8(ctx, w, fused_rms_q8(ctx, h1, w.ln_post, rms), h1, at);
 }
 
 inline std::string pi_key(const gguf_reader & g, const char * s) {

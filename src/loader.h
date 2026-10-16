@@ -61,6 +61,21 @@ public:
     ggml_tensor * fuse_f32 (const char * out_name, const std::vector<std::string> & srcs);
     ggml_tensor * fuse_typed(ggml_type want, const char * out_name, const std::vector<std::string> & srcs);
 
+    // Float GGUF weights [K, N_i], concatenated along N, as symmetric per-output-
+    // channel INT8: codes I8 [K, N] and scales F32 [N], w[n][k] ~ code * scale[n].
+    // Quantized from F32 at upload (layers/qlinear.h runs them).
+    struct QWeight {
+        ggml_tensor * w = nullptr, * s = nullptr;
+        int           bits = 8;
+        int64_t       group = 0;  // INT4: K-elements per scale (0: per channel)
+        explicit operator bool() const { return w != nullptr; }
+    };
+    QWeight quant_i8(const std::string & out_name, const std::vector<std::string> & srcs);
+    // The same as symmetric INT4 (codes -7..7, two per byte along K, low nibble
+    // first: I8 [K/2, N]) with one F32 scale per `group` K-elements and output
+    // channel (F32 [N, K/group], scale[g * N + n]); group 0 = one per channel.
+    QWeight quant_i4(const std::string & out_name, const std::vector<std::string> & srcs, int64_t group);
+
     // A tensor of another type in the file (a FoldQuant site's INT codes) that
     // gemm/opt_gemm/fuse_gemm declare as a float [K, N] weight in the resident
     // GEMM type; make() returns its N*K floats (row-major [N][K]) at upload.
@@ -86,6 +101,7 @@ public:
 private:
     ggml_tensor * declare(ggml_type want, bool required, bool gemma_norm, const char * fmt, va_list ap);
     ggml_tensor * fuse(ggml_type want, const char * out_name, const std::vector<std::string> & srcs);
+    QWeight       quant(const std::string & out_name, const std::vector<std::string> & srcs, int bits, int64_t group);
     // Bytes of a resident tensor filled from GGUF tensor `name` (a registered
     // float rebuild, or the file's tensor converted).
     bool read_resident(const std::string & name, ggml_type type, bool gemma_norm, std::vector<uint8_t> & out);
@@ -109,6 +125,12 @@ private:
 
     std::vector<std::string> gemma_norms_;
     std::vector<Fused>       fused_;
+    struct Quant {
+        QWeight                  q;
+        int64_t                  K = 0;
+        std::vector<std::string> srcs;
+    };
+    std::vector<Quant>       quant_;
 };
 
 }

@@ -139,3 +139,13 @@ if(GGML_CUDA)
     add_test(NAME bf16_cuda_ops_flat COMMAND test_bf16_cuda_ops)
     set_tests_properties(bf16_cuda_ops_flat PROPERTIES ENVIRONMENT VLA_BF16_FLAT=1)
 endif()
+
+# The same for the SYCL BF16 ops. Skips when no SYCL device is present.
+if(GGML_SYCL AND NOT GGML_CUDA)
+    add_executable(test_bf16_sycl_ops test_bf16_sycl_ops.cpp)
+    target_include_directories(test_bf16_sycl_ops PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_bf16_sycl_ops PRIVATE vla_sycl_ops ggml)
+    target_compile_options(test_bf16_sycl_ops PRIVATE -fsycl -Wall -Wextra)
+    target_link_options(test_bf16_sycl_ops PRIVATE -fsycl)
+    add_test(NAME bf16_sycl_ops COMMAND test_bf16_sycl_ops)
+endif()

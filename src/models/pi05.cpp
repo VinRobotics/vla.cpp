@@ -28,11 +28,19 @@
 #include "modules/prompt.h"
 #include "foldquant.h"
 #include "layers/fq_linear.h"
+#include "act_dtype.h"
+#include "layers/fused_ew.h"
+#include "env_flag.h"
+#include "cuda/vla_cuda_ops.h"
+#include "sycl/vla_sycl_ops.h"
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <algorithm>
+#include <cstdlib>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -51,6 +59,21 @@ struct Pi05ModelArch : public ModelArchBase {
     ggml_context *        ctx_const   = nullptr;
     ggml_backend_buffer_t const_buf   = nullptr;
     scratch_ctx           vision_scratch;
+    // Language segment padded up to a multiple of this (0 = exact length), with
+    // the padding masked out as attention keys. Set in create (16 on OpenVINO).
+    int64_t               lang_bucket = 0;
+    // Activation dtype of the GEMMs (--act-dtype bf16 on CUDA/SYCL). The expert's
+    // residual stream, its adaRMS gating and the flow-matching state stay F32.
+    ggml_type             act_type    = GGML_TYPE_F32;
+    // The expert's adaRMS and gated residuals as single fused nodes
+    // (layers/fused_ew.h). Only where a backend claims them: SYCL.
+    bool                  fused_ew    = false;
+    FusedAdarmsSpec       adarms_spec;
+    FusedGateResSpec      gateres_spec;
+    // K/V written in place into per-layer F16 buffers, q|k|v and gate|up GEMMs
+    // fused (modules/gemma_expert.h: KvSlot, gemma_declare_float). SYCL's fused
+    // attention only; VLA_PI05_NO_KV_INPLACE=1 keeps the concat graph.
+    bool                  kv_inplace  = false;
 
     struct MainKey {
         int64_t n_img=-1, n_lang=-1, nsteps=-1;
@@ -61,6 +84,7 @@ struct Pi05ModelArch : public ModelArchBase {
     struct MainIO {
         ggml_tensor *t_image_emb=nullptr,*t_lang_emb=nullptr,*t_prefix_pos=nullptr;
         ggml_tensor *t_x0=nullptr,*t_suffix_pos=nullptr,*x_final=nullptr;
+        ggml_tensor *t_prefix_mask=nullptr,*t_suffix_mask=nullptr;  // lang_bucket only
     };
     graph_cache<MainKey, MainIO> main_graph;
     // Opened once at load: reopening per predict re-parses the whole GGUF header.
@@ -85,6 +109,11 @@ struct Pi05ModelArch : public ModelArchBase {
 
 namespace {
 
+// On a view-taking flash attention (vla::fa_takes_views()), pi05's three
+// attention sites (SigLIP, the VLM prefix and the action expert) run fused
+// straight off the [hd, H, S] views. Otherwise the unfused graph is used.
+bool use_fused_attention() { return vla::flash_attn_enabled() && vla::fa_takes_views(); }
+
 ggml_tensor * build_adarms(
         ggml_context * ctx, ggml_tensor * x, ggml_tensor * mod, int64_t h, float eps,
         ggml_tensor ** gate_out) {
@@ -104,21 +133,49 @@ ggml_tensor * build_expert_layer(
         ggml_context * ctx, const GemmaLayerW & w,
         ggml_tensor * x_in, ggml_tensor * positions, ggml_tensor * mod_attn, ggml_tensor * mod_ffn,
         const Config & cfg, int64_t seq,
-        ggml_tensor * cached_K, ggml_tensor * cached_V) {
+        ggml_tensor * cached_K, ggml_tensor * cached_V, ggml_tensor * mask = nullptr,
+        ggml_type at = GGML_TYPE_F32, const FusedAdarmsSpec * fa = nullptr, const FusedGateResSpec * fg = nullptr,
+        KvSlot * kv = nullptr) {
     const int64_t h = cfg.expert_h;
+    static const bool q8_fuse = !env_flag("VLA_PI05_NO_Q8_FUSE");
+    if (q8_fuse && fa && kv && w.q_qkv && w.q_o && w.q_gu && w.q_down) {
+        // W8A8: adaRMS writes each GEMM's INT8 input, and the gated residuals
+        // x + out * gate are the o and down GEMMs' epilogues (F32 out).
+        auto gate = [&](ggml_tensor * mod) {
+            return ggml_view_1d(ctx, mod, h, 2 * h * ggml_element_size(mod));
+        };
+        ggml_tensor * h1 = gemma_attn_kv(ctx, w, fused_adarms(ctx, x_in, mod_attn, GGML_TYPE_I8, *fa), positions,
+                                         cfg, seq, *kv, mask, at, x_in, gate(mod_attn), GGML_TYPE_F32);
+        return gemma_mlp_q8(ctx, w, fused_adarms(ctx, h1, mod_ffn, GGML_TYPE_I8, *fa), h1, at, gate(mod_ffn),
+                            GGML_TYPE_F32);
+    }
+    if (fa && fg && !w.fq_q && !w.fq_gate) {
+        // One node per chain: adaRMS straight into the GEMMs' input type, and
+        // out * gate + x reading the GEMM output in whatever type it has.
+        ggml_tensor * xn = fused_adarms(ctx, x_in, mod_attn, at, *fa);
+        ggml_tensor * o  = gemma_attn(ctx, w, xn, positions, cfg, seq, cached_K, cached_V, mask,
+                                      nullptr, nullptr, at, use_fused_attention(), nullptr, nullptr, kv);
+        ggml_tensor * h1 = fused_gateres(ctx, x_in, o, mod_attn, *fg);
+        ggml_tensor * xm = fused_adarms(ctx, h1, mod_ffn, at, *fa);
+        return fused_gateres(ctx, h1, gemma_mlp(ctx, w, xm, at), mod_ffn, *fg);
+    }
 
     ggml_tensor * gate_attn = nullptr;
     ggml_tensor * x_norm = build_adarms(ctx, x_in, mod_attn, h, cfg.rms_eps, &gate_attn);
     // FoldQuant: the act nodes quantize the adaRMS outputs; the residuals are
     // gated (out * gate + x), so they stay out of the GEMM epilogues.
-    ggml_tensor * o_out  = gemma_attn(ctx, w, x_norm, positions, cfg, seq, cached_K, cached_V, nullptr,
-                                      nullptr, nullptr, GGML_TYPE_F32, false, x_norm);
+    // mm_act does not convert its input: a BF16 GEMM must be handed BF16 rows,
+    // but adaRMS produces F32, whose bits would be misread as BF16.
+    ggml_tensor * o_out  = gemma_attn(ctx, w, as_type(ctx, x_norm, at), positions, cfg, seq, cached_K, cached_V, mask,
+                                      nullptr, nullptr, at, use_fused_attention(), x_norm, nullptr, kv);
+    o_out = as_type(ctx, o_out, GGML_TYPE_F32);
 
     ggml_tensor * h1 = ggml_add(ctx, x_in, ggml_mul(ctx, o_out, gate_attn));
 
     ggml_tensor * gate_ffn = nullptr;
     ggml_tensor * x_norm_mlp = build_adarms(ctx, h1, mod_ffn, h, cfg.rms_eps, &gate_ffn);
-    ggml_tensor * mlp_out    = gemma_mlp(ctx, w, x_norm_mlp, GGML_TYPE_F32, x_norm_mlp);
+    ggml_tensor * mlp_out    = as_type(ctx, gemma_mlp(ctx, w, as_type(ctx, x_norm_mlp, at), at, x_norm_mlp),
+                                       GGML_TYPE_F32);
 
     return ggml_add(ctx, h1, ggml_mul(ctx, mlp_out, gate_ffn));
 }
@@ -270,6 +327,54 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
         m->backend = b.handle;
         if (!foldquant_check_backend("vla(pi05)", b, fq, opts.weight_dtype.has_value()))
             return nullptr;
+
+        // pi0.5 writes the robot state into its prompt, so the language length
+        // changes every step. A backend that compiles one model per graph shape
+        // can pad the segment to a multiple of VLA_PI05_LANG_BUCKET tokens, with
+        // the pad masked out as keys; suffix positions still count from the real
+        // prefix length, so the result is the same. 0 keeps it exact. OpenVINO
+        // compiles and keeps one model per shape, so it defaults to 16.
+        m->lang_bucket = b.is_openvino ? 16 : 0;
+        // ggml-openvino compiles graphs that do not start with a MUL_MAT in
+        // ACCURACY mode, which pins them to f32; pi0.5 holds at f16, so use the
+        // precision the GPU is configured with. An explicit setting wins.
+        if (b.is_openvino)
+            setenv_default("GGML_OPENVINO_EXEC_MODE", "performance");
+        // Fused elementwise nodes on SYCL, the backend that claims them.
+        // VLA_PI05_NO_FUSE=1 keeps the per-op graph.
+        if (b.is_sycl && !fq.present && !env_flag("VLA_PI05_NO_FUSE")) {
+            m->fused_ew        = true;
+            m->adarms_spec.eps = cfg.rms_eps;
+            sycl_register_fused_ops();
+            std::printf("vla(pi05): fused expert elementwise ops on (VLA_PI05_NO_FUSE=1 to disable)\n");
+        }
+        if (const char * e = std::getenv("VLA_PI05_LANG_BUCKET"); e && *e)
+            m->lang_bucket = std::max(0L, std::strtol(e, nullptr, 10));
+        if (m->lang_bucket > 0)
+            std::printf("vla(pi05): language segment padded to a multiple of %lld tokens (masked)\n",
+                        (long long) m->lang_bucket);
+
+        // On SYCL, flash attention runs on oneDNN's fused SDPA, so it is the
+        // default there unless --flash-attn was given either way.
+        if (b.is_sycl && !opts.flash_attn.has_value() && vla::fa_takes_views()) {
+            vla::set_flash_attn(true);
+            std::printf("vla(pi05): flash attention = on (SYCL default; --flash-attn 0 to disable)\n");
+        }
+
+        // BF16 activations, as pi0 has them: BF16-resident weights and
+        // a GPU BF16 GEMM path (src/cuda/vla_cuda_bf16.cu, src/sycl/vla_sycl_bf16.cpp).
+        // Not with FoldQuant, whose integer sites take F32 activations.
+        if (opts.act_dtype.value_or(GGML_TYPE_F32) == GGML_TYPE_BF16) {
+            if ((b.is_cuda || b.is_sycl) && m->matmul_type == GGML_TYPE_BF16 && !fq.present) {
+                m->act_type = GGML_TYPE_BF16;
+                cuda_register_bf16_ops();
+                sycl_register_bf16_ops();
+                std::printf("vla(pi05): activations = BF16 (expert residual stream F32)\n");
+            } else {
+                std::fprintf(stderr, "vla(pi05): --act-dtype bf16 ignored - needs CUDA or SYCL, BF16 weights "
+                                     "and no FoldQuant\n");
+            }
+        }
     }
 
     // The SigLIP tower is now bundled in the ckpt GGUF; mmproj_path is ignored.
@@ -287,9 +392,48 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     }
     WeightLoader L("pi05", g, m->ctx_weights, m->matmul_type);
 
+    m->kv_inplace = use_fused_attention() && !fq.present && !env_flag("VLA_PI05_NO_KV_INPLACE");
+    if (m->kv_inplace)
+        std::printf("vla(pi05): K/V in place in F16, fused q|k|v and gate|up GEMMs (VLA_PI05_NO_KV_INPLACE=1 to disable)\n");
+    // W8A8 GEMMs (layers/qlinear.h) on the in-place SYCL graph: VLA_PI05_W8A8 =
+    // any of vit, vlm, expert (comma-separated), or all (1).
+    bool q8_vlm = false, q8_aex = false, q8_vit = false;
+    if (const char * e = std::getenv("VLA_PI05_W8A8"); e && *e && std::string(e) != "0") {
+        const std::string v = e;
+        auto has = [&](const char * k) { return v == "all" || v == "1" || v.find(k) != std::string::npos; };
+        q8_vlm = has("vlm");
+        q8_aex = has("expert");
+        q8_vit = has("vit");
+        if (!m->kv_inplace || !m->fused_ew) {
+            std::fprintf(stderr, "vla(pi05): VLA_PI05_W8A8 ignored - needs SYCL with fused attention, no FoldQuant\n");
+            q8_vlm = q8_aex = q8_vit = false;
+        } else {
+            std::printf("vla(pi05): W8A8 GEMMs (per-token INT8 activations): %s%s%s\n", q8_vit ? "SigLIP " : "",
+                        q8_vlm ? "VLM " : "", q8_aex ? "expert" : "");
+        }
+    }
+    // INT4 expert weights on top of W8A8 (W4A8): VLA_PI05_W4=expert, with
+    // VLA_PI05_W4_GROUP K-elements per scale (default 128; 0 = per channel).
+    int64_t aex_w4_group = 0;
+    if (const char * e = std::getenv("VLA_PI05_W4"); q8_aex && e && std::string(e) == "expert") {
+        const char * g = std::getenv("VLA_PI05_W4_GROUP");
+        aex_w4_group = g && *g ? std::strtol(g, nullptr, 10) : 128;
+        if (aex_w4_group == 0) aex_w4_group = -1;  // per channel: quant_i4 takes K
+        std::printf("vla(pi05): expert weights INT4 (W4A8), %s\n",
+                    aex_w4_group > 0 ? ("group " + std::to_string(aex_w4_group)).c_str() : "per channel");
+    }
+    m->vis.vit.enc.cfg.flash_attn = use_fused_attention();
+    m->vis.vit.enc.cfg.act        = m->act_type;
+    // Fused SigLIP blocks (modules/encoder.h, EncCfg::fused): SYCL, BF16, fused
+    // attention. VLA_PI05_NO_VIT_FUSE=1 keeps the per-op graph.
+    m->vis.vit.enc.cfg.fused = m->fused_ew && m->act_type == GGML_TYPE_BF16 && use_fused_attention() &&
+                               !env_flag("VLA_PI05_NO_VIT_FUSE");
+    m->vis.vit.enc.cfg.int8 = m->vis.vit.enc.cfg.fused && q8_vit;
+    if (m->vis.vit.enc.cfg.fused)
+        std::printf("vla(pi05): fused SigLIP blocks (VLA_PI05_NO_VIT_FUSE=1 to disable)\n");
     m->vis.declare(L);
 
-    m->pl.declare(L, "vlm", cfg.n_layers, false, fq.present ? &fq.llm : nullptr, cfg.rms_eps);
+    m->pl.declare(L, "vlm", cfg.n_layers, false, fq.present ? &fq.llm : nullptr, cfg.rms_eps, m->kv_inplace, q8_vlm);
 
     m->ex_layers.resize(cfg.n_layers);
     for (int64_t i=0; i<cfg.n_layers; ++i) {
@@ -309,19 +453,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
             if (!w.fq_q != !w.fq_k || !w.fq_q != !w.fq_v || !w.fq_gate != !w.fq_up)
                 L.fail("FoldQuant: an expert layer's q/k/v (and gate/up) must all be INT or all float");
         }
-        if (!w.fq_q) {
-            w.Wq    = L.gemm("aex.blk.%lld.attn_q.weight",   ii);
-            w.Wk    = L.gemm("aex.blk.%lld.attn_k.weight",   ii);
-            w.Wv    = L.gemm("aex.blk.%lld.attn_v.weight",   ii);
-        }
-        if (!w.fq_o)
-            w.Wo    = L.gemm("aex.blk.%lld.attn_o.weight",   ii);
-        if (!w.fq_gate) {
-            w.Wgate = L.gemm("aex.blk.%lld.ffn_gate.weight", ii);
-            w.Wup   = L.gemm("aex.blk.%lld.ffn_up.weight",   ii);
-        }
-        if (!w.fq_down)
-            w.Wdown = L.gemm("aex.blk.%lld.ffn_down.weight", ii);
+        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), m->kv_inplace, q8_aex, aex_w4_group);
     }
 
     m->W_ain  = L.f32("action_in_proj.weight");   m->b_ain  = L.f32("action_in_proj.bias");
@@ -374,35 +506,59 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         return {};
     }
     const int64_t n_lang   = in.n_lang;
-    const int64_t n_prefix = n_img_tokens+n_lang;
+    const int64_t n_prefix = n_img_tokens+n_lang;      // real tokens
+    // Graph sizes: the language segment padded to the bucket (== real without one).
+    const int64_t n_lang_g   = lang_bucket > 0 ? (n_lang + lang_bucket - 1) / lang_bucket * lang_bucket : n_lang;
+    const int64_t n_prefix_g = n_img_tokens + n_lang_g;
+    const bool    padded     = lang_bucket > 0;
 
     std::vector<int32_t> lang_ids(in.lang_tokens, in.lang_tokens+n_lang);
-    std::vector<float> lang_rows((size_t) n_lang * hidden_pl);
+    std::vector<float> lang_rows((size_t) n_lang_g * hidden_pl, 0.0f);
     {
         if (!io.fetch_rows_f32("token_embd.weight", lang_ids, lang_rows.data(), hidden_pl)) return {};
     }
 
     // Prefix + expert graph depends only on the token counts and step count.
-    const MainKey mkey{ n_img_tokens, n_lang, num_steps };
+    const MainKey mkey{ n_img_tokens, n_lang_g, num_steps };
     const size_t max_nodes = (size_t) 64*n_layers*(num_steps+1) + 1024;
     const bool built = main_graph.ensure(backend, mkey,
                                          ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false),
                                          [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
     ggml_tensor * t_image_emb = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_img_tokens); ggml_set_input(t_image_emb);
-    ggml_tensor * t_lang_emb  = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_lang);       ggml_set_input(t_lang_emb);
-    ggml_tensor * t_prefix_pos= ggml_new_tensor_1d(C, GGML_TYPE_I32, n_prefix);                ggml_set_input(t_prefix_pos);
+    ggml_tensor * t_lang_emb  = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_pl, n_lang_g);     ggml_set_input(t_lang_emb);
+    ggml_tensor * t_prefix_pos= ggml_new_tensor_1d(C, GGML_TYPE_I32, n_prefix_g);              ggml_set_input(t_prefix_pos);
+    ggml_tensor * t_prefix_mask = nullptr, * t_suffix_mask = nullptr;
+    if (padded) {
+        t_prefix_mask = ggml_new_tensor_2d(C, GGML_TYPE_F32, n_prefix_g, n_prefix_g);        ggml_set_input(t_prefix_mask);
+        t_suffix_mask = ggml_new_tensor_2d(C, GGML_TYPE_F32, n_prefix_g + n_suf, n_suf);     ggml_set_input(t_suffix_mask);
+    }
     ggml_tensor * t_x0        = ggml_new_tensor_2d(C, GGML_TYPE_F32, max_ad, chunk);           ggml_set_input(t_x0);
     ggml_tensor * t_suffix_pos= ggml_new_tensor_1d(C, GGML_TYPE_I32, n_suf);                   ggml_set_input(t_suffix_pos);
 
     const float lang_scale = (float) std::sqrt((double) hidden_pl);
-    ggml_tensor * prefix_embs = ggml_concat(C, t_image_emb, ggml_scale(C, t_lang_emb, lang_scale),  1);
+    ggml_tensor * prefix_embs = as_type(C, ggml_concat(C, t_image_emb, ggml_scale(C, t_lang_emb, lang_scale),  1),
+                                        act_type);
 
     std::vector<ggml_tensor *> cK(n_layers), cV(n_layers);
+    std::vector<KvSlot>        kv(kv_inplace ? n_layers : 0);
+    for (KvSlot & sl : kv) {
+        // Leaves the allocator places up front; output-flagged so it never
+        // frees or reuses them while the steps still read them.
+        sl.k = ggml_new_tensor_3d(C, GGML_TYPE_F16, cfg.head_dim, cfg.n_kv_heads, n_prefix_g + n_suf);
+        sl.v = ggml_new_tensor_3d(C, GGML_TYPE_F16, cfg.head_dim, cfg.n_kv_heads, n_prefix_g + n_suf);
+        ggml_set_output(sl.k);
+        ggml_set_output(sl.v);
+    }
     {
         ggml_tensor * h = prefix_embs;
         for (int64_t i=0; i<n_layers; ++i) {
-            h = gemma_layer(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix,
-                            nullptr, nullptr, nullptr, &cK[i], &cV[i]);
+            if (kv_inplace && pl.blk[i].q_qkv && !env_flag("VLA_PI05_NO_Q8_FUSE"))
+                h = gemma_layer_q8(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix_g, kv[i], t_prefix_mask, act_type,
+                                   pl.rms_spec);
+            else
+                h = gemma_layer(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix_g,
+                                nullptr, nullptr, t_prefix_mask, &cK[i], &cV[i], act_type, use_fused_attention(),
+                                kv_inplace ? &kv[i] : nullptr);
         }
         (void) h;
     }
@@ -416,7 +572,9 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         ggml_tensor * h = ggml_add(C, ggml_mul_mat(C, W_ain, x_t), b_ain);
         for (int64_t i=0; i<n_layers; ++i) {
             h = build_expert_layer(C, ex_layers[i], h, t_suffix_pos, mod(2*i), mod(2*i+1), cfg, n_suf,
-                                   cK[i], cV[i]);
+                                   cK[i], cV[i], t_suffix_mask, act_type,
+                                   fused_ew ? &adarms_spec : nullptr, fused_ew ? &gateres_spec : nullptr,
+                                   kv_inplace ? &kv[i] : nullptr);
         }
 
         ggml_tensor * h_final = build_adarms(C, h, mod(2*n_layers), hidden_ex, cfg.rms_eps, nullptr);
@@ -428,6 +586,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
 
     gio.t_image_emb=t_image_emb; gio.t_lang_emb=t_lang_emb; gio.t_prefix_pos=t_prefix_pos;
     gio.t_x0=t_x0; gio.t_suffix_pos=t_suffix_pos; gio.x_final=x_final;
+    gio.t_prefix_mask=t_prefix_mask; gio.t_suffix_mask=t_suffix_mask;
 
     ggml_cgraph * gf = ggml_new_graph_custom(C, max_nodes, false);
     ggml_build_forward_expand(gf, x_final);
@@ -445,46 +604,97 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(t_image_emb, in.precomputed_img_emb, 0, ggml_nbytes(t_image_emb));
     } else {
         const int64_t K = vis.n_tokens, H = hidden_pl, grid = vis.image_size/vis.patch_size;
-        ggml_context * VC = vision_scratch.reset((size_t) 128*1024*1024);
-        if (!VC) { std::fprintf(stderr, "vla(pi05): ggml_init(vision ctx) failed\n"); return {}; }
-        ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vis.image_size, vis.image_size, 3); ggml_set_input(t_px);
-        ggml_tensor * h = vis.vit.build(VC, vis.vit.embed_conv(VC, t_px, vis.patch_size, grid), K);
-        // PaliGemma projector: linear (+ optional bias).
-        ggml_tensor * vit_emb = linear(VC, vis.proj_w, vis.proj_b, h);
-        ggml_set_output(vit_emb);
 
-        ggml_cgraph * vg = ggml_new_graph_custom(VC, 8192, false);
-        ggml_build_forward_expand(vg, vit_emb);
-
-        if (!vision_scratch.alloc(backend, vg)) {
-            std::fprintf(stderr, "vla(pi05): vision gallocr alloc failed\n");
-            return {};
-        }
+        const int n_gpu_views = in.n_images;
         const auto tv0 = clk::now();
+
+        // The fused SigLIP blocks take every GPU view in one pass (nv * 256 rows
+        // per GEMM); the per-op graph runs them one at a time.
+        const bool batched = vis.vit.enc.cfg.fused && !env_flag("VLA_PI05_NO_VIT_BATCH");
+        // A graph over nv views at once; compute(v0) encodes views v0..v0+nv-1
+        // into t_image_emb.
+        ggml_tensor * t_px = nullptr, * vit_emb = nullptr;
+        ggml_cgraph * vg = nullptr;
+        ggml_context * VC = nullptr;
+        int           g_nv = 0;
+        auto build_vision = [&](int nv) -> bool {
+            VC = vision_scratch.reset((size_t) 128*1024*1024);
+            if (!VC) { std::fprintf(stderr, "vla(pi05): ggml_init(vision ctx) failed\n"); return false; }
+            t_px = ggml_new_tensor_4d(VC, GGML_TYPE_F32, vis.image_size, vis.image_size, 3, nv);
+            ggml_set_input(t_px);
+            // patch embed (conv_2d) stays F32, per view; the tower runs in the activation dtype
+            ggml_tensor * emb = nullptr;
+            for (int v = 0; v < nv; ++v) {
+                ggml_tensor * px = ggml_view_3d(VC, t_px, vis.image_size, vis.image_size, 3, t_px->nb[1], t_px->nb[2],
+                                                (size_t) v * t_px->nb[3]);
+                ggml_tensor * e = vis.vit.embed_conv(VC, px, vis.patch_size, grid);
+                emb = emb ? ggml_concat(VC, emb, e, 1) : e;
+            }
+            ggml_tensor * h = vis.vit.build(VC, as_type(VC, emb, act_type), K, nv);
+            // PaliGemma projector: linear (+ optional bias), read back as F32.
+            ggml_tensor * proj = mm_act(VC, vis.proj_w, h, act_type);
+            if (vis.proj_b)
+                proj = ggml_add(VC, proj, vis.proj_b);
+            vit_emb = as_type(VC, proj, GGML_TYPE_F32);
+            ggml_set_output(vit_emb);
+            vg = ggml_new_graph_custom(VC, 8192, false);
+            ggml_build_forward_expand(vg, vit_emb);
+            if (!vision_scratch.alloc(backend, vg)) {
+                std::fprintf(stderr, "vla(pi05): vision gallocr alloc failed\n");
+                return false;
+            }
+            g_nv = nv;
+            return true;
+        };
         std::vector<float> chw;
-        for (int v=0; v<in.n_images; ++v) {
-            if (!preprocess_image_chw("pi05", in.images[v], vis.image_size, chw)) { return {}; }
-            ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
+        auto compute_vision = [&](int v0) -> bool {
+            for (int v = 0; v < g_nv; ++v) {
+                if (!preprocess_image_chw("pi05", in.images[v0 + v], vis.image_size, chw)) { return false; }
+                ggml_backend_tensor_set(t_px, chw.data(), (size_t) v * t_px->nb[3], t_px->nb[3]);
+            }
             graph_unique_names(vg);
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
-                std::fprintf(stderr, "vla(pi05): vision compute failed (view %d)\n", v);
-                return {};
+                std::fprintf(stderr, "vla(pi05): vision compute failed (views %d..%d)\n", v0, v0 + g_nv - 1);
+                return false;
             }
-            ggml_tensor * dst = ggml_view_2d(VC, t_image_emb, H, K, t_image_emb->nb[1], (size_t) v * K * t_image_emb->nb[1]);
+            ggml_tensor * dst = ggml_view_2d(VC, t_image_emb, H, K * g_nv, t_image_emb->nb[1],
+                                             (size_t) v0 * K * t_image_emb->nb[1]);
             if (ggml_backend_view_init(dst) != GGML_STATUS_SUCCESS) {
-                std::fprintf(stderr, "vla(pi05): image embedding view failed (view %d)\n", v);
-                return {};
+                std::fprintf(stderr, "vla(pi05): image embedding view failed (views %d..)\n", v0);
+                return false;
             }
             ggml_backend_tensor_copy(vit_emb, dst);
+            return true;
+        };
+        if (batched && n_gpu_views > 1) {
+            if (!build_vision(n_gpu_views) || !compute_vision(0)) return {};
+        } else if (n_gpu_views > 0) {
+            if (!build_vision(1)) return {};
+            for (int v = 0; v < n_gpu_views; ++v)
+                if (!compute_vision(v)) return {};
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now()-tv0).count();
     }
     ggml_backend_tensor_set(t_lang_emb,  lang_rows.data(),    0, ggml_nbytes(t_lang_emb));
     {
-        std::vector<int32_t> pp(n_prefix); for (int64_t i=0; i<n_prefix; ++i) pp[i] = (int32_t) i;
+        // Pad tokens continue the count; they are masked as keys, so their
+        // positions only shape their own (unused) query rows.
+        std::vector<int32_t> pp(n_prefix_g); for (int64_t i=0; i<n_prefix_g; ++i) pp[i] = (int32_t) i;
         ggml_backend_tensor_set(t_prefix_pos, pp.data(), 0, ggml_nbytes(t_prefix_pos));
         std::vector<int32_t> sp(n_suf);    for (int64_t i=0; i<n_suf; ++i)    sp[i] = (int32_t) (n_prefix+i);
         ggml_backend_tensor_set(t_suffix_pos, sp.data(), 0, ggml_nbytes(t_suffix_pos));
+    }
+    if (padded) {
+        const float NEG = -INFINITY;
+        std::vector<float> pm((size_t) n_prefix_g * n_prefix_g, 0.0f);
+        for (int64_t q = 0; q < n_prefix_g; ++q)
+            for (int64_t k = n_prefix; k < n_prefix_g; ++k) pm[(size_t) q * n_prefix_g + k] = NEG;
+        ggml_backend_tensor_set(gio.t_prefix_mask, pm.data(), 0, ggml_nbytes(gio.t_prefix_mask));
+        const int64_t nk = n_prefix_g + n_suf;
+        std::vector<float> sm((size_t) nk * n_suf, 0.0f);
+        for (int64_t q = 0; q < n_suf; ++q)
+            for (int64_t k = n_prefix; k < n_prefix_g; ++k) sm[(size_t) q * nk + k] = NEG;
+        ggml_backend_tensor_set(gio.t_suffix_mask, sm.data(), 0, ggml_nbytes(gio.t_suffix_mask));
     }
     {
         std::vector<float> x0h;
@@ -493,7 +703,17 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     }
     graph_unique_names(gf);
     const auto ti0 = clk::now();
-    const ggml_status st = ggml_backend_graph_compute(backend, gf);
+    static const bool split_host = env_flag("VLA_PI05_HOST_SPLIT");
+    ggml_status st;
+    if (split_host) {
+        st = ggml_backend_graph_compute_async(backend, gf);
+        const float ms_submit = std::chrono::duration<float, std::milli>(clk::now()-ti0).count();
+        ggml_backend_synchronize(backend);
+        std::fprintf(stderr, "vla(pi05): main graph %d nodes: host submit %.1f ms, done %.1f ms\n", ggml_graph_n_nodes(gf),
+                     ms_submit, std::chrono::duration<float, std::milli>(clk::now()-ti0).count());
+    } else {
+        st = ggml_backend_graph_compute(backend, gf);
+    }
     stats.ms_inference = std::chrono::duration<float, std::milli>(clk::now()-ti0).count();
     if (st != GGML_STATUS_SUCCESS) {
         std::fprintf(stderr, "vla(pi05): ggml_backend_graph_compute failed (%d)\n", (int) st);
