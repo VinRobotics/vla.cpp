@@ -67,6 +67,11 @@ tarball). Details, and the macOS and Windows notes, are in
 sudo apt-get install -y libzmq3-dev cppzmq-dev libprotobuf-dev protobuf-compiler
 ```
 
+On Ubuntu 22.04 (JetPack 6), `cppzmq-dev` is not packaged: leave it out of the
+apt line, download `zmq.hpp` and `zmq_addon.hpp` from
+[cppzmq v4.10.0](https://github.com/zeromq/cppzmq/tree/v4.10.0) into a directory
+and pass `-DCPPZMQ_INCLUDE_DIR=<dir>` to CMake.
+
 #### Configure and build
 
 Identify your machine CUDA architecture:
