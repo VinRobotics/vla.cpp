@@ -23,6 +23,7 @@
 #include "gguf_reader.h"
 #include "layers/attn.h"
 #include "layers/ffn.h"
+#include "layers/fused_ops.h"
 #include "layers/linear.h"
 #include "layers/norm.h"
 #include "loader.h"
@@ -51,6 +52,7 @@ struct DualTower {
     int64_t s_hidden=1152,s_layers=26,s_heads=16,s_head_dim=72;
     int64_t image_size=224,patch_size=14,n_patches=256;
     float   ln_eps=1e-6f;
+    bool    fused_ops=false;   // layers/fused_ops.h nodes (CUDA only)
 
     ggml_tensor *d_patch_w=nullptr,*d_patch_b=nullptr,*d_cls=nullptr,*d_reg=nullptr,*d_pos=nullptr;
     ggml_tensor *s_patch_w=nullptr,*s_patch_b=nullptr,*s_pos=nullptr;
@@ -109,6 +111,19 @@ struct DualTower {
     ggml_tensor* encode(ggml_backend_t backend, graph_cache<int64_t,VisIO> & cache, const Inputs & in, const char * tag) const;
 };
 
+// vit_block on the fused kernels, bit-identical to it.
+inline ggml_tensor* vit_block_fused(ggml_context*C, const ViTLayerW&w, ggml_tensor*x, int64_t N, int64_t hidden, int64_t heads, int64_t hd, float eps, bool ls){
+    ggml_tensor*n1=fused_ln(C,x,w.n1w,w.n1b,eps,false,bf16_operand(w.Wqkv,N));
+    ggml_tensor*qkv=fused_qkv_heads(C,mm_exact(C,w.Wqkv,n1),w.bqkv,nullptr,nullptr,3,hd,heads,N,1,0b100,0);
+    ggml_tensor*att=attention_rows_exact(C,fused_part(C,qkv,0,false),fused_part(C,qkv,1,false),fused_part(C,qkv,2,true),
+                                         1.0f/std::sqrt((float)hd),hidden,N,1,bf16_operand(w.Wproj,N));
+    ggml_tensor*ao=mm_exact(C,w.Wproj,att);
+    x=ls?fused_bias_gate_res(C,ao,w.bproj,w.ls1,x):fused_bias_res(C,ao,w.bproj,x);
+    ggml_tensor*n2=fused_ln(C,x,w.n2w,w.n2b,eps,false,bf16_operand(w.Wfc1,N));
+    ggml_tensor*h=mm_exact(C,w.Wfc2,fused_bias_gelu_erf(C,mm_exact(C,w.Wfc1,n2),w.bfc1,bf16_operand(w.Wfc2,N)));
+    return ls?fused_bias_gate_res(C,h,w.bfc2,w.ls2,x):fused_bias_res(C,h,w.bfc2,x);
+}
+
 inline ggml_tensor* vit_block(ggml_context*C, const ViTLayerW&w, ggml_tensor*x, int64_t N, int64_t hidden, int64_t heads, int64_t hd, float eps, bool ls){
     ggml_tensor*qkv=linear(C,w.Wqkv,w.bqkv,layer_norm(C,x,w.n1w,w.n1b,eps));
     ggml_tensor*Q=ggml_cont(C,ggml_permute(C,head_view(C,qkv,hd,heads,N,hidden,3,0),0,2,1,3));
@@ -122,7 +137,7 @@ inline ggml_tensor* vit_block(ggml_context*C, const ViTLayerW&w, ggml_tensor*x, 
 
 inline ggml_tensor* tower(ggml_context*C, ggml_tensor*pix, ggml_tensor*pw, ggml_tensor*pb, ggml_tensor*pos,
                           ggml_tensor*cls, ggml_tensor*reg, const std::vector<ViTLayerW>&blk,
-                          int64_t hidden, int64_t heads, int64_t hd, int64_t patch, float eps, bool prefix){
+                          int64_t hidden, int64_t heads, int64_t hd, int64_t patch, float eps, bool prefix, bool fused){
     ggml_tensor*conv=ggml_conv_2d(C,pw,pix,patch,patch,0,0,1,1);
     // Patch count from the conv, not a constant: both callers run 224/14 today,
     // and a different input size would otherwise reshape into the wrong grid.
@@ -135,7 +150,7 @@ inline ggml_tensor* tower(ggml_context*C, ggml_tensor*pix, ggml_tensor*pw, ggml_
         x=ggml_concat(C,tok,pt,1);
     }
     for(size_t i=0;i<blk.size();++i)
-        x=vit_block(C,blk[i],x,N,hidden,heads,hd,eps,prefix);
+        x=fused?vit_block_fused(C,blk[i],x,N,hidden,heads,hd,eps,prefix):vit_block(C,blk[i],x,N,hidden,heads,hd,eps,prefix);
     if(prefix)
         x=ggml_cont(C,ggml_view_2d(C,x,hidden,NP,x->nb[1],nprefix*x->nb[1]));
     return x;
@@ -164,14 +179,22 @@ inline ggml_tensor* DualTower::encode(ggml_backend_t backend, graph_cache<int64_
         for(int v=0; v<n_views; ++v){
             io.px_d[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(io.px_d[v]);
             io.px_s[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(io.px_s[v]);
-            ggml_tensor*pd=tower(C,io.px_d[v],d_patch_w,d_patch_b,d_pos,d_cls,d_reg,dvit,d_hidden,d_heads,d_head_dim,patch_size,ln_eps,true);
-            ggml_tensor*ps=tower(C,io.px_s[v],s_patch_w,s_patch_b,s_pos,nullptr,nullptr,svit,s_hidden,s_heads,s_head_dim,patch_size,ln_eps,false);
+            ggml_tensor*pd=tower(C,io.px_d[v],d_patch_w,d_patch_b,d_pos,d_cls,d_reg,dvit,d_hidden,d_heads,d_head_dim,patch_size,ln_eps,true,fused_ops);
+            ggml_tensor*ps=tower(C,io.px_s[v],s_patch_w,s_patch_b,s_pos,nullptr,nullptr,svit,s_hidden,s_heads,s_head_dim,patch_size,ln_eps,false,fused_ops);
             cmb[v]=ggml_concat(C,pd,ps,0);
         }
         ggml_tensor*allp=cmb[0]; for(int v=1;v<n_views;++v) allp=ggml_concat(C,allp,cmb[v],1);
-        ggml_tensor*ph=ggml_gelu_erf(C,linear(C,pj_fc1w,pj_fc1b,allp));
-        ph=ggml_gelu_erf(C,linear(C,pj_fc2w,pj_fc2b,ph));
-        io.proj=linear(C,pj_fc3w,pj_fc3b,ph); ggml_set_output(io.proj);
+        if(fused_ops){
+            const int64_t rows=allp->ne[1];
+            ggml_tensor*ph=fused_bias_gelu_erf(C,mm_exact(C,pj_fc1w,allp),pj_fc1b,bf16_operand(pj_fc2w,rows));
+            ph=fused_bias_gelu_erf(C,mm_exact(C,pj_fc2w,ph),pj_fc2b,bf16_operand(pj_fc3w,rows));
+            io.proj=ggml_add(C,mm_exact(C,pj_fc3w,ph),pj_fc3b);
+        } else {
+            ggml_tensor*ph=ggml_gelu_erf(C,linear(C,pj_fc1w,pj_fc1b,allp));
+            ph=ggml_gelu_erf(C,linear(C,pj_fc2w,pj_fc2b,ph));
+            io.proj=linear(C,pj_fc3w,pj_fc3b,ph);
+        }
+        ggml_set_output(io.proj);
         ggml_cgraph*vg=ggml_new_graph_custom(C,max_nodes,false); ggml_build_forward_expand(vg,io.proj);
         return vg;
     });
