@@ -251,6 +251,55 @@ inline ggml_tensor * gemma_attn_kv(
     return gemma_attn_kv_tail(ctx, w, q16, k_w, v_w, cfg, seq, row0, kv, mask, at, o_res, o_gate, o_type);
 }
 
+// The CUDA fused path, bit-identical to the ggml graphs below: a float layer
+// (separate BF16 weights, F32 activations, no flash attention) over enough
+// tokens for ggml to run its GEMMs on cuBLAS, whose keys fit the emulated
+// softmax (tkv: prefix + new tokens, up to 4096).
+inline bool gemma_fused(const GemmaLayerW & w, ggml_type at, bool flash, int64_t seq, int64_t tkv) {
+    const auto bf16 = [](const ggml_tensor * W) { return W && bf16_operand(W); };
+    return fused_ops_active() && !flash && at == GGML_TYPE_F32 && cublas_rows(seq) && tkv <= 4096 &&
+           !w.fq_q && !w.fq_o && !w.fq_gate && !w.fq_down &&
+           bf16(w.Wq) && bf16(w.Wk) && bf16(w.Wv) && bf16(w.Wo) && bf16(w.Wgate) && bf16(w.Wup) && bf16(w.Wdown);
+}
+
+// gemma_attn on the fused path. x_norm: the BF16 GEMM operand. The K/V cache
+// handed out (and read back) keeps gemma_attn's layouts: K after RoPE and V,
+// both [hd, nkv, seq].
+inline ggml_tensor * gemma_attn_fused(
+        ggml_context * ctx, const GemmaLayerW & w,
+        ggml_tensor * x_norm, ggml_tensor * positions,
+        const Config & cfg, int64_t seq,
+        ggml_tensor * cached_K, ggml_tensor * cached_V, ggml_tensor * mask,
+        ggml_tensor ** k_out, ggml_tensor ** v_out) {
+    const int64_t hd  = cfg.head_dim;
+    const int64_t nq  = cfg.n_q_heads;
+    const int64_t nkv = cfg.n_kv_heads;
+    const float   fb  = cfg.rope_freq_base;
+
+    ggml_tensor * q = mm_exact(ctx, w.Wq, x_norm);
+    ggml_tensor * k = mm_exact(ctx, w.Wk, x_norm);
+    ggml_tensor * v = mm_exact(ctx, w.Wv, x_norm);
+
+    ggml_tensor * Q  = fused_heads_rope(ctx, q, positions, nullptr,  hd, nq,  fb, false);   // [hd, seq, nq]
+    ggml_tensor * K  = fused_heads_rope(ctx, k, positions, cached_K, hd, nkv, fb, false);   // [hd, tkv, nkv]
+    ggml_tensor * Vt = fused_heads_rope(ctx, v, nullptr,   cached_V, hd, nkv, fb, true);    // [tkv, hd, nkv]
+
+    if (k_out)
+        *k_out = nkv == 1 ? ggml_reshape_3d(ctx, K, hd, 1, K->ne[1])
+                          : ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
+    if (v_out)
+        *v_out = ggml_reshape_3d(ctx, v, hd, nkv, seq);
+
+    const float scale = 1.f/std::sqrt((float) hd);
+    return mm_exact(ctx, w.Wo, fused_attn_exact(ctx, Q, K, Vt, scale, true, 1, mask));
+}
+
+inline ggml_tensor * gemma_mlp_fused(ggml_context * ctx, const GemmaLayerW & w, ggml_tensor * x_norm) {
+    ggml_tensor * gate = mm_exact(ctx, w.Wgate, x_norm);
+    ggml_tensor * up   = mm_exact(ctx, w.Wup,   x_norm);
+    return mm_exact(ctx, w.Wdown, fused_gelu_mul(ctx, gate, up, true));
+}
+
 inline ggml_tensor * gemma_attn(
         ggml_context * ctx, const GemmaLayerW & w,
         ggml_tensor * x_norm, ggml_tensor * positions,
@@ -399,6 +448,12 @@ inline ggml_tensor * gemma_layer(
         ggml_tensor * cached_K, ggml_tensor * cached_V, ggml_tensor * mask,
         ggml_tensor ** k_out, ggml_tensor ** v_out,
         ggml_type at = GGML_TYPE_F32, bool flash = false, KvSlot * kv = nullptr) {
+    if (!kv && gemma_fused(w, at, flash, seq, seq + (cached_K ? cached_K->ne[2] : 0))) {
+        ggml_tensor * h1 = ggml_add(ctx, x_in,
+            gemma_attn_fused(ctx, w, fused_rms_mul(ctx, x_in, w.ln_in, cfg.rms_eps, true), positions, cfg, seq,
+                             cached_K, cached_V, mask, k_out, v_out));
+        return ggml_add(ctx, h1, gemma_mlp_fused(ctx, w, fused_rms_mul(ctx, h1, w.ln_post, cfg.rms_eps, true)));
+    }
     // FoldQuant (pi0.5 prefix): the RMSNorm and its folded gamma ride in the
     // q/k/v and gate/up act nodes, the residual adds in the o / down epilogues.
     ggml_tensor * h1 = w.fq_o

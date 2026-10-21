@@ -73,6 +73,7 @@ struct Pi0ModelArch : public ModelArchBase {
     // --act-dtype bf16, which removes the per-GEMM F32<->BF16 round trip ggml
     // pays when BF16 weights meet F32 activations. See mm_act/as_type below.
     ggml_type             act_type    = GGML_TYPE_F32;
+    bool                  fused_ops   = false;   // CUDA fused (bit-exact) paths, F32 activations only
 
     PaliVision    vis;
     GemmaStack    pl;
@@ -241,6 +242,8 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
                 std::fprintf(stderr, "vla(pi0): --act-dtype bf16 ignored - needs CUDA or SYCL and BF16 weights\n");
             }
         }
+        if (m->act_type == GGML_TYPE_F32)
+            m->fused_ops = enable_fused_ops("pi0", b.is_cuda);
     }
 
     // The SigLIP tower is now bundled in the ckpt GGUF; mmproj_path is ignored.
@@ -259,6 +262,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
     WeightLoader L("pi0", g, m->ctx_weights, m->matmul_type);
 
     m->vis.declare(L);
+    m->vis.vit.enc.cfg.fused_ops = m->fused_ops;   // used when the tower runs as EncStack blocks, below
 
     m->pl.declare(L, "vlm", cfg.n_layers, false);
     m->ex.declare(L, "aex", cfg.n_layers, true);
@@ -429,8 +433,13 @@ std::vector<float> Pi0ModelArch::predict(const Inputs& in) {
         ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, vis.image_size, vis.image_size, 3); ggml_set_input(t_px);
         // patch embed (conv_2d) stays F32; the tower runs in the activation dtype
         ggml_tensor * h = as_type(VC, vis.vit.embed_conv(VC, t_px, vis.patch_size, grid), act_type);
-        for (const EncBlockW & w : vis.vit.enc.blk)
-            h = build_siglip_layer(VC, w, h, K, vis.vit.enc.cfg, act_type);
+        // With F32 activations build_siglip_layer is EncStack's block op for op,
+        // so the fused (bit-identical) blocks stand in for it.
+        if (fused_ops && !flash_attn_enabled())
+            h = vis.vit.enc.build(VC, h, K, 1);
+        else
+            for (const EncBlockW & w : vis.vit.enc.blk)
+                h = build_siglip_layer(VC, w, h, K, vis.vit.enc.cfg, act_type);
         h = layer_norm(VC, h, vis.vit.post_ln_w, vis.vit.post_ln_b, vis.vit.enc.cfg.ln_eps);
         // PaliGemma projector: linear (+ optional bias).
         ggml_tensor * proj = mm_act(VC, vis.proj_w, h, act_type);
