@@ -14,6 +14,8 @@
 
 #include "bitvla_vit_cuda.h"
 #include "bitvla_lm_cuda.h"
+#include "bitnet_mma.cuh"
+#include "bitvla_rowops.cuh"
 
 #include <cublas_v2.h>
 #include <cuda_bf16.h>
@@ -26,6 +28,9 @@
 extern "C" void bitlinear_int8xint2_m(int8_t* A, int8_t* B, __nv_bfloat16* out,
                                        float* s, float* ws,
                                        int M, int N, int K, cudaStream_t stream);
+bool bitlinear_mma_enabled();
+void bitlinear_mma_segs(const int8_t * A, const float * s, bitmma::Segs segs, int M, int K, cudaStream_t stream);
+void bitlinear_repack_for_mma(int8_t * w, int N, int K);
 extern "C" void bitvla_act_quant_cuda(const __nv_bfloat16* in, int8_t* out,
                                        float* scales,
                                        int M, int K, int ld_out, cudaStream_t stream);
@@ -151,6 +156,16 @@ void bitvla_vit_cuda_free(bitvla_vit_cuda_ctx* ctx) {
 void bitvla_vit_cuda_set_layer(bitvla_vit_cuda_ctx* ctx, int L,
                                 const bitvla_vit_layer_cuda* layer) {
     ctx->layers[L] = *layer;
+    if (bitlinear_mma_enabled()) {
+        auto& l = ctx->layers[L];
+        const int H = ctx->hidden;
+        bitlinear_repack_for_mma(l.q_packed,   H,        H);
+        bitlinear_repack_for_mma(l.k_packed,   H,        H);
+        bitlinear_repack_for_mma(l.v_packed,   H,        H);
+        bitlinear_repack_for_mma(l.o_packed,   H,        H);
+        bitlinear_repack_for_mma(l.fc1_packed, ctx->ffn, H);
+        bitlinear_repack_for_mma(l.fc2_packed, H,        ctx->ffn_pad);
+    }
 }
 void bitvla_vit_cuda_set_embed(bitvla_vit_cuda_ctx* ctx,
                                 const __nv_bfloat16* patch_w,
@@ -169,7 +184,98 @@ void bitvla_vit_cuda_set_mmproj(bitvla_vit_cuda_ctx* ctx,
     ctx->mm_b2 = const_cast<__nv_bfloat16*>(b2);
 }
 
+// run_vit_layer on the fused kernels, same bits. GEMM epilogues do biases,
+// gelu_tanh, residual adds and the head split; layernorm and head merge are
+// fused with their act_quant.
+static int run_vit_layer_fused(bitvla_vit_cuda_ctx* ctx, int L, cudaStream_t stream) {
+    using namespace bitvla_rowops;
+    auto& lr = ctx->layers[L];
+    const int seq = ctx->n_patches, H = ctx->hidden, n_heads = ctx->n_heads;
+    const int hd  = ctx->head_dim, ffn = ctx->ffn, ffn_pad = ctx->ffn_pad;
+    auto gemm = [&](const int8_t* A, bitmma::Segs sg, int K) { bitlinear_mma_segs(A, ctx->d_act_s, sg, seq, K, stream); };
+    auto ln_quant = [&](const __nv_bfloat16* w, const __nv_bfloat16* b) {
+        return launch_norm_quant<IN_ROW, NORM_LN>({ctx->d_h, w, b, ctx->ln_eps, H, 0, seq, ctx->d_act_int8_h, H, ctx->d_act_s}, stream);
+    };
+
+    if (!ln_quant(lr.ln1_w, lr.ln1_b))
+        return -1;
+    {
+        bitmma::Segs sg{};
+        sg.n = 3;
+        sg.s[0] = {lr.q_packed, ctx->d_q_HShd, lr.q_ws, H, H, 0};
+        sg.s[1] = {lr.k_packed, ctx->d_k_HShd, lr.k_ws, H, H, 0};
+        sg.s[2] = {lr.v_packed, ctx->d_v_HShd, lr.v_ws, H, H, 0};
+        sg.s[0].bias = lr.q_b; sg.s[1].bias = lr.k_b; sg.s[2].bias = lr.v_b;
+        for (int i = 0; i < 3; ++i) sg.s[i].hd = hd;
+        gemm(ctx->d_act_int8_h, sg, H);
+    }
+
+    cublasSetStream(ctx->cublas, stream);
+    const float alpha = 1.0f, beta = 0.0f;
+    cublasStatus_t cbs;
+    cbs = cublasGemmStridedBatchedEx(
+        ctx->cublas, CUBLAS_OP_T, CUBLAS_OP_N,
+        seq, seq, hd, &alpha,
+        ctx->d_k_HShd, CUDA_R_16BF, hd, (long long) seq * hd,
+        ctx->d_q_HShd, CUDA_R_16BF, hd, (long long) seq * hd,
+        &beta,
+        ctx->d_scores, CUDA_R_16BF, seq, (long long) seq * seq,
+        n_heads, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    if (cbs != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(bitvla_vit_cuda): QK^T gemm @L%d failed (%d)\n", L, cbs);
+        return -1;
+    }
+    bitvla_softmax_scaled_bf16(ctx->d_scores, 1.0f/std::sqrt((float) hd), n_heads * seq, seq, stream);
+    cbs = cublasGemmStridedBatchedEx(
+        ctx->cublas, CUBLAS_OP_N, CUBLAS_OP_N,
+        hd, seq, seq, &alpha,
+        ctx->d_v_HShd, CUDA_R_16BF, hd,  (long long) seq * hd,
+        ctx->d_scores, CUDA_R_16BF, seq, (long long) seq * seq,
+        &beta,
+        ctx->d_attn_out, CUDA_R_16BF, hd, (long long) seq * hd,
+        n_heads, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    if (cbs != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(bitvla_vit_cuda): attn@V gemm @L%d failed (%d)\n", L, cbs);
+        return -1;
+    }
+
+    // Head merge + act_quant, then o-proj with bias, adding into d_h.
+    if (!launch_norm_quant<IN_HEADS, NORM_NONE>({ctx->d_attn_out, nullptr, nullptr, 0.0f, H, hd, seq, ctx->d_act_int8_h, H, ctx->d_act_s}, stream))
+        return -1;
+    {
+        bitmma::Segs sg{};
+        sg.n = 1;
+        sg.s[0] = {lr.o_packed, ctx->d_h, lr.o_ws, H, H, 0};
+        sg.s[0].bias = lr.o_b;
+        sg.s[0].res = ctx->d_h;
+        gemm(ctx->d_act_int8_h, sg, H);
+    }
+
+    if (!ln_quant(lr.ln2_w, lr.ln2_b))
+        return -1;
+    {
+        bitmma::Segs sg{};
+        sg.n = 1;
+        sg.s[0] = {lr.fc1_packed, ctx->d_fc1_dense, lr.fc1_ws, ffn, ffn, 0};
+        sg.s[0].bias = lr.fc1_b;
+        sg.s[0].act = bitmma::ACT_GELU_TANH;
+        gemm(ctx->d_act_int8_h, sg, H);
+    }
+    bitvla_act_quant_cuda(ctx->d_fc1_dense, ctx->d_act_int8_ffn, ctx->d_act_s, seq, ffn, ffn_pad, stream);
+    {
+        bitmma::Segs sg{};
+        sg.n = 1;
+        sg.s[0] = {lr.fc2_packed, ctx->d_h, lr.fc2_ws, H, H, 0};
+        sg.s[0].bias = lr.fc2_b;
+        sg.s[0].res = ctx->d_h;
+        gemm(ctx->d_act_int8_ffn, sg, ffn_pad);
+    }
+    return 0;
+}
+
 static int run_vit_layer(bitvla_vit_cuda_ctx* ctx, int L, cudaStream_t stream) {
+    if (bitlinear_mma_enabled())
+        return run_vit_layer_fused(ctx, L, stream);
     auto& lr = ctx->layers[L];
     const int seq = ctx->n_patches, H = ctx->hidden, n_heads = ctx->n_heads;
     const int hd  = ctx->head_dim, ffn = ctx->ffn, ffn_pad = ctx->ffn_pad;

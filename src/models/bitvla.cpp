@@ -162,6 +162,9 @@ struct BitvlaModelArch : public ModelArchBase {
 
     __nv_bfloat16* d_vit_patches    = nullptr;
     __nv_bfloat16* d_vit_img_embeds = nullptr;
+    // All views' image embeddings, kept on the device for the LM input.
+    __nv_bfloat16* d_img_rows     = nullptr;
+    size_t         d_img_rows_cap = 0;
 #endif
 
     std::vector<float> predict(const Inputs& in) override;
@@ -565,6 +568,8 @@ BitvlaModelArch::~BitvlaModelArch() {
         cudaFree(d_vit_patches);
     if (d_vit_img_embeds)
         cudaFree(d_vit_img_embeds);
+    if (d_img_rows)
+        cudaFree(d_img_rows);
     for (void* p : cpu_kept_ptrs)
         if (p)
             std::free(p);
@@ -1129,9 +1134,31 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
 
     std::vector<float> img_embeds_host;
 
+    // Image embeddings stay on the device and are copied into the LM input
+    // there. Same input: the host path's bf16 -> f32 -> bf16 is exact. Off when
+    // dumping, which needs the host copies.
+    bool dev_img = false;
+#ifdef VLA_BITVLA_CUDA_KERNELS
+    dev_img = !use_precomp_img && cuda_vit_ready && cuda_lm_ready && !_dump_dir &&
+              vla::env_flag("VLA_BITVLA_DEVICE_EMBEDS", true);
+    if (dev_img) {
+        const size_t need = (size_t) n_views * N * hidden_l;
+        if (need > d_img_rows_cap) {
+            cudaFree(d_img_rows);
+            d_img_rows = nullptr;
+            d_img_rows_cap = 0;
+            if (cudaMalloc(&d_img_rows, need * sizeof(__nv_bfloat16)) == cudaSuccess)
+                d_img_rows_cap = need;
+            else
+                dev_img = false;
+        }
+    }
+#endif
+
     if (!use_precomp_img) {
 
-        img_embeds_host.assign((size_t) n_views * N * hidden_l, 0.0f);
+        if (!dev_img)
+            img_embeds_host.assign((size_t) n_views * N * hidden_l, 0.0f);
         std::vector<float> patches((size_t) N * patch_flat);
         const auto t_v0 = clk::now();
         for (int64_t v=0; v<n_views; ++v) {
@@ -1167,6 +1194,14 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
 
                 std::vector<ggml_bf16_t> patches_bf16((size_t) N * patch_flat);
                 ggml_fp32_to_bf16_row(patches.data(), patches_bf16.data(), (int64_t) patches_bf16.size());
+                if (dev_img) {
+                    if (cudaMemcpy(d_vit_patches, patches_bf16.data(), patches_bf16.size()*sizeof(ggml_bf16_t), cudaMemcpyHostToDevice) != cudaSuccess ||
+                        bitvla_vit_cuda_forward(vit_cuda_ctx, d_vit_patches, d_img_rows + (size_t) v * N * hidden_l, 0) != 0) {
+                        std::fprintf(stderr, "vla(bitvla): CUDA ViT forward failed (view %lld)\n", (long long) v);
+                        return {};
+                    }
+                    continue;
+                }
                 std::vector<ggml_bf16_t> img_bf16((size_t) N * hidden_l);
                 if (cudaMemcpy(d_vit_patches, patches_bf16.data(), patches_bf16.size()*sizeof(ggml_bf16_t), cudaMemcpyHostToDevice) != cudaSuccess ||
                     bitvla_vit_cuda_forward(vit_cuda_ctx, d_vit_patches, d_vit_img_embeds,  0) != 0 ||
@@ -1208,6 +1243,10 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
             ggml_backend_tensor_get(mm2, img_embeds_host.data()+(size_t) v * N * hidden_l, 0, (size_t) N * hidden_l * sizeof(float));
             }
         }
+#ifdef VLA_BITVLA_CUDA_KERNELS
+        if (dev_img)
+            cudaStreamSynchronize(0);   // ms_vision covers the tower
+#endif
         stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now()-t_v0).count();
     } else {
         img_embeds_host.assign(in.precomputed_img_emb, in.precomputed_img_emb+(size_t) n_views * N * hidden_l);
@@ -1299,6 +1338,30 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         return {};
     }
 
+#ifdef VLA_BITVLA_CUDA_KERNELS
+    if (dev_img && !(seq <= cuda_max_seq)) {
+        // The LM runs on the CPU path: bring the image rows to the host.
+        std::vector<ggml_bf16_t> tmp((size_t) n_img_tok * hidden_l);
+        if (cudaMemcpy(tmp.data(), d_img_rows, tmp.size()*sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
+            std::fprintf(stderr, "vla(bitvla): image embeddings download failed\n");
+            return {};
+        }
+        img_embeds_host.resize(tmp.size());
+        ggml_bf16_to_fp32_row(tmp.data(), img_embeds_host.data(), (int64_t) tmp.size());
+        dev_img = false;
+    }
+#endif
+    // Image rows of the LM input, as runs of consecutive rows; with dev_img
+    // they are copied on the device instead of on the host.
+    struct ImgRun { int64_t row, k, n; };
+    std::vector<ImgRun> img_runs;
+    auto add_img_rows = [&](int64_t row, int64_t k, int64_t n) {
+        if (!img_runs.empty() && img_runs.back().row + img_runs.back().n == row && img_runs.back().k + img_runs.back().n == k)
+            img_runs.back().n += n;
+        else
+            img_runs.push_back({row, k, n});
+    };
+
     std::vector<float> inputs_embeds((size_t) seq * hidden_l, 0.0f);
 
     if (full_prefix) {
@@ -1324,9 +1387,7 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         for (int64_t i=0; i<n_lang_in; ++i) {
             const int32_t tok = in.lang_tokens[i];
             if (tok == image_token_id) {
-                std::memcpy(inputs_embeds.data()+(size_t) i * hidden_l,
-                            img_embeds_host.data()+(size_t) k_img * hidden_l,
-                            (size_t) hidden_l * sizeof(float));
+                add_img_rows(i, k_img, 1);
                 k_img++;
             } else if (tok == proprio_pad_id) {
                 std::memcpy(inputs_embeds.data()+(size_t) i * hidden_l,
@@ -1349,13 +1410,18 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
             }
             if (!emb_reader.fetch_rows_f32("token_embd.weight", ids, inputs_embeds.data(), hidden_l)) return {};
         }
-        std::memcpy(inputs_embeds.data()+(size_t) n_prompt * hidden_l,
-                    img_embeds_host.data(), (size_t) n_img_tok * hidden_l * sizeof(float));
+        add_img_rows(n_prompt, 0, n_img_tok);
         std::memcpy(inputs_embeds.data()+(size_t) (n_prompt+n_img_tok)*hidden_l,
                     proprio_embed_host.data(), (size_t) hidden_l * sizeof(float));
         std::memcpy(inputs_embeds.data()+(size_t) (seq-1)*hidden_l,
                     stop_embed.data(), (size_t) hidden_l * sizeof(float));
     }
+
+    if (!dev_img)
+        for (const ImgRun & r : img_runs)
+            std::memcpy(inputs_embeds.data()+(size_t) r.row * hidden_l,
+                        img_embeds_host.data()+(size_t) r.k * hidden_l,
+                        (size_t) r.n * hidden_l * sizeof(float));
 
     _dump_bin("inputs_embeds", inputs_embeds.data(), inputs_embeds.size());
     _dump_manifest(std::string("inputs_embeds fp32 1 ")+std::to_string(seq) +
@@ -1373,7 +1439,12 @@ std::vector<float> BitvlaModelArch::predict(const Inputs& in) {
         for (int64_t i=0; i<n_action; ++i)
             aids[i] = (int32_t) (seq-2-n_action+i);
         std::vector<ggml_bf16_t> out_bf16((size_t) n_action * hidden_l);
-        if (cudaMemcpy(d_inputs_embeds, in_bf16.data(), in_bf16.size()*sizeof(ggml_bf16_t), cudaMemcpyHostToDevice) != cudaSuccess ||
+        bool rows_ok = cudaMemcpy(d_inputs_embeds, in_bf16.data(), in_bf16.size()*sizeof(ggml_bf16_t), cudaMemcpyHostToDevice) == cudaSuccess;
+        if (dev_img)
+            for (const ImgRun & r : img_runs)
+                rows_ok = rows_ok && cudaMemcpyAsync(d_inputs_embeds + (size_t) r.row * hidden_l, d_img_rows + (size_t) r.k * hidden_l,
+                                                     (size_t) r.n * hidden_l * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, 0) == cudaSuccess;
+        if (!rows_ok ||
             bitvla_lm_cuda_forward(lm_cuda_ctx, d_inputs_embeds, d_last_hidden, (int) seq,  0) != 0 ||
             cudaMemcpy(d_action_ids, aids.data(), n_action * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess) {
             std::fprintf(stderr, "vla(bitvla): CUDA LM forward failed\n");
