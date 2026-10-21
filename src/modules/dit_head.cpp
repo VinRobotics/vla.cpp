@@ -19,12 +19,15 @@
 #include "layers/embed.h"
 #include "layers/ffn.h"
 #include "layers/fq_linear.h"
+#include "layers/fused_ops.h"
 #include "layers/linear.h"
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <cstdio>
 
 namespace vla {
@@ -181,10 +184,28 @@ ggml_tensor * DitHead::block(ggml_context * C, const DitLayerW & w, ggml_tensor 
 
     ggml_tensor * sc = ggml_view_1d(C, mod, dim, 0);
     ggml_tensor * sh = ggml_view_1d(C, mod, dim, (size_t)dim*sizeof(float));
-    ggml_tensor * xn = ggml_norm(C, h, cfg.ln_eps);
-    ggml_tensor * n  = ggml_add(C, ggml_add(C, xn, ggml_mul(C, xn, sc)), sh);
+    const bool fz = cfg.fused_ops && !w.fq_o && !w.fq_ff0 && !w.fq_qkv && !w.fq_q;
+    ggml_tensor * n;
+    if (fz) {
+        n = fused_ln(C, h, sc, sh, cfg.ln_eps, true, bf16_operand(w.Wqkv ? w.Wqkv : w.Wq));
+    } else if (cfg.fused_ops) {
+        n = fused_ln(C, h, sc, sh, cfg.ln_eps, true);
+    } else {
+        ggml_tensor * xn = ggml_norm(C, h, cfg.ln_eps);
+        n = ggml_add(C, ggml_add(C, xn, ggml_mul(C, xn, sc)), sh);
+    }
     ggml_tensor *Q, *K, *V;
-    if (!enc && (w.Wqkv || w.fq_qkv)) {
+    if (fz && !enc && w.Wqkv) {
+        // V transposed (bit 2): the non-flash attention takes V^T.
+        ggml_tensor * qkv = fused_qkv_heads(C, mm_exact(C, w.Wqkv, n), w.bqkv, nullptr, nullptr, 3, hd, heads, Tk, 1, 4, 0);
+        Q = fused_part(C, qkv, 0, false);
+        K = fused_part(C, qkv, 1, false);
+        V = fused_part(C, qkv, 2, true);
+    } else if (fz && K_pre && w.Wq) {
+        Q = fused_part(C, fused_qkv_heads(C, mm_exact(C, w.Wq, n), w.bq, nullptr, nullptr, 1, hd, heads, Tk, 1, 0, 0), 0, false);
+        K = K_pre;
+        V = V_pre;
+    } else if (!enc && (w.Wqkv || w.fq_qkv)) {
         ggml_tensor * qkv = w.fq_qkv ? fq_linear(C, w.fq_qkv, n) : linear(C, w.Wqkv, w.bqkv, n);
         if (w.fq_qkv && w.fq_qkv.gemm.heads) {
             Q = fq_head_view(C, qkv, w.fq_qkv, 0, Tk);
@@ -214,7 +235,20 @@ ggml_tensor * DitHead::block(ggml_context * C, const DitLayerW & w, ggml_tensor 
         }
     }
 
-    ggml_tensor * att = attention(C, Q, K, V, nullptr, scale, dim, Tk);
+    const bool fusable = cfg.fused_ops && Q->type == GGML_TYPE_F32 && K->type == GGML_TYPE_F32 &&
+                         V->type == GGML_TYPE_F32 && ggml_is_contiguous(Q) && ggml_is_contiguous(K) && ggml_is_contiguous(V) &&
+                         K->ne[1] <= 1024 && V->ne[0] == K->ne[1] && V->ne[1] == K->ne[0];
+    const bool exact = fusable && attn_exact_enabled();
+    if (fz) {
+        ggml_tensor * att = exact ? fused_attn_exact(C, Q, K, V, scale, bf16_operand(w.Wo))
+                                  : attention_rows(C, Q, K, V, scale, dim, Tk, 1, bf16_operand(w.Wo));
+        ggml_tensor * h1  = fused_bias_res(C, mm_exact(C, w.Wo, att), w.bo, h);
+        ggml_tensor * n3  = fused_ln(C, h1, nullptr, nullptr, cfg.ln_eps, false, bf16_operand(w.Wff0));
+        ggml_tensor * g   = fused_bias_gelu(C, mm_exact(C, w.Wff0, n3), w.bff0, bf16_operand(w.Wff2));
+        return fused_bias_res(C, mm_exact(C, w.Wff2, g), w.bff2, h1);
+    }
+    ggml_tensor * att = exact ? fused_attn_exact(C, Q, K, V, scale, false)
+                              : attention(C, Q, K, V, nullptr, scale, dim, Tk);
     // FoldQuant: both residual adds ride in the GEMM epilogues.
     ggml_tensor * h1  = w.fq_o ? fq_linear(C, w.fq_o, att, h) : ggml_add(C, h, linear(C, w.Wo, w.bo, att));
     ggml_tensor * n3  = ggml_norm(C, h1, cfg.ln_eps);

@@ -53,10 +53,11 @@ inline ggml_tensor * rope_2d(ggml_context * C, ggml_tensor * x, ggml_tensor * co
     const int64_t hd = x->ne[0];
     const int64_t S  = x->ne[1];
     const int64_t Hh = x->ne[2];
+    const int64_t nv = x->ne[3];
     const int64_t half = hd/2;
 
-    ggml_tensor * x1  = ggml_cont(C, ggml_view_3d(C, x, half, S, Hh, x->nb[1], x->nb[2], 0));
-    ggml_tensor * x2  = ggml_cont(C, ggml_view_3d(C, x, half, S, Hh, x->nb[1], x->nb[2], (size_t)half*x->nb[0]));
+    ggml_tensor * x1  = ggml_cont(C, ggml_view_4d(C, x, half, S, Hh, nv, x->nb[1], x->nb[2], x->nb[3], 0));
+    ggml_tensor * x2  = ggml_cont(C, ggml_view_4d(C, x, half, S, Hh, nv, x->nb[1], x->nb[2], x->nb[3], (size_t)half*x->nb[0]));
     ggml_tensor * rot = ggml_concat(C, ggml_neg(C, x2), x1, 0);
     return ggml_add(C, ggml_mul(C, x, cos_t), ggml_mul(C, rot, sin_t));
 }

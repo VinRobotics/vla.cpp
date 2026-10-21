@@ -21,6 +21,7 @@
 #include "backend.h"
 #include "gguf_reader.h"
 #include "scratch_ctx.h"
+#include "cuda/vla_cuda_ops.h"
 #include "layers/embed.h"
 #include "layers/ffn.h"
 #include "modules/dit_head.h"
@@ -204,6 +205,10 @@ std::unique_ptr<ModelArchBase> vla_jepa_create(const std::string& mmproj_path,
             return nullptr;
         }
         m->backend = b.handle;
+        const bool fused = enable_fused_ops("vla_jepa", b.is_cuda);
+        m->vit.fused_ops = fused;
+        m->lm.cfg.fused_ops = fused;
+        m->dit.cfg.fused_ops = fused;
     }
 
     ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };

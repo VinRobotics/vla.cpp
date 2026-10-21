@@ -16,6 +16,7 @@
 
 #include "layers/attn.h"
 #include "layers/ffn.h"
+#include "layers/fused_ops.h"
 #include "layers/linear.h"
 #include "layers/norm.h"
 #include "options.h"
@@ -133,6 +134,27 @@ ggml_tensor * EncStack::block(ggml_context * C, const EncBlockW & w, ggml_tensor
         ggml_tensor * ff = ggml_add(C, mm_act(C, w.Wfc2, gelu(C, ggml_add(C, mm_act(C, w.Wfc1, n2, at), w.bfc1)), at),
                                     w.bfc2);
         return ggml_add(C, h1, ff);
+    }
+
+    // Fused path for one view only: with several, ggml multiplies the 3D
+    // activations with one batched cuBLAS call, which the fused ops' single
+    // GEMM over all views does not reproduce bit for bit.
+    if (cfg.fused_ops && nv == 1) {
+        const bool fa = cfg.flash_attn;
+        ggml_tensor * n1 = fused_ln(C, x, w.ln1w, w.ln1b, cfg.ln_eps, false,
+                                    bf16_operand(w.Wq) && bf16_operand(w.Wk) && bf16_operand(w.Wv));
+        auto heads_of = [&](ggml_tensor * W, ggml_tensor * b, bool vt, bool f16) {
+            return fused_part(C, fused_qkv_heads(C, mm_exact(C, W, n1), b, nullptr, nullptr, 1, hd, heads, seq, nv,
+                                                 vt ? 1 : 0, 0, 0, f16), 0, vt);
+        };
+        // With flash attention K/V are written F16, the type it casts them to.
+        ggml_tensor * Q = heads_of(w.Wq, w.bq, false, false), * K = heads_of(w.Wk, w.bk, false, fa);
+        ggml_tensor * att = fa ? ggml_reshape_2d(C, flash_attention(C, Q, K, heads_of(w.Wv, w.bv, false, true), nullptr, scale), cfg.hidden, seq*nv)
+                               : attention_rows_exact(C, Q, K, heads_of(w.Wv, w.bv, true, false), scale, cfg.hidden, seq, nv, bf16_operand(w.Wo));
+        ggml_tensor * h1 = fused_bias_res(C, mm_exact(C, w.Wo, att), w.bo, x);
+        ggml_tensor * n2 = fused_ln(C, h1, w.ln2w, w.ln2b, cfg.ln_eps, false, bf16_operand(w.Wfc1));
+        ggml_tensor * g  = fused_bias_gelu(C, mm_exact(C, w.Wfc1, n2), w.bfc1, bf16_operand(w.Wfc2));
+        return fused_bias_res(C, mm_exact(C, w.Wfc2, g), w.bfc2, h1);
     }
 
     ggml_tensor * n1 = layer_norm(C, x, w.ln1w, w.ln1b, cfg.ln_eps);
