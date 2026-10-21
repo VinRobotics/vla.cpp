@@ -32,6 +32,7 @@
 #include "ggml-backend.h"
 #include "gguf.h"
 #include "backend.h"
+#include "cuda/vla_cuda_ops.h"
 
 #include "nlohmann/json.hpp"
 
@@ -251,6 +252,7 @@ struct SmolVLAModelArch : public ModelArchBase {
     ggml_backend_t        backend     = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
     bool                  is_cuda     = false;
+    bool                  fused_ops   = false;   // CUDA fused (bit-exact) paths
 
     ggml_type             weight_dtype = GGML_TYPE_BF16;
 
@@ -814,6 +816,7 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
             return nullptr;
         m->backend = b.handle;
         m->is_cuda = b.is_cuda;
+        m->fused_ops = enable_fused_ops("smolvla", b.is_cuda);
     }
     vram_probe(m->backend, "after backend init");
 
@@ -848,6 +851,7 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
         }
         m->cfg.n_img = m->vit_n_tokens;
         m->vit.enc.cfg = {m->vit_hidden, m->vit_heads, m->vit_hidden/m->vit_heads, m->vit_ln_eps, false};
+        m->vit.enc.cfg.fused_ops = m->fused_ops;
     }
     m->cfg.n_prefix = m->cfg.n_img+m->cfg.n_lang+m->cfg.n_state;
     m->cfg.n_full   = m->cfg.n_prefix+m->cfg.n_suffix;
@@ -1351,8 +1355,13 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         if (!VC) { std::fprintf(stderr, "vla(smolvla): ggml_init(vision ctx) failed\n"); return {}; }
         ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, m->vit_image, m->vit_image, 3); ggml_set_input(t_px);
         ggml_tensor * hv = m->vit.embed_conv(VC, t_px, m->vit_patch, grid);
-        for (const EncBlockW & w : m->vit.enc.blk)
-            hv = build_siglip_layer(VC, m->vit.enc.cfg, w, hv, n_patches);
+        // build_siglip_layer is EncStack's block op for op, so the fused
+        // (bit-identical) blocks stand in for it.
+        if (m->fused_ops && !vla::flash_attn_enabled())
+            hv = m->vit.enc.build(VC, hv, n_patches);
+        else
+            for (const EncBlockW & w : m->vit.enc.blk)
+                hv = build_siglip_layer(VC, m->vit.enc.cfg, w, hv, n_patches);
         ggml_tensor * shuf = layer_norm(VC, hv, m->vit.post_ln_w, m->vit.post_ln_b, m->vit.enc.cfg.ln_eps);
         shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_3d(VC, shuf, H*s, grid/s, grid), 0, 2, 1, 3));
         shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_3d(VC, shuf, c4, grid/s, grid/s), 0, 2, 1, 3));
