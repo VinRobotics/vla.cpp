@@ -234,7 +234,7 @@ Wiring, recording, training and queue sizing are in the
 | [docs/QUANTIZATION.md](docs/QUANTIZATION.md) | FoldQuant W8A8 / W4A4: the GGUF contract, the integer arithmetic, converting a FoldQuantVLA quantized model |
 | [docs/DOCKER.md](docs/DOCKER.md) | Building and running the eval in containers |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Engine design: layers, the prediction path, backends, adding an architecture |
-| [docs/backend/](docs/backend) | Per-backend build and run notes: [SYCL](docs/backend/sycl.md), [OpenVINO](docs/backend/ov.md), [Metal](docs/backend/metal.md), [Hexagon](docs/backend/hexagon.md), [Hexagon on Windows](docs/backend/hexagon-windows.md), [WSL2](docs/backend/wsl.md) |
+| [docs/backend/](docs/backend) | Per-backend build and run notes: [SYCL](docs/backend/sycl.md), [OpenVINO](docs/backend/ov.md), [Metal](docs/backend/metal.md), [Hexagon](docs/backend/hexagon.md), [Hexagon on Windows](docs/backend/hexagon-windows.md), [WSL2](docs/backend/wsl.md), [CUDA bit-exact path](docs/backend/cuda-exact.md) |
 | [docs/benchmark/](docs/benchmark) | Per-device latency and memory for every model, and the fastest flags per device |
 | [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) | Known issues and their resolutions |
 | [docs/ADOPTION.md](docs/ADOPTION.md) | C ABI, Python bindings, release packaging, and what is left |
