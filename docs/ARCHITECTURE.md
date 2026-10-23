@@ -32,6 +32,9 @@ source is the detail.
 - `src/kernels/bitvla/` - custom 1.58-bit ternary CUDA kernels for BitVLA.
 - `src/foldquant.h`, `src/kernels/foldquant/`, `src/cuda/` - FoldQuant INT8 linears
   and the in-tree CUDA kernels behind the ggml extension hook.
+- `src/layers/fused_ops.h`, `src/cuda/vla_cuda_fused.cu` - fused CUDA nodes,
+  `gemm_exact` and `attn_exact`: a faster path that gives the same bits as the
+  ggml graph. See [backend/cuda-exact.md](backend/cuda-exact.md).
 
 ## The prediction path
 
@@ -82,7 +85,9 @@ CPU backend runs the reference in `src/foldquant_ref.cpp`, and on CUDA the
 extension hook (`src/cuda/`), and on OpenVINO `src/openvino/foldquant_ov.cpp`
 translates them into OpenVINO ops. Every other backend reads the sites back as
 float weights through `WeightLoader::as_float` and runs the arch's float path. CPU thread count scales to the machine core count;
-the GPU backends run the towers and the transformer on the device.
+the GPU backends run the towers and the transformer on the device. On CUDA,
+at the default precision, most of each graph runs on fused kernels that
+reproduce ggml's output bit for bit ([backend/cuda-exact.md](backend/cuda-exact.md)).
 
 ## Adding an architecture
 

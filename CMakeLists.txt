@@ -334,11 +334,16 @@ if(GGML_CUDA)
         src/cuda/vla_cuda_ext.cu
         src/cuda/vla_cuda_bf16.cu
         src/cuda/vla_cuda_foldquant.cu
+        src/cuda/vla_cuda_fused.cu
     )
     # The staging shim in vla_cuda_foldquant.cu runs the CPU reference on the
     # host; it must round exactly like vla_core's copy.
     set_source_files_properties(src/cuda/vla_cuda_foldquant.cu PROPERTIES
         COMPILE_OPTIONS "-Xcompiler=-ffp-contract=off")
+    # The fused epilogues must round exactly like the ggml-cuda kernels they
+    # replace, which ggml builds with -use_fast_math (ftz, approximate div/tanh).
+    set_source_files_properties(src/cuda/vla_cuda_fused.cu PROPERTIES
+        COMPILE_OPTIONS "-use_fast_math")
     target_include_directories(vla_cuda_ops PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${llama_SOURCE_DIR}/ggml/include
@@ -352,7 +357,7 @@ if(GGML_CUDA)
     target_compile_options(vla_cuda_ops PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-O3 -Xptxas=-O3>
     )
-    target_link_libraries(vla_cuda_ops PUBLIC CUDA::cublas CUDA::cudart ggml-cuda vla_fq_kernels)
+    target_link_libraries(vla_cuda_ops PUBLIC CUDA::cublas CUDA::cublasLt CUDA::cudart ggml-cuda vla_fq_kernels)
     target_link_libraries(vla_core PRIVATE vla_cuda_ops)
 endif()
 

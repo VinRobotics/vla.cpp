@@ -16,6 +16,7 @@
 
 #include "layers/attn.h"
 #include "layers/fq_linear.h"
+#include "layers/fused_ops.h"
 #include "layers/norm.h"
 
 #include <cmath>
@@ -70,11 +71,15 @@ ggml_tensor * Qwen3LM::block(ggml_context * C, const Qwen3LayerW & w, ggml_tenso
     const float   scale= 1.0f/std::sqrt((float)hd);
 
     // FoldQuant q/k/v: one activation node (RMSNorm fused) feeds three INT8 GEMMs.
+    // Fused (float weights only): the norms and silu*up write the BF16 operand
+    // their GEMMs take, once, instead of one F32->BF16 convert per GEMM.
+    const bool fz = cfg.fused_ops && !w.fq_q && !w.fq_o && !w.fq_gate && !w.fq_down;
     ggml_tensor * hn = nullptr, * xq = nullptr;
     if (w.fq_q) xq = fq_act(C, w.fq_q, h);
+    else if (fz) hn = fused_rms_mul(C, h, w.attn_norm, cfg.rms_eps, bf16_operand(w.Wq) && bf16_operand(w.Wk) && bf16_operand(w.Wv));
     else        hn = rms_norm(C, h, w.attn_norm, cfg.rms_eps);
     auto proj = [&](const FqLinear & fq, ggml_tensor * W) {
-        return fq ? fq_gemm(C, fq, xq) : ggml_mul_mat(C, W, hn);
+        return fq ? fq_gemm(C, fq, xq) : fz ? mm_exact(C, W, hn) : ggml_mul_mat(C, W, hn);
     };
     ggml_tensor * qh = ggml_reshape_3d(C, proj(w.fq_q, w.Wq), hd, n_q,  seq);
     ggml_tensor * kh = ggml_reshape_3d(C, proj(w.fq_k, w.Wk), hd, n_kv, seq);
@@ -82,23 +87,46 @@ ggml_tensor * Qwen3LM::block(ggml_context * C, const Qwen3LayerW & w, ggml_tenso
     const bool v_heads = w.fq_v && w.fq_v.gemm.heads;   // epilogue wrote the attention layout
     ggml_tensor * vh = v_heads ? nullptr : ggml_reshape_3d(C, vp, hd, n_kv, seq);
 
-    ggml_tensor * qr = rope(C, cfg.rope, rms_norm(C, qh, w.q_norm, cfg.rms_eps), pos);
-    ggml_tensor * kr = rope(C, cfg.rope, rms_norm(C, kh, w.k_norm, cfg.rms_eps), pos);
-    ggml_tensor * Q  = ggml_cont(C, ggml_permute(C, qr, 0, 2, 1, 3));
-    ggml_tensor * K  = ggml_cont(C, ggml_permute(C, kr, 0, 2, 1, 3));
+    // Fused q/k norm + IMROPE + attention layout (plain RoPE scaling only).
+    const RopeSpec & rs = cfg.rope;
+    const bool fqk = fz && rs.type == GGML_ROPE_TYPE_IMROPE && rs.n_dims == hd && rs.ext_factor == 0.0f &&
+                     rs.freq_scale == 1.0f && rs.attn_factor == 1.0f && hd%64 == 0;
+    ggml_tensor * qr = nullptr, * kr = nullptr, * Q;
+    if (fqk) {
+        Q = fused_qk_norm_rope(C, qh, w.q_norm, pos, cfg.rms_eps, rs.sections, rs.freq_base, false);
+    } else {
+        qr = rope(C, cfg.rope, rms_norm(C, qh, w.q_norm, cfg.rms_eps), pos);
+        kr = rope(C, cfg.rope, rms_norm(C, kh, w.k_norm, cfg.rms_eps), pos);
+        Q  = ggml_cont(C, ggml_permute(C, qr, 0, 2, 1, 3));
+    }
 
     ggml_tensor * att;
-    if (cfg.flash_attn) {
+    if (fz && cfg.flash_attn) {
+        // K/V straight into F16 (no cont + cast), and a mask the caller may
+        // already have cast once for every layer.
+        auto to_f16 = [&](ggml_tensor * t) {
+            ggml_tensor * p = ggml_permute(C, t, 0, 2, 1, 3);
+            return ggml_cpy(C, p, ggml_new_tensor_4d(C, GGML_TYPE_F16, p->ne[0], p->ne[1], p->ne[2], p->ne[3]));
+        };
+        ggml_tensor * K = fqk ? fused_qk_norm_rope(C, kh, w.k_norm, pos, cfg.rms_eps, rs.sections, rs.freq_base, true) : to_f16(kr);
+        att = flash_attention(C, Q, K, to_f16(vh), mask->type == GGML_TYPE_F16 ? mask : ggml_cast(C, mask, GGML_TYPE_F16), scale);
+    } else if (cfg.flash_attn) {
+        ggml_tensor * K = ggml_cont(C, ggml_permute(C, kr, 0, 2, 1, 3));
         ggml_tensor * V = v_heads ? fq_head_view(C, vp, w.fq_v, 0, seq) : ggml_cont(C, ggml_permute(C, vh, 0, 2, 1, 3));
         att = flash_attention(C, Q, K, V, ggml_cast(C, mask, GGML_TYPE_F16), scale);
+    } else if (fz) {
+        ggml_tensor * K = fqk ? fused_qk_norm_rope(C, kh, w.k_norm, pos, cfg.rms_eps, rs.sections, rs.freq_base, false)
+                              : ggml_cont(C, ggml_permute(C, kr, 0, 2, 1, 3));
+        att = attention_rows(C, Q, K, ggml_cont(C, ggml_permute(C, vh, 1, 2, 0, 3)), scale, hq, seq, 1, bf16_operand(w.Wo), mask);
     } else {
+        ggml_tensor * K = ggml_cont(C, ggml_permute(C, kr, 0, 2, 1, 3));
         ggml_tensor * V = v_heads ? fq_head_view(C, vp, w.fq_v, 0, seq) : ggml_cont(C, ggml_permute(C, vh, 1, 2, 0, 3));
         att = attention(C, Q, K, V, mask, scale, hq, seq);
     }
 
     // o_proj takes the raw attention output (no norm) and is still rotated.
     // FoldQuant: the residual add rides in the GEMM epilogue.
-    ggml_tensor * h_attn = w.fq_o ? fq_linear(C, w.fq_o, att, h) : ggml_add(C, h, ggml_mul_mat(C, w.Wo, att));
+    ggml_tensor * h_attn = w.fq_o ? fq_linear(C, w.fq_o, att, h) : ggml_add(C, h, fz ? mm_exact(C, w.Wo, att) : ggml_mul_mat(C, w.Wo, att));
     // gate/up (one activation node, ffn_norm fused) and down are independent
     // sites; the float form is ffn_swiglu's op sequence exactly.
     ggml_tensor * gate, * up;
@@ -106,6 +134,10 @@ ggml_tensor * Qwen3LM::block(ggml_context * C, const Qwen3LayerW & w, ggml_tenso
         ggml_tensor * xq2 = fq_act(C, w.fq_gate, h_attn);
         gate = ggml_silu(C, fq_gemm(C, w.fq_gate, xq2));
         up   = fq_gemm(C, w.fq_up, xq2);
+    } else if (fz) {
+        ggml_tensor * hn2 = fused_rms_mul(C, h_attn, w.ffn_norm, cfg.rms_eps, bf16_operand(w.Wgate) && bf16_operand(w.Wup));
+        ggml_tensor * mid = fused_silu_mul(C, mm_exact(C, w.Wgate, hn2), mm_exact(C, w.Wup, hn2), bf16_operand(w.Wdown));
+        return ggml_add(C, h_attn, mm_exact(C, w.Wdown, mid));
     } else {
         ggml_tensor * hn2 = rms_norm(C, h_attn, w.ffn_norm, cfg.rms_eps);
         gate = ggml_silu(C, ggml_mul_mat(C, w.Wgate, hn2));

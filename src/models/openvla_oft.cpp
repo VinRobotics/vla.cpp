@@ -23,6 +23,8 @@
 #include "backend.h"
 #include "gguf_reader.h"
 #include "scratch_ctx.h"
+#include "cuda/vla_cuda_ops.h"
+#include "layers/fused_ops.h"
 #include "layers/linear.h"
 #include "layers/norm.h"
 
@@ -71,6 +73,7 @@ struct OpenVlaOftModelArch : public ModelArchBase {
     graph_cache<MainKey, MainIO> main_graph;
     ggml_backend_buffer_t weight_buf = nullptr;
     ggml_type mt = GGML_TYPE_BF16;
+    bool fused_ops = false;   // CUDA fused (bit-exact) paths, BF16 weights only
 
     int64_t lm_hidden=4096,lm_layers=32,n_q=32,n_kv=32,lm_head_dim=128,vocab=32064;
     float   lm_rope_base=1e4f, lm_rms_eps=1e-6f;
@@ -141,6 +144,9 @@ std::unique_ptr<ModelArchBase> openvla_oft_create(const std::string& mmproj_path
             return nullptr;
         }
         m->backend = b.handle;
+        if (m->mt == GGML_TYPE_BF16)
+            m->fused_ops = enable_fused_ops("openvla_oft", b.is_cuda);
+        m->vis.fused_ops = m->fused_ops;
     }
 
     ggml_init_params wp = { (size_t)64*1024*1024, nullptr, true };
@@ -251,7 +257,22 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     ggml_tensor*t_pos=ggml_new_tensor_1d(C,GGML_TYPE_I32,SEQ); ggml_set_input(t_pos); ggml_set_output(t_pos);
     const float lsc=1.0f/std::sqrt((float)lm_head_dim);
     ggml_tensor*x=seq;
+    const bool fused_lm=fused_ops && cublas_rows(SEQ) && SEQ<=4096;
     for(int i=0;i<lm_layers;++i){ const auto&l=lm[i];
+        if(fused_lm){
+            // The same layer on the fused (bit-identical) kernels: RMSNorm into
+            // the BF16 operand, NEOX RoPE + head layout, exact attention,
+            // SiLU-gated FFN into the BF16 operand.
+            ggml_tensor*hn=fused_rms_mul(C,x,l.attn_norm,lm_rms_eps,bf16_operand(l.Wq,SEQ)&&bf16_operand(l.Wk,SEQ)&&bf16_operand(l.Wv,SEQ));
+            ggml_tensor*Q =fused_heads_rope(C,mm_exact(C,l.Wq,hn),t_pos,nullptr,lm_head_dim,n_q, lm_rope_base,false);
+            ggml_tensor*K =fused_heads_rope(C,mm_exact(C,l.Wk,hn),t_pos,nullptr,lm_head_dim,n_kv,lm_rope_base,false);
+            ggml_tensor*Vt=fused_heads_rope(C,mm_exact(C,l.Wv,hn),nullptr,nullptr,lm_head_dim,n_kv,lm_rope_base,true);
+            x=ggml_add(C,x,mm_exact(C,l.Wo,fused_attn_exact(C,Q,K,Vt,lsc,bf16_operand(l.Wo,SEQ))));
+            ggml_tensor*hn2=fused_rms_mul(C,x,l.ffn_norm,lm_rms_eps,bf16_operand(l.Wg,SEQ)&&bf16_operand(l.Wu,SEQ));
+            ggml_tensor*mid=fused_silu_mul(C,mm_exact(C,l.Wg,hn2),mm_exact(C,l.Wu,hn2),bf16_operand(l.Wd,SEQ));
+            x=ggml_add(C,x,mm_exact(C,l.Wd,mid));
+            continue;
+        }
         ggml_tensor*hn=ggml_mul(C,ggml_rms_norm(C,x,lm_rms_eps),l.attn_norm);
         ggml_tensor*qp=ggml_mul_mat(C,l.Wq,hn),*kp=ggml_mul_mat(C,l.Wk,hn),*vp=ggml_mul_mat(C,l.Wv,hn);
         ggml_tensor*qh=ggml_reshape_3d(C,qp,lm_head_dim,n_q,SEQ),*kh=ggml_reshape_3d(C,kp,lm_head_dim,n_kv,SEQ),*vh=ggml_reshape_3d(C,vp,lm_head_dim,n_kv,SEQ);

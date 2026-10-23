@@ -61,6 +61,8 @@ struct EncCfg {
     bool fused = false;
     // With fused: the GEMMs as W8A8 with per-token INT8 activations.
     bool int8 = false;
+    // F32 act on CUDA: layers/fused_ops.h nodes, bit-identical to this graph.
+    bool fused_ops = false;
 };
 
 struct EncStack {

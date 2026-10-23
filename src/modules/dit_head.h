@@ -48,6 +48,7 @@ struct DitCfg {
     int64_t layers       = 16;
     float   ln_eps       = 1e-5f;
     float   norm_out_eps = 1e-6f;
+    bool    fused_ops    = false;   // layers/fused_ops.h nodes (CUDA only)
 };
 
 struct DitHead {

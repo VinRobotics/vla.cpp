@@ -26,6 +26,7 @@
 #include "scratch_ctx.h"
 #include "act_dtype.h"
 #include "cuda/vla_cuda_ops.h"
+#include "layers/fused_ops.h"
 #include "modules/preprocess.h"
 
 #include <chrono>
@@ -85,6 +86,8 @@ struct Evo1ModelArch : public ModelArchBase {
     // --act-dtype bf16, which removes the per-GEMM F32<->BF16 round trip ggml
     // pays when BF16 weights meet F32 activations. See mm_act/as_type below.
     ggml_type             act_type    = GGML_TYPE_F32;
+    bool                  fused_ops   = false;   // CUDA fused (bit-exact) paths, F32 activations only
+    bool                  fused_vit = false, fused_lm = false, fused_dit = false;   // per tower (VLA_FUSED_OPS=vit / lm / dit for A/B checks)
 
     int64_t lm_hidden=896, lm_layers=14, n_q=14, n_kv=2, lm_head_dim=64, lm_inter=4864;
     int64_t embed_dim=896, dit_layers=8, dit_heads=8;
@@ -129,6 +132,24 @@ ggml_tensor * build_qwen2_layer(ggml_context * C, const Evo1ModelArch & m, const
     const int64_t hd = m.lm_head_dim, n_q = m.n_q, n_kv = m.n_kv, hq = n_q * hd;
     const ggml_type at = m.act_type;
     const float scale = 1.0f/std::sqrt((float) hd);
+    if (m.fused_lm && cublas_rows(seq) && seq <= 4096) {
+        // The same layer on the fused (bit-identical) kernels: RMSNorm into the
+        // BF16 operand, bias + NEOX RoPE + head layout in one pass per operand,
+        // exact attention (K/V broadcast over query heads, the mask), SiLU-gated
+        // FFN into the BF16 operand.
+        ggml_tensor * hn = fused_rms_mul(C, h, w.attn_norm, m.lm_rms_eps,
+                                         bf16_operand(w.Wq, seq) && bf16_operand(w.Wk, seq) && bf16_operand(w.Wv, seq));
+        ggml_tensor * Q  = fused_heads_rope(C, mm_exact(C, w.Wq, hn), positions, nullptr, hd, n_q,  m.lm_rope_base, false, w.bq);
+        ggml_tensor * K  = fused_heads_rope(C, mm_exact(C, w.Wk, hn), positions, nullptr, hd, n_kv, m.lm_rope_base, false, w.bk);
+        ggml_tensor * Vt = fused_heads_rope(C, mm_exact(C, w.Wv, hn), nullptr,   nullptr, hd, n_kv, m.lm_rope_base, true,  w.bv);
+        ggml_tensor * attn_out = mm_exact(C, w.Wo, fused_attn_exact(C, Q, K, Vt, scale, bf16_operand(w.Wo, seq), 1, mask));
+        if (qmask)
+            attn_out = ggml_mul(C, attn_out, qmask);
+        ggml_tensor * h_attn = ggml_add(C, h, attn_out);
+        ggml_tensor * hn2 = fused_rms_mul(C, h_attn, w.ffn_norm, m.lm_rms_eps, bf16_operand(w.Wgate, seq) && bf16_operand(w.Wup, seq));
+        ggml_tensor * mid = fused_silu_mul(C, mm_exact(C, w.Wgate, hn2), mm_exact(C, w.Wup, hn2), bf16_operand(w.Wdown, seq));
+        return ggml_add(C, h_attn, mm_exact(C, w.Wdown, mid));
+    }
     ggml_tensor * h_n1 = ggml_mul(C, ggml_rms_norm(C, h, m.lm_rms_eps), w.attn_norm);
     ggml_tensor * qp = ggml_add(C, mm_act(C, w.Wq, h_n1, at), w.bq);
     ggml_tensor * kp = ggml_add(C, mm_act(C, w.Wk, h_n1, at), w.bk);
@@ -200,6 +221,19 @@ ggml_tensor * build_internvit_layer(ggml_context * C, const Evo1ModelArch & m, c
     const int64_t H = m.vit_hidden, n_heads = m.vit_heads, hd = H/n_heads;
     const ggml_type at = m.act_type;
     const float scale = 1.0f/std::sqrt((float) hd);
+    if (m.fused_vit && !vla::flash_attn_enabled()) {
+        // The same block on the fused (bit-identical) kernels: LayerNorm into the
+        // BF16 operand, bias + head split + V^T in one pass, exact attention,
+        // bias + layer scale + residual and bias + GELU (erf) epilogues.
+        ggml_tensor * n1  = fused_ln(C, x, w.n1w, w.n1b, m.vit_ln_eps, false, bf16_operand(w.Wqkv, N));
+        ggml_tensor * qkv = fused_qkv_heads(C, mm_exact(C, w.Wqkv, n1), w.bqkv, nullptr, nullptr, 3, hd, n_heads, N, 1, 0b100, 0);
+        ggml_tensor * att = attention_rows_exact(C, fused_part(C, qkv, 0, false), fused_part(C, qkv, 1, false),
+                                                 fused_part(C, qkv, 2, true), scale, H, N, 1, bf16_operand(w.Wproj, N));
+        ggml_tensor * x1  = fused_bias_gate_res(C, mm_exact(C, w.Wproj, att), w.bproj, w.ls1, x);
+        ggml_tensor * n2  = fused_ln(C, x1, w.n2w, w.n2b, m.vit_ln_eps, false, bf16_operand(w.Wfc1, N));
+        ggml_tensor * ff  = fused_bias_gelu_erf(C, mm_exact(C, w.Wfc1, n2), w.bfc1, bf16_operand(w.Wfc2, N));
+        return fused_bias_gate_res(C, mm_exact(C, w.Wfc2, ff), w.bfc2, w.ls2, x1);
+    }
     ggml_tensor * x_n1 = ggml_add(C, ggml_mul(C, ggml_norm(C, x, m.vit_ln_eps), w.n1w), w.n1b);
     ggml_tensor * qkv = ggml_add(C, mm_act(C, w.Wqkv, x_n1, at), w.bqkv);
     // one cast of the packed QKV rather than three of its slices
@@ -379,6 +413,13 @@ std::unique_ptr<ModelArchBase> evo1_create(const std::string& mmproj_path,
                 std::fprintf(stderr, "vla(evo1): --act-dtype bf16 ignored - needs CUDA and BF16 weights\n");
             }
         }
+        if (m->act_type == GGML_TYPE_F32)
+            m->fused_ops = enable_fused_ops("evo1", b.is_cuda);
+        const char * fo = std::getenv("VLA_FUSED_OPS");
+        const bool all = !fo || !std::strstr("vit lm dit", fo);
+        m->fused_vit = m->fused_ops && (all || std::strcmp(fo, "vit") == 0);
+        m->fused_lm  = m->fused_ops && (all || std::strcmp(fo, "lm") == 0);
+        m->fused_dit = m->fused_ops && (all || std::strcmp(fo, "dit") == 0);
     }
 
     ggml_init_params wp = {  (size_t) 32*1024*1024,
@@ -722,6 +763,18 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         ggml_tensor * x = ggml_add(C, mm_act(C, ae_W3, ae, at), ae_b3);
         for (int64_t i=0; i<dit_layers; ++i) {
             const auto & w = dit[i]; const auto & c = dc[i];
+            if (fused_dit) {
+                // The same layer on the fused (bit-identical) kernels.
+                ggml_tensor * x_q = fused_ln(C, x, w.n1w, w.n1b, proj_ln_eps, false, bf16_operand(c.Wq, horizon));
+                ggml_tensor * Q   = fused_part(C, fused_qkv_heads(C, mm_exact(C, c.Wq, x_q), c.bq, nullptr, nullptr, 1, hd_dit,
+                                                                  dit_heads, horizon, 1, 0, 0), 0, false);
+                ggml_tensor * att = attention_rows_exact(C, Q, c.K, c.V, scale_dit, E, horizon, 1, bf16_operand(w.Wo, horizon));
+                ggml_tensor * x1  = fused_bias_res(C, mm_exact(C, w.Wo, att), w.bo, x);
+                ggml_tensor * x2  = ggml_add(C, fused_ln(C, x1, w.n2w, w.n2b, proj_ln_eps, false), time_emb);
+                ggml_tensor * ff  = fused_bias_gelu_erf(C, mm_exact(C, w.f1w, x2), w.f1b, bf16_operand(w.f2w, horizon));
+                x = fused_bias_res(C, mm_exact(C, w.f2w, ff), w.f2b, x1);
+                continue;
+            }
             ggml_tensor * x_q = ggml_add(C, ggml_mul(C, ggml_norm(C, x, proj_ln_eps), w.n1w), w.n1b);
             ggml_tensor * qp = as_type(C, ggml_add(C, mm_act(C, c.Wq, x_q, at), c.bq), GGML_TYPE_F32);
             ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, qp, hd_dit, dit_heads, horizon), 0, 2, 1, 3));

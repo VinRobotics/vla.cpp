@@ -30,6 +30,7 @@
 #include "scratch_ctx.h"
 #include "layers/embed.h"
 #include "modules/qwen3vl_vit.h"
+#include "cuda/vla_cuda_ops.h"
 
 #include <chrono>
 #include <cstdint>
@@ -70,19 +71,29 @@ struct Gr00tN1d7ModelArch : public ModelArchBase {
 
     FlowTimes          times;
     std::vector<float> c_mask; int64_t c_mask_seq = -1;
+    // Fused path: token embeddings of the last prompt (image rows zeroed); a
+    // policy loop sends the same instruction every step.
+    std::vector<int32_t> emb_ids; std::vector<float> emb_cache;
     gguf_reader        io{"gr00tn1d7"};
 
     struct MainKey {
-        int64_t seq=-1, n_img=-1, seq_txt=-1, nsteps=-1; bool deepstack=false;
+        int64_t seq=-1, n_img=-1, seq_txt=-1, nsteps=-1; bool deepstack=false, fused=false, img_u8=false;
         bool operator==(const MainKey & o) const {
             return seq==o.seq && n_img==o.n_img && seq_txt==o.seq_txt &&
-                   nsteps==o.nsteps && deepstack==o.deepstack;
+                   nsteps==o.nsteps && deepstack==o.deepstack && fused==o.fused && img_u8==o.img_u8;
         }
     };
     struct MainIO {
         ggml_tensor *t_embeds=nullptr,*t_pos=nullptr,*t_lmmask=nullptr,*t_state=nullptr,*t_x0=nullptr;
         ggml_tensor *t_ds[3]={nullptr,nullptr,nullptr};
         ggml_tensor *t_img_idx=nullptr,*t_txt_idx=nullptr,*actions=nullptr;
+        // Fused vision: the tower runs inside the main graph and its outputs are
+        // scattered onto the image positions on the device.
+        ggml_tensor *t_img=nullptr,*t_patches=nullptr,*t_vpos=nullptr,*t_vcos=nullptr,*t_vsin=nullptr,*t_scatter=nullptr,*t_zero=nullptr;
+        // Per-graph constants (vision tables, zero row, mask) are uploaded once.
+        // They are also flagged as outputs: the graph allocator may otherwise
+        // reuse an input's memory after its last reader within a compute.
+        bool consts_set = false;
     };
     graph_cache<MainKey, MainIO> mg;
 
@@ -217,6 +228,14 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
         m->backend = b.handle;
         if (!foldquant_check_backend("vla(gr00tn1d7)", b, fq, opts.weight_dtype.has_value()))
             return nullptr;
+        // VLA_FUSED_OPS=vit or =dit limits the fused ops to one tower (A/B checks).
+        if (enable_fused_ops("gr00tn1d7", b.is_cuda)) {
+            const char * fo = std::getenv("VLA_FUSED_OPS");
+            m->vit.fused_ops      = !fo || std::strcmp(fo, "dit") != 0;
+            m->dit.cfg.fused_ops  = !fo || std::strcmp(fo, "vit") != 0;
+            m->lm.cfg.fused_ops   = !fo || (std::strcmp(fo, "vit") != 0 && std::strcmp(fo, "dit") != 0);
+            m->vlsa.cfg.fused_ops = m->lm.cfg.fused_ops;
+        }
     }
 
     ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };
@@ -273,10 +292,44 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     const int64_t AD = action_dim, AH = action_horizon;
     const bool    do_dump = (std::getenv("VLA_GR00T_N17_DUMP") != nullptr);
 
+    // On with the fused vision ops: the vision tower runs inside the main graph for
+    // all views at once, so its outputs never leave the device. Without them the
+    // batched plain graph is not bit-identical to the per-view one, so it stays
+    // off. VLA_GR00T_FUSED_VIT overrides. Dumping needs the host copies, so it opts out.
+    // All views must share one pixel format: the fused graph takes them as one tensor.
+    bool same_format = in.images && in.n_images > 0;
+    for (int v=1; same_format && v<in.n_images; ++v)
+        same_format = in.images[v].format == in.images[0].format;
+    const bool fused = !(in.precomputed_img_emb && in.n_img_views > 0) && same_format &&
+                       !do_dump && env_flag("VLA_GR00T_FUSED_VIT", vit.fused_ops);
+    const bool img_u8 = fused && in.images[0].format == PixelFormat::U8;
+
+    // With the CUDA fused ops the patchify runs on the device and only the raw
+    // pixels go up; otherwise it runs here.
+    const bool dev_patchify = fused && vit.fused_ops;
     int64_t n_views = 0;
-    std::vector<float> img_emb_host, ds_host[3];
+    std::vector<float> img_emb_host, ds_host[3], patches;
     const float * img_emb_ptr = nullptr;
-    if (in.precomputed_img_emb && in.n_img_views > 0) {
+    if (fused) {
+        n_views = in.n_images;
+        const int64_t n_patches = vit.grid()*vit.grid(), per_view = n_patches*vit.patch_flat;
+        const auto tv0 = std::chrono::steady_clock::now();
+        std::vector<float> one;
+        if (!dev_patchify)
+            patches.resize((size_t) (n_views*per_view));
+        for (int64_t v=0; v<n_views; ++v) {
+            if (dev_patchify) {
+                if (!view_ok("gr00tn1d7", in.images[v], vit.side))
+                    return {};
+                continue;
+            }
+            if (!preprocess_image_patches("gr00tn1d7", in.images[v], vit.side, vit.patch, vit.temporal, vit.row, vit.col, one))
+                return {};
+            std::memcpy(patches.data()+v*per_view, one.data(), (size_t) per_view*sizeof(float));
+        }
+        // Fused vision: only the host-side preparation; the tower is part of ms_inference.
+        stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now()-tv0).count();
+    } else if (in.precomputed_img_emb && in.n_img_views > 0) {
         n_views = in.n_img_views; img_emb_ptr = in.precomputed_img_emb;
     } else if (in.images && in.n_images > 0) {
         n_views = in.n_images;
@@ -295,14 +348,28 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     const int64_t SEQ = prompt.len(), SEQ_TXT = prompt.n_text();
 
     std::vector<float> inputs_embeds;
-    if (!fetch_embeds(io, prompt, img_emb_ptr, H, inputs_embeds)) return {};
+    std::vector<int32_t> scatter;
+    if (fused) {
+        // Text rows only; image rows stay zero and receive the tower output on
+        // the device (x + 0 is exact, so this matches the host scatter bit for bit).
+        if (prompt.ids != emb_ids) {
+            emb_cache.assign((size_t) SEQ*H, 0.0f);
+            if (!io.fetch_rows_f32("token_embd.weight", prompt.ids, emb_cache.data(), H)) { emb_ids.clear(); return {}; }
+            for (int64_t k=0; k<n_img; ++k)
+                std::memset(emb_cache.data()+(size_t) prompt.image_pos[k]*H, 0, H*sizeof(float));
+            emb_ids = prompt.ids;
+        }
+        scatter.assign((size_t) SEQ, (int32_t) n_img);
+        for (int64_t k=0; k<n_img; ++k)
+            scatter[(size_t) prompt.image_pos[k]] = (int32_t) k;
+    } else if (!fetch_embeds(io, prompt, img_emb_ptr, H, inputs_embeds)) return {};
 
     std::vector<int32_t> pp;
     if (!mrope_positions("gr00tn1d7", prompt.ids, (int32_t) image_token_index, vit.grid()/vit.merge, pp)) return {};
 
     std::vector<std::vector<float>> ds_pad(3);
-    const bool inject_deepstack = !img_emb_host.empty();
-    if (inject_deepstack) for (int j=0; j<3; ++j) {
+    const bool inject_deepstack = fused || !img_emb_host.empty();
+    if (inject_deepstack && !fused) for (int j=0; j<3; ++j) {
         ds_pad[j].assign((size_t) SEQ * H, 0.0f);
         for (int64_t k=0; k<n_img; ++k) {
             std::memcpy(ds_pad[j].data()+(size_t) prompt.image_pos[k]*H,
@@ -322,19 +389,50 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
 
     ggml_tensor * eagle = nullptr, * vl_embs = nullptr;
     std::vector<ggml_tensor*> lm_h_dump, vlsa_dump;
-    const MainKey mkey{ SEQ, n_img, SEQ_TXT, num_steps, inject_deepstack };
+    const MainKey mkey{ SEQ, n_img, SEQ_TXT, num_steps, inject_deepstack, fused, img_u8 };
     const size_t main_nodes = 65536 + (size_t) num_steps*64*(dit_layers+1);
     const bool built = mg.ensure(backend, mkey, main_nodes*ggml_tensor_overhead() + ggml_graph_overhead_custom(main_nodes, false),
                                  [&](ggml_context * C, MainIO & gio) -> ggml_cgraph * {
     ggml_tensor * t_embeds = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);          ggml_set_input(t_embeds);
     ggml_tensor * t_pos    = ggml_new_tensor_1d(C, GGML_TYPE_I32, 4*SEQ);         ggml_set_input(t_pos);
-    ggml_tensor * t_lmmask = ggml_new_tensor_2d(C, GGML_TYPE_F32, SEQ, SEQ);        ggml_set_input(t_lmmask);
+    ggml_tensor * t_lmmask = ggml_new_tensor_2d(C, GGML_TYPE_F32, SEQ, SEQ);        ggml_set_input(t_lmmask); ggml_set_output(t_lmmask);
     ggml_tensor * t_state  = ggml_new_tensor_2d(C, GGML_TYPE_F32, max_state_dim, 1);ggml_set_input(t_state);
     ggml_tensor * t_x0     = ggml_new_tensor_2d(C, GGML_TYPE_F32, AD, AH);          ggml_set_input(t_x0);
     ggml_tensor * t_ds[3] = {nullptr,nullptr,nullptr};
-    if (inject_deepstack) for (int j=0; j<3; ++j) {
+    ggml_tensor * ds_add[3] = {nullptr,nullptr,nullptr};
+    ggml_tensor * h = t_embeds;
+    if (fused) {
+        const int64_t n_patches = vit.grid()*vit.grid(), hd = vit.hidden/vit.heads;
+        ggml_tensor * t_patches;
+        if (dev_patchify) {
+            gio.t_img = ggml_new_tensor_4d(C, img_u8 ? GGML_TYPE_I8 : GGML_TYPE_F32, 3, vit.side, vit.side, n_views);
+            ggml_set_input(gio.t_img);
+            t_patches = fused_patchify(C, gio.t_img, vit.patch, vit.temporal, vit.merge, QWEN3VL_MEAN, QWEN3VL_STD);
+        } else {
+            gio.t_patches = ggml_new_tensor_2d(C, GGML_TYPE_F32, vit.patch_flat, n_patches*n_views);
+            ggml_set_input(gio.t_patches);
+            t_patches = gio.t_patches;
+        }
+        gio.t_vpos    = ggml_new_tensor_2d(C, GGML_TYPE_F32, vit.hidden, n_patches);            ggml_set_input(gio.t_vpos);
+        gio.t_vcos    = ggml_new_tensor_2d(C, GGML_TYPE_F32, hd, n_patches);                    ggml_set_input(gio.t_vcos);
+        gio.t_vsin    = ggml_new_tensor_2d(C, GGML_TYPE_F32, hd, n_patches);                    ggml_set_input(gio.t_vsin);
+        gio.t_scatter = ggml_new_tensor_1d(C, GGML_TYPE_I32, SEQ);                              ggml_set_input(gio.t_scatter);
+        gio.t_zero    = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, 1);                             ggml_set_input(gio.t_zero);
+        for (ggml_tensor * t : {gio.t_vpos, gio.t_vcos, gio.t_vsin, gio.t_zero})
+            ggml_set_output(t);
+        ggml_tensor * emb = nullptr, * ds[3] = {nullptr,nullptr,nullptr};
+        vit.build(C, t_patches, gio.t_vpos, gio.t_vcos, gio.t_vsin, n_views, emb, ds);
+        // Row n_img of each table is zero: text positions gather it.
+        auto scatter_rows = [&](ggml_tensor * rows) {
+            return ggml_get_rows(C, ggml_concat(C, rows, gio.t_zero, 1), gio.t_scatter);
+        };
+        h = ggml_add(C, t_embeds, scatter_rows(emb));
+        for (int j=0; j<3; ++j)
+            ds_add[j] = scatter_rows(ds[j]);
+    } else if (inject_deepstack) for (int j=0; j<3; ++j) {
         t_ds[j] = ggml_new_tensor_2d(C, GGML_TYPE_F32, H, SEQ);
         ggml_set_input(t_ds[j]);
+        ds_add[j] = t_ds[j];
     }
 
     ggml_tensor * t_img_idx = ggml_new_tensor_1d(C, GGML_TYPE_I32, n_img);    ggml_set_input(t_img_idx);
@@ -343,11 +441,12 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     if (t_txt_idx)
         ggml_set_input(t_txt_idx);
 
-    ggml_tensor * h = t_embeds;
+    // Flash attention takes an F16 mask: cast it once here rather than in every layer.
+    ggml_tensor * lm_mask = (lm.cfg.flash_attn && lm.cfg.fused_ops) ? ggml_cast(C, t_lmmask, GGML_TYPE_F16) : t_lmmask;
     for (int64_t i=0; i<lm_layers; ++i) {
-        h = lm.block(C, lm.blk[i], h, t_pos, t_lmmask, SEQ);
+        h = lm.block(C, lm.blk[i], h, t_pos, lm_mask, SEQ);
         if (inject_deepstack && i < 3)
-            h = ggml_add(C, h, t_ds[i]);
+            h = ggml_add(C, h, ds_add[i]);
         if (do_dump) {
             ggml_set_output(h);
             lm_h_dump.push_back(h);
@@ -391,13 +490,15 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     MainIO & gio = mg.io();
     ggml_cgraph * gf = mg.graph();
 
-    ggml_backend_tensor_set(gio.t_embeds, inputs_embeds.data(), 0, ggml_nbytes(gio.t_embeds));
+    ggml_backend_tensor_set(gio.t_embeds, fused ? emb_cache.data() : inputs_embeds.data(), 0, ggml_nbytes(gio.t_embeds));
     ggml_backend_tensor_set(gio.t_pos, pp.data(), 0, ggml_nbytes(gio.t_pos));
     if (c_mask_seq != SEQ) {
         build_causal_mask(SEQ, c_mask);
         c_mask_seq = SEQ;
     }
-    ggml_backend_tensor_set(gio.t_lmmask, c_mask.data(), 0, ggml_nbytes(gio.t_lmmask));
+    // The mask depends on SEQ alone, which is part of the graph key.
+    if (!gio.consts_set)
+        ggml_backend_tensor_set(gio.t_lmmask, c_mask.data(), 0, ggml_nbytes(gio.t_lmmask));
     {
         std::vector<float> st(max_state_dim, 0.0f);
         for (int64_t i=0; i<max_state_dim; ++i)
@@ -405,10 +506,27 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
         ggml_backend_tensor_set(gio.t_state, st.data(), 0, ggml_nbytes(gio.t_state));
     }
     ggml_backend_tensor_set(gio.t_x0, x_init.data(), 0, ggml_nbytes(gio.t_x0));
-    if (inject_deepstack) for (int j=0; j<3; ++j) ggml_backend_tensor_set(gio.t_ds[j], ds_pad[j].data(), 0, ggml_nbytes(gio.t_ds[j]));
+    if (fused) {
+        if (dev_patchify) {
+            const size_t per_view = ggml_nbytes(gio.t_img)/(size_t) n_views;
+            for (int64_t v=0; v<n_views; ++v)
+                ggml_backend_tensor_set(gio.t_img, in.images[v].data, (size_t) v*per_view, per_view);
+        } else {
+            ggml_backend_tensor_set(gio.t_patches, patches.data(), 0, ggml_nbytes(gio.t_patches));
+        }
+        ggml_backend_tensor_set(gio.t_scatter, scatter.data(), 0, ggml_nbytes(gio.t_scatter));
+        if (!gio.consts_set) {
+            ggml_backend_tensor_set(gio.t_vpos, vit.pos_interp.data(), 0, ggml_nbytes(gio.t_vpos));
+            ggml_backend_tensor_set(gio.t_vcos, vit.rope_cos.data(), 0, ggml_nbytes(gio.t_vcos));
+            ggml_backend_tensor_set(gio.t_vsin, vit.rope_sin.data(), 0, ggml_nbytes(gio.t_vsin));
+            const std::vector<float> zero((size_t) H, 0.0f);
+            ggml_backend_tensor_set(gio.t_zero, zero.data(), 0, ggml_nbytes(gio.t_zero));
+        }
+    } else if (inject_deepstack) for (int j=0; j<3; ++j) ggml_backend_tensor_set(gio.t_ds[j], ds_pad[j].data(), 0, ggml_nbytes(gio.t_ds[j]));
     ggml_backend_tensor_set(gio.t_img_idx, prompt.image_pos.data(), 0, ggml_nbytes(gio.t_img_idx));
     if (gio.t_txt_idx)
         ggml_backend_tensor_set(gio.t_txt_idx, prompt.text_pos.data(), 0, ggml_nbytes(gio.t_txt_idx));
+    gio.consts_set = true;
 
     graph_unique_names(gf);
     // VLA_GRAPH_DEBUG=1: report what changes between two computes of the cached

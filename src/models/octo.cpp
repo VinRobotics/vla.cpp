@@ -14,10 +14,12 @@
 
 #include "arch.h"
 #include "backend.h"
+#include "cuda/vla_cuda_ops.h"
 #include "gguf_reader.h"
 #include "layers/attn.h"
 #include "layers/conv.h"
 #include "layers/ffn.h"
+#include "layers/fused_ops.h"
 #include "layers/linear.h"
 #include "layers/norm.h"
 #include "loader.h"
@@ -68,6 +70,7 @@ struct OctoRuntime {
     ggml_backend_t backend = nullptr;
     std::unordered_map<std::string, ggml_tensor *> by_name;
     bool pytorch_ckpt = false;
+    bool fused_ops = false;   // CUDA fused (bit-exact) paths
 
     // One cache per camera: the views differ in side and token count, so they
     // cannot share a graph.
@@ -1124,6 +1127,21 @@ bool run_transformer_graph(OctoRuntime& rt,
         io.readout_idx = readout_idx;
 
         for (int i=0; i<12; ++i) {
+            if (rt.fused_ops && seq <= 4096) {
+                // The same block on the fused (bit-identical) kernels: LayerNorm,
+                // bias + head split + V^T in one pass, exact attention with the
+                // mask, and the bias + residual and bias + GELU epilogues.
+                ggml_tensor * qkv = fused_qkv_heads(C, ggml_mul_mat(C, blk_w[i][2], fused_ln(C, x, blk_w[i][0], blk_w[i][1], ln_eps, false)),
+                                                    blk_w[i][3], nullptr, nullptr, 3, head_dim, heads, seq, 1, 0b100, 0);
+                ggml_tensor * merged = fused_attn_exact(C, fused_part(C, qkv, 0, false), fused_part(C, qkv, 1, false),
+                                                        fused_part(C, qkv, 2, true), attn_scale, false, 1, mask);
+                ggml_tensor * residual = fused_bias_res(C, ggml_mul_mat(C, blk_w[i][4], merged), blk_w[i][5], x);
+                ggml_tensor * up = ggml_mul_mat(C, blk_w[i][8], fused_ln(C, residual, blk_w[i][6], blk_w[i][7], ln_eps, false));
+                ggml_tensor * mlp = rt.pytorch_ckpt ? fused_bias_gelu_erf(C, up, blk_w[i][9])
+                                                    : octo_gelu(C, ggml_add(C, up, blk_w[i][9]), false);
+                x = fused_bias_res(C, ggml_mul_mat(C, blk_w[i][10], mlp), blk_w[i][11], residual);
+                continue;
+            }
             ggml_tensor * n1  = layer_norm(C, x, blk_w[i][0], blk_w[i][1], ln_eps);
             ggml_tensor * qkv = linear(C, blk_w[i][2], blk_w[i][3], n1);
             ggml_tensor * Q   = ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, seq, kHidden, 3, 0), 0, 2, 1, 3));
@@ -1254,7 +1272,8 @@ ggml_tensor * build_score_actor(ggml_context * ctx,
                                 const OctoScoreActorWeights& w,
                                 ggml_tensor * time,
                                 ggml_tensor * obs,
-                                ggml_tensor * actions) {
+                                ggml_tensor * actions,
+                                bool fused) {
     constexpr float ln_eps = 1e-6f;
     constexpr float two_pi = 6.2831853071795864769f;
 
@@ -1265,6 +1284,11 @@ ggml_tensor * build_score_actor(ggml_context * ctx,
     ggml_tensor * reverse_input = ggml_concat(ctx, ggml_concat(ctx, cond, obs, 0), actions, 0);
     ggml_tensor * x = linear(ctx, w.rinw, w.rinb, reverse_input);
     for (int i=0; i<3; ++i) {
+        if (fused) {
+            ggml_tensor * h = ggml_silu(ctx, linear(ctx, w.blk[i][2], w.blk[i][3], fused_ln(ctx, x, w.blk[i][0], w.blk[i][1], ln_eps, false)));
+            x = fused_bias_res(ctx, ggml_mul_mat(ctx, w.blk[i][4], h), w.blk[i][5], x);
+            continue;
+        }
         ggml_tensor * h = layer_norm(ctx, x, w.blk[i][0], w.blk[i][1], ln_eps);
         h = ggml_silu(ctx, linear(ctx, w.blk[i][2], w.blk[i][3], h));
         x = ggml_add(ctx, x, linear(ctx, w.blk[i][4], w.blk[i][5], h));
@@ -1363,7 +1387,7 @@ bool run_diffusion(OctoRuntime& rt,
 
             ggml_tensor * time = ggml_view_2d(C, times_all, 1, width, times_all->nb[1],
                                               (size_t) step*times_all->nb[2]);
-            ggml_tensor * eps  = build_score_actor(C, w, time, obs, x);
+            ggml_tensor * eps  = build_score_actor(C, w, time, obs, x, rt.fused_ops);
             ggml_tensor * y    = ggml_scale(C, ggml_add(C, x, ggml_scale(C, eps, -alpha_2)), alpha_1);
             if (time_value > 0) {
                 ggml_tensor * zs = ggml_view_2d(C, z_all, action, width, z_all->nb[1],
@@ -1815,6 +1839,7 @@ std::unique_ptr<ModelArchBase> octo_create(const std::string& mmproj_path,
     if (!load_weights(*m, m->io))
         return nullptr;
     m->rt.init(m->backend, m->ctx_weights);
+    m->rt.fused_ops = enable_fused_ops("octo", b.is_cuda);
 
     std::printf("vla(octo): weights resident in %.2f GiB (F32) - head=%s window=%lld horizon=%lld "
                 "action_dim=%lld proprio=%s\n",

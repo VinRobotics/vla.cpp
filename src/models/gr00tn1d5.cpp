@@ -28,6 +28,7 @@
 #include "modules/prompt.h"
 #include "modules/qwen3_lm.h"
 #include "modules/siglip_vit.h"
+#include "cuda/vla_cuda_ops.h"
 #include "scratch_ctx.h"
 
 #include "ggml.h"
@@ -234,6 +235,12 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
     m->backend = b.handle;
     if (!foldquant_check_backend("vla(gr00tn1d5)", b, fq, opts.weight_dtype.has_value()))
         return nullptr;
+    if (enable_fused_ops("gr00tn1d5", b.is_cuda)) {
+        m->lm.cfg.fused_ops   = true;
+        m->vlsa.cfg.fused_ops = true;
+        m->dit.cfg.fused_ops  = true;
+        m->vit.enc.cfg.fused_ops = true;   // SigLIP blocks are EncStack blocks
+    }
 
     ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };
     m->ctx_weights = ggml_init(wp);
