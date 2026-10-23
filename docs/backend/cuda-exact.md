@@ -81,7 +81,7 @@ The defaults are the verified configuration. The switches exist for A/B checks.
 | `VLA_GEMM_EXACT` | on | `0`: BF16 GEMMs stay `ggml_mul_mat`. |
 | `VLA_GEMM_LT`, `VLA_GEMM_SKINNY` | on | `0` drops the cuBLASLt or the `gemm_skinny` candidates. |
 | `VLA_ATTN_EXACT` | on | `0` keeps ggml's attention chain. `VLA_ATTN_EXACT_FUSED=0` and `VLA_ATTN_TF32=0` drop paths A and C. |
-| `VLA_GR00T_FUSED_VIT` | on | GR00T N1.7: `0` runs the vision tower as its own graph. |
+| `VLA_GR00T_FUSED_VIT` | on with the vision fused ops | GR00T N1.7: `0` runs the vision tower as its own graph. |
 | `VLA_BITVLA_MMA` | on | `0` runs BitVLA's original kernels. |
 | `VLA_BITVLA_DEVICE_EMBEDS` | on | BitVLA: `0` copies the image embeddings through the host. |
 | `VLA_GEMM_CACHE=file` | off | Extra cuBLASLt configurations to try, one per line. `VLA_GEMM_SEARCH=1` tries every configuration (slow) and appends the fastest identical ones to the file. Entries carry the cuBLASLt version and are ignored after an upgrade. |

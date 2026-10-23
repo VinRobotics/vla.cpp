@@ -292,15 +292,16 @@ std::vector<float> Gr00tN1d7ModelArch::predict(const Inputs& in) {
     const int64_t AD = action_dim, AH = action_horizon;
     const bool    do_dump = (std::getenv("VLA_GR00T_N17_DUMP") != nullptr);
 
-    // On by default: the vision tower runs inside the main graph for all views at
-    // once, so its outputs never leave the device. VLA_GR00T_FUSED_VIT=0 restores
-    // the per-view vision graph. Dumping needs the host copies, so it opts out.
+    // On with the fused vision ops: the vision tower runs inside the main graph for
+    // all views at once, so its outputs never leave the device. Without them the
+    // batched plain graph is not bit-identical to the per-view one, so it stays
+    // off. VLA_GR00T_FUSED_VIT overrides. Dumping needs the host copies, so it opts out.
     // All views must share one pixel format: the fused graph takes them as one tensor.
     bool same_format = in.images && in.n_images > 0;
     for (int v=1; same_format && v<in.n_images; ++v)
         same_format = in.images[v].format == in.images[0].format;
     const bool fused = !(in.precomputed_img_emb && in.n_img_views > 0) && same_format &&
-                       !do_dump && env_flag("VLA_GR00T_FUSED_VIT", true);
+                       !do_dump && env_flag("VLA_GR00T_FUSED_VIT", vit.fused_ops);
     const bool img_u8 = fused && in.images[0].format == PixelFormat::U8;
 
     // With the CUDA fused ops the patchify runs on the device and only the raw
