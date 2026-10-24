@@ -14,6 +14,7 @@
 
 #include "arch.h"
 #include "options.h"
+#include "act_dtype.h"
 #include "backend.h"
 #include "foldquant.h"
 #include "gguf_reader.h"
@@ -234,6 +235,12 @@ std::unique_ptr<ModelArchBase> gr00t_n1_5_create(const std::string& mmproj_path,
     m->backend = b.handle;
     if (!foldquant_check_backend("vla(gr00tn1d5)", b, fq, opts.weight_dtype.has_value()))
         return nullptr;
+    if (dit_enable_fused(m->dit, b, m->matmul_type, fq.present, opts, "gr00tn1d5")) {
+        // SigLIP as EncStack's fused blocks too (BF16 activations, views in
+        // one pass); same conditions and switch as the DiT.
+        m->vit.enc.cfg.fused = true;
+        m->vit.enc.cfg.act   = GGML_TYPE_BF16;
+    }
 
     ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };
     m->ctx_weights = ggml_init(wp);
@@ -290,12 +297,28 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
         n_views = in.n_images;
         img_emb_host.assign((size_t) n_views*K*H, 0.0f);
 
-        const bool vbuilt = vis_graph.ensure(backend, 0, (size_t) 64*1024*1024, [&](ggml_context * VC, VisIO & vio) -> ggml_cgraph * {
+        // fused: every view through the tower in one pass (BF16 activations),
+        // one graph per view count; the per-op graph encodes one view at a time.
+        const bool    fz = vit.enc.cfg.fused;
+        const int64_t nv = fz ? n_views : 1;
+        const bool vbuilt = vis_graph.ensure(backend, fz ? nv : 0, (size_t) 64*1024*1024, [&](ggml_context * VC, VisIO & vio) -> ggml_cgraph * {
             const int64_t grid = image_size/patch_size;
-            ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, image_size, image_size, 3);
+            ggml_tensor * t_px = ggml_new_tensor_4d(VC, GGML_TYPE_F32, image_size, image_size, 3, nv);
             ggml_set_input(t_px);
 
-            ggml_tensor * h       = vit.build(VC, vit.embed_conv(VC, t_px, patch_size, grid), K);
+            ggml_tensor * h;
+            if (fz) {
+                ggml_tensor * emb = nullptr;
+                for (int64_t v=0; v<nv; ++v) {
+                    ggml_tensor * px = ggml_view_3d(VC, t_px, image_size, image_size, 3, t_px->nb[1], t_px->nb[2],
+                                                    (size_t) v*t_px->nb[3]);
+                    ggml_tensor * e = vit.embed_conv(VC, px, patch_size, grid);
+                    emb = emb ? ggml_concat(VC, emb, e, 1) : e;
+                }
+                h = as_type(VC, vit.build(VC, as_type(VC, emb, GGML_TYPE_BF16), K, nv), GGML_TYPE_F32);
+            } else {
+                h = vit.build(VC, vit.embed_conv(VC, ggml_reshape_3d(VC, t_px, image_size, image_size, 3), patch_size, grid), K);
+            }
             ggml_tensor * vit_emb = linear(VC, mm_W, mm_b, h);
             ggml_set_output(vit_emb);
             vio.t_px = t_px; vio.vit_emb = vit_emb;
@@ -310,15 +333,17 @@ std::vector<float> Gr00tN1d5ModelArch::predict(const Inputs& in) {
 
         const auto tv0 = std::chrono::steady_clock::now();
         std::vector<float> chw;
-        for (int64_t v=0; v<n_views; ++v) {
-            if (!preprocess_image_chw("gr00tn1d5", in.images[v], image_size, chw)) return {};
-            ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
+        for (int64_t v0=0; v0<n_views; v0 += nv) {
+            for (int64_t v=0; v<nv; ++v) {
+                if (!preprocess_image_chw("gr00tn1d5", in.images[v0+v], image_size, chw)) return {};
+                ggml_backend_tensor_set(t_px, chw.data(), (size_t) v*t_px->nb[3], t_px->nb[3]);
+            }
             graph_unique_names(vg);
             if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
                 std::fprintf(stderr, "vla(gr00tn1d5): vision compute failed\n");
                 return {};
             }
-            ggml_backend_tensor_get(vit_emb, img_emb_host.data()+v*K*H, 0, ggml_nbytes(vit_emb));
+            ggml_backend_tensor_get(vit_emb, img_emb_host.data()+v0*K*H, 0, ggml_nbytes(vit_emb));
         }
         stats.ms_vision = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now()-tv0).count();
         img_emb_ptr = img_emb_host.data();

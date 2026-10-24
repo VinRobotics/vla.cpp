@@ -20,6 +20,10 @@
 #include "layers/ffn.h"
 #include "layers/fq_linear.h"
 #include "layers/linear.h"
+#include "act_dtype.h"
+#include "env_flag.h"
+#include "options.h"
+#include "sycl/vla_sycl_ops.h"
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -149,6 +153,26 @@ void DitHead::kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
     const int64_t heads = cfg.heads;
     const int64_t Tkv   = src->ne[1];
 
+    if (fused) {
+        // [hd, Tkv, heads] views straight into the BF16 projections; the
+        // attention reads them in place.
+        ggml_tensor * s16 = as_type(C, src, GGML_TYPE_BF16);
+        auto heads_of = [&](ggml_tensor * p, int64_t which) {
+            const size_t es = ggml_element_size(p);
+            return ggml_permute(C, ggml_view_3d(C, p, hd, heads, Tkv, hd * es, p->nb[1], (size_t) which * cfg.hidden * es),
+                                0, 2, 1, 3);
+        };
+        if (w.Wkv) {
+            ggml_tensor * kvp = fused_linear(C, w.Wkv, s16, w.bkv, nullptr, GGML_TYPE_BF16, 0);
+            *K_out = heads_of(kvp, 0);
+            *V_out = heads_of(kvp, 1);
+        } else {
+            *K_out = heads_of(fused_linear(C, w.Wk, s16, w.bk, nullptr, GGML_TYPE_BF16, 0), 0);
+            *V_out = heads_of(fused_linear(C, w.Wv, s16, w.bv, nullptr, GGML_TYPE_BF16, 0), 0);
+        }
+        return;
+    }
+
     if (w.Wkv || w.fq_kv) {
         ggml_tensor * kvp = w.fq_kv ? fq_linear(C, w.fq_kv, src) : linear(C, w.Wkv, w.bkv, src);
         if (w.fq_kv && w.fq_kv.gemm.heads) {   // written in head layout by the epilogue
@@ -178,6 +202,39 @@ ggml_tensor * DitHead::block(ggml_context * C, const DitLayerW & w, ggml_tensor 
     const int64_t dim   = cfg.hidden;
     const int64_t Tk    = h->ne[1];
     const float   scale = 1.0f/std::sqrt((float)hd);
+
+    if (fused) {
+        // mod holds 1 + scale, then shift (FlowTimes::build with dit.fused).
+        ggml_tensor * n = fused_lnorm(C, h, ggml_view_1d(C, mod, dim, 0),
+                                      ggml_view_1d(C, mod, dim, (size_t) dim * sizeof(float)), GGML_TYPE_BF16, ln_spec);
+        auto heads_of = [&](ggml_tensor * p, int64_t which) {
+            const size_t es = ggml_element_size(p);
+            return ggml_permute(C, ggml_view_3d(C, p, hd, heads, Tk, hd * es, p->nb[1], (size_t) which * dim * es),
+                                0, 2, 1, 3);
+        };
+        ggml_tensor *Qf, *Kf, *Vf;
+        if (!enc && w.Wqkv) {
+            ggml_tensor * qkv = fused_linear(C, w.Wqkv, n, w.bqkv, nullptr, GGML_TYPE_BF16, 0);
+            Qf = heads_of(qkv, 0);
+            Kf = heads_of(qkv, 1);
+            Vf = heads_of(qkv, 2);
+        } else {
+            Qf = heads_of(fused_linear(C, w.Wq, n, w.bq, nullptr, GGML_TYPE_BF16, 0), 0);
+            if (K_pre) {
+                Kf = K_pre;
+                Vf = V_pre;
+            } else {
+                kv(C, w, enc ? enc : n, &Kf, &Vf);
+            }
+        }
+        ggml_tensor * fa = ggml_flash_attn_ext(C, Qf, Kf, Vf, nullptr, scale, 0.0f, 0.0f);
+        ggml_prec_set_acc(fa, GGML_PREC_F32);
+        retype(fa, GGML_TYPE_BF16);
+        ggml_tensor * h1 = fused_linear(C, w.Wo, ggml_reshape_2d(C, fa, dim, Tk), w.bo, h, GGML_TYPE_F32, 0);
+        ggml_tensor * f  = fused_linear(C, w.Wff0, fused_lnorm(C, h1, nullptr, nullptr, GGML_TYPE_BF16, ln_spec),
+                                        w.bff0, nullptr, GGML_TYPE_BF16, FUSED_GELU_TANH);
+        return fused_linear(C, w.Wff2, f, w.bff2, h1, GGML_TYPE_F32, 0);
+    }
 
     ggml_tensor * sc = ggml_view_1d(C, mod, dim, 0);
     ggml_tensor * sh = ggml_view_1d(C, mod, dim, (size_t)dim*sizeof(float));
@@ -230,10 +287,27 @@ ggml_tensor * DitHead::time_emb(ggml_context * C, ggml_tensor * tproj) const {
 ggml_tensor * DitHead::proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * mod) const {
     ggml_tensor * sh = ggml_view_1d(C, mod, cfg.hidden, 0);
     ggml_tensor * sc = ggml_view_1d(C, mod, cfg.hidden, (size_t)cfg.hidden*sizeof(float));
+    if (fused)  // sc holds 1 + scale here
+        return fused_linear(C, po2W, fused_lnorm(C, h, sc, sh, GGML_TYPE_BF16, out_ln_spec), po2b, nullptr,
+                            GGML_TYPE_F32, 0);
 
     ggml_tensor * hn    = ggml_norm(C, h, cfg.norm_out_eps);
     ggml_tensor * h_mod = ggml_add(C, ggml_add(C, hn, ggml_mul(C, hn, sc)), sh);
     return linear(C, po2W, po2b, h_mod);
+}
+
+bool dit_enable_fused(DitHead & dit, const Backend & b, ggml_type weight_type, bool fq, const Options & opts,
+                      const char * tag) {
+    if (!b.is_sycl || weight_type != GGML_TYPE_BF16 || !fa_takes_views() || fq || !opts.flash_attn.value_or(true) ||
+        env_flag("VLA_GR00T_NO_FUSE"))
+        return false;
+    dit.fused = true;
+    dit.ln_spec.eps     = dit.cfg.ln_eps;
+    dit.out_ln_spec.eps = dit.cfg.norm_out_eps;
+    sycl_register_fused_ops();
+    sycl_register_bf16_ops();
+    std::printf("vla(%s): fused DiT blocks (VLA_GR00T_NO_FUSE=1 to disable)\n", tag);
+    return true;
 }
 
 FlowTimes::~FlowTimes() {
@@ -315,6 +389,14 @@ bool FlowTimes::build(const char * arch, ggml_backend_t backend, const DitHead &
         std::vector<float> host((size_t) ggml_nelements(mods));
         for (size_t k=0; k<outs.size(); ++k)
             ggml_backend_tensor_get(outs[k], host.data()+k*(size_t) (2*dim), 0, ggml_nbytes(outs[k]));
+        // The fused blocks take the adaLN as a LayerNorm with weight 1 + scale:
+        // scale is the first half of a block's row and the second of proj_out's.
+        if (dit.fused)
+            for (size_t k=0; k<outs.size(); ++k) {
+                const bool proj = (int64_t) (k % (size_t) per_step) == layers;
+                float * sc = host.data() + k*(size_t) (2*dim) + (proj ? dim : 0);
+                for (int64_t j=0; j<dim; ++j) sc[j] += 1.0f;
+            }
         ggml_backend_tensor_set(mods, host.data(), 0, ggml_nbytes(mods));
     }
     if (ga)

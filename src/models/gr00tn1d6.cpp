@@ -14,6 +14,7 @@
 
 #include "arch.h"
 #include "options.h"
+#include "act_dtype.h"
 #include "backend.h"
 #include "foldquant.h"
 #include "gguf_reader.h"
@@ -251,6 +252,12 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
     m->backend = b.handle;
     if (!foldquant_check_backend("vla(gr00tn1d6)", b, fq, opts.weight_dtype.has_value()))
         return nullptr;
+    if (dit_enable_fused(m->dit, b, m->matmul_type, fq.present, opts, "gr00tn1d6")) {
+        // SigLIP as EncStack's fused blocks too (BF16 activations, views in
+        // one pass); same conditions and switch as the DiT.
+        m->vit.enc.cfg.fused = true;
+        m->vit.enc.cfg.act   = GGML_TYPE_BF16;
+    }
 
     ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };
     m->ctx_weights = ggml_init(wp);
@@ -318,9 +325,14 @@ std::vector<float> Gr00tN1d6ModelArch::predict(const Inputs& in) {
         const bool vbuilt = vis_graph.ensure(backend, n_views, (size_t) 64*1024*1024, [&](ggml_context * VC, VisIO & vio) -> ggml_cgraph * {
             ggml_tensor * t_patches = ggml_new_tensor_3d(VC, GGML_TYPE_F32, patch_dim, n_patches, n_views);
             ggml_set_input(t_patches);
-            ggml_tensor * post_ln = vit.build(VC, vit.embed_patches(VC, t_patches), n_patches, n_views);
-
             const int64_t hid = vit.enc.cfg.hidden, g2 = grid/r;
+            ggml_tensor * emb = vit.embed_patches(VC, t_patches);
+            // fused: [hid, n_patches * n_views] rows into the tower, BF16 activations
+            ggml_tensor * post_ln = vit.enc.cfg.fused
+                ? as_type(VC, vit.build(VC, as_type(VC, ggml_reshape_2d(VC, emb, hid, n_patches*n_views), GGML_TYPE_BF16),
+                                        n_patches, n_views), GGML_TYPE_F32)
+                : vit.build(VC, emb, n_patches, n_views);
+
             ggml_tensor * shuf = ggml_reshape_3d(VC, post_ln, hid, r, g2*r*g2*n_views);
             shuf = ggml_cont(VC, ggml_permute(VC, shuf, 1, 0, 2, 3));
             shuf = ggml_reshape_4d(VC, shuf, r, hid*g2, r, g2*n_views);
