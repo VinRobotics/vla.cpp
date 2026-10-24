@@ -28,7 +28,7 @@ namespace vla {
 
 namespace {
 
-constexpr int MAX_EXT = 4;
+constexpr int MAX_EXT = 8;
 
 struct Ext {
     sycl_ext_forward_fn  forward;
@@ -55,12 +55,15 @@ bool supports(const ggml_tensor * op) {
 
 }  // namespace
 
-void sycl_ext_register(sycl_ext_forward_fn forward, sycl_ext_supports_fn sup) {
+void sycl_ext_register(sycl_ext_forward_fn forward, sycl_ext_supports_fn sup, bool front) {
     std::lock_guard<std::mutex> lock(g_mu);
     for (int i = 0; i < g_n_ext; ++i)
         if (g_ext[i].forward == forward) return;
     if (g_n_ext == MAX_EXT) return;
-    g_ext[g_n_ext] = {forward, sup};
+    const int at = front ? 0 : g_n_ext;
+    for (int i = g_n_ext; i > at; --i)
+        g_ext[i] = g_ext[i - 1];
+    g_ext[at] = {forward, sup};
     ++g_n_ext;
     ggml_sycl_ext_forward  = dispatch;
     ggml_sycl_ext_supports = supports;

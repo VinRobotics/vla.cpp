@@ -103,6 +103,22 @@ public:
      *         @c cfg.num_steps*cfg.real_action_dim.
      */
     virtual std::vector<float> predict(const Inputs& in) = 0;
+
+    /**
+     * @brief Run only the vision tower (and projector) on @p n_images views.
+     *
+     * The result is what @ref Inputs::precomputed_img_emb takes, so a second
+     * process (or another device) can run the LM and action head on it.
+     * Archs that do not support it return false.
+     * @param images  Camera views.
+     * @param n_images Number of @p images.
+     * @param out     Receives [n_images * tokens_per_view, hidden] floats.
+     * @return true on success.
+     */
+    virtual bool encode_images(const ImageView* images, int n_images, std::vector<float>& out) {
+        (void) images; (void) n_images; (void) out;
+        return false;
+    }
 };
 
 /**

@@ -32,6 +32,14 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   GGUF with no calibration and nothing re-rounded; `--check-onnx` byte-compares
   every site against the TensorRT plugin graphs. The family converters expose
   `convert(ckpt, out, writer_factory=...)` for it.
+- **Faster π0.5 FoldQuant on Intel GPUs** with `-DVLA_SYCL_TLA_DIR=<sycl-tla>`:
+  INT4 x INT4 DPAS GEMMs for the W4A4 sites, flash attention over the cached
+  prefix K/V with q/k/v + RoPE fused, and the expert's adaRMS folded into the
+  activation nodes. On an Arc B390, W4A4 runs in 92 ms against 263 ms for bf16
+  (2 views, 48 tokens). See `docs/backend/sycl.md`.
+- `vla_encode_images` (C API and Python) runs only the vision tower, so its
+  output can go into `precomputed_img_emb` later or on another device (π0.5).
+  `vla-server --warmup N` runs N dummy predicts before binding (default 1).
 - `scripts/foldquant_fake_export.py` (uncalibrated file for bring-up),
   `scripts/inspect_gguf_quant.py` (contract check) and `scripts/foldquant_ref.py`
   (numpy reference).

@@ -51,6 +51,7 @@ class  WeightLoader;
 
 constexpr uint32_t FQ_ACT_MAGIC  = 0x31414651u;  // "FQA1"
 constexpr uint32_t FQ_GEMM_MAGIC = 0x31474651u;  // "FQG1"
+constexpr uint32_t FQ_GLU_ACT_MAGIC = 0x31554651u;  // "FQU1": GEGLU gate/up GEMM + the next site's act
 
 // Bytes after the codes in every row of the activation blob: the per-token
 // float scale sits at byte K_pack, the rest is padding that keeps rows 16-byte
@@ -68,6 +69,8 @@ struct FqModuleSpec {
     std::string scheme;
     bool  dequant     = false;  // read every site back as a float weight (see above)
     bool  no_heads    = false;  // keep plain [N][T] GEMM outputs (no fq_set_heads layout)
+    bool  wide4       = false;  // SYCL: store INT4 activations one code per byte (FqActSpec::wide4); arch opt-in
+    bool  s4gemm      = false;  // SYCL: W4A4 sites on the INT4 DPAS GEMMs (FqGemmSpec::s4); arch opt-in
 
     int wbits_for(const char * site_key) const;
     int abits_for(const char * site_key) const;
@@ -92,7 +95,17 @@ struct FqActSpec {
     bool     has_ascale  = false;  // static SmoothQuant vector shipped with the site
     float    clip        = 1.0f;
     float    eps         = 0.0f;   // RMSNorm epsilon when has_gamma
+    // INT4 codes stored one per byte (the blob reads as A8): what oneDNN's s8
+    // matmul takes, so no unpack pass runs before it. Set on SYCL (fill_specs).
+    bool     wide4       = false;
+    // adaRMS: a per-node shift [K] added after the (1 + scale) gamma, its source
+    // right after the gamma's. pi0.5's action expert on SYCL (build_expert_layer).
+    bool     has_shift   = false;
 };
+
+
+/// Bits per stored activation code: 4 only for nibble-packed INT4.
+inline int fq_act_store_bits(const FqActSpec & s) { return (s.abits == 4 && !s.wide4) ? 4 : 8; }
 
 struct FqGemmSpec {
     uint32_t magic = FQ_GEMM_MAGIC;
@@ -111,6 +124,22 @@ struct FqGemmSpec {
     int      head_dim = 0;
     int      heads    = 0;
     uint32_t vmask    = 0;
+    // GEGLU epilogue (gate and up fused into one site, rows [gate | up]): the
+    // node outputs [N/2, T] = gelu_tanh(gate) * up instead of [N, T]. SYCL only
+    // for now (gemma_declare_fq_gateup); 0 = plain.
+    int      glu      = 0;
+    // SYCL: run W4A4 instances on the INT4 x INT4 DPAS kernels
+    // (src/sycl/vla_sycl_s4gemm.cpp); needs nibble-packed activations.
+    int      s4       = 0;
+};
+
+/// A gate/up GEMM with its GEGLU and the down site's act in one node: the
+/// [N/2, T] F32 GEGLU output is never stored (fq_glu_act, SYCL). Both specs live
+/// in the layer's weight struct.
+struct FqGluActSpec {
+    uint32_t           magic = FQ_GLU_ACT_MAGIC;
+    const FqGemmSpec * gemm  = nullptr;   // the fused gate/up site (glu set)
+    const FqActSpec *  act   = nullptr;   // the down site's act (no gamma)
 };
 
 struct FqLinear {
@@ -174,6 +203,7 @@ void fq_set_heads(FqLinear & s, int head_dim, int heads, uint32_t vmask);
 void fq_link_prefetch(const std::vector<FqLinear *> & order);
 
 FqLinear fq_declare_fused(WeightLoader & L, const FqModuleSpec & mod, const char * site_key,
-                          bool has_bias, const std::string & out_base, const std::vector<std::string> & sites);
+                          bool has_bias, const std::string & out_base, const std::vector<std::string> & sites,
+                          ggml_tensor * gamma = nullptr, float eps = 0.0f);
 
 }  // namespace vla

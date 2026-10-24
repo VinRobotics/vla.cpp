@@ -309,7 +309,17 @@ bool fill_specs(WeightLoader & L, const FqModuleSpec & mod, const char * site_ke
     r.act.has_ascale  = r.ascale != nullptr;
     r.act.clip        = abits == 4 ? mod.clip : 1.0f;
     r.act.eps         = eps;
+#ifdef GGML_USE_SYCL
+    // oneDNN's int8 matmul takes byte codes: store INT4 activations unpacked,
+    // for archs that opt in (mod.wide4: pi0.5). VLA_FQ_A4_PACKED=1 keeps the
+    // nibble layout (A/B runs, native kernels).
+    {
+        const char * e = std::getenv("VLA_FQ_A4_PACKED");
+        r.act.wide4 = mod.wide4 && abits == 4 && !(e && *e && *e != '0');
+    }
+#endif
     r.gemm.K          = K;
+    r.gemm.s4         = mod.s4gemm ? 1 : 0;
     r.gemm.N          = N;
     r.gemm.wbits      = wbits;
     r.heads_off       = mod.no_heads;
@@ -373,7 +383,8 @@ void fq_link_prefetch(const std::vector<FqLinear *> & order) {
 }
 
 FqLinear fq_declare_fused(WeightLoader & L, const FqModuleSpec & mod, const char * site_key,
-                          bool has_bias, const std::string & out_base, const std::vector<std::string> & sites) {
+                          bool has_bias, const std::string & out_base, const std::vector<std::string> & sites,
+                          ggml_tensor * gamma, float eps) {
     FqLinear r;
     if (sites.empty())
         return r;
@@ -436,7 +447,7 @@ FqLinear fq_declare_fused(WeightLoader & L, const FqModuleSpec & mod, const char
     }
     r.ascale = has_a0 ? L.typed(GGML_TYPE_F32, "%s", a0.c_str()) : nullptr;
 
-    if (!fill_specs(L, mod, site_key, out_base.c_str(), nullptr, 0.0f, r))
+    if (!fill_specs(L, mod, site_key, out_base.c_str(), gamma, eps, r))
         r.w = nullptr;
     return r;
 }

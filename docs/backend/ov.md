@@ -142,8 +142,10 @@ one camera view, best of 4-6 iterations after 3 warmups. "CPU backend" is ggml's
 own CPU backend on the same 16-core host. No `GGML_OPENVINO_CACHE_DIR`.
 
 Latencies were taken at `b10331` and have not been re-timed on `b10729` or
-`b11223`. Read the GPU column for VLA-JEPA and GR00T N1.7 as the cost of a wrong
-answer at that pin; both are correct now.
+`b11223`, except π0.5's in the [FoldQuant section](#foldquant-w8a8--w4a4-checkpoints)
+(`vla-bench`, 2 views: 243 ms on the GPU at `b11223`). Read the GPU column for
+VLA-JEPA and GR00T N1.7 as the cost of a wrong answer at that pin; both are
+correct now.
 
 | Model | input | CPU backend | OpenVINO CPU | OpenVINO GPU | OpenVINO NPU |
 |---|---|---:|---:|---:|---:|
@@ -297,24 +299,27 @@ read the sites back as float weights instead. See
 [QUANTIZATION.md](../QUANTIZATION.md#openvino) for the arithmetic and accuracy.
 
 π0.5 LIBERO, 2 views at 224 px, 48 tokens, Intel Core Ultra X7 358H with an Arc
-B390 iGPU, OpenVINO 2026.4, `vla-bench` p50 over 10 calls after 3 warmups:
+B390 iGPU, OpenVINO 2026.4, llama.cpp `b11223`, `vla-bench` p50 over 10 calls
+after 3 warmups:
 
 | Device | Checkpoint | p50 ms | Peak RSS |
 |---|---|--:|--:|
-| CPU | bf16 | 6624 | 16.5 GB |
-| CPU | FoldQuant W4A4 | 3888 | 6.4 GB |
-| CPU | FoldQuant W4A4, o/down INT8 | 3807 | 7.1 GB |
-| CPU | FoldQuant W8A8 | 3653 | 8.6 GB |
-| GPU | bf16 | 568 | 11.4 GB |
-| GPU | FoldQuant W4A4 | 656 | 3.4 GB |
-| GPU | FoldQuant W4A4, o/down INT8 | 652 | 3.7 GB |
-| GPU | FoldQuant W8A8 | 655 | 4.7 GB |
+| CPU | bf16 | 6601 | 16.6 GB |
+| CPU | FoldQuant W4A4 | 3751 | 6.5 GB |
+| CPU | FoldQuant W4A4, o/down INT8 | 3682 | 7.1 GB |
+| CPU | FoldQuant W8A8 | 3536 | 8.6 GB |
+| GPU | bf16 | 243 | 11.5 GB |
+| GPU | FoldQuant W4A4 | 227 | 3.7 GB |
+| GPU | FoldQuant W4A4, o/down INT8 | 229 | 4.1 GB |
+| GPU | FoldQuant W8A8 | 241 | 4.8 GB |
 
-The GPU runs the per-site activation ops (reduction, rounding, the rotation
-MatMul) on top of the GEMMs and comes out slower than bf16 there, at a third of
-the memory. On an Intel GPU the SYCL backend is the faster FoldQuant path: the
-same W4A4 file runs in 291 ms on this iGPU, against 326 ms for bf16 on SYCL
-([sycl.md](sycl.md#foldquant-w8a8--w4a4-checkpoints)).
+On the GPU the per-site activation ops (reduction, rounding, the rotation
+MatMul) run on top of the GEMMs, so FoldQuant is only 7% faster than bf16 there,
+at a third of the memory. On an Intel GPU the SYCL backend is the faster
+FoldQuant path: built with sycl-tla, the same W4A4 file runs in 92 ms on this
+iGPU, against 263 ms for bf16 on SYCL
+([sycl.md](sycl.md#foldquant-w8a8--w4a4-checkpoints)). The NPU does not run π0.5
+at this pin (see [Known issues](#known-issues)).
 
 The FoldQuant files are FoldQuantVLA quantized checkpoints converted with
 `scripts/convert_quantized_model_to_gguf.py`: W4A4 and W4A4 with INT8 o/down are
@@ -346,7 +351,8 @@ several graphs, so one graph gets another's blob - the same class of bug as the
 in-process `graph_key` above, which is now keyed on shapes. In practice, pay the
 compile once per process and leave it unset.
 
-**The NPU accepts three of the ten archs, and only two of those are correct.**
+**At `b10729` the NPU accepted three of the ten archs, and only two of those were
+correct; at `b11223` π0.5 no longer compiles.**
 Check every NPU run against the startup banner: an unavailable NPU falls back to
 the CPU plugin silently and would otherwise report excellent numbers that are not
 NPU numbers at all. A partially-failing run still reports a wall-clock time, so
@@ -355,7 +361,7 @@ do not read a latency off a run whose actions did not come out.
 | Model | NPU outcome |
 |---|---|
 | SmolVLA | runs, 1.1e-2 (the compile config's dynamic quantization) |
-| π0.5 | runs, 1.6e-3 |
+| π0.5 | runs, 1.6e-3 at `b10729`; at `b11223` / OpenVINO 2026.4 the compiler rejects the main graph: `IE.Reshape doesn't support dynamic shapes` |
 | π0 | runs, but **1.7e0 wrong** - see below |
 | VLA-JEPA | compiles and runs, returns all `NaN` (not diagnosed) |
 | GR00T N1.5 / N1.6 / N1.7 | `NPUW: Assertion all_ok failed`, `partitioning.cpp:1350` |

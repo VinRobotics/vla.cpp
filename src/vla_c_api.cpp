@@ -172,6 +172,34 @@ int32_t vla_predict(vla_model * h, const vla_inputs * in,
     }
 }
 
+int32_t vla_encode_images(vla_model * h, const vla_image * images, int32_t n_images,
+                          float ** out_emb, int64_t * out_n) {
+    if (!h || !h->m || !images || n_images < 1 || !out_emb || !out_n)
+        return VLA_ERR_ARG;
+    *out_emb = nullptr;
+    *out_n = 0;
+    try {
+        std::lock_guard<std::mutex> lk(h->mu);
+        std::vector<vla::ImageView> views((size_t) n_images);
+        for (size_t i=0; i<views.size(); ++i) {
+            views[i] = vla::ImageView{ images[i].data, images[i].w, images[i].h,
+                                       to_pixel_format(images[i].format) };
+        }
+        std::vector<float> emb;
+        if (!vla::encode_images(h->m, views.data(), n_images, emb) || emb.empty())
+            return VLA_ERR_PREDICT;
+        float * buf = (float *) std::malloc(emb.size()*sizeof(float));
+        if (!buf)
+            return VLA_ERR_EXCEPTION;
+        std::memcpy(buf, emb.data(), emb.size()*sizeof(float));
+        *out_emb = buf;
+        *out_n = (int64_t) emb.size();
+        return VLA_OK;
+    } catch (...) {
+        return VLA_ERR_EXCEPTION;
+    }
+}
+
 void vla_free_actions(float * actions) {
     std::free(actions);
 }

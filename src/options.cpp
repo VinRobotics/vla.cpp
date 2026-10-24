@@ -119,8 +119,8 @@ bool resolve_num_steps(const char * arch, const Options & opts, int & steps) {
 
 const char * Options::usage() {
     return "  --weight-dtype f32|bf16|f16  resident dtype for GEMM weights\n"
-           "  --act-dtype f32|bf16      activation dtype; bf16 is pi0/evo1 only, needs CUDA\n"
-           "                            and bf16 weights\n"
+           "  --act-dtype f32|bf16      activation dtype; bf16 needs bf16 weights: pi0 and\n"
+           "                            pi0.5 on CUDA or SYCL, evo1 on CUDA\n"
            "  --flash-attn [0|1]        flash attention; faster, changes numerics\n"
            "  --mm-prec default|f32     matmul accumulation precision\n"
            "  --num-steps N             flow-matching solver steps, 1-1000 (default: the\n"
@@ -150,7 +150,7 @@ bool Options::parse_arg(int argc, char ** argv, int & i, std::string & err) {
             return false;
         }
         // F16 weights are for backends without BF16 kernels (Hexagon, OpenCL);
-        // the BF16 activation path is CUDA's and has no F16 twin.
+        // the BF16 activation path (CUDA, SYCL) has no F16 twin.
         if (a == "--act-dtype" && t == GGML_TYPE_F16) {
             err = a+": expected f32 or bf16, got '"+v+"'";
             return false;

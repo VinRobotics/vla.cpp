@@ -195,6 +195,10 @@ amax are xor butterflies over the sub-group. `fq_gemm` runs oneDNN's int8 matmul
 buffer, then the reference's epilogue. Built without oneDNN (`GGML_SYCL_DNN=OFF`),
 or with `VLA_FQ_SYCL_GEMM=native`, it uses its own GEMV for up to 32 tokens and
 an XMX `joint_matrix` kernel above that; both are much slower.
+Built with sycl-tla, π0.5 opts its sites into vla.cpp's DPAS GEMMs instead
+(`FqGemmSpec::s4`): INT4 x INT4 for the W4A4 sites, and `s8` for INT8 sites of up
+to 16 rows, each with the epilogue applied to the accumulator in registers, in
+the reference's order. See [sycl.md](backend/sycl.md#the-fast-path-sycl-tla).
 
 The integer sums are exact in any order, so the output is bit-identical to the CPU
 reference as long as the float steps are: the source is built with
@@ -202,17 +206,28 @@ reference as long as the float steps are: the source is built with
 `-cl-fp32-correctly-rounded-divide-sqrt` for the driver's JIT, which otherwise
 approximates division and sqrt and moves codes across rounding ties.
 `tests/test_foldquant_sycl_op.cpp` checks every activation byte and every output
-bit against the reference, for every bit width, on every GEMM path, at
-production shapes up to K = 16384. With a GPU it goes through ggml's SYCL
+bit against the reference, for every bit width, on every oneDNN and native GEMM
+path, at production shapes up to K = 16384. With a GPU it goes through ggml's SYCL
 backend; without one (CI, or `ONEAPI_DEVICE_SELECTOR=opencl:cpu`) it hands the
 nodes straight to the extension hook on the OpenCL CPU device, since ggml-sycl
 will not start on a CPU; the GEMMs then run on vla.cpp's own kernels, because
-oneDNN's int8 matmul on a CPU without VNNI saturates 16-bit partial sums. A
+oneDNN's int8 matmul on a CPU without VNNI saturates 16-bit partial sums.
+The test does not set `FqGemmSpec::s4`, so the DPAS GEMMs are checked in a whole
+model instead: `VLA_FQ_CHECK=1` on π0.5 recomputes the GEMM nodes that write F32
+(the expert's q/k/v, o and down, the VLM's o and down) with the reference and
+finds them exact. It skips the fused gate/up, whose GELU runs on the device into
+BF16, and the VLM's q/k/v, which feeds the RoPE pack directly. A
 whole π0.5 model follows the CUDA integer path to 0.99999 action cosine at W8A8, 0.9997 at W4A4 with INT8 o/down and 0.9995
 at W4A4 (FoldQuantVLA's calibrated LIBERO checkpoints). Both GPUs are exact to the same reference, so the gap comes from the
 float layers between the sites (the bf16 model's actions differ by up to 7e-4
 between them), which land some codes on the other side of a rounding tie; with
 15 activation levels those flips compound, as on OpenVINO.
+
+`VLA_PI05_W8A8=vit` on SYCL also quantizes π0.5's SigLIP, which a FoldQuant file
+carries in BF16, but not with FoldQuant's arithmetic: its weights are rounded at
+load to symmetric per-output-channel INT8 (round-to-nearest, no calibration, no
+rotation) and its activations get per-token INT8 scales, through the W8A8 GEMMs
+of `src/layers/qlinear.h`. It is outside the file contract and off by default.
 
 ### Other backends
 

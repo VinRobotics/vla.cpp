@@ -58,6 +58,11 @@ The GR00T models need two extras:
 - server side: `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda`
   for N1.6, `libero_sim` for N1.7).
 
+π0.5 prompts default to LeRobot's form, `Task: <task>, State: <bins>;\nAction: `.
+`VLA_PI05_PROMPT=openpi` sends openpi's instead, the task and `\n` with no state
+tokens, which is what openpi-trained π0.5 checkpoints such as
+`vrfai/pi05_libero_pytorch` (and the FoldQuant files made from it) were tuned on.
+
 ### SimplerEnv
 
 So far only **GR00T-N1.6** is wired (the `gr00t-n1d6-bridge` checkpoint with the

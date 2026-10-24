@@ -549,7 +549,9 @@ bool forward(ggml_tensor * dst, void * queue) {
 
 void sycl_register_fused_ops() {
     sycl_ext_register(forward, supported);
-    fused_ew_registered() = true;
+    // VLA_SYCL_NO_FUSED=1 declines every node (supported), so the helpers must
+    // not emit them.
+    fused_ew_registered() = !env_flag("VLA_SYCL_NO_FUSED");
 }
 
 }  // namespace vla

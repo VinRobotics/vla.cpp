@@ -73,8 +73,9 @@ with measured latency and success rate, is in [CHANGELOG.md](../CHANGELOG.md);
 per-device fastest flags are in [benchmark/](benchmark/).
 
 - `--weight-dtype f32|bf16|f16` - resident dtype for GEMM weights.
-- `--act-dtype f32|bf16` - activation dtype; bf16 is π0 and Evo-1 only and
-  needs CUDA and bf16 weights.
+- `--act-dtype f32|bf16` - activation dtype; bf16 needs bf16 weights and is
+  for π0 and π0.5 on CUDA or SYCL (not with a FoldQuant checkpoint) and Evo-1
+  on CUDA.
 - `--flash-attn` - faster on the larger towers, but changes numerics.
 - `--mm-prec default|f32` - matmul accumulation precision.
 - `--num-steps N` - flow-matching solver steps for π0, π0.5, SmolVLA, Evo-1,

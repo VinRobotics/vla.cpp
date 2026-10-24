@@ -35,6 +35,9 @@
 
 #include "sycl/vla_sycl_foldquant.h"
 #include "sycl/vla_sycl_ext.h"
+#ifdef VLA_SYCL_S4GEMM
+#include "sycl/vla_sycl_s4gemm.h"
+#endif
 
 #include "foldquant.h"
 #include "foldquant_ref.h"
@@ -48,6 +51,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <map>
 #include <tuple>
 #include <unordered_map>
@@ -70,11 +74,22 @@ struct ActParams {
     int64_t       x_stride;
     const float * ascale;      // [K] or null
     const float * gamma;       // [K] or null
+    const float * shift;       // [K] or null (adaRMS, after the gamma)
     int8_t *      blob;        // [M][row_bytes]
     int64_t       row_bytes;
     int64_t       M, K;
     bool          fold_before;
     float         clip, eps, inv_sqrt_bs;
+    // GEGLU source (fq_glu_act) instead of x: element k of row m is
+    // gelu_tanh(((acc[m][k] * xs_m) * ws[k]) (+ b[k])) * (same at k + K), xs_m the
+    // gate/up input row's scale, read from its blob; the glu epilogue's math.
+    const int32_t * glu_acc       = nullptr;   // [M][2K]
+    const uint16_t * glu_bf       = nullptr;   // or [M][2K] BF16 bits: sums x weight scales
+    const uint16_t * x_bf         = nullptr;   // or [M][K] BF16 bits: the input itself (the INT4 GEGLU kernel's)
+    const float *   glu_ws        = nullptr;   // [2K]
+    const float *   glu_bias      = nullptr;   // [2K] or null
+    const int8_t *  glu_blob      = nullptr;
+    int64_t         glu_row_bytes = 0, glu_kp = 0;
 };
 
 struct GemmParams {
@@ -83,9 +98,16 @@ struct GemmParams {
     const float *  wscale;     // [N]
     const float *  bias;       // [N] or null
     const float *  res;        // [M][N] or null
-    float *        y;          // [M][N]
+    float *        y;          // [M][N], or [M][glu_n] when glu_n != 0
     int64_t        M, N, K, row_bytes;
+    int64_t        glu_n = 0;  // GEGLU epilogue: y[m][n] = gelu(col n) * col n + glu_n, n < glu_n
+    const float *  gate  = nullptr;   // [N]: y = res + v * gate (pi0.5's gated residuals)
 };
+
+// ggml-sycl's GELU (tanh form); the CPU reference's fqref::gelu_tanh in device code.
+inline float gelu_tanh(float x) {
+    return 0.5f * x * (1.0f + sycl::tanh(0.7978845608028654f * x * (1.0f + 0.044715f * x * x)));
+}
 
 const void * fq_userdata(const ggml_tensor * op) {
     if (op == nullptr || op->op != GGML_OP_CUSTOM) return nullptr;
@@ -108,6 +130,8 @@ inline void load_chunk(const ActParams & a, const float * x, int64_t c0, float r
     for (int i = 0; i < CHUNK; ++i) v[i] = x[c0 + i];
     if (a.gamma)
         for (int i = 0; i < CHUNK; ++i) v[i] = (v[i] * rstd) * a.gamma[c0 + i];
+    if (a.shift)
+        for (int i = 0; i < CHUNK; ++i) v[i] = v[i] + a.shift[c0 + i];
     if (a.ascale && a.fold_before)
         for (int i = 0; i < CHUNK; ++i) v[i] = v[i] / a.ascale[c0 + i];
     if (ROT > 1) {
@@ -156,7 +180,7 @@ void act_kernel(const ActParams a, const sycl::nd_item<1> & it) {
     }
     for (int off = 16; off > 0; off >>= 1) mx = sycl::fmax(mx, sycl::permute_group_by_xor(sg, mx, off));
 
-    const float qmax  = ABITS == 4 ? 7.0f : 127.0f;
+    const float qmax  = ABITS == 8 ? 127.0f : 7.0f;   // 4 and 44 (INT4 codes in bytes)
     float       scale = (a.clip * mx) / qmax;
     if (scale < 1e-12f) scale = 1e-12f;
     // Multiply by the reciprocal, as the reference and the TensorRT kernels do.
@@ -165,7 +189,7 @@ void act_kernel(const ActParams a, const sycl::nd_item<1> & it) {
     int8_t * row = a.blob + m * a.row_bytes;
     for (int c = lane; c < nchunks; c += SG) {
         if (nchunks > SG) load_chunk<ROT>(a, x, (int64_t) c * CHUNK, rstd, v);
-        if (ABITS == 8) {
+        if (ABITS != 4) {
             int8_t * dst = row + (int64_t) c * CHUNK;
             for (int i = 0; i < CHUNK; ++i) {
                 float q = sycl::rint(v[i] * inv);
@@ -183,7 +207,7 @@ void act_kernel(const ActParams a, const sycl::nd_item<1> & it) {
         }
     }
     if (lane == 0) {
-        float * s = (float *) (row + (ABITS == 8 ? K : K / 2));
+        float * s = (float *) (row + (ABITS != 4 ? K : K / 2));
         *s = scale;
     }
 }
@@ -197,7 +221,9 @@ void act_kernel(const ActParams a, const sycl::nd_item<1> & it) {
 // of squares keeps the reference's lane-partial order (sub-group 0 runs the
 // per-row loop), so the codes are still bit-identical. The CUDA path's
 // act_row_kernel, ported.
-constexpr int RW = 8, RT = RW * SG, MAXC = 16;   // K <= RW * MAXC * 64
+constexpr int MAXC = 16;   // chunks per sub-group: K <= RW * MAXC * 64, RW = 8 or 16 sub-groups
+// (16 for the LLM's down projection, K = 16384; the amax is a max and the
+// butterfly is per chunk, so how many sub-groups share a row changes no code).
 
 template <int ROT>
 inline void rot_pair(const sycl::sub_group & sg, float & v0, float & v1, int lane, float inv_sqrt_bs) {
@@ -216,7 +242,7 @@ inline void rot_pair(const sycl::sub_group & sg, float & v0, float & v1, int lan
     }
 }
 
-template <int ABITS, int ROT>
+template <int ABITS, int ROT, int RW>
 void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red, float * s_rstd) {
     const auto    sg      = it.get_sub_group();
     const int     w       = (int) sg.get_group_linear_id();
@@ -224,7 +250,7 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
     const int64_t m       = (int64_t) it.get_group(0);
     const int64_t K       = a.K;
     const int     nchunks = (int) (K / CHUNK);
-    const float * x       = a.x + m * a.x_stride;
+    const float * x       = a.x ? a.x + m * a.x_stride : nullptr;
 
     if (a.gamma) {
         if (w == 0) {
@@ -248,8 +274,41 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
         const int c = w + i * RW;
         if (c < nchunks) {
             const int64_t k0 = (int64_t) c * CHUNK + 2 * lane;
-            float e0 = x[k0], e1 = x[k0 + 1];
+            float e0, e1;
+            if (a.glu_acc || a.glu_bf) {
+                float xs;
+                std::memcpy(&xs, a.glu_blob + m * a.glu_row_bytes + a.glu_kp, sizeof(float));
+                float g0, g1, u0, u1;
+                if (a.glu_bf) {
+                    // BF16 -> F32 by its bits: a bfloat16 type in this kernel changed the
+                    // other acts' rounding (VLA_FQ_CHECK mismatches on non-GLU nodes).
+                    const uint16_t * br = a.glu_bf + m * 2 * K;
+                    auto bf = [](uint16_t b) { return sycl::bit_cast<float>((uint32_t) b << 16); };
+                    g0 = bf(br[k0]) * xs;     g1 = bf(br[k0 + 1]) * xs;
+                    u0 = bf(br[K + k0]) * xs; u1 = bf(br[K + k0 + 1]) * xs;
+                } else {
+                    const int32_t * ar = a.glu_acc + m * 2 * K;
+                    g0 = ((float) ar[k0]     * xs) * a.glu_ws[k0];
+                    g1 = ((float) ar[k0 + 1] * xs) * a.glu_ws[k0 + 1];
+                    u0 = ((float) ar[K + k0]     * xs) * a.glu_ws[K + k0];
+                    u1 = ((float) ar[K + k0 + 1] * xs) * a.glu_ws[K + k0 + 1];
+                }
+                if (a.glu_bias) {
+                    g0 = g0 + a.glu_bias[k0];     g1 = g1 + a.glu_bias[k0 + 1];
+                    u0 = u0 + a.glu_bias[K + k0]; u1 = u1 + a.glu_bias[K + k0 + 1];
+                }
+                e0 = gelu_tanh(g0) * u0;
+                e1 = gelu_tanh(g1) * u1;
+            } else if (a.x_bf) {
+                const uint16_t * xr = a.x_bf + m * K;
+                e0 = sycl::bit_cast<float>((uint32_t) xr[k0] << 16);
+                e1 = sycl::bit_cast<float>((uint32_t) xr[k0 + 1] << 16);
+            } else {
+                e0 = x[k0];
+                e1 = x[k0 + 1];
+            }
             if (a.gamma) { e0 = (e0 * rstd) * a.gamma[k0]; e1 = (e1 * rstd) * a.gamma[k0 + 1]; }
+            if (a.shift) { e0 = e0 + a.shift[k0]; e1 = e1 + a.shift[k0 + 1]; }
             if (a.ascale && a.fold_before) { e0 = e0 / a.ascale[k0]; e1 = e1 / a.ascale[k0 + 1]; }
             rot_pair<ROT>(sg, e0, e1, lane, a.inv_sqrt_bs);
             if (a.ascale && !a.fold_before) { e0 = e0 / a.ascale[k0]; e1 = e1 / a.ascale[k0 + 1]; }
@@ -263,7 +322,7 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
     mx = red[0];
     for (int j = 1; j < RW; ++j) mx = sycl::fmax(mx, red[j]);
 
-    const float qmax  = ABITS == 4 ? 7.0f : 127.0f;
+    const float qmax  = ABITS == 8 ? 127.0f : 7.0f;   // 4 and 44 (INT4 codes in bytes)
     float       scale = (a.clip * mx) / qmax;
     if (scale < 1e-12f) scale = 1e-12f;
     const float inv = 1.0f / scale;
@@ -275,7 +334,7 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
             float q0 = sycl::rint(v0[i] * inv), q1 = sycl::rint(v1[i] * inv);
             q0 = sycl::fmin(qmax, sycl::fmax(-qmax, q0));
             q1 = sycl::fmin(qmax, sycl::fmax(-qmax, q1));
-            if (ABITS == 8) {
+            if (ABITS != 4) {
                 row[(int64_t) c * CHUNK + 2 * lane]     = (int8_t) (int) q0;
                 row[(int64_t) c * CHUNK + 2 * lane + 1] = (int8_t) (int) q1;
             } else {
@@ -285,26 +344,31 @@ void act_row_kernel(const ActParams a, const sycl::nd_item<1> & it, float * red,
         }
     }
     if (it.get_local_linear_id() == 0) {
-        float * sp = (float *) (row + (ABITS == 8 ? K : K / 2));
+        float * sp = (float *) (row + (ABITS != 4 ? K : K / 2));
         *sp = scale;
     }
 }
 
-template <int ABITS, int ROT>
+template <int ABITS, int ROT, int RW>
 void launch_act_row(sycl::queue & q, const ActParams & a) {
+    constexpr int RT = RW * SG;
     q.submit([&](sycl::handler & h) {
         sycl::local_accessor<float, 1> red(sycl::range<1>(RW + 1), h);
         h.parallel_for(sycl::nd_range<1>((size_t) a.M * RT, RT), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG)]] {
             float * r = red.template get_multi_ptr<sycl::access::decorated::no>().get();
-            act_row_kernel<ABITS, ROT>(a, it, r, r + RW);
+            act_row_kernel<ABITS, ROT, RW>(a, it, r, r + RW);
         });
     });
 }
 
 template <int ABITS, int ROT>
 void launch_act_rot(sycl::queue & q, const ActParams & a) {
-    if (a.K / CHUNK <= RW * MAXC) {
-        launch_act_row<ABITS, ROT>(q, a);
+    if (a.K / CHUNK <= 8 * MAXC) {
+        launch_act_row<ABITS, ROT, 8>(q, a);
+        return;
+    }
+    if (a.K / CHUNK <= 16 * MAXC) {
+        launch_act_row<ABITS, ROT, 16>(q, a);
         return;
     }
     const size_t groups = (size_t) ((a.M + ROWS - 1) / ROWS);
@@ -382,7 +446,7 @@ void launch_gemm_bits(sycl::queue & q, const GemmParams & g, bool has_bias, bool
                 std::memcpy(&xs, g.blob + m * g.row_bytes + (ABITS == 4 ? g.K / 2 : g.K), sizeof(float));
                 float v = ((float) acc * xs) * g.wscale[n];
                 if (has_bias) v = v + g.bias[n];
-                if (has_res)  v = v + g.res[m * g.N + n];
+                if (has_res)  v = g.gate ? g.res[m * g.N + n] + v * g.gate[n] : v + g.res[m * g.N + n];
                 g.y[m * g.N + n] = v;
             }
         });
@@ -461,7 +525,7 @@ void launch_gemm_xmx(sycl::queue & q, const GemmParams & g, bool has_bias, bool 
                 std::memcpy(&xs, g.blob + m * g.row_bytes + (ABITS == 4 ? g.K / 2 : g.K), sizeof(float));
                 float v = ((float) Cs[e] * xs) * g.wscale[n];
                 if (has_bias) v = v + g.bias[n];
-                if (has_res)  v = v + g.res[m * g.N + n];
+                if (has_res)  v = g.gate ? g.res[m * g.N + n] + v * g.gate[n] : v + g.res[m * g.N + n];
                 g.y[m * g.N + n] = v;
             }
         });
@@ -522,7 +586,7 @@ void launch_gemm_small(sycl::queue & q, const GemmParams & g, bool has_bias, boo
                 std::memcpy(&xs, g.blob + (int64_t) m * g.row_bytes + (ABITS == 4 ? g.K / 2 : g.K), sizeof(float));
                 float v = ((float) total * xs) * g.wscale[n];
                 if (has_bias) v = v + g.bias[n];
-                if (has_res)  v = v + g.res[(int64_t) m * g.N + n];
+                if (has_res)  v = g.gate ? g.res[(int64_t) m * g.N + n] + v * g.gate[n] : v + g.res[(int64_t) m * g.N + n];
                 g.y[(int64_t) m * g.N + n] = v;
             }
         }
@@ -550,6 +614,7 @@ bool run_act(sycl::queue & q, ggml_tensor * dst, const FqActSpec & s) {
     const ggml_tensor * x = dst->src[0];
     int si = 1;
     const ggml_tensor * gamma  = s.has_gamma  ? dst->src[si++] : nullptr;
+    const ggml_tensor * shift  = s.has_shift  ? dst->src[si++] : nullptr;
     const ggml_tensor * ascale = s.has_ascale ? dst->src[si++] : nullptr;
     if (!x || x->type != GGML_TYPE_F32 || x->nb[0] != sizeof(float) || s.K % CHUNK != 0 || s.rot_block > CHUNK)
         return false;
@@ -558,6 +623,7 @@ bool run_act(sycl::queue & q, ggml_tensor * dst, const FqActSpec & s) {
     a.x_stride    = (int64_t) (x->nb[1] / sizeof(float));
     a.ascale      = ascale ? (const float *) ascale->data : nullptr;
     a.gamma       = gamma ? (const float *) gamma->data : nullptr;
+    a.shift       = shift ? (const float *) shift->data : nullptr;
     a.blob        = (int8_t *) dst->data;
     a.row_bytes   = dst->ne[0];
     a.M           = dst->ne[1] * dst->ne[2] * dst->ne[3];
@@ -567,8 +633,9 @@ bool run_act(sycl::queue & q, ggml_tensor * dst, const FqActSpec & s) {
     a.eps         = s.eps;
     a.inv_sqrt_bs = s.rot_block > 1 ? fqref::inv_sqrt_block(s.rot_block) : 1.0f;
     if (a.M == 0) return true;
+    // ABITS 44: INT4 range, one code per byte (FqActSpec::wide4).
     return s.abits == 8 ? launch_act_bits<8>(q, a, s.rot_block)
-         : s.abits == 4 ? launch_act_bits<4>(q, a, s.rot_block)
+         : s.abits == 4 ? (s.wide4 ? launch_act_bits<44>(q, a, s.rot_block) : launch_act_bits<4>(q, a, s.rot_block))
          : false;
 }
 
@@ -621,6 +688,21 @@ void unpack_rows(sycl::queue & q, const int8_t * src, int64_t src_stride, int8_t
     });
 }
 
+// GEGLU epilogue over [gate | up] accumulators: one pass, the [M][N] F32
+// intermediate and the separate GLU kernel never exist.
+template <int ABITS>
+void launch_epilogue_glu(sycl::queue & q, const GemmParams & g, const int32_t * acc, bool has_bias) {
+    q.parallel_for(sycl::range<2>((size_t) g.M, (size_t) g.glu_n), [=](sycl::item<2> it) {
+        const int64_t m = (int64_t) it.get_id(0), n = (int64_t) it.get_id(1), nu = n + g.glu_n;
+        float xs;
+        std::memcpy(&xs, g.blob + m * g.row_bytes + (ABITS == 4 ? g.K / 2 : g.K), sizeof(float));
+        float gv = ((float) acc[m * g.N + n]  * xs) * g.wscale[n];
+        float uv = ((float) acc[m * g.N + nu] * xs) * g.wscale[nu];
+        if (has_bias) { gv = gv + g.bias[n]; uv = uv + g.bias[nu]; }
+        g.y[m * g.glu_n + n] = gelu_tanh(gv) * uv;
+    });
+}
+
 template <int ABITS>
 void launch_epilogue(sycl::queue & q, const GemmParams & g, const int32_t * acc, bool has_bias, bool has_res) {
     q.parallel_for(sycl::range<2>((size_t) g.M, (size_t) g.N), [=](sycl::item<2> it) {
@@ -629,24 +711,28 @@ void launch_epilogue(sycl::queue & q, const GemmParams & g, const int32_t * acc,
         std::memcpy(&xs, g.blob + m * g.row_bytes + (ABITS == 4 ? g.K / 2 : g.K), sizeof(float));
         float v = ((float) acc[m * g.N + n] * xs) * g.wscale[n];
         if (has_bias) v = v + g.bias[n];
-        if (has_res)  v = v + g.res[m * g.N + n];
+        if (has_res)  v = g.gate ? g.res[m * g.N + n] + v * g.gate[n] : v + g.res[m * g.N + n];
         g.y[m * g.N + n] = v;
     });
 }
 
-bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res);
+bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res,
+                    int32_t ** acc_out = nullptr, bool bf16ws = false);
 
 // oneDNN on a GPU, unless it cannot drive it (no engine, no int8 matmul): then
 // this file's kernels, for good on that queue. GPUs only: on a CPU device
 // oneDNN's int8 matmul is not exact everywhere (on CPUs without VNNI it sums
 // pairs in saturating 16-bit lanes, vpmaddubsw), and vla.cpp only runs ggml-sycl
 // on GPUs anyway; the CPU device is test_foldquant_sycl_op's stand-in.
-bool gemm_dnnl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res) {
+// acc_out: stop after the matmul and hand back the int32 sums (fq_glu_act);
+// with bf16ws, BF16 sums already times the weight scales instead (same buffer).
+bool gemm_dnnl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res,
+               int32_t ** acc_out = nullptr, bool bf16ws = false) {
     static std::unordered_map<sycl::queue *, bool> unusable;
     if (unusable.find(&q) == unusable.end()) unusable[&q] = !q.get_device().is_gpu();
     if (unusable[&q]) return false;
     try {
-        if (gemm_dnnl_impl(q, g, wbits, abits, has_bias, has_res)) return true;
+        if (gemm_dnnl_impl(q, g, wbits, abits, has_bias, has_res, acc_out, bf16ws)) return true;
     } catch (const std::exception & e) {
         std::fprintf(stderr, "FoldQuant SYCL: oneDNN unavailable on this device (%s); using the native GEMMs\n", e.what());
     }
@@ -654,7 +740,9 @@ bool gemm_dnnl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool
     return false;
 }
 
-bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res) {
+bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool has_bias, bool has_res,
+                    int32_t ** acc_out, bool bf16ws) {
+    bf16ws = bf16ws && acc_out;
     using dt  = dnnl::memory::data_type;
     using md  = dnnl::memory::desc;
     DnnlState & st = dnnl_state(q);
@@ -671,10 +759,12 @@ bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits,
     auto make = [&](bool w4) {
         const md src_md({ M, K }, dt::s8, { lda, 1 });
         const md wei_md({ K, N }, w4 ? dt::s4 : dt::s8, { 1, K });
-        const md dst_md({ M, N }, dt::s32, { N, 1 });
-        return dnnl::matmul(dnnl::matmul::primitive_desc(st.eng, src_md, wei_md, dst_md));
+        const md dst_md({ M, N }, bf16ws ? dt::bf16 : dt::s32, { N, 1 });
+        dnnl::primitive_attr attr;
+        if (bf16ws) attr.set_scales_mask(DNNL_ARG_WEIGHTS, 1 << 1);   // per output column
+        return dnnl::matmul(dnnl::matmul::primitive_desc(st.eng, src_md, wei_md, dst_md, attr));
     };
-    auto key = std::make_tuple(M, N, K, lda, s4 ? 1 : 0);
+    auto key = std::make_tuple(M, N, K, lda, (s4 ? 1 : 0) | (bf16ws ? 2 : 0));
     auto it  = st.prims.find(key);
     if (it == st.prims.end()) {
         try {
@@ -684,7 +774,7 @@ bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits,
             st.s4_ok = false;   // no s4 x s8 matmul here: unpack the weights instead
             std::fprintf(stderr, "FoldQuant SYCL: oneDNN has no s8 x s4 matmul here; INT4 weights are unpacked per call\n");
             s4  = false;
-            key = std::make_tuple(M, N, K, lda, 0);
+            key = std::make_tuple(M, N, K, lda, bf16ws ? 2 : 0);
             it  = st.prims.find(key);
             if (it == st.prims.end()) it = st.prims.emplace(key, make(false)).first;
         }
@@ -699,16 +789,66 @@ bool gemm_dnnl_impl(sycl::queue & q, const GemmParams & g, int wbits, int abits,
     using dnnl::sycl_interop::memory_kind;
     const md src_md({ M, K }, dt::s8, { lda, 1 });
     const md wei_md({ K, N }, s4 ? dt::s4 : dt::s8, { 1, K });
-    const md dst_md({ M, N }, dt::s32, { N, 1 });
+    const md dst_md({ M, N }, bf16ws ? dt::bf16 : dt::s32, { N, 1 });
     auto src_m = make_memory(src_md, st.eng, memory_kind::usm, const_cast<int8_t *>(a));
     auto wei_m = make_memory(wei_md, st.eng, memory_kind::usm, const_cast<int8_t *>(w));
     auto dst_m = make_memory(dst_md, st.eng, memory_kind::usm, acc);
-    it->second.execute(st.strm, { { DNNL_ARG_SRC, src_m }, { DNNL_ARG_WEIGHTS, wei_m }, { DNNL_ARG_DST, dst_m } });
-    if (abits == 4) launch_epilogue<4>(q, g, acc, has_bias, has_res);
-    else            launch_epilogue<8>(q, g, acc, has_bias, has_res);
+    if (bf16ws) {
+        auto sc_m = make_memory(md({ N }, dt::f32, { 1 }), st.eng, memory_kind::usm, const_cast<float *>(g.wscale));
+        it->second.execute(st.strm, { { DNNL_ARG_SRC, src_m }, { DNNL_ARG_WEIGHTS, wei_m }, { DNNL_ARG_DST, dst_m },
+                                      { DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, sc_m } });
+    } else {
+        it->second.execute(st.strm, { { DNNL_ARG_SRC, src_m }, { DNNL_ARG_WEIGHTS, wei_m }, { DNNL_ARG_DST, dst_m } });
+    }
+    if (acc_out) {
+        *acc_out = acc;
+        return true;
+    }
+    if (g.glu_n) {
+        if (abits == 4) launch_epilogue_glu<4>(q, g, acc, has_bias);
+        else            launch_epilogue_glu<8>(q, g, acc, has_bias);
+    } else if (abits == 4) launch_epilogue<4>(q, g, acc, has_bias, has_res);
+    else                   launch_epilogue<8>(q, g, acc, has_bias, has_res);
     return true;
 }
 #endif
+
+// This file's GEMM kernels on g as given (no GLU): the GEMV for M <= SM_MAX,
+// XMX, else the plain tiled one.
+bool run_gemm_plain(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool bias, bool simple, bool res = false);
+
+#if defined(VLA_FQ_SYCL_DNNL) && defined(VLA_SYCL_S4GEMM)
+// INT4 x INT4 on DPAS for sites that opt in (FqGemmSpec::s4, nibble-packed
+// activations). Exact integer sums like oneDNN's, so the epilogues and the
+// VLA_FQ_CHECK comparison are unchanged. VLA_FQ_NO_S4GEMM=1: oneDNN instead.
+bool s4_ok(const FqGemmSpec & s, int abits, const GemmParams & g) {
+    static const bool off = env_flag("VLA_FQ_NO_S4GEMM");
+    return !off && s.s4 && s.wbits == 4 && abits == 4 && g.K % 128 == 0 && g.row_bytes % 16 == 0 && g.M > 0;
+}
+
+int32_t * s4_acc(sycl::queue & q, const GemmParams & g) {
+    if (g.N % 256 != 0) return nullptr;
+    DnnlState & st = dnnl_state(q);
+    int32_t * acc = grow(q, st.acc, st.acc_cap, (size_t) (g.M * g.N));
+    if (!acc || !sycl_s4_gemm_s32(&q, g.blob, g.M, g.K, g.row_bytes, g.w, g.N, acc)) return nullptr;
+    return acc;
+}
+#endif
+
+// Device scratch for a GLU node's [M][N] intermediate on the native path.
+float * glu_scratch(sycl::queue & q, size_t n) {
+    static std::mutex mu;
+    static float * p = nullptr;
+    static size_t cap = 0;
+    static sycl::context ctx = q.get_context();
+    std::lock_guard<std::mutex> lk(mu);
+    if (p && cap >= n && ctx == q.get_context()) return p;
+    if (p) { q.wait(); sycl::free(p, ctx); }
+    ctx = q.get_context();
+    p = sycl::malloc_device<float>(n, q);
+    cap = p ? n : 0;
+    return p;
+}
 
 bool run_gemm(sycl::queue & q, ggml_tensor * dst, const FqGemmSpec & s, int abits) {
     const ggml_tensor * w = dst->src[0], * blob = dst->src[1], * ws = dst->src[2];
@@ -720,12 +860,35 @@ bool run_gemm(sycl::queue & q, ggml_tensor * dst, const FqGemmSpec & s, int abit
     g.wscale    = (const float *) ws->data;
     g.bias      = bias ? (const float *) bias->data : nullptr;
     g.res       = res ? (const float *) res->data : nullptr;
+    g.gate      = (res && dst->src[5]) ? (const float *) dst->src[5]->data : nullptr;
     g.y         = (float *) dst->data;
     g.M         = dst->ne[1];
     g.N         = s.N;
     g.K         = s.K;
     g.row_bytes = blob->ne[0];
+    g.glu_n     = s.glu ? s.N / 2 : 0;
     if (g.M == 0) return true;
+    if (g.glu_n && (res || s.N % 2)) return false;
+#if defined(VLA_FQ_SYCL_DNNL) && defined(VLA_SYCL_S4GEMM)
+    // The epilogue in the GEMM's registers: one kernel, the same bits as the s32
+    // sums and launch_epilogue. VLA_FQ_NO_S4EPI=1: the two kernels.
+    static const bool split_epi = env_flag("VLA_FQ_NO_S4EPI");
+    if (s4_ok(s, abits, g) && !g.glu_n && !split_epi &&
+        sycl_s4_gemm_f32(&q, g.blob, g.M, g.K, g.row_bytes, g.K / 2, g.w, g.N, g.wscale, g.bias, g.res, g.gate, g.y))
+        return true;
+    // INT8 sites at the expert's few rows: the same DPAS GEMM and epilogue
+    // (16-row tiles, exact sums). VLA_FQ_NO_S8DPAS=1: oneDNN.
+    static const bool no_s8 = env_flag("VLA_FQ_NO_S8DPAS");
+    if (!no_s8 && !split_epi && s.wbits == 8 && abits == 8 && !g.glu_n &&
+        sycl_s8_gemm_f32(&q, g.blob, g.M, g.K, g.row_bytes, g.K, g.w, g.N, g.wscale, g.bias, g.res, g.gate, g.y))
+        return true;
+    if (s4_ok(s, abits, g))
+        if (int32_t * acc = s4_acc(q, g)) {
+            if (g.glu_n) launch_epilogue_glu<4>(q, g, acc, bias != nullptr);
+            else         launch_epilogue<4>(q, g, acc, bias != nullptr, res != nullptr);
+            return true;
+        }
+#endif
     // oneDNN when built with it; VLA_FQ_SYCL_GEMM=native picks this file's kernels
     // (the GEMV for M <= SM_MAX, else XMX) and =simple the plain tiled one. Read
     // per call so test_foldquant_sycl_op can cover every path.
@@ -736,26 +899,45 @@ bool run_gemm(sycl::queue & q, ggml_tensor * dst, const FqGemmSpec & s, int abit
     if (!native && gemm_dnnl(q, g, s.wbits, abits, bias, res))
         return true;
 #endif
+    if (g.glu_n) {
+        // The native kernels write [M][N]; apply the GLU from a scratch copy.
+        float * out = g.y;
+        GemmParams full = g;
+        full.glu_n = 0;
+        full.y = glu_scratch(q, (size_t) (g.M * g.N));
+        if (!full.y || !run_gemm_plain(q, full, s.wbits, abits, bias != nullptr, simple)) return false;
+        const float * src = full.y;
+        const int64_t N = g.N, Nh = g.glu_n;
+        q.parallel_for(sycl::range<2>((size_t) g.M, (size_t) Nh), [=](sycl::item<2> it) {
+            const int64_t m = (int64_t) it.get_id(0), n = (int64_t) it.get_id(1);
+            out[m * Nh + n] = gelu_tanh(src[m * N + n]) * src[m * N + n + Nh];
+        });
+        return true;
+    }
+    return run_gemm_plain(q, g, s.wbits, abits, bias != nullptr, simple, res != nullptr);
+}
+
+bool run_gemm_plain(sycl::queue & q, const GemmParams & g, int wbits, int abits, bool bias, bool simple, bool res) {
     if (!simple && g.M <= SM_MAX && g.K % (SM_SG * 8) == 0) {
-        if (s.wbits == 8 && abits == 8) launch_gemm_small<8, 8>(q, g, bias, res);
-        else if (s.wbits == 8 && abits == 4) launch_gemm_small<8, 4>(q, g, bias, res);
-        else if (s.wbits == 4 && abits == 8) launch_gemm_small<4, 8>(q, g, bias, res);
-        else if (s.wbits == 4 && abits == 4) launch_gemm_small<4, 4>(q, g, bias, res);
+        if (wbits == 8 && abits == 8) launch_gemm_small<8, 8>(q, g, bias, res);
+        else if (wbits == 8 && abits == 4) launch_gemm_small<8, 4>(q, g, bias, res);
+        else if (wbits == 4 && abits == 8) launch_gemm_small<4, 8>(q, g, bias, res);
+        else if (wbits == 4 && abits == 4) launch_gemm_small<4, 4>(q, g, bias, res);
         else return false;
         return true;
     }
     if (!simple && use_xmx(q) && g.N % XN == 0 && g.K % XK == 0) {
-        if (s.wbits == 8 && abits == 8) launch_gemm_xmx<8, 8>(q, g, bias, res);
-        else if (s.wbits == 8 && abits == 4) launch_gemm_xmx<8, 4>(q, g, bias, res);
-        else if (s.wbits == 4 && abits == 8) launch_gemm_xmx<4, 8>(q, g, bias, res);
-        else if (s.wbits == 4 && abits == 4) launch_gemm_xmx<4, 4>(q, g, bias, res);
+        if (wbits == 8 && abits == 8) launch_gemm_xmx<8, 8>(q, g, bias, res);
+        else if (wbits == 8 && abits == 4) launch_gemm_xmx<8, 4>(q, g, bias, res);
+        else if (wbits == 4 && abits == 8) launch_gemm_xmx<4, 8>(q, g, bias, res);
+        else if (wbits == 4 && abits == 4) launch_gemm_xmx<4, 4>(q, g, bias, res);
         else return false;
         return true;
     }
-    if (s.wbits == 8 && abits == 8) launch_gemm_bits<8, 8>(q, g, bias, res);
-    else if (s.wbits == 8 && abits == 4) launch_gemm_bits<8, 4>(q, g, bias, res);
-    else if (s.wbits == 4 && abits == 8) launch_gemm_bits<4, 8>(q, g, bias, res);
-    else if (s.wbits == 4 && abits == 4) launch_gemm_bits<4, 4>(q, g, bias, res);
+    if (wbits == 8 && abits == 8) launch_gemm_bits<8, 8>(q, g, bias, res);
+    else if (wbits == 8 && abits == 4) launch_gemm_bits<8, 4>(q, g, bias, res);
+    else if (wbits == 4 && abits == 8) launch_gemm_bits<4, 8>(q, g, bias, res);
+    else if (wbits == 4 && abits == 4) launch_gemm_bits<4, 4>(q, g, bias, res);
     else return false;
     return true;
 }
@@ -765,6 +947,79 @@ bool run_gemm(sycl::queue & q, ggml_tensor * dst, const FqGemmSpec & s, int abit
 int blob_abits(const ggml_tensor * blob, int64_t K) {
     return blob->ne[0] == fq_act_row_bytes(K, 4) ? 4 : 8;
 }
+
+#ifdef VLA_FQ_SYCL_DNNL
+// fq_glu_act: the gate/up matmul to int32 sums (oneDNN), then the down site's
+// act kernel reading the GEGLU of those sums in place of a stored F32 input.
+bool run_glu_act(sycl::queue & q, ggml_tensor * dst, const FqGluActSpec & gs) {
+    const FqGemmSpec & s  = *gs.gemm;
+    const FqActSpec &  as = *gs.act;
+    const ggml_tensor * w = dst->src[0], * blob = dst->src[1], * ws = dst->src[2], * bias = dst->src[3];
+    const ggml_tensor * ascale = dst->src[4];
+    if (!w || !blob || !ws || as.has_gamma || as.K * 2 != s.N || as.K % CHUNK != 0 || as.K / CHUNK > 16 * MAXC)
+        return false;
+    GemmParams g{};
+    g.w         = (const int8_t *) w->data;
+    g.blob      = (const int8_t *) blob->data;
+    g.wscale    = (const float *) ws->data;
+    g.bias      = bias ? (const float *) bias->data : nullptr;
+    g.M         = blob->ne[1];
+    g.N         = s.N;
+    g.K         = s.K;
+    g.row_bytes = blob->ne[0];
+    if (g.M == 0) return true;
+    const int abits = blob_abits(blob, s.K);
+#ifdef VLA_SYCL_S4GEMM
+    if (s4_ok(s, abits, g) && (s.N / 2) % 256 == 0) {
+        // INT4 DPAS with the GEGLU in its epilogue: BF16 [M][N/2] out, read by the act.
+        const int64_t Nh = s.N / 2;
+        uint16_t * h = reinterpret_cast<uint16_t *>(glu_scratch(q, (size_t) ((g.M * Nh + 1) / 2)));
+        if (h && sycl_s4_gemm_glu(&q, g.blob, g.M, g.K, g.row_bytes, fq_act_kpack(s.K, 4), g.w, g.wscale, g.bias, Nh, h)) {
+            ActParams a{};
+            a.ascale      = ascale ? (const float *) ascale->data : nullptr;
+            a.blob        = (int8_t *) dst->data;
+            a.row_bytes   = dst->ne[0];
+            a.M           = g.M;
+            a.K           = as.K;
+            a.fold_before = as.fold_before;
+            a.clip        = as.clip;
+            a.eps         = as.eps;
+            a.inv_sqrt_bs = as.rot_block > 1 ? fqref::inv_sqrt_block(as.rot_block) : 1.0f;
+            a.x_bf        = h;
+            return as.abits == 8 ? launch_act_bits<8>(q, a, as.rot_block)
+                 : as.abits == 4 ? (as.wide4 ? launch_act_bits<44>(q, a, as.rot_block) : launch_act_bits<4>(q, a, as.rot_block))
+                 : false;
+        }
+    }
+#endif
+    // BF16 sums with the weight scales applied by oneDNN: the matmul writes and
+    // this act reads half the bytes (prefix gate/up: 1.07 -> 0.85 ms on the Arc
+    // B390), at a BF16 rounding of the pre-GELU values. VLA_FQ_GLU_BF16=0: int32.
+    static const bool bf = [] { const char * e = std::getenv("VLA_FQ_GLU_BF16"); return !(e && std::strcmp(e, "0") == 0); }();
+    int32_t * acc = nullptr;
+    if (!gemm_dnnl(q, g, s.wbits, abits, false, false, &acc, bf) || !acc) return false;
+    ActParams a{};
+    a.ascale        = ascale ? (const float *) ascale->data : nullptr;
+    a.blob          = (int8_t *) dst->data;
+    a.row_bytes     = dst->ne[0];
+    a.M             = g.M;
+    a.K             = as.K;
+    a.fold_before   = as.fold_before;
+    a.clip          = as.clip;
+    a.eps           = as.eps;
+    a.inv_sqrt_bs   = as.rot_block > 1 ? fqref::inv_sqrt_block(as.rot_block) : 1.0f;
+    a.glu_acc       = bf ? nullptr : acc;
+    a.glu_bf        = bf ? reinterpret_cast<const uint16_t *>(acc) : nullptr;
+    a.glu_ws        = g.wscale;
+    a.glu_bias      = g.bias;
+    a.glu_blob      = g.blob;
+    a.glu_row_bytes = g.row_bytes;
+    a.glu_kp        = fq_act_kpack(s.K, abits);
+    return as.abits == 8 ? launch_act_bits<8>(q, a, as.rot_block)
+         : as.abits == 4 ? (as.wide4 ? launch_act_bits<44>(q, a, as.rot_block) : launch_act_bits<4>(q, a, as.rot_block))
+         : false;
+}
+#endif
 
 // VLA_FQ_CHECK=1, as on CUDA: after each node, recompute it with the CPU
 // reference on host copies of the same inputs and report any byte difference.
@@ -797,26 +1052,44 @@ void check_against_host(sycl::queue & q, ggml_tensor * dst, void (*ref)(ggml_ten
         }
     std::printf("vla(fq) CHECK %-40s ne=[%lld,%lld] %s", ggml_get_name(dst), (long long) dst->ne[0],
                 (long long) dst->ne[1], bad ? "MISMATCH" : "ok\n");
-    if (bad) std::printf(" rows %lld/%lld (first %lld)\n", (long long) bad, (long long) rows, (long long) first);
+    if (bad) {
+        double md = 0, mv = 0;
+        if (dst->type == GGML_TYPE_F32)
+            for (size_t i = 0; i < got.size() / 4; ++i) {
+                const float x = ((const float *) got.data())[i], y = ((const float *) want.data())[i];
+                md = std::max(md, (double) std::fabs(x - y));
+                mv = std::max(mv, (double) std::fabs(y));
+            }
+        std::printf(" rows %lld/%lld (first %lld)", (long long) bad, (long long) rows, (long long) first);
+        if (dst->type == GGML_TYPE_F32) std::printf(" max|d| %.4g of max|y| %.4g", md, mv);
+        std::printf("\n");
+    }
 }
 
-bool dispatch(ggml_tensor * dst, void * queue) {
+bool fq_dispatch(ggml_tensor * dst, void * queue) {
     const void * ud = fq_userdata(dst);
     const uint32_t m = fq_magic(ud);
-    if (m != FQ_ACT_MAGIC && m != FQ_GEMM_MAGIC) return false;
+    if (m != FQ_ACT_MAGIC && m != FQ_GEMM_MAGIC && m != FQ_GLU_ACT_MAGIC) return false;
     sycl::queue & q = *static_cast<sycl::queue *>(queue);
+    if (m == FQ_GLU_ACT_MAGIC) {   // GEGLU on the device: not bit-comparable, so no VLA_FQ_CHECK
+#ifdef VLA_FQ_SYCL_DNNL
+        return run_glu_act(q, dst, *static_cast<const FqGluActSpec *>(ud));
+#else
+        return false;
+#endif
+    }
     static const bool check = env_flag("VLA_FQ_CHECK");
     if (m == FQ_ACT_MAGIC) {
         const FqActSpec & s = *static_cast<const FqActSpec *>(ud);
         if (!run_act(q, dst, s)) return false;
         if (check)
-            check_against_host(q, dst, fq_act_cpu, const_cast<void *>(ud), (size_t) fq_act_kpack(s.K, s.abits) + 4,
+            check_against_host(q, dst, fq_act_cpu, const_cast<void *>(ud), (size_t) fq_act_kpack(s.K, fq_act_store_bits(s)) + 4,
                                (size_t) dst->ne[0]);
         return true;
     }
     const FqGemmSpec & s = *static_cast<const FqGemmSpec *>(ud);
     if (!run_gemm(q, dst, s, blob_abits(dst->src[1], s.K))) return false;
-    if (check)
+    if (check && !s.glu)   // GLU nodes evaluate tanh on the device: not bit-comparable
         check_against_host(q, dst, fq_gemm_cpu, const_cast<void *>(ud), (size_t) s.N * sizeof(float),
                            (size_t) s.N * sizeof(float));
     return true;
@@ -824,15 +1097,42 @@ bool dispatch(ggml_tensor * dst, void * queue) {
 
 bool supports(const ggml_tensor * op) {
     const uint32_t m = fq_magic(fq_userdata(op));
-    if (m == FQ_ACT_MAGIC) return true;
+    if (m == FQ_ACT_MAGIC || m == FQ_GLU_ACT_MAGIC) return true;
     if (m == FQ_GEMM_MAGIC) return static_cast<const FqGemmSpec *>(fq_userdata(op))->heads == 0;
     return false;
 }
 
 }  // namespace
 
+int32_t * sycl_fq_gemm_acc(void * queue, const ggml_tensor * w, const ggml_tensor * blob, const ggml_tensor * ws,
+                           const FqGemmSpec & s, int64_t * xs_off) {
+#ifdef VLA_FQ_SYCL_DNNL
+    sycl::queue & q = *static_cast<sycl::queue *>(queue);
+    GemmParams g{};
+    g.w         = (const int8_t *) w->data;
+    g.blob      = (const int8_t *) blob->data;
+    g.wscale    = (const float *) ws->data;
+    g.M         = blob->ne[1];
+    g.N         = s.N;
+    g.K         = s.K;
+    g.row_bytes = blob->ne[0];
+    const int abits = blob_abits(blob, s.K);
+    *xs_off = fq_act_kpack(s.K, abits);
+#ifdef VLA_SYCL_S4GEMM
+    if (s4_ok(s, abits, g))
+        if (int32_t * acc4 = s4_acc(q, g)) return acc4;
+#endif
+    int32_t * acc = nullptr;
+    if (g.M == 0 || !gemm_dnnl(q, g, s.wbits, abits, false, false, &acc)) return nullptr;
+    return acc;
+#else
+    (void) queue; (void) w; (void) blob; (void) ws; (void) s; (void) xs_off;
+    return nullptr;
+#endif
+}
+
 void sycl_register_foldquant_ops() {
-    sycl_ext_register(dispatch, supports);
+    sycl_ext_register(fq_dispatch, supports);
 }
 
 }  // namespace vla

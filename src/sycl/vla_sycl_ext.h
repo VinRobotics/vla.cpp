@@ -30,7 +30,9 @@ using sycl_ext_supports_fn = bool (*)(const ggml_tensor * op);
 
 // Add an extension and install the dispatcher. @p supports answers for the
 // GGML_OP_CUSTOM nodes it claims and may be null. Registering the same
-// @p forward twice is a no-op.
-void sycl_ext_register(sycl_ext_forward_fn forward, sycl_ext_supports_fn supports);
+// @p forward twice is a no-op. @p front puts it ahead of the ones already
+// registered: for an extension that claims a few built-in nodes an earlier one
+// would otherwise take (the sycl-tla attention over a FoldQuant prefix pack).
+void sycl_ext_register(sycl_ext_forward_fn forward, sycl_ext_supports_fn supports, bool front = false);
 
 }  // namespace vla

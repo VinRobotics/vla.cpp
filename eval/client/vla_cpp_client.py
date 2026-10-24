@@ -922,7 +922,13 @@ class VlaCppClient:
             task = task.decode()
         cleaned = task.strip().replace("_", " ").replace("\n", " ")
         state_str = " ".join(map(str, disc.tolist()))
-        prompt = f"Task: {cleaned}, State: {state_str};\nAction: "
+        if os.environ.get("VLA_PI05_PROMPT") == "openpi":
+            # openpi's pi05 prompt (discrete_state_input=False): BOS, the task and
+            # "\n", no state; the form openpi-trained checkpoints were tuned on.
+            prompt = f"{cleaned}\n"
+        else:
+            # LeRobot's state-in-prompt form.
+            prompt = f"Task: {cleaned}, State: {state_str};\nAction: "
         toks = self.tok(prompt, padding=False, truncation=True,
                         max_length=self.max_length, return_tensors="np")
         lang = toks["input_ids"][0].astype(np.int32)

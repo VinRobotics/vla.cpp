@@ -87,6 +87,13 @@ if(GGML_SYCL)
     # drives the kernels on a SYCL queue of its own.
     target_compile_options(test_foldquant_sycl_op PRIVATE -fsycl -Wall -Wextra -ffp-contract=off)
     add_test(NAME foldquant_sycl_op COMMAND test_foldquant_sycl_op)
+    # sycl-tla flash attention vs a host reference; needs an Intel GPU, so not a ctest.
+    if(VLA_SYCL_TLA_DIR)
+        add_executable(fmha_sycl_check fmha_sycl_check.cpp)
+        target_include_directories(fmha_sycl_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
+        target_link_libraries(fmha_sycl_check PRIVATE vla_core)
+        target_compile_options(fmha_sycl_check PRIVATE -fsycl -Wall -Wextra)
+    endif()
 endif()
 
 # The same site through ggml's OpenVINO backend (src/openvino/foldquant_ov.cpp).
