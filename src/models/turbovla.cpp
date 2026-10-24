@@ -770,6 +770,20 @@ std::unique_ptr<ModelArchBase> turbovla_create(const std::string& mmproj_path,
     if (!b.handle)
         return nullptr;
     m->backend = b.handle;
+    // On SYCL, F16-resident weights and flash attention (oneDNN's fused SDPA)
+    // unless --weight-dtype / --flash-attn say otherwise: 2 views at 256 px go
+    // from 128 to 74 ms on a Core Ultra 7 356H, with the actions within 3.4e-4
+    // of the F32 graph (BF16 weights: 70 ms, but 2.9e-3).
+    if (b.is_sycl) {
+        if (!opts.weight_dtype) {
+            m->mt = GGML_TYPE_F16;
+            std::printf("vla(turbovla): weights = f16 (SYCL default; --weight-dtype f32 to keep them f32)\n");
+        }
+        if (!opts.flash_attn.has_value() && fa_takes_views()) {
+            set_flash_attn(true);
+            std::printf("vla(turbovla): flash attention = on (SYCL default; --flash-attn 0 to disable)\n");
+        }
+    }
 
     if (!load_weights(*m, g) || !m->upload_rope_tables())
         return nullptr;
