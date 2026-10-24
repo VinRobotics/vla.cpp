@@ -25,7 +25,10 @@
 #include "layers/ffn.h"
 #include "layers/linear.h"
 #include "layers/norm.h"
+#include "act_dtype.h"
+#include "layers/fused_ew.h"
 #include "loader.h"
+#include "modules/encoder.h"
 #include "model.h"
 #include "modules/preprocess.h"
 #include "scratch_ctx.h"
@@ -105,6 +108,15 @@ struct DualTower {
         pj_fc3w = L.gemm("vis.proj.fc3.weight"); pj_fc3b = L.f32("vis.proj.fc3.bias");
     }
 
+    // The fused towers (SYCL, BF16 weights, view-taking flash attention): both
+    // as EncStack's fused blocks (erf GELU), DINOv2's LayerScale folded into
+    // its proj and fc2 weights, every view through each tower in one pass, and
+    // the projector as three fused GEMMs. Set by enable_fused after the upload.
+    bool     fused = false;
+    EncStack d_enc, s_enc;
+    bool enable_fused(const char * tag);
+
+    // fused: px_d / px_s hold one [S, S, 3, n_views] input each.
     struct VisIO { std::vector<ggml_tensor*> px_d, px_s; ggml_tensor*proj=nullptr; };
     ggml_tensor* encode(ggml_backend_t backend, graph_cache<int64_t,VisIO> & cache, const Inputs & in, const char * tag) const;
 };
@@ -120,25 +132,63 @@ inline ggml_tensor* vit_block(ggml_context*C, const ViTLayerW&w, ggml_tensor*x, 
     return ggml_add(C,x,ls?ggml_mul(C,h,w.ls2):h);
 }
 
-inline ggml_tensor* tower(ggml_context*C, ggml_tensor*pix, ggml_tensor*pw, ggml_tensor*pb, ggml_tensor*pos,
-                          ggml_tensor*cls, ggml_tensor*reg, const std::vector<ViTLayerW>&blk,
-                          int64_t hidden, int64_t heads, int64_t hd, int64_t patch, float eps, bool prefix){
+// A tower's input tokens: patch embedding + positions, after the CLS and 4
+// register tokens for DINOv2 (prefix). [hidden, NP (+5)].
+inline ggml_tensor* tower_embed(ggml_context*C, ggml_tensor*pix, ggml_tensor*pw, ggml_tensor*pb, ggml_tensor*pos,
+                                ggml_tensor*cls, ggml_tensor*reg, int64_t hidden, int64_t patch, bool prefix){
     ggml_tensor*conv=ggml_conv_2d(C,pw,pix,patch,patch,0,0,1,1);
     // Patch count from the conv, not a constant: both callers run 224/14 today,
     // and a different input size would otherwise reshape into the wrong grid.
-    const int64_t NP=conv->ne[0]*conv->ne[1], nprefix=prefix?5:0, N=NP+nprefix;
+    const int64_t NP=conv->ne[0]*conv->ne[1];
     ggml_tensor*pt=ggml_cont(C,ggml_transpose(C,ggml_reshape_2d(C,conv,NP,hidden)));
     pt=ggml_add(C,pt,pb); pt=ggml_add(C,pt,pos);
-    ggml_tensor*x=pt;
-    if(prefix){
-        ggml_tensor*tok=ggml_concat(C,ggml_reshape_2d(C,cls,hidden,1),reg,1);
-        x=ggml_concat(C,tok,pt,1);
-    }
+    if(!prefix)
+        return pt;
+    ggml_tensor*tok=ggml_concat(C,ggml_reshape_2d(C,cls,hidden,1),reg,1);
+    return ggml_concat(C,tok,pt,1);
+}
+
+inline ggml_tensor* tower(ggml_context*C, ggml_tensor*pix, ggml_tensor*pw, ggml_tensor*pb, ggml_tensor*pos,
+                          ggml_tensor*cls, ggml_tensor*reg, const std::vector<ViTLayerW>&blk,
+                          int64_t hidden, int64_t heads, int64_t hd, int64_t patch, float eps, bool prefix){
+    ggml_tensor*x=tower_embed(C,pix,pw,pb,pos,cls,reg,hidden,patch,prefix);
+    const int64_t nprefix=prefix?5:0, N=x->ne[1], NP=N-nprefix;
     for(size_t i=0;i<blk.size();++i)
         x=vit_block(C,blk[i],x,N,hidden,heads,hd,eps,prefix);
     if(prefix)
         x=ggml_cont(C,ggml_view_2d(C,x,hidden,NP,x->nb[1],nprefix*x->nb[1]));
     return x;
+}
+
+inline bool DualTower::enable_fused(const char * tag) {
+    auto make = [&](EncStack & e, std::vector<ViTLayerW> & blk, int64_t hidden, int64_t heads, int64_t hd) {
+        e.cfg = {hidden, heads, hd, ln_eps, true};
+        e.cfg.act = GGML_TYPE_BF16;
+        e.cfg.fused = true;
+        e.cfg.gelu_erf = true;
+        e.ln_spec.eps = ln_eps;
+        e.blk.resize(blk.size());
+        for (size_t i=0; i<blk.size(); ++i) {
+            ViTLayerW & v = blk[i];
+            if (v.Wqkv->type != GGML_TYPE_BF16 || (v.ls1 && (!fold_layer_scale(v.Wproj, v.bproj, v.ls1) ||
+                                                             !fold_layer_scale(v.Wfc2, v.bfc2, v.ls2))))
+                return false;
+            EncBlockW & w = e.blk[i];
+            w = EncBlockW{};
+            w.ln1w = v.n1w; w.ln1b = v.n1b; w.ln2w = v.n2w; w.ln2b = v.n2b;
+            w.Wqkv = v.Wqkv; w.bqkv = v.bqkv; w.Wo = v.Wproj; w.bo = v.bproj;
+            w.Wfc1 = v.Wfc1; w.bfc1 = v.bfc1; w.Wfc2 = v.Wfc2; w.bfc2 = v.bfc2;
+        }
+        return true;
+    };
+    // LayerScale is folded into the weights here, so there is no going back
+    // to the per-op graph after a partial failure.
+    if (!make(d_enc, dvit, d_hidden, d_heads, d_head_dim) || !make(s_enc, svit, s_hidden, s_heads, s_head_dim)) {
+        std::fprintf(stderr, "vla(%s): fused towers need BF16 weights\n", tag);
+        return false;
+    }
+    fused = true;
+    return true;
 }
 
 inline ggml_tensor* DualTower::encode(ggml_backend_t backend, graph_cache<int64_t,VisIO> & cache, const Inputs & in, const char * tag) const {
@@ -159,6 +209,35 @@ inline ggml_tensor* DualTower::encode(ggml_backend_t backend, graph_cache<int64_
     const size_t max_nodes=(size_t)64*(d_layers+s_layers+1)*n_views+1024;
     const bool built=cache.ensure(backend,n_views,ggml_tensor_overhead()*max_nodes+ggml_graph_overhead_custom(max_nodes,false),
                                   [&](ggml_context*C, VisIO&io)->ggml_cgraph*{
+        if(fused){
+            // Each tower over every view in one pass (n_views * N rows per GEMM,
+            // a batch of n_views to the attention), BF16 activations.
+            io.px_d={ggml_new_tensor_4d(C,GGML_TYPE_F32,S,S,3,n_views)}; ggml_set_input(io.px_d[0]);
+            io.px_s={ggml_new_tensor_4d(C,GGML_TYPE_F32,S,S,3,n_views)}; ggml_set_input(io.px_s[0]);
+            auto view=[&](ggml_tensor*px,int64_t v){ return ggml_view_3d(C,px,S,S,3,px->nb[1],px->nb[2],(size_t)v*px->nb[3]); };
+            ggml_tensor*ed=nullptr,*es=nullptr;
+            for(int64_t v=0; v<n_views; ++v){
+                ggml_tensor*d=tower_embed(C,view(io.px_d[0],v),d_patch_w,d_patch_b,d_pos,d_cls,d_reg,d_hidden,patch_size,true);
+                ggml_tensor*s=tower_embed(C,view(io.px_s[0],v),s_patch_w,s_patch_b,s_pos,nullptr,nullptr,s_hidden,patch_size,false);
+                ed=ed?ggml_concat(C,ed,d,1):d; es=es?ggml_concat(C,es,s,1):s;
+            }
+            const int64_t Nd=ed->ne[1]/n_views, Ns=es->ne[1]/n_views, NP=Ns;
+            ggml_tensor*hd=d_enc.build(C,as_type(C,ed,GGML_TYPE_BF16),Nd,n_views);
+            ggml_tensor*hs=s_enc.build(C,as_type(C,es,GGML_TYPE_BF16),Ns,n_views);
+            // per view: DINOv2's patch rows (prefix dropped) next to SigLIP's
+            ggml_tensor*allp=nullptr;
+            for(int64_t v=0; v<n_views; ++v){
+                ggml_tensor*dv=ggml_view_2d(C,hd,d_hidden,NP,hd->nb[1],(size_t)(v*Nd+Nd-NP)*hd->nb[1]);
+                ggml_tensor*sv=ggml_view_2d(C,hs,s_hidden,NP,hs->nb[1],(size_t)(v*Ns)*hs->nb[1]);
+                ggml_tensor*c=ggml_concat(C,ggml_cast(C,dv,GGML_TYPE_F32),ggml_cast(C,sv,GGML_TYPE_F32),0);
+                allp=allp?ggml_concat(C,allp,c,1):c;
+            }
+            ggml_tensor*ph=fused_linear(C,pj_fc1w,ggml_cast(C,allp,GGML_TYPE_BF16),pj_fc1b,nullptr,GGML_TYPE_BF16,FUSED_GELU_ERF);
+            ph=fused_linear(C,pj_fc2w,ph,pj_fc2b,nullptr,GGML_TYPE_BF16,FUSED_GELU_ERF);
+            io.proj=fused_linear(C,pj_fc3w,ph,pj_fc3b,nullptr,GGML_TYPE_F32,0); ggml_set_output(io.proj);
+            ggml_cgraph*vg=ggml_new_graph_custom(C,max_nodes,false); ggml_build_forward_expand(vg,io.proj);
+            return vg;
+        }
         io.px_d.resize(n_views); io.px_s.resize(n_views);
         std::vector<ggml_tensor*> cmb(n_views);
         for(int v=0; v<n_views; ++v){
@@ -179,8 +258,11 @@ inline ggml_tensor* DualTower::encode(ggml_backend_t backend, graph_cache<int64_
     VisIO&io=cache.io();
     std::vector<float> dbuf, sbuf;
     for(int v=0;v<n_views;++v){
-        preprocess_image_chw(tag,in.images[v],S,DMEAN,DSTD,dbuf); ggml_backend_tensor_set(io.px_d[v],dbuf.data(),0,ggml_nbytes(io.px_d[v]));
-        preprocess_image_chw(tag,in.images[v],S,sbuf); ggml_backend_tensor_set(io.px_s[v],sbuf.data(),0,ggml_nbytes(io.px_s[v]));
+        // fused: views are consecutive planes of the one input
+        ggml_tensor*pd=fused?io.px_d[0]:io.px_d[v], *ps=fused?io.px_s[0]:io.px_s[v];
+        const size_t off=fused?(size_t)v*pd->nb[3]:0;
+        preprocess_image_chw(tag,in.images[v],S,DMEAN,DSTD,dbuf); ggml_backend_tensor_set(pd,dbuf.data(),off,dbuf.size()*sizeof(float));
+        preprocess_image_chw(tag,in.images[v],S,sbuf); ggml_backend_tensor_set(ps,sbuf.data(),off,sbuf.size()*sizeof(float));
     }
     graph_unique_names(cache.graph());
     if(ggml_backend_graph_compute(backend,cache.graph())!=GGML_STATUS_SUCCESS){ std::fprintf(stderr,"vla(%s): vision compute failed\n",tag); return nullptr; }
