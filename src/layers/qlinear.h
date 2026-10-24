@@ -124,7 +124,7 @@ inline void qlinear_cpu(ggml_tensor * dst, int ith, int nth, void * ud) {
                 v = (float) acc * sx * sw[n];
             }
             if (b) v += ((const float *) b->data)[n];
-            if (s.gelu) v = fused_gelu_tanh(v);
+            if (s.gelu) v = fused_gelu(s.gelu, v);
             if (g) v *= g[n];
             if (r) v += fused_load(r, (const char *) r->data + m * r->nb[1], n);
             fused_store(dst, dr, n, v);
@@ -136,7 +136,7 @@ inline void qlinear_cpu(ggml_tensor * dst, int ith, int nth, void * ud) {
 // given, scales the result per output channel before res is added (pi0.5's
 // gated residual: res + out * gate). Returns [N, M] of out_type.
 inline ggml_tensor * qlinear(ggml_context * C, const QWeight & q, ggml_tensor * x, ggml_tensor * bias,
-                             ggml_tensor * res, ggml_type out_type, bool gelu = false, ggml_tensor * gate = nullptr) {
+                             ggml_tensor * res, ggml_type out_type, int gelu = 0, ggml_tensor * gate = nullptr) {
     const int64_t K = qlinear_k(q.w, q.bits);
     const bool    blob = x->type == GGML_TYPE_I8;
     GGML_ASSERT(blob ? x->ne[0] % (K + 4) == 0
