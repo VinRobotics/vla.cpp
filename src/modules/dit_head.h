@@ -19,6 +19,7 @@
 #pragma once
 
 #include "foldquant.h"
+#include "layers/fused_ew.h"
 #include "loader.h"
 
 #include "ggml.h"
@@ -53,6 +54,13 @@ struct DitCfg {
 struct DitHead {
     DitCfg                 cfg;
     std::vector<DitLayerW> blk;
+    // The fused graph (SYCL, BF16 weights, view-taking flash attention, no
+    // FoldQuant): each block as 7 nodes (layers/fused_ew.h) - the adaLN as a
+    // LayerNorm whose weight and bias are 1 + scale and shift (FlowTimes keeps
+    // 1 + scale), attention reading the q|k|v and K/V GEMM outputs in place,
+    // the residual adds and the GELU as GEMM epilogues. Set before FlowTimes::build.
+    bool                   fused = false;
+    FusedLNormSpec         ln_spec, out_ln_spec;
     ggml_tensor *te_l1W = nullptr, *te_l1b = nullptr, *te_l2W = nullptr, *te_l2b = nullptr;
     ggml_tensor *po1W   = nullptr, *po1b   = nullptr, *po2W   = nullptr, *po2b   = nullptr;
 
@@ -74,6 +82,15 @@ struct DitHead {
     // (shift, scale), opposite to the blocks.
     ggml_tensor * proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * mod) const;
 };
+
+struct Backend;
+struct Options;
+
+// Sets dit.fused where the fused graph runs: SYCL, BF16-resident weights,
+// view-taking flash attention, no FoldQuant (fq), --flash-attn not 0, and
+// VLA_GR00T_NO_FUSE unset. Call after cfg is read and before FlowTimes::build.
+bool dit_enable_fused(DitHead & dit, const Backend & b, ggml_type weight_type, bool fq, const Options & opts,
+                      const char * tag);
 
 struct FlowTimes {
     std::vector<ggml_tensor *> tau;

@@ -16,9 +16,11 @@
 
 #pragma once
 
+#include "act_dtype.h"
 #include "backend.h"
 #include "gguf_reader.h"
 #include "layers/attn.h"
+#include "layers/fused_ew.h"
 #include "loader.h"
 #include "layers/rope.h"
 #include "model.h"
@@ -59,6 +61,13 @@ struct Qwen3VLTower {
 
     std::vector<int64_t> row, col;
     std::vector<float>   rope_cos, rope_sin, pos_interp;
+
+    // The fused tower (SYCL, BF16 weights; set by the model with its fused
+    // DiT): every view in one pass, each layer as LayerNorm, q|k|v, RoPE from
+    // the tables writing q and k/v as F16, attention, o + residual, LayerNorm,
+    // fc1 + GELU, fc2 + residual (layers/fused_ew.h). Residual stream F32.
+    bool           fused = false;
+    FusedLNormSpec ln_spec;
 
     int64_t grid() const {
         return side/patch;
@@ -114,6 +123,29 @@ struct Qwen3VLTower {
         merger_w(merger, name);
     }
 };
+
+// Qwen3VLTower::fused: one layer over nv views of seq tokens. kbuf / vbuf: BF16
+// [hd, heads, seq * nv], rewritten here (shared by the layers).
+inline ggml_tensor * build_vit_layer_fused(ggml_context * C, const VitLayerW & w, ggml_tensor * x,
+                                           ggml_tensor * cos_t, ggml_tensor * sin_t, ggml_tensor * kbuf,
+                                           ggml_tensor * vbuf, int64_t seq, int64_t nv, int64_t heads, int64_t hd,
+                                           int64_t hidden, const FusedLNormSpec & ln) {
+    ggml_tensor * qkv = fused_linear(C, w.Wqkv, fused_lnorm(C, x, w.ln1w, w.ln1b, GGML_TYPE_BF16, ln), w.bqkv, nullptr,
+                                     GGML_TYPE_F32, 0);
+    ggml_tensor * q16 = fused_rope_kv_table(C, qkv, cos_t, sin_t, kbuf, vbuf, (int) heads, (int) heads, (int) hd, 0);
+    auto per_view = [&](ggml_tensor * t) {  // [hd, heads, seq * nv] -> [hd, seq, heads, nv]
+        return ggml_permute(C, ggml_reshape_4d(C, t, hd, heads, seq, nv), 0, 2, 1, 3);
+    };
+    ggml_tensor * fa = ggml_flash_attn_ext(C, per_view(q16), per_view(kbuf), per_view(vbuf), nullptr,
+                                           1.0f/std::sqrt((float) hd), 0.0f, 0.0f);
+    ggml_prec_set_acc(fa, GGML_PREC_F32);
+    add_dep(fa, q16);
+    retype(fa, GGML_TYPE_BF16);
+    ggml_tensor * h1 = fused_linear(C, w.Wo, ggml_reshape_2d(C, fa, hidden, seq * nv), w.bo, x, GGML_TYPE_F32, 0);
+    ggml_tensor * f  = fused_linear(C, w.Wfc1, fused_lnorm(C, h1, w.ln2w, w.ln2b, GGML_TYPE_BF16, ln), w.bfc1, nullptr,
+                                    GGML_TYPE_BF16, FUSED_GELU_TANH);
+    return fused_linear(C, w.Wfc2, f, w.bfc2, h1, GGML_TYPE_F32, 0);
+}
 
 inline ggml_tensor * build_vit_layer(ggml_context * C, const VitLayerW & w, ggml_tensor * x,
                                      ggml_tensor * cos_t, ggml_tensor * sin_t,
@@ -323,17 +355,29 @@ inline bool Qwen3VLTower::encode(const char * arch, ggml_backend_t backend, grap
                                  int64_t n_views, const float * patches_in, std::vector<float> & emb,
                                  std::vector<float> (&ds)[3]) const {
     const int64_t n_patches = grid()*grid(), hd = hidden/heads;
+    // fused: all views in one graph (nv * n_patches rows; the positions and
+    // RoPE tables are repeated per view), one graph per view count.
+    const int64_t nv = fused ? n_views : 1, rows = n_patches * nv;
 
-    const bool built = cache.ensure(backend, 0, (size_t) 512*1024*1024, [&](ggml_context * VC, VitIO & io) -> ggml_cgraph * {
-        ggml_tensor * t_patches = ggml_new_tensor_2d(VC, GGML_TYPE_F32, patch_flat, n_patches); ggml_set_input(t_patches);
-        ggml_tensor * t_pos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hidden, n_patches);     ggml_set_input(t_pos);
-        ggml_tensor * t_cos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hd, n_patches);         ggml_set_input(t_cos);
-        ggml_tensor * t_sin     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hd, n_patches);         ggml_set_input(t_sin);
+    const bool built = cache.ensure(backend, (int) (fused ? nv : 0), (size_t) 512*1024*1024, [&](ggml_context * VC, VitIO & io) -> ggml_cgraph * {
+        ggml_tensor * t_patches = ggml_new_tensor_2d(VC, GGML_TYPE_F32, patch_flat, rows); ggml_set_input(t_patches);
+        ggml_tensor * t_pos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hidden, rows);     ggml_set_input(t_pos);
+        ggml_tensor * t_cos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hd, rows);         ggml_set_input(t_cos);
+        ggml_tensor * t_sin     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hd, rows);         ggml_set_input(t_sin);
         ggml_tensor * h = ggml_add(VC, ggml_add(VC, ggml_mul_mat(VC, patch_w, t_patches), patch_b), t_pos);
+        ggml_tensor * kbuf = nullptr, * vbuf = nullptr;
+        if (fused) {
+            // BF16: the attention reads a batch of views in place only in BF16
+            kbuf = ggml_new_tensor_3d(VC, GGML_TYPE_BF16, hd, heads, rows);
+            vbuf = ggml_new_tensor_3d(VC, GGML_TYPE_BF16, hd, heads, rows);
+            ggml_set_output(kbuf);
+            ggml_set_output(vbuf);
+        }
 
         ggml_tensor * stash[3] = {nullptr, nullptr, nullptr};
         for (int64_t i=0; i<layers; ++i) {
-            h = build_vit_layer(VC, blk[i], h, t_cos, t_sin, n_patches, heads, hd, hidden, ln_eps);
+            h = fused ? build_vit_layer_fused(VC, blk[i], h, t_cos, t_sin, kbuf, vbuf, n_patches, nv, heads, hd, hidden, ln_spec)
+                      : build_vit_layer(VC, blk[i], h, t_cos, t_sin, n_patches, heads, hd, hidden, ln_eps);
             for (int j=0; j<3; ++j)
                 if (i == deepstack_idx[j])
                     stash[j] = h;
@@ -362,31 +406,34 @@ inline bool Qwen3VLTower::encode(const char * arch, ggml_backend_t backend, grap
     ggml_tensor * embeds = io.embeds;
     ggml_tensor * const * ds_out = io.ds;
 
-    const size_t per_view = (size_t) ggml_nelements(embeds);
+    const size_t per_view = (size_t) ggml_nelements(embeds) / (size_t) nv;
     emb.assign((size_t) n_views*per_view, 0.0f);
     for (int j=0; j<3; ++j)
         ds[j].assign((size_t) n_views*per_view, 0.0f);
 
     std::vector<float> patches;
-    for (int64_t v=0; v<n_views; ++v) {
-        const float * px = patches_in ? patches_in+(size_t) v*n_patches*patch_flat : nullptr;
-        if (!px) {
-            if (!preprocess_image_patches(arch, images[v], side, patch, temporal, row, col, patches))
-                return false;
-            px = patches.data();
+    const size_t pv_patch = (size_t) n_patches*patch_flat;
+    for (int64_t v0=0; v0<n_views; v0 += nv) {
+        for (int64_t v=0; v<nv; ++v) {
+            const float * px = patches_in ? patches_in+(size_t) (v0+v)*pv_patch : nullptr;
+            if (!px) {
+                if (!preprocess_image_patches(arch, images[v0+v], side, patch, temporal, row, col, patches))
+                    return false;
+                px = patches.data();
+            }
+            ggml_backend_tensor_set(t_patches, px, (size_t) v*pv_patch*sizeof(float), pv_patch*sizeof(float));
+            ggml_backend_tensor_set(t_pos, pos_interp.data(), (size_t) v*pos_interp.size()*sizeof(float), pos_interp.size()*sizeof(float));
+            ggml_backend_tensor_set(t_cos, rope_cos.data(), (size_t) v*rope_cos.size()*sizeof(float), rope_cos.size()*sizeof(float));
+            ggml_backend_tensor_set(t_sin, rope_sin.data(), (size_t) v*rope_sin.size()*sizeof(float), rope_sin.size()*sizeof(float));
         }
-        ggml_backend_tensor_set(t_patches, px, 0, ggml_nbytes(t_patches));
-        ggml_backend_tensor_set(t_pos, pos_interp.data(), 0, ggml_nbytes(t_pos));
-        ggml_backend_tensor_set(t_cos, rope_cos.data(), 0, ggml_nbytes(t_cos));
-        ggml_backend_tensor_set(t_sin, rope_sin.data(), 0, ggml_nbytes(t_sin));
         graph_unique_names(vg);
         if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
             std::fprintf(stderr, "vla(%s): vision compute failed\n", arch);
             return false;
         }
-        ggml_backend_tensor_get(embeds, emb.data()+v*per_view, 0, ggml_nbytes(embeds));
+        ggml_backend_tensor_get(embeds, emb.data()+v0*per_view, 0, ggml_nbytes(embeds));
         for (int j=0; j<3; ++j)
-            ggml_backend_tensor_get(ds_out[j], ds[j].data()+v*per_view, 0, ggml_nbytes(ds_out[j]));
+            ggml_backend_tensor_get(ds_out[j], ds[j].data()+v0*per_view, 0, ggml_nbytes(ds_out[j]));
     }
     return true;
 }

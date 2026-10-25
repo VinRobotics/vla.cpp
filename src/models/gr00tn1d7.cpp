@@ -217,6 +217,14 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
         m->backend = b.handle;
         if (!foldquant_check_backend("vla(gr00tn1d7)", b, fq, opts.weight_dtype.has_value()))
             return nullptr;
+        // Opt-in here until a LIBERO run validates it: with the fused Qwen3-VL
+        // tower the actions move by up to 1.3e-2 (N1.5 / N1.6 are validated).
+        if (env_flag("VLA_GR00T_N17_FUSE") &&
+            dit_enable_fused(m->dit, b, m->matmul_type, fq.present, opts, "gr00tn1d7")) {
+            // The Qwen3-VL tower fused too (views in one pass); same switch.
+            m->vit.fused = true;
+            m->vit.ln_spec.eps = m->vit.ln_eps;
+        }
     }
 
     ggml_init_params wp = { (size_t) 32*1024*1024, nullptr, true };
