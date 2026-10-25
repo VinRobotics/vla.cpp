@@ -28,6 +28,7 @@
 #include "modules/siglip_vit.h"
 #include "options.h"
 #include "model.h"
+#include "modules/npu_vision.h"
 #include "modules/preprocess.h"
 #include "scratch_ctx.h"
 
@@ -46,6 +47,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <initializer_list>
 #include <map>
 #include <memory>
@@ -1656,60 +1658,84 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         const auto t_vision_begin = clock::now();
 
         // SigLIP ViT (conv patch-embed -> +pos -> layers -> post_ln -> pixel shuffle -> connector), plain sequential positions.
-        ggml_context * VC = m->vision_scratch.reset(size_t(256)*1024*1024);
-        if (!VC) { std::fprintf(stderr, "vla(smolvla): ggml_init(vision ctx) failed\n"); return {}; }
-        // The fused blocks take every view in one pass (nv * n_patches rows per
-        // GEMM, a batch of nv to the attention); the per-op graph runs one view
-        // per compute.
-        const bool    fused = m->vit.enc.cfg.fused;
-        const int64_t nv    = fused ? n_views : 1;
-        ggml_tensor * t_px = ggml_new_tensor_4d(VC, GGML_TYPE_F32, m->vit_image, m->vit_image, 3, nv); ggml_set_input(t_px);
-        ggml_tensor * shuf;
-        if (fused) {
-            ggml_tensor * emb = nullptr;
-            for (int64_t v = 0; v < nv; ++v) {
-                ggml_tensor * px = ggml_view_3d(VC, t_px, m->vit_image, m->vit_image, 3, t_px->nb[1], t_px->nb[2],
-                                                (size_t) v * t_px->nb[3]);
-                ggml_tensor * e = m->vit.embed_conv(VC, px, m->vit_patch, grid);
-                emb = emb ? ggml_concat(VC, emb, e, 1) : e;
-            }
-            ggml_tensor * hv = m->vit.enc.build(VC, as_type(VC, emb, GGML_TYPE_BF16), n_patches, nv);
-            shuf = layer_norm(VC, as_type(VC, hv, GGML_TYPE_F32), m->vit.post_ln_w, m->vit.post_ln_b,
-                              m->vit.enc.cfg.ln_eps);
-        } else {
-            ggml_tensor * hv = m->vit.embed_conv(VC, ggml_reshape_3d(VC, t_px, m->vit_image, m->vit_image, 3),
-                                                 m->vit_patch, grid);
-            for (const EncBlockW & w : m->vit.enc.blk)
-                hv = build_siglip_layer(VC, m->vit.enc.cfg, w, hv, n_patches);
-            shuf = layer_norm(VC, hv, m->vit.post_ln_w, m->vit.post_ln_b, m->vit.enc.cfg.ln_eps);
-        }
-        shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_4d(VC, shuf, H*s, grid/s, grid, nv), 0, 2, 1, 3));
-        shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_4d(VC, shuf, c4, grid/s, grid/s, nv), 0, 2, 1, 3));
-        ggml_tensor * img_embeds = ggml_mul_mat(VC, m->mm_fc, ggml_reshape_2d(VC, shuf, c4, K*nv));
-        ggml_set_output(img_embeds);
-        ggml_cgraph * gA = ggml_new_graph_custom(VC, 8192, false);
-        ggml_build_forward_expand(gA, img_embeds);
-        if (!m->vision_scratch.alloc(m->backend, gA)) {
-            std::fprintf(stderr, "vla(smolvla): vision gallocr alloc failed\n");
-            return {};
-        }
-
-        std::vector<float> chw;
-        bool vok = true;
-        for (int v0=0; v0<n_views && vok; v0 += (int) nv) {
-            for (int64_t v=0; v<nv; ++v) {
-                if (!preprocess_image_chw("smolvla", in.images[v0+v], m->vit_image, chw)) {
-                    vok = false;
-                    break;
+        // encode(v0, count): views [v0, v0 + count) into img_emb_pre. The fused blocks
+        // take every view in one pass (nv * n_patches rows per GEMM, a batch of nv to
+        // the attention); the per-op graph runs one view per compute.
+        const bool fused = m->vit.enc.cfg.fused;
+        auto encode = [&](int first, int count) -> bool {
+            const int64_t nv = fused ? count : 1;
+            ggml_context * VC = m->vision_scratch.reset(size_t(256)*1024*1024);
+            if (!VC) { std::fprintf(stderr, "vla(smolvla): ggml_init(vision ctx) failed\n"); return false; }
+            ggml_tensor * t_px = ggml_new_tensor_4d(VC, GGML_TYPE_F32, m->vit_image, m->vit_image, 3, nv); ggml_set_input(t_px);
+            ggml_tensor * shuf;
+            if (fused) {
+                ggml_tensor * emb = nullptr;
+                for (int64_t v = 0; v < nv; ++v) {
+                    ggml_tensor * px = ggml_view_3d(VC, t_px, m->vit_image, m->vit_image, 3, t_px->nb[1], t_px->nb[2],
+                                                    (size_t) v * t_px->nb[3]);
+                    ggml_tensor * e = m->vit.embed_conv(VC, px, m->vit_patch, grid);
+                    emb = emb ? ggml_concat(VC, emb, e, 1) : e;
                 }
-                ggml_backend_tensor_set(t_px, chw.data(), (size_t) v * t_px->nb[3], t_px->nb[3]);
+                ggml_tensor * hv = m->vit.enc.build(VC, as_type(VC, emb, GGML_TYPE_BF16), n_patches, nv);
+                shuf = layer_norm(VC, as_type(VC, hv, GGML_TYPE_F32), m->vit.post_ln_w, m->vit.post_ln_b,
+                                  m->vit.enc.cfg.ln_eps);
+            } else {
+                ggml_tensor * hv = m->vit.embed_conv(VC, ggml_reshape_3d(VC, t_px, m->vit_image, m->vit_image, 3),
+                                                     m->vit_patch, grid);
+                for (const EncBlockW & w : m->vit.enc.blk)
+                    hv = build_siglip_layer(VC, m->vit.enc.cfg, w, hv, n_patches);
+                shuf = layer_norm(VC, hv, m->vit.post_ln_w, m->vit.post_ln_b, m->vit.enc.cfg.ln_eps);
             }
-            if (!vok) break;
-            graph_unique_names(gA);
-            if (ggml_backend_graph_compute(m->backend, gA) != GGML_STATUS_SUCCESS) {
-                std::fprintf(stderr, "vla(smolvla): vision compute failed (view %d)\n", v0); vok = false; break;
+            shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_4d(VC, shuf, H*s, grid/s, grid, nv), 0, 2, 1, 3));
+            shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_4d(VC, shuf, c4, grid/s, grid/s, nv), 0, 2, 1, 3));
+            ggml_tensor * img_embeds = ggml_mul_mat(VC, m->mm_fc, ggml_reshape_2d(VC, shuf, c4, K*nv));
+            ggml_set_output(img_embeds);
+            ggml_cgraph * gA = ggml_new_graph_custom(VC, 8192, false);
+            ggml_build_forward_expand(gA, img_embeds);
+            if (!m->vision_scratch.alloc(m->backend, gA)) {
+                std::fprintf(stderr, "vla(smolvla): vision gallocr alloc failed\n");
+                return false;
             }
-            ggml_backend_tensor_get(img_embeds, img_emb_pre.data()+size_t(v0)*per_view_n, 0, ggml_nbytes(img_embeds));
+
+            std::vector<float> chw;
+            for (int v0=first; v0<first+count; v0 += (int) nv) {
+                for (int64_t v=0; v<nv; ++v) {
+                    if (!preprocess_image_chw("smolvla", in.images[v0+v], m->vit_image, chw))
+                        return false;
+                    ggml_backend_tensor_set(t_px, chw.data(), (size_t) v * t_px->nb[3], t_px->nb[3]);
+                }
+                graph_unique_names(gA);
+                if (ggml_backend_graph_compute(m->backend, gA) != GGML_STATUS_SUCCESS) {
+                    std::fprintf(stderr, "vla(smolvla): vision compute failed (view %d)\n", v0);
+                    return false;
+                }
+                ggml_backend_tensor_get(img_embeds, img_emb_pre.data()+size_t(v0)*per_view_n, 0, ggml_nbytes(img_embeds));
+            }
+            return true;
+        };
+
+        // Prototype (VLA_SMOLVLA_NPU_VISION=<socket>, 2+ views): the last view is encoded
+        // on the NPU by scripts/npu_vision_worker.py, serving the graph that
+        // scripts/build_vision_ir.py builds from this GGUF, while the GPU encodes the
+        // others; vision then costs max(GPU, NPU) instead of the sum. Any NPU failure
+        // falls back to encoding that view here.
+        static const char * npu_sock = std::getenv("VLA_SMOLVLA_NPU_VISION");
+        bool vok;
+        if (npu_sock && *npu_sock && n_views >= 2) {
+            const int last = n_views - 1;
+            std::vector<float> npu_chw;
+            vok = preprocess_image_chw("smolvla", in.images[last], m->vit_image, npu_chw);
+            float * npu_out = img_emb_pre.data() + size_t(last) * per_view_n;
+            std::future<bool> npu_job = std::async(std::launch::async, [&] {
+                return vok && npu_vision_roundtrip(npu_sock, npu_chw, npu_out, per_view_n);
+            });
+            vok = encode(0, last) && vok;
+            if (!npu_job.get()) {
+                std::fprintf(stderr, "vla(smolvla): NPU view failed, encoding it on the GPU\n");
+                vok = vok && encode(last, 1);
+            }
+        } else {
+            vok = encode(0, n_views);
         }
         if (!vok) return {};
         m->stats.ms_vision = std::chrono::duration<float, std::milli>(clock::now()-t_vision_begin).count();
