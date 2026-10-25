@@ -61,6 +61,8 @@ struct EncCfg {
     bool fused = false;
     // With fused: the GEMMs as W8A8 with per-token INT8 activations.
     bool int8 = false;
+    // With fused: the MLP's GELU is the exact (erf) one rather than tanh.
+    bool gelu_erf = false;
 };
 
 struct EncStack {
@@ -75,5 +77,11 @@ struct EncStack {
 
     ggml_tensor * build(ggml_context * C, ggml_tensor * x, int64_t seq, int64_t nv = 1) const;
 };
+
+// LayerScale into the resident weights it scales, for the fused blocks: x +
+// ls * (W x + b) is x + (ls W) x + ls b, so the residual add becomes the GEMM's
+// epilogue. W: BF16 [K, N] on the backend; b, ls: F32 [N]. One BF16 rounding
+// of the scaled weights. Returns false for a weight that is not BF16.
+bool fold_layer_scale(ggml_tensor * W, ggml_tensor * b, const ggml_tensor * ls);
 
 }
