@@ -149,3 +149,14 @@ if(GGML_SYCL AND NOT GGML_CUDA)
     target_link_options(test_bf16_sycl_ops PRIVATE -fsycl)
     add_test(NAME bf16_sycl_ops COMMAND test_bf16_sycl_ops)
 endif()
+
+# The fused row-wise nodes (layers/fused_ew.h) on SYCL against their CPU
+# reference. Skips when no SYCL device is present.
+if(GGML_SYCL AND NOT GGML_CUDA)
+    add_executable(test_fused_sycl_ops test_fused_sycl_ops.cpp)
+    target_include_directories(test_fused_sycl_ops PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_fused_sycl_ops PRIVATE vla_sycl_ops ggml)
+    target_compile_options(test_fused_sycl_ops PRIVATE -fsycl -Wall -Wextra)
+    target_link_options(test_fused_sycl_ops PRIVATE -fsycl)
+    add_test(NAME fused_sycl_ops COMMAND test_fused_sycl_ops)
+endif()
