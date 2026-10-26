@@ -36,6 +36,12 @@ target_link_libraries(test_dit_common PRIVATE ggml)
 target_compile_options(test_dit_common PRIVATE -Wall -Wextra)
 add_test(NAME dit_common COMMAND test_dit_common)
 
+add_executable(test_prefix_cond test_prefix_cond.cpp)
+target_include_directories(test_prefix_cond PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_prefix_cond PRIVATE ggml)
+target_compile_options(test_prefix_cond PRIVATE -Wall -Wextra)
+add_test(NAME prefix_cond COMMAND test_prefix_cond)
+
 # Defines GGML_USE_OPENVINO itself so the pass is exercised on any build.
 add_executable(test_graph_names test_graph_names.cpp)
 target_include_directories(test_graph_names PRIVATE ${CMAKE_SOURCE_DIR}/src)
