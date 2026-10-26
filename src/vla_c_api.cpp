@@ -151,6 +151,9 @@ int32_t vla_predict(vla_model * h, const vla_inputs * in,
         ci.noise               = in->noise;
         ci.attention_mask      = in->attention_mask;
         ci.attention_mask_n    = in->attention_mask_n;
+        ci.prev_actions        = in->prev_actions;
+        ci.n_prev              = in->n_prev;
+        ci.inference_delay     = in->inference_delay;
         ci.timing_detail       = in->timing_detail == VLA_TIMING_PHASE
                                      ? vla::TimingDetail::PHASE
                                      : vla::TimingDetail::NONE;

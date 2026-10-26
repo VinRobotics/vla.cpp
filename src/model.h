@@ -151,6 +151,16 @@ struct Inputs {
     int              attention_mask_n = 0;     ///< Length of @ref attention_mask.
 
     TimingDetail     timing_detail    = TimingDetail::NONE;
+
+    /// Optional prefix conditioning across chunks (SmolVLA only; other
+    /// architectures ignore it): the not-yet-executed rest of the previous
+    /// chunk, robot units, @ref n_prev rows of @c max_action_dim. At every
+    /// denoise step the predicted clean chunk is pulled onto it with RTC's
+    /// prefix weights (1 on the first @ref inference_delay rows, exponential
+    /// decay to 0 at row @ref n_prev), without gradients. nullptr disables it.
+    const float*     prev_actions     = nullptr;
+    int              n_prev           = 0;
+    int              inference_delay  = 0; ///< Steps that run before this chunk starts.
 };
 
 /**

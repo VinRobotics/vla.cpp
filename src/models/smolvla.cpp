@@ -21,6 +21,7 @@
 #include "layers/embed.h"
 #include "layers/ffn.h"
 #include "layers/norm.h"
+#include "layers/prefix_cond.h"
 #include "layers/rope.h"
 #include "modules/siglip_vit.h"
 #include "options.h"
@@ -287,6 +288,7 @@ struct SmolVLAModelArch : public ModelArchBase {
         ggml_tensor *img_emb = nullptr, *lang_emb = nullptr, *state = nullptr, *x0 = nullptr;
         ggml_tensor *mask_prefill = nullptr, *pos_prefill = nullptr, *mask_full = nullptr;
         ggml_tensor *mask_pfx_only = nullptr, *pos_full = nullptr, *pos_rebased = nullptr, *x_t = nullptr;
+        ggml_tensor *prefix_w = nullptr, *prefix_y = nullptr;  // prefix conditioning; all-zero weights = off
         std::vector<ggml_tensor *> k_cache, v_cache, k_leaf, v_leaf;
     };
     graph_cache<int, MainIO> main_graph;
@@ -1216,9 +1218,12 @@ void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::Mai
     io.mask_pfx_only = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.n_prefix, cfg.n_suffix);
     io.pos_full      = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
     io.pos_rebased   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cfg.n_suffix);
+    io.prefix_w      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.max_action_dim, cfg.n_suffix);
+    io.prefix_y      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.max_action_dim, cfg.n_suffix);
     for (ggml_tensor * t : {io.img_emb, io.lang_emb, io.state, io.x0,
                             io.mask_prefill, io.pos_prefill, io.mask_full,
-                            io.mask_pfx_only, io.pos_full, io.pos_rebased}) {
+                            io.mask_pfx_only, io.pos_full, io.pos_rebased,
+                            io.prefix_w, io.prefix_y}) {
         ggml_set_input(t);
     }
 
@@ -1281,6 +1286,9 @@ void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::Mai
             }
         }
         ggml_tensor * v_t = linear(ctx, m->W_aout, m->b_aout, rms_norm(ctx, h, m->Wnorm_expert, cfg.rms_eps));
+        // Prefix conditioning (gradient-free RTC, layers/prefix_cond.h). W = 0
+        // leaves v_t unchanged.
+        v_t = prefix_cond_velocity(ctx, x_t, v_t, io.prefix_y, io.prefix_w, 1.f+float(step)*dt);
         x_t = ggml_add(ctx, x_t, ggml_scale(ctx, v_t, dt));
     }
 
@@ -1455,6 +1463,13 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
             v = dist(m->rng);
     }
 
+    // Prefix conditioning: rows of the previous chunk not yet executed, in model
+    // space, with RTC's prefix weights (layers/prefix_cond.h).
+    std::vector<float> prefix_w_host, prefix_y_host;
+    prefix_cond_inputs(in.prev_actions, in.n_prev, in.inference_delay, cfg.n_suffix, cfg.max_action_dim,
+                       cfg.real_action_dim, m->action_mean.data(), m->action_std.data(), cfg.norm_eps,
+                       prefix_w_host, prefix_y_host);
+
     std::vector<int32_t> lang_host(n_lang, 0);
     std::memcpy(lang_host.data(), in.lang_tokens, in.n_lang*sizeof(int32_t));
     std::vector<float> lang_emb_host(size_t(n_lang)*cfg.hidden);
@@ -1512,6 +1527,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     ggml_backend_tensor_set(io->lang_emb,      lang_emb_host.data(),  0, lang_emb_host.size()*sizeof(float));
     ggml_backend_tensor_set(io->state,         state_host.data(),     0, cfg.max_state_dim*sizeof(float));
     ggml_backend_tensor_set(io->x0,            noise_host.data(),     0, noise_host.size()*sizeof(float));
+    ggml_backend_tensor_set(io->prefix_w,      prefix_w_host.data(),  0, prefix_w_host.size()*sizeof(float));
+    ggml_backend_tensor_set(io->prefix_y,      prefix_y_host.data(),  0, prefix_y_host.size()*sizeof(float));
     ggml_backend_tensor_set(io->mask_prefill,  mask_prefill_host.data(),     0, mask_prefill_host.size()     * sizeof(float));
     ggml_backend_tensor_set(io->pos_prefill,   pos_prefill_host.data(),      0, pos_prefill_host.size()      * sizeof(int32_t));
     ggml_backend_tensor_set(io->mask_full,     mask_full_host.data(),        0, mask_full_host.size()        * sizeof(float));

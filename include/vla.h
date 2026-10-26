@@ -34,7 +34,7 @@ extern "C" {
 #endif
 
 // Bumped on any incompatible change to the structs or functions below.
-#define VLA_ABI_VERSION 1
+#define VLA_ABI_VERSION 2
 
 typedef struct vla_model vla_model;
 
@@ -124,6 +124,13 @@ typedef struct {
     int32_t           attention_mask_n;
 
     int32_t           timing_detail;  ///< A vla_timing_detail value.
+
+    /// Optional prefix conditioning, SmolVLA only: the not-yet-executed rest of
+    /// the previous chunk in robot units, n_prev rows of max_action_dim. NULL
+    /// disables it.
+    const float *     prev_actions;
+    int32_t           n_prev;
+    int32_t           inference_delay;  ///< Steps that run before this chunk starts.
 } vla_inputs;
 
 /// Milliseconds. Phase fields are zero unless timing_detail was VLA_TIMING_PHASE.
