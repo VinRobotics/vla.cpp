@@ -15,16 +15,20 @@
 // TODO: SnapFlow (arXiv 2604.05656) distills cfg.num_steps to 1; load the
 // distilled action-expert weights and force num_steps = 1 at the denoise loops.
 
+#include "act_dtype.h"
 #include "arch.h"
 #include "gguf_reader.h"
 #include "layers/attn.h"
 #include "layers/embed.h"
+#include "layers/fused_ew.h"
 #include "layers/ffn.h"
 #include "layers/norm.h"
+#include "layers/qlinear.h"
 #include "layers/rope.h"
 #include "modules/siglip_vit.h"
 #include "options.h"
 #include "model.h"
+#include "modules/npu_vision.h"
 #include "modules/preprocess.h"
 #include "scratch_ctx.h"
 
@@ -32,6 +36,8 @@
 #include "ggml-backend.h"
 #include "gguf.h"
 #include "backend.h"
+#include "env_flag.h"
+#include "sycl/vla_sycl_ops.h"
 
 #include "nlohmann/json.hpp"
 
@@ -41,11 +47,14 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <future>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <random>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace vla {
@@ -227,6 +236,13 @@ struct LayerW {
     ggml_tensor * Wgate;
     ggml_tensor * Wup;
     ggml_tensor * Wdown;
+    // The fused graph (SmolVLAModelArch::fused_lm): q|k|v (self-attention
+    // layers) and gate|up as one weight each; Wq..Wup are then views of them.
+    ggml_tensor * Wqkv = nullptr;
+    ggml_tensor * Wgu  = nullptr;
+    // W8A8 (SmolVLAModelArch::w8a8_*): INT8 copies of those GEMMs, made after
+    // the upload (q_q: a cross-attention layer's q, which has no q|k|v).
+    QWeight q_qkv, q_q, q_o, q_gu, q_down;
 };
 
 bool expert_self_attn(const Config & cfg, int64_t i) {
@@ -251,6 +267,14 @@ struct SmolVLAModelArch : public ModelArchBase {
     ggml_backend_t        backend     = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
     bool                  is_cuda     = false;
+    bool                  is_sycl     = false;
+    // LM and expert layers as fused nodes (fused_layer_kv / fused_layer_cross).
+    bool                  fused_lm    = false;
+    FusedRmsSpec          rms_spec;
+    // VLA_SMOLVLA_W8A8: which parts run W8A8 (layers/qlinear.h), fused graph only.
+    bool                  w8a8_vit = false, w8a8_vlm = false, w8a8_expert = false;
+    ggml_context *        ctx_q8   = nullptr;
+    ggml_backend_buffer_t q8_buf   = nullptr;
 
     ggml_type             weight_dtype = GGML_TYPE_BF16;
 
@@ -734,6 +758,103 @@ ggml_tensor * build_expert_cross_attn_layer(
                     mask_prefix_only, cfg, cfg.n_suffix);
 }
 
+// The fused graph (SYCL, BF16 weights, view-taking flash attention): BF16 into
+// every GEMM, the residual stream F32. Per layer: RMSNorm into BF16, the q|k|v
+// GEMM with an F32 result, RoPE writing q as F16 and k/v straight into the
+// layer's K/V buffers, attention over the rows written so far, the o GEMM with
+// the residual as its epilogue, RMSNorm, one gate|up GEMM, SwiGLU, and the down
+// GEMM with the residual: 9 kernels where the per-op graph runs ~20.
+//
+// One K/V buffer pair per layer, F16 [hd, n_kv, n_full]: the VLM layer writes
+// rows [0, n_prefix), each expert step of a self-attention layer overwrites the
+// rows after them, and a cross-attention layer reprojects the prefix rows once.
+struct KvBuf {
+    ggml_tensor * k = nullptr, * v = nullptr;
+    ggml_tensor * pre = nullptr;  // the prefix pass's write: a dependency of every read
+};
+
+// Attention of q16 (F16 [hd, nq, seq]) over K/V ([hd, nkv, n]), then the o GEMM
+// and the MLP, each with the residual as its epilogue. deps: the nodes whose
+// writes K/V are views of.
+ggml_tensor * fused_attn_mlp(ggml_context * ctx, const LayerW & w, const FusedRmsSpec & rms, ggml_tensor * x_in,
+                             ggml_tensor * q16, ggml_tensor * K, ggml_tensor * V, ggml_tensor * mask_f16,
+                             const Config & cfg, int64_t seq, std::initializer_list<ggml_tensor *> deps) {
+    ggml_tensor * fa = ggml_flash_attn_ext(ctx, ggml_permute(ctx, q16, 0, 2, 1, 3), ggml_permute(ctx, K, 0, 2, 1, 3),
+                                           ggml_permute(ctx, V, 0, 2, 1, 3), mask_f16,
+                                           1.f/std::sqrt((float) cfg.head_dim), 0.f, 0.f);
+    ggml_prec_set_acc(fa, GGML_PREC_F32);
+    for (ggml_tensor * d : deps)
+        if (d) add_dep(fa, d);
+    retype(fa, GGML_TYPE_BF16);
+    ggml_tensor * att = ggml_reshape_2d(ctx, fa, cfg.q_full_dim, seq);
+    // W8A8: the RMSNorm and SwiGLU write their GEMM's INT8 input themselves.
+    const bool q8 = static_cast<bool>(w.q_o);
+    ggml_tensor * h1 = q8 ? qlinear(ctx, w.q_o, att, nullptr, x_in, GGML_TYPE_F32)
+                          : fused_linear(ctx, w.Wo, att, nullptr, x_in, GGML_TYPE_F32, false);
+    ggml_tensor * gu = q8 ? qlinear(ctx, w.q_gu, fused_rms_q8(ctx, h1, w.Wln_post, rms), nullptr, nullptr,
+                                    GGML_TYPE_BF16)
+                          : fused_linear(ctx, w.Wgu, fused_rms(ctx, h1, w.Wln_post, GGML_TYPE_BF16, rms), nullptr,
+                                         nullptr, GGML_TYPE_BF16, false);
+    const int64_t n = gu->ne[0]/2;
+    ggml_tensor * g = ggml_view_2d(ctx, gu, n, gu->ne[1], gu->nb[1], 0);
+    ggml_tensor * u = ggml_view_2d(ctx, gu, n, gu->ne[1], gu->nb[1], n*ggml_element_size(gu));
+    return q8 ? qlinear(ctx, w.q_down, fused_swiglu(ctx, g, u, GGML_TYPE_I8), nullptr, h1, GGML_TYPE_F32)
+              : fused_linear(ctx, w.Wdown, fused_swiglu(ctx, g, u), nullptr, h1, GGML_TYPE_F32, false);
+}
+
+// The normed input of a layer's first GEMM: a q8 blob for W8A8 weights.
+ggml_tensor * fused_in(ggml_context * ctx, const LayerW & w, const FusedRmsSpec & rms, ggml_tensor * x_in) {
+    return w.q_o ? fused_rms_q8(ctx, x_in, w.Wln_in, rms) : fused_rms(ctx, x_in, w.Wln_in, GGML_TYPE_BF16, rms);
+}
+
+// A layer whose own q|k|v land in kv at row0 (the VLM layers, row0 = 0, and the
+// expert's self-attention layers, row0 = n_prefix).
+ggml_tensor * fused_layer_kv(ggml_context * ctx, const LayerW & w, const FusedRmsSpec & rms, ggml_tensor * x_in,
+                             ggml_tensor * positions, ggml_tensor * mask_f16, const Config & cfg, int64_t seq,
+                             int64_t row0, KvBuf & kv) {
+    const int64_t hd = cfg.head_dim, nkv = cfg.n_kv_heads, n_all = row0+seq;
+    ggml_tensor * xn  = fused_in(ctx, w, rms, x_in);
+    ggml_tensor * qkv = w.q_qkv ? qlinear(ctx, w.q_qkv, xn, nullptr, nullptr, GGML_TYPE_F32)
+                                : fused_linear(ctx, w.Wqkv, xn, nullptr, nullptr, GGML_TYPE_F32, false);
+    ggml_tensor * q16 = fused_rope_kv(ctx, qkv, positions, kv.k, kv.v, (int) cfg.n_q_heads, (int) nkv, (int) hd,
+                                      row0, cfg.rope_freq_base);
+    if (!kv.pre)
+        kv.pre = q16;
+    auto rows = [&](ggml_tensor * buf) {
+        return ggml_view_3d(ctx, buf, hd, nkv, n_all, buf->nb[1], buf->nb[2], 0);
+    };
+    return fused_attn_mlp(ctx, w, rms, x_in, q16, rows(kv.k), rows(kv.v), mask_f16, cfg, seq, {q16, kv.pre});
+}
+
+// The cross-attention layer's K/V: the prefix rows of kv through its k/v
+// projections, F16, once per request.
+void fused_cross_kv(ggml_context * ctx, const LayerW & w, const KvBuf & kv, const Config & cfg,
+                    ggml_tensor ** K_repro, ggml_tensor ** V_repro) {
+    auto repro = [&](ggml_tensor * buf, ggml_tensor * W) {
+        ggml_tensor * x = ggml_cast(ctx, ggml_view_2d(ctx, buf, cfg.kv_full_dim, cfg.n_prefix, buf->nb[2], 0),
+                                    GGML_TYPE_F32);
+        add_dep(x, kv.pre);
+        return ggml_reshape_3d(ctx, ggml_cast(ctx, mm_w(ctx, W, x), GGML_TYPE_F16), cfg.head_dim, cfg.n_kv_heads,
+                               cfg.n_prefix);
+    };
+    *K_repro = repro(kv.k, w.Wk);
+    *V_repro = repro(kv.v, w.Wv);
+}
+
+ggml_tensor * fused_layer_cross(ggml_context * ctx, const LayerW & w, const FusedRmsSpec & rms, ggml_tensor * x_in,
+                                ggml_tensor * K_repro, ggml_tensor * V_repro, ggml_tensor * positions_rebased,
+                                ggml_tensor * mask_f16, const Config & cfg) {
+    ggml_tensor * xn = fused_in(ctx, w, rms, x_in);
+    ggml_tensor * q  = w.q_q ? qlinear(ctx, w.q_q, xn, nullptr, nullptr, GGML_TYPE_F32)
+                             : fused_linear(ctx, w.Wq, xn, nullptr, nullptr, GGML_TYPE_F32, false);
+    // RoPE writes F16 itself (act_dtype.h: retype), as the attention reads it.
+    ggml_tensor * q16 = retype(rope(ctx, rope_spec(cfg),
+                                    ggml_reshape_3d(ctx, q, cfg.head_dim, cfg.n_q_heads, cfg.n_suffix),
+                                    positions_rebased),
+                               GGML_TYPE_F16);
+    return fused_attn_mlp(ctx, w, rms, x_in, q16, K_repro, V_repro, mask_f16, cfg, cfg.n_suffix, {});
+}
+
 }
 
 namespace {
@@ -814,6 +935,7 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
             return nullptr;
         m->backend = b.handle;
         m->is_cuda = b.is_cuda;
+        m->is_sycl = b.is_sycl;
         // On SYCL the vision tower's attention runs on oneDNN's fused SDPA, so
         // flash attention is the default there unless --flash-attn was given.
         if (b.is_sycl && !opts.flash_attn.has_value() && vla::fa_takes_views()) {
@@ -854,6 +976,50 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
         }
         m->cfg.n_img = m->vit_n_tokens;
         m->vit.enc.cfg = {m->vit_hidden, m->vit_heads, m->vit_hidden/m->vit_heads, m->vit_ln_eps, false};
+        // Fused SigLIP blocks (modules/encoder.h, EncCfg::fused): SYCL, BF16
+        // weights, view-taking flash attention. Every GEMM carries its bias,
+        // GELU and residual, LayerNorm is one kernel, q|k|v is one GEMM, and
+        // all views go through the tower in one pass. VLA_SMOLVLA_NO_VIT_FUSE=1
+        // keeps the per-op graph.
+        // Not for a GGUF whose GEMM weights stay packed (quantized): the fused
+        // GEMMs take BF16 weights.
+        const ggml_type ft0 = use_gguf ? gst.file_type(hf_to_gguf(
+            "model.vlm_with_expert.vlm.model.text_model.layers.0.self_attn.q_proj.weight")) : GGML_TYPE_COUNT;
+        const bool fusable = m->is_sycl && m->weight_dtype == GGML_TYPE_BF16 && vla::flash_attn_enabled() &&
+                             vla::fa_takes_views() && !(ft0 != GGML_TYPE_COUNT && ggml_is_quantized(ft0));
+        if (fusable && !env_flag("VLA_SMOLVLA_NO_VIT_FUSE")) {
+            m->vit.enc.cfg.fused      = true;
+            m->vit.enc.cfg.flash_attn = true;
+            m->vit.enc.cfg.act        = GGML_TYPE_BF16;
+            m->vit.enc.ln_spec.eps    = m->vit_ln_eps;
+            sycl_register_fused_ops();
+            sycl_register_bf16_ops();
+            std::printf("vla(smolvla): fused SigLIP blocks, views batched (VLA_SMOLVLA_NO_VIT_FUSE=1 to disable)\n");
+        }
+        // The LM and expert layers as fused nodes, same conditions.
+        // VLA_SMOLVLA_NO_FUSE=1 keeps the per-op graph.
+        if (fusable && !env_flag("VLA_SMOLVLA_NO_FUSE")) {
+            m->fused_lm     = true;
+            m->rms_spec.eps = m->cfg.rms_eps;
+            sycl_register_fused_ops();
+            sycl_register_bf16_ops();
+            std::printf("vla(smolvla): fused LM and expert layers, K/V in place (VLA_SMOLVLA_NO_FUSE=1 to disable)\n");
+        }
+        // VLA_SMOLVLA_W8A8=all (or any of vit,vlm,expert): those GEMMs as W8A8
+        // with per-token INT8 activations, the weights quantized at load.
+        if (const char * e = std::getenv("VLA_SMOLVLA_W8A8"); e && *e) {
+            const std::string v = e;
+            auto has = [&](const char * k) { return v == "all" || v.find(k) != std::string::npos; };
+            if (m->fused_lm && m->vit.enc.cfg.fused) {
+                m->w8a8_vit    = has("vit");
+                m->w8a8_vlm    = has("vlm");
+                m->w8a8_expert = has("expert");
+                std::printf("vla(smolvla): W8A8 GEMMs:%s%s%s\n", m->w8a8_vit ? " vit" : "",
+                            m->w8a8_vlm ? " vlm" : "", m->w8a8_expert ? " expert" : "");
+            } else {
+                std::fprintf(stderr, "vla(smolvla): VLA_SMOLVLA_W8A8 ignored - needs the fused SYCL graph\n");
+            }
+        }
     }
     m->cfg.n_prefix = m->cfg.n_img+m->cfg.n_lang+m->cfg.n_state;
     m->cfg.n_full   = m->cfg.n_prefix+m->cfg.n_suffix;
@@ -962,9 +1128,21 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
             const std::string pf = pb;
             w.ln1w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H); w.ln1b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
             w.ln2w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H); w.ln2b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
-            w.Wq = ggml_new_tensor_2d(ctx, wdt, H, H); w.bq = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
-            w.Wk = ggml_new_tensor_2d(ctx, wdt, H, H); w.bk = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
-            w.Wv = ggml_new_tensor_2d(ctx, wdt, H, H); w.bv = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
+            if (vt.enc.cfg.fused) {
+                // q, k and v stream into row slices of one [H, 3H] GEMM weight
+                // (and one [3H] bias); the views are initialised by alloc_weights.
+                w.Wqkv = ggml_new_tensor_2d(ctx, wdt, H, 3*H);
+                w.bqkv = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 3*H);
+                ggml_tensor ** Ws[3] = {&w.Wq, &w.Wk, &w.Wv}, ** bs[3] = {&w.bq, &w.bk, &w.bv};
+                for (int j = 0; j < 3; ++j) {
+                    *Ws[j] = ggml_view_2d(ctx, w.Wqkv, H, H, w.Wqkv->nb[1], (size_t) j * H * w.Wqkv->nb[1]);
+                    *bs[j] = ggml_view_1d(ctx, w.bqkv, H, (size_t) j * H * sizeof(float));
+                }
+            } else {
+                w.Wq = ggml_new_tensor_2d(ctx, wdt, H, H); w.bq = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
+                w.Wk = ggml_new_tensor_2d(ctx, wdt, H, H); w.bk = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
+                w.Wv = ggml_new_tensor_2d(ctx, wdt, H, H); w.bv = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
+            }
             w.Wo = ggml_new_tensor_2d(ctx, wdt, H, H); w.bo = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
             w.Wfc1 = ggml_new_tensor_2d(ctx, wdt, H, FF);  w.bfc1 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, FF);
             w.Wfc2 = ggml_new_tensor_2d(ctx, wdt, FF, H);  w.bfc2 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
@@ -982,17 +1160,36 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
                                m->mm_fc, {cfg.hidden, c4}});
     }
 
+    // GEMM weights [K, N_0 + N_1 + ...] whose parts the checkpoint's tensors
+    // stream into: *parts[j] becomes a view of rows [N_0 + ... + N_{j-1}, ...).
+    auto fused_weight = [&](int64_t K, std::initializer_list<std::pair<ggml_tensor **, int64_t>> parts) {
+        int64_t N = 0;
+        for (const auto & p : parts) N += p.second;
+        ggml_tensor * W = ggml_new_tensor_2d(ctx, wdt, K, N);
+        int64_t n0 = 0;
+        for (const auto & p : parts) {
+            *p.first = ggml_view_2d(ctx, W, K, p.second, W->nb[1], (size_t) n0 * W->nb[1]);
+            n0 += p.second;
+        }
+        return W;
+    };
+
     m->vlm_layers.resize(cfg.n_layers);
     for (int i=0; i<cfg.n_layers; ++i) {
         LayerW & w = m->vlm_layers[i];
         w.Wln_in   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.hidden);
-        w.Wq       = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.q_full_dim);
-        w.Wk       = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.kv_full_dim);
-        w.Wv       = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.kv_full_dim);
+        if (m->fused_lm) {
+            w.Wqkv = fused_weight(cfg.hidden, {{&w.Wq, cfg.q_full_dim}, {&w.Wk, cfg.kv_full_dim}, {&w.Wv, cfg.kv_full_dim}});
+            w.Wgu  = fused_weight(cfg.hidden, {{&w.Wgate, cfg.intermediate}, {&w.Wup, cfg.intermediate}});
+        } else {
+            w.Wq    = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.q_full_dim);
+            w.Wk    = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.kv_full_dim);
+            w.Wv    = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.kv_full_dim);
+            w.Wgate = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.intermediate);
+            w.Wup   = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.intermediate);
+        }
         w.Wo       = ggml_new_tensor_2d(ctx, wdt, cfg.q_full_dim, cfg.hidden);
         w.Wln_post = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.hidden);
-        w.Wgate    = ggml_new_tensor_2d(ctx, wdt, cfg.hidden,       cfg.intermediate);
-        w.Wup      = ggml_new_tensor_2d(ctx, wdt, cfg.hidden,       cfg.intermediate);
         w.Wdown    = ggml_new_tensor_2d(ctx, wdt, cfg.intermediate, cfg.hidden);
 
         char p[256]; std::snprintf(p, sizeof(p),
@@ -1014,18 +1211,26 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
         LayerW & w = m->expert_layers[i];
         const bool self_attn = expert_self_attn(cfg, i);
         w.Wln_in   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.expert_h);
-        w.Wq       = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h, cfg.q_full_dim);
-        if (self_attn) {
-            w.Wk = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h,    cfg.kv_full_dim);
-            w.Wv = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h,    cfg.kv_full_dim);
+        if (m->fused_lm && self_attn) {
+            w.Wqkv = fused_weight(cfg.expert_h, {{&w.Wq, cfg.q_full_dim}, {&w.Wk, cfg.kv_full_dim}, {&w.Wv, cfg.kv_full_dim}});
         } else {
-            w.Wk = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.kv_full_dim, cfg.kv_full_dim);
-            w.Wv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.kv_full_dim, cfg.kv_full_dim);
+            w.Wq = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h, cfg.q_full_dim);
+            if (self_attn) {
+                w.Wk = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h,    cfg.kv_full_dim);
+                w.Wv = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h,    cfg.kv_full_dim);
+            } else {
+                w.Wk = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.kv_full_dim, cfg.kv_full_dim);
+                w.Wv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.kv_full_dim, cfg.kv_full_dim);
+            }
+        }
+        if (m->fused_lm)
+            w.Wgu = fused_weight(cfg.expert_h, {{&w.Wgate, cfg.expert_inter}, {&w.Wup, cfg.expert_inter}});
+        else {
+            w.Wgate = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h, cfg.expert_inter);
+            w.Wup   = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h, cfg.expert_inter);
         }
         w.Wo       = ggml_new_tensor_2d(ctx, wdt, cfg.q_full_dim, cfg.expert_h);
         w.Wln_post = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.expert_h);
-        w.Wgate    = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h,     cfg.expert_inter);
-        w.Wup      = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h,     cfg.expert_inter);
         w.Wdown    = ggml_new_tensor_2d(ctx, wdt, cfg.expert_inter, cfg.expert_h);
 
         char p[256]; std::snprintf(p, sizeof(p),
@@ -1092,7 +1297,7 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
         keep.reserve(pending_f32.size());
         for (auto & p : pending_f32) {
             const ggml_type ft = gst.file_type(hf_to_gguf(p.name));
-            if (p.t->type == wdt && ft != GGML_TYPE_COUNT && ggml_is_quantized(ft) &&
+            if (p.t->type == wdt && !p.t->view_src && ft != GGML_TYPE_COUNT && ggml_is_quantized(ft) &&
                 p.t->ne[0] % ggml_blck_size(ft) == 0) {
                 retype(p.t, ft);
                 pending_packed.push_back({p.name, p.t});
@@ -1177,6 +1382,58 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
         ggml_backend_tensor_set(p.t, hbuf.data(), 0, hbuf.size());
     }
 
+    if (m->w8a8_vit || m->w8a8_vlm || m->w8a8_expert) {
+        // INT8 copies of the resident BF16 weights, symmetric per output
+        // channel (max|w| / 127), as WeightLoader::quant_i8 makes them. A
+        // fused weight's rows are its parts' rows, so quantizing it whole is
+        // quantizing each part.
+        std::vector<std::pair<ggml_tensor *, QWeight *>> todo;
+        auto want = [&](ggml_tensor * W, QWeight & q) { if (W) todo.push_back({W, &q}); };
+        if (m->w8a8_vit)
+            for (EncBlockW & w : m->vit.enc.blk) {
+                want(w.Wqkv, w.q_qkv); want(w.Wo, w.q_o); want(w.Wfc1, w.q_fc1); want(w.Wfc2, w.q_fc2);
+            }
+        for (int pass = 0; pass < 2; ++pass) {
+            if (!(pass == 0 ? m->w8a8_vlm : m->w8a8_expert)) continue;
+            for (LayerW & w : pass == 0 ? m->vlm_layers : m->expert_layers) {
+                if (w.Wqkv) want(w.Wqkv, w.q_qkv); else want(w.Wq, w.q_q);
+                want(w.Wo, w.q_o); want(w.Wgu, w.q_gu); want(w.Wdown, w.q_down);
+            }
+        }
+        const ggml_init_params qp = { ggml_tensor_overhead() * (2 * todo.size() + 8), nullptr, true };
+        m->ctx_q8 = ggml_init(qp);
+        if (!m->ctx_q8) { std::fprintf(stderr, "vla(smolvla): ggml_init (q8) failed\n"); return nullptr; }
+        for (auto & [W, q] : todo) {
+            GGML_ASSERT(W->type == GGML_TYPE_BF16);
+            q->w = ggml_new_tensor_2d(m->ctx_q8, GGML_TYPE_I8, W->ne[0], W->ne[1]);
+            q->s = ggml_new_tensor_1d(m->ctx_q8, GGML_TYPE_F32, W->ne[1]);
+            ggml_format_name(q->w, "%s.i8", ggml_get_name(W));
+        }
+        m->q8_buf = alloc_weights(m->ctx_q8, m->backend);
+        if (!m->q8_buf) { std::fprintf(stderr, "vla(smolvla): alloc (q8 weights) failed\n"); return nullptr; }
+        std::vector<ggml_bf16_t> wb;
+        std::vector<float>       wf, sc;
+        std::vector<int8_t>      codes;
+        for (auto & [W, q] : todo) {
+            const int64_t K = W->ne[0], N = W->ne[1];
+            wb.resize((size_t) (K * N)); wf.resize(wb.size()); codes.resize(wb.size()); sc.resize((size_t) N);
+            ggml_backend_tensor_get(W, wb.data(), 0, ggml_nbytes(W));
+            ggml_bf16_to_fp32_row(wb.data(), wf.data(), K * N);
+            for (int64_t n = 0; n < N; ++n) {
+                const float * row = wf.data() + n * K;
+                float amax = 0.0f;
+                for (int64_t k = 0; k < K; ++k) amax = std::max(amax, std::fabs(row[k]));
+                sc[n] = amax > 0.0f ? amax / 127.0f : 1.0f;
+                for (int64_t k = 0; k < K; ++k)
+                    codes[n * K + k] = (int8_t) std::lrint(std::min(127.0f, std::max(-127.0f, row[k] / sc[n])));
+            }
+            ggml_backend_tensor_set(q->w, codes.data(), 0, ggml_nbytes(q->w));
+            ggml_backend_tensor_set(q->s, sc.data(), 0, ggml_nbytes(q->s));
+        }
+        std::printf("vla(smolvla): %zu GEMM weights quantized to INT8 (%.1f MiB)\n", todo.size(),
+                    ggml_backend_buffer_get_size(m->q8_buf) / (1024.0 * 1024.0));
+    }
+
     {
         const float dt = -1.f/static_cast<float>(cfg.num_steps);
         for (int step=0; step<cfg.num_steps; ++step) {
@@ -1231,6 +1488,50 @@ void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::Mai
     ggml_tensor * mask_prefill_f16 = ggml_cast(ctx, io.mask_prefill,  GGML_TYPE_F16);
     ggml_tensor * mask_full_f16    = ggml_cast(ctx, io.mask_full,     GGML_TYPE_F16);
     ggml_tensor * mask_pfx_only_f16= ggml_cast(ctx, io.mask_pfx_only, GGML_TYPE_F16);
+    if (m->fused_lm && !kv_leaves) {
+        std::vector<KvBuf> kv(cfg.n_layers);
+        for (KvBuf & b : kv) {
+            // Leaves the allocator places up front; output-flagged so it never
+            // frees or reuses them while the steps still read them.
+            b.k = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, cfg.head_dim, cfg.n_kv_heads, cfg.n_full);
+            b.v = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, cfg.head_dim, cfg.n_kv_heads, cfg.n_full);
+            ggml_set_output(b.k);
+            ggml_set_output(b.v);
+        }
+        ggml_tensor * h = prefix_embs;
+        for (int i=0; i<cfg.n_layers; ++i)
+            h = fused_layer_kv(ctx, m->vlm_layers[i], m->rms_spec, h, io.pos_prefill, mask_prefill_f16, cfg,
+                               cfg.n_prefix, 0, kv[i]);
+        (void) h;
+
+        std::vector<ggml_tensor *> xk(cfg.n_layers, nullptr), xv(cfg.n_layers, nullptr);
+        for (int li=0; li<cfg.n_layers; ++li)
+            if (!expert_self_attn(cfg, li))
+                fused_cross_kv(ctx, m->expert_layers[li], kv[li], cfg, &xk[li], &xv[li]);
+
+        const float dt = -1.f/static_cast<float>(cfg.num_steps);
+        ggml_tensor * x_t = io.x0;
+        for (int step=0; step<cfg.num_steps; ++step) {
+            ggml_tensor * action_emb     = linear(ctx, m->W_ain, m->b_ain, x_t);
+            ggml_tensor * action_time_in = ggml_concat(ctx, action_emb, m->time_bcasts[step], 0);
+            ggml_tensor * mlp1           = linear(ctx, m->W_at1, m->b_at1, action_time_in);
+            ggml_tensor * hs             = linear(ctx, m->W_at2, m->b_at2, ggml_silu(ctx, mlp1));
+            for (int li=0; li<cfg.n_layers; ++li) {
+                const LayerW & w = m->expert_layers[li];
+                hs = expert_self_attn(cfg, li)
+                    ? fused_layer_kv(ctx, w, m->rms_spec, hs, io.pos_full, mask_full_f16, cfg, cfg.n_suffix,
+                                     cfg.n_prefix, kv[li])
+                    : fused_layer_cross(ctx, w, m->rms_spec, hs, xk[li], xv[li], io.pos_rebased,
+                                        mask_pfx_only_f16, cfg);
+            }
+            ggml_tensor * v_t = linear(ctx, m->W_aout, m->b_aout, rms_norm(ctx, hs, m->Wnorm_expert, cfg.rms_eps));
+            x_t = ggml_add(ctx, x_t, ggml_scale(ctx, v_t, dt));
+        }
+        ggml_set_output(x_t);
+        io.x_t = x_t;
+        return;
+    }
+
     io.k_cache.resize(cfg.n_layers);
     io.v_cache.resize(cfg.n_layers);
     {
@@ -1290,6 +1591,10 @@ void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::Mai
 }
 
 SmolVLAModelArch::~SmolVLAModelArch() {
+    if (q8_buf)
+        ggml_backend_buffer_free(q8_buf);
+    if (ctx_q8)
+        ggml_free(ctx_q8);
     if (weight_buf)
         ggml_backend_buffer_free(weight_buf);
     if (ctx_weights)
@@ -1353,37 +1658,84 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         const auto t_vision_begin = clock::now();
 
         // SigLIP ViT (conv patch-embed -> +pos -> layers -> post_ln -> pixel shuffle -> connector), plain sequential positions.
-        ggml_context * VC = m->vision_scratch.reset(size_t(256)*1024*1024);
-        if (!VC) { std::fprintf(stderr, "vla(smolvla): ggml_init(vision ctx) failed\n"); return {}; }
-        ggml_tensor * t_px = ggml_new_tensor_3d(VC, GGML_TYPE_F32, m->vit_image, m->vit_image, 3); ggml_set_input(t_px);
-        ggml_tensor * hv = m->vit.embed_conv(VC, t_px, m->vit_patch, grid);
-        for (const EncBlockW & w : m->vit.enc.blk)
-            hv = build_siglip_layer(VC, m->vit.enc.cfg, w, hv, n_patches);
-        ggml_tensor * shuf = layer_norm(VC, hv, m->vit.post_ln_w, m->vit.post_ln_b, m->vit.enc.cfg.ln_eps);
-        shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_3d(VC, shuf, H*s, grid/s, grid), 0, 2, 1, 3));
-        shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_3d(VC, shuf, c4, grid/s, grid/s), 0, 2, 1, 3));
-        ggml_tensor * img_embeds = ggml_mul_mat(VC, m->mm_fc, ggml_reshape_2d(VC, shuf, c4, K));
-        ggml_set_output(img_embeds);
-        ggml_cgraph * gA = ggml_new_graph_custom(VC, 8192, false);
-        ggml_build_forward_expand(gA, img_embeds);
-        if (!m->vision_scratch.alloc(m->backend, gA)) {
-            std::fprintf(stderr, "vla(smolvla): vision gallocr alloc failed\n");
-            return {};
-        }
+        // encode(v0, count): views [v0, v0 + count) into img_emb_pre. The fused blocks
+        // take every view in one pass (nv * n_patches rows per GEMM, a batch of nv to
+        // the attention); the per-op graph runs one view per compute.
+        const bool fused = m->vit.enc.cfg.fused;
+        auto encode = [&](int first, int count) -> bool {
+            const int64_t nv = fused ? count : 1;
+            ggml_context * VC = m->vision_scratch.reset(size_t(256)*1024*1024);
+            if (!VC) { std::fprintf(stderr, "vla(smolvla): ggml_init(vision ctx) failed\n"); return false; }
+            ggml_tensor * t_px = ggml_new_tensor_4d(VC, GGML_TYPE_F32, m->vit_image, m->vit_image, 3, nv); ggml_set_input(t_px);
+            ggml_tensor * shuf;
+            if (fused) {
+                ggml_tensor * emb = nullptr;
+                for (int64_t v = 0; v < nv; ++v) {
+                    ggml_tensor * px = ggml_view_3d(VC, t_px, m->vit_image, m->vit_image, 3, t_px->nb[1], t_px->nb[2],
+                                                    (size_t) v * t_px->nb[3]);
+                    ggml_tensor * e = m->vit.embed_conv(VC, px, m->vit_patch, grid);
+                    emb = emb ? ggml_concat(VC, emb, e, 1) : e;
+                }
+                ggml_tensor * hv = m->vit.enc.build(VC, as_type(VC, emb, GGML_TYPE_BF16), n_patches, nv);
+                shuf = layer_norm(VC, as_type(VC, hv, GGML_TYPE_F32), m->vit.post_ln_w, m->vit.post_ln_b,
+                                  m->vit.enc.cfg.ln_eps);
+            } else {
+                ggml_tensor * hv = m->vit.embed_conv(VC, ggml_reshape_3d(VC, t_px, m->vit_image, m->vit_image, 3),
+                                                     m->vit_patch, grid);
+                for (const EncBlockW & w : m->vit.enc.blk)
+                    hv = build_siglip_layer(VC, m->vit.enc.cfg, w, hv, n_patches);
+                shuf = layer_norm(VC, hv, m->vit.post_ln_w, m->vit.post_ln_b, m->vit.enc.cfg.ln_eps);
+            }
+            shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_4d(VC, shuf, H*s, grid/s, grid, nv), 0, 2, 1, 3));
+            shuf = ggml_cont(VC, ggml_permute(VC, ggml_reshape_4d(VC, shuf, c4, grid/s, grid/s, nv), 0, 2, 1, 3));
+            ggml_tensor * img_embeds = ggml_mul_mat(VC, m->mm_fc, ggml_reshape_2d(VC, shuf, c4, K*nv));
+            ggml_set_output(img_embeds);
+            ggml_cgraph * gA = ggml_new_graph_custom(VC, 8192, false);
+            ggml_build_forward_expand(gA, img_embeds);
+            if (!m->vision_scratch.alloc(m->backend, gA)) {
+                std::fprintf(stderr, "vla(smolvla): vision gallocr alloc failed\n");
+                return false;
+            }
 
-        std::vector<float> chw;
-        bool vok = true;
-        for (int v=0; v<n_views && vok; ++v) {
-            if (!preprocess_image_chw("smolvla", in.images[v], m->vit_image, chw)) {
-                vok = false;
-                break;
+            std::vector<float> chw;
+            for (int v0=first; v0<first+count; v0 += (int) nv) {
+                for (int64_t v=0; v<nv; ++v) {
+                    if (!preprocess_image_chw("smolvla", in.images[v0+v], m->vit_image, chw))
+                        return false;
+                    ggml_backend_tensor_set(t_px, chw.data(), (size_t) v * t_px->nb[3], t_px->nb[3]);
+                }
+                graph_unique_names(gA);
+                if (ggml_backend_graph_compute(m->backend, gA) != GGML_STATUS_SUCCESS) {
+                    std::fprintf(stderr, "vla(smolvla): vision compute failed (view %d)\n", v0);
+                    return false;
+                }
+                ggml_backend_tensor_get(img_embeds, img_emb_pre.data()+size_t(v0)*per_view_n, 0, ggml_nbytes(img_embeds));
             }
-            ggml_backend_tensor_set(t_px, chw.data(), 0, ggml_nbytes(t_px));
-            graph_unique_names(gA);
-            if (ggml_backend_graph_compute(m->backend, gA) != GGML_STATUS_SUCCESS) {
-                std::fprintf(stderr, "vla(smolvla): vision compute failed (view %d)\n", v); vok = false; break;
+            return true;
+        };
+
+        // Prototype (VLA_SMOLVLA_NPU_VISION=<socket>, 2+ views): the last view is encoded
+        // on the NPU by scripts/npu_vision_worker.py, serving the graph that
+        // scripts/build_vision_ir.py builds from this GGUF, while the GPU encodes the
+        // others; vision then costs max(GPU, NPU) instead of the sum. Any NPU failure
+        // falls back to encoding that view here.
+        static const char * npu_sock = std::getenv("VLA_SMOLVLA_NPU_VISION");
+        bool vok;
+        if (npu_sock && *npu_sock && n_views >= 2) {
+            const int last = n_views - 1;
+            std::vector<float> npu_chw;
+            vok = preprocess_image_chw("smolvla", in.images[last], m->vit_image, npu_chw);
+            float * npu_out = img_emb_pre.data() + size_t(last) * per_view_n;
+            std::future<bool> npu_job = std::async(std::launch::async, [&] {
+                return vok && npu_vision_roundtrip(npu_sock, npu_chw, npu_out, per_view_n);
+            });
+            vok = encode(0, last) && vok;
+            if (!npu_job.get()) {
+                std::fprintf(stderr, "vla(smolvla): NPU view failed, encoding it on the GPU\n");
+                vok = vok && encode(last, 1);
             }
-            ggml_backend_tensor_get(img_embeds, img_emb_pre.data()+size_t(v)*per_view_n, 0, ggml_nbytes(img_embeds));
+        } else {
+            vok = encode(0, n_views);
         }
         if (!vok) return {};
         m->stats.ms_vision = std::chrono::duration<float, std::milli>(clock::now()-t_vision_begin).count();

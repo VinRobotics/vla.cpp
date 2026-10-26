@@ -23,7 +23,10 @@
 #include "layers/fused_ew.h"
 #include "layers/qlinear.h"
 
+#include "ggml-backend.h"
+
 #include <cmath>
+#include <vector>
 
 namespace vla {
 
@@ -85,7 +88,8 @@ ggml_tensor * EncStack::block(ggml_context * C, const EncBlockW & w, ggml_tensor
         const FusedLNormSpec & ln = ln_spec;
         auto lin = [&](ggml_tensor * W, const WeightLoader::QWeight & q, ggml_tensor * in, ggml_tensor * b,
                        ggml_tensor * res, bool gelu) {
-            return q ? qlinear(C, q, in, b, res, at, gelu) : fused_linear(C, W, in, b, res, at, gelu);
+            const int act = gelu ? (cfg.gelu_erf ? FUSED_GELU_ERF : FUSED_GELU_TANH) : 0;
+            return q ? qlinear(C, q, in, b, res, at, act) : fused_linear(C, W, in, b, res, at, act);
         };
         ggml_tensor * qkv = lin(w.Wqkv, w.q_qkv, fused_lnorm(C, x, w.ln1w, w.ln1b, at, ln), w.bqkv, nullptr, false);
         const size_t es = ggml_element_size(qkv);
@@ -163,6 +167,27 @@ ggml_tensor * EncStack::block(ggml_context * C, const EncBlockW & w, ggml_tensor
     ggml_tensor * h1 = ggml_add(C, x, linear(C, w.Wo, w.bo, att));
     ggml_tensor * n2 = layer_norm(C, h1, w.ln2w, w.ln2b, cfg.ln_eps);
     return ggml_add(C, h1, ffn_gelu(C, w.Wfc1, w.bfc1, w.Wfc2, w.bfc2, n2));
+}
+
+bool fold_layer_scale(ggml_tensor * W, ggml_tensor * b, const ggml_tensor * ls) {
+    if (W->type != GGML_TYPE_BF16 || b->type != GGML_TYPE_F32 || ls->type != GGML_TYPE_F32 ||
+        ggml_nelements(b) != W->ne[1] || ggml_nelements(ls) != W->ne[1])
+        return false;
+    const int64_t K = W->ne[0], N = W->ne[1];
+    std::vector<float>       s((size_t) N), bb((size_t) N), wf((size_t) (K * N));
+    std::vector<ggml_bf16_t> wb((size_t) (K * N));
+    ggml_backend_tensor_get(ls, s.data(), 0, ggml_nbytes(ls));
+    ggml_backend_tensor_get(b, bb.data(), 0, ggml_nbytes(b));
+    ggml_backend_tensor_get(W, wb.data(), 0, ggml_nbytes(W));
+    ggml_bf16_to_fp32_row(wb.data(), wf.data(), K * N);
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t k = 0; k < K; ++k) wf[n * K + k] *= s[n];
+        bb[n] *= s[n];
+    }
+    ggml_fp32_to_bf16_row(wf.data(), wb.data(), K * N);
+    ggml_backend_tensor_set(W, wb.data(), 0, ggml_nbytes(W));
+    ggml_backend_tensor_set(b, bb.data(), 0, ggml_nbytes(b));
+    return true;
 }
 
 ggml_tensor * EncStack::build(ggml_context * C, ggml_tensor * x, int64_t seq, int64_t nv) const {
