@@ -416,6 +416,120 @@ NAIVE_COMPUTE_NEW = """enum ggml_status naive_compute(ggml_cgraph * cgraph,
 """
 
 # file -> [(anchor, replacement), ...]. Every anchor must match exactly once.
+VLA_FUSE_IM2COL_2D = r'''// vla.cpp: THE 2D im2col. The matcher below was written for the 1D chain
+// (Convert <- Reshape <- Reshape <- Transpose <- ExtractImagePatches) and never
+// matched a vision tower's patch embed, which the translator emits as
+//   MatMul(W, Convert <- Reshape <- Convert(f16) <- Reshape <- Transpose
+//             <- Reshape <- Transpose <- ExtractImagePatches <- Pad(image))
+// with W = Reshape(Const[OC, IC, KH, KW]). ggml_conv_2d is by construction
+// mul_mat(im2col(image), kernel flattened the same way), so the chain between
+// the patches and the MatMul is only the translator's fixed relayout; walking
+// back through Reshape/Transpose/Convert to the ExtractImagePatches and
+// replacing the whole thing with Convolution(image, W) is exact. Checked on
+// the CPU plugin: SmolVLA's and pi0.5's towers within 1.4e-4 of the im2col
+// graph (outputs of magnitude 65-190).
+static bool vla_fuse_im2col_2d(const std::shared_ptr<ov::op::v0::MatMul> & mm) {
+    // GGML_OPENVINO_FUSE_CONV2D=0 keeps the im2col graph, for A/B runs.
+    static const bool enabled = [] {
+        const char * e = getenv("GGML_OPENVINO_FUSE_CONV2D");
+        return !(e && *e && atoi(e) == 0);
+    }();
+    if (!enabled) {
+        return false;
+    }
+    ov::Output<ov::Node> act = mm->input_value(1);
+    std::shared_ptr<ov::op::v3::ExtractImagePatches> eip;
+    for (int i = 0; i < 10 && !eip; ++i) {
+        auto n = act.get_node_shared_ptr();
+        if (ov::is_type<ov::op::v0::Convert>(n) || ov::is_type<ov::op::v1::Reshape>(n) ||
+            ov::is_type<ov::op::v1::Transpose>(n)) {
+            if (n->output(0).get_target_inputs().size() != 1) {
+                return false;
+            }
+            act = n->input_value(0);
+        } else {
+            eip = ov::as_type_ptr<ov::op::v3::ExtractImagePatches>(n);
+            if (!eip) {
+                return false;
+            }
+        }
+    }
+    if (!eip) {
+        return false;
+    }
+    const auto sizes = eip->get_sizes();
+    if (sizes.size() != 2 || sizes[0] <= 1) {
+        return false;  // KH == 1 is the 1D case the matcher below handles
+    }
+    auto pad = ov::as_type_ptr<ov::op::v1::Pad>(eip->input_value(0).get_node_shared_ptr());
+    if (!pad) {
+        return false;
+    }
+    auto pb = ov::as_type_ptr<ov::op::v0::Constant>(pad->input_value(1).get_node_shared_ptr());
+    auto pe = ov::as_type_ptr<ov::op::v0::Constant>(pad->input_value(2).get_node_shared_ptr());
+    if (!pb || !pe) {
+        return false;
+    }
+    const auto pbv = pb->cast_vector<int64_t>();
+    const auto pev = pe->cast_vector<int64_t>();
+    if (pbv.size() != 4 || pev.size() != 4 || pbv[0] || pbv[1] || pev[0] || pev[1]) {
+        return false;
+    }
+    auto image = pad->input_value(0);  // [N, IC, IH, IW]
+    ov::Output<ov::Node> w = mm->input_value(0);
+    for (int i = 0; i < 4; ++i) {
+        auto n = w.get_node_shared_ptr();
+        if (ov::is_type<ov::op::v0::Convert>(n) || ov::is_type<ov::op::v1::Reshape>(n)) {
+            w = n->input_value(0);
+        } else {
+            break;
+        }
+    }
+    auto wc = ov::as_type_ptr<ov::op::v0::Constant>(w.get_node_shared_ptr());
+    if (!wc || wc->get_shape().size() != 4) {
+        return false;
+    }
+    const auto ws = wc->get_shape();  // [OC, IC, KH, KW]
+    const auto ips = image.get_partial_shape();
+    if (ws[2] != sizes[0] || ws[3] != sizes[1] || !ips.is_static() || ips.rank().get_length() != 4 ||
+        ips[1].get_length() != (int64_t) ws[1]) {
+        return false;
+    }
+    const auto out_ps = mm->get_output_partial_shape(0);
+    if (!out_ps.is_static()) {
+        return false;
+    }
+    const auto out_shape = out_ps.to_shape();  // [1, N, OC, OH*OW]
+    if (out_shape.size() != 4 || out_shape[2] != ws[0]) {
+        return false;
+    }
+    ov::Output<ov::Node> weight = wc;
+    if (wc->get_element_type() != image.get_element_type()) {
+        weight = std::make_shared<ov::op::v0::Convert>(wc, image.get_element_type());
+    }
+    const auto strides = eip->get_strides();
+    const auto rates = eip->get_rates();
+    auto conv = std::make_shared<ov::op::v1::Convolution>(
+        image, weight, ov::Strides{strides[0], strides[1]}, ov::CoordinateDiff{pbv[2], pbv[3]},
+        ov::CoordinateDiff{pev[2], pev[3]}, ov::Strides{rates[0], rates[1]}, ov::op::PadType::EXPLICIT);
+    // [N, OC, OH, OW] is the MatMul's [1, N, OC, OH*OW] row for row.
+    if (ov::shape_size(conv->get_output_shape(0)) != ov::shape_size(out_shape)) {
+        return false;
+    }
+    ov::Output<ov::Node> res = std::make_shared<ov::op::v1::Reshape>(
+        conv, ov::op::v0::Constant::create(ov::element::i64, {out_shape.size()},
+                                           std::vector<int64_t>(out_shape.begin(), out_shape.end())),
+        false);
+    if (res.get_element_type() != mm->get_output_element_type(0)) {
+        res = std::make_shared<ov::op::v0::Convert>(res, mm->get_output_element_type(0));
+    }
+    res.get_node_shared_ptr()->set_friendly_name(mm->get_friendly_name());
+    ov::replace_node(mm, res.get_node_shared_ptr());
+    return true;
+}
+
+'''
+
 EDITS = {
     "ggml/src/ggml-openvino/ggml-openvino-extra.cpp": [
         ("#include <optional>\n", "#include <optional>\n#include <vector>\n"),
@@ -472,6 +586,47 @@ EDITS = {
         }
     }""",
         ),
+        (
+            """        "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
+""",
+            """        "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
+        // vla.cpp: extra NPU plugin properties, "KEY=VALUE,KEY=VALUE" (NPU_TURBO=YES,
+        // PERFORMANCE_HINT=LATENCY, ...). See the NPU compile config below.
+        "GGML_OPENVINO_NPU_PROPS",
+""",
+            '"GGML_OPENVINO_NPU_PROPS",',
+        ),
+        (
+            """        if (compilation_mode_params && strlen(compilation_mode_params) > 0) {
+            compile_config["NPU_COMPILATION_MODE_PARAMS"] = compilation_mode_params;
+        }
+""",
+            """        if (compilation_mode_params && strlen(compilation_mode_params) > 0) {
+            compile_config["NPU_COMPILATION_MODE_PARAMS"] = compilation_mode_params;
+        }
+        // vla.cpp: GGML_OPENVINO_NPU_PROPS="KEY=VALUE,KEY=VALUE" lands verbatim in
+        // the compile config. NPU_TURBO=YES keeps the clock up between requests:
+        // a policy server's 50-500 ms gaps otherwise cost 50-70 ms per request.
+        // Later keys override the defaults above.
+        if (const char * props = ggml_openvino_getenv_str("GGML_OPENVINO_NPU_PROPS"); props && *props) {
+            std::string list(props);
+            size_t start = 0;
+            while (start < list.size()) {
+                size_t end = list.find(',', start);
+                if (end == std::string::npos) {
+                    end = list.size();
+                }
+                const std::string kv = list.substr(start, end - start);
+                const size_t eq = kv.find('=');
+                if (eq != std::string::npos && eq > 0) {
+                    compile_config[kv.substr(0, eq)] = kv.substr(eq + 1);
+                }
+                start = end + 1;
+            }
+        }
+""",
+            "// vla.cpp: GGML_OPENVINO_NPU_PROPS=",
+        ),
     ],
     "ggml/src/ggml-openvino/openvino/op/add.cpp": [
         (
@@ -503,6 +658,31 @@ EDITS = {
         // vla.cpp: two ROPEs with the same op_params but different position
         // inputs (a prefix and an action suffix) must not share one table.
         cache_key += "_pos_" + context.get_input_names()[1];
+""",
+        ),
+    ],
+    # vla.cpp: fold ggml_conv_2d's im2col chain into one Convolution.
+    "ggml/src/ggml-openvino/openvino/pass/fuse_to_conv.cpp": [
+        (
+            "#include <openvino/core/graph_util.hpp>\n",
+            "#include <cstdlib>\n#include <openvino/core/graph_util.hpp>\n",
+        ),
+        (
+            "FuseToConv::FuseToConv() {\n",
+            VLA_FUSE_IM2COL_2D + "FuseToConv::FuseToConv() {\n",
+            "static bool vla_fuse_im2col_2d(",
+        ),
+        (
+            """        if (!matmul_node || matmul_node->get_transpose_a() || !matmul_node->get_transpose_b()) {
+            return false;
+        }
+""",
+            """        if (!matmul_node || matmul_node->get_transpose_a() || !matmul_node->get_transpose_b()) {
+            return false;
+        }
+        if (vla_fuse_im2col_2d(matmul_node)) {
+            return true;
+        }
 """,
         ),
     ],
