@@ -64,6 +64,27 @@ Clients: the LIBERO and SimplerEnv runners in [EVAL.md](EVAL.md), and the
 real-robot client in the README's
 [Rollout on a real robot](../README.md#rollout-on-a-real-robot).
 
+### Prefix conditioning across chunks (SmolVLA)
+
+For asynchronous execution, a request can carry the part of the previous chunk
+that has not run yet, so the new chunk starts where the old one is going instead
+of jumping. Off by default; without it the output is bit-identical.
+
+| field | where | meaning |
+|---|---|---|
+| `prev_actions` | `PredictRequest` field 9, `vla_inputs.prev_actions` / `n_prev`, Python `predict(prev_actions=...)` | the not-yet-executed rest of the previous chunk, robot units (same as the output), whole rows of `max_action_dim`, at most `chunk_size` rows |
+| `inference_delay` | `PredictRequest` field 10, `vla_inputs.inference_delay`, Python `predict(inference_delay=...)` | actions that run while this chunk is computed (d) |
+
+At every Euler step the predicted clean chunk is pulled onto `prev_actions`:
+`x1 = x_t - t v`, `v <- v - W (Y - x1) / t`, with `Y` the rows normalised like the
+output and `W` RTC's prefix weights (1 on the first d rows, exponential decay to
+0 at the last row of `prev_actions`). It is gradient-free: not RTC's
+vector-Jacobian guidance, which would need backward passes through the action
+expert (about 2.5x the per-step cost in the RTC paper, 1.9x per chunk for a
+PyTorch SmolVLA on a Jetson Orin NX) and backward rules ggml lacks for flash
+attention and `concat`. It adds a few elementwise ops per step. SmolVLA only; other architectures ignore the fields. Smoothness at
+the chunk switch has been measured offline; task success on hardware has not.
+
 ## Runtime flags
 
 The same on `vla-server`, `vla-cli` and `vla-bench` (`--help` for the full
