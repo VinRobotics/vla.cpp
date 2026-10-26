@@ -80,11 +80,15 @@ class Model:
         self.close()
 
     def predict(self, images, tokens: Sequence[int], state=None, noise=None,
-                pixel_format: int = PIXEL_U8, timing: int = TIMING_NONE):
+                pixel_format: int = PIXEL_U8, timing: int = TIMING_NONE,
+                prev_actions=None, inference_delay: int = 0):
         """Run one forward pass.
 
         images: one HWC array, or a sequence of them for multi-view. uint8 RGB by
         default; pass pixel_format=PIXEL_F32_RGB_01 for float RGB in [0, 1].
+        prev_actions: optional (n_prev, max_action_dim) rest of the previous chunk
+        in robot units (SmolVLA prefix conditioning); inference_delay: steps that
+        run before this chunk starts.
         """
         views = images if isinstance(images, (list, tuple)) else [images]
         if not views:
@@ -133,6 +137,16 @@ class Model:
         if noise_ptr is not None:
             cin.noise = ctypes.cast(noise_ptr, POINTER(c_float))
         cin.timing_detail = int(timing)
+        if prev_actions is not None:
+            cols = int(self.config.max_action_dim)
+            flat = [float(v) for row in prev_actions for v in (row if hasattr(row, "__len__") else [row])]
+            if not flat or len(flat) % cols:
+                raise ValueError(f"prev_actions must be rows of {cols} values")
+            prev_ptr, prev_keep = _as_f32_array(flat, len(flat), "prev_actions")
+            keep.append(prev_keep)
+            cin.prev_actions = ctypes.cast(prev_ptr, POINTER(c_float))
+            cin.n_prev = len(flat) // cols
+            cin.inference_delay = int(inference_delay)
 
         out = POINTER(c_float)()
         n = c_int64()

@@ -31,6 +31,12 @@ message PredictRequest {
   uint32         precomputed_img_emb_n_views = 7;
 
   repeated uint32 attention_mask = 8;
+
+  // Optional prefix conditioning (SmolVLA): the not-yet-executed rest of the
+  // previous chunk in robot units, whole rows of action_dim, at most chunk_size
+  // rows; empty disables it. inference_delay: steps that run before this chunk.
+  repeated float prev_actions    = 9;
+  uint32         inference_delay = 10;
 }
 
 message PredictResponse {

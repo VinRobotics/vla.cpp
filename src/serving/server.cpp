@@ -448,6 +448,15 @@ int main(int argc, char ** argv) {
             continue;
         }
 
+        const int n_prev_vals = req.prev_actions_size();
+        if (n_prev_vals % int(cfg.max_action_dim) != 0 || n_prev_vals > expected_noise_n) {
+            char buf[160]; std::snprintf(buf, sizeof(buf),
+                "prev_actions length %d is not whole rows of %lld (at most %d values)",
+                n_prev_vals, (long long) cfg.max_action_dim, expected_noise_n);
+            send_reply(make_error_response(rid, buf));
+            continue;
+        }
+
         const bool use_precomputed = req.precomputed_img_emb_size() > 0;
         std::vector<float> precomputed_emb;
         int precomputed_n_views = 0;
@@ -530,6 +539,17 @@ int main(int argc, char ** argv) {
             }
         }
 
+        std::vector<float> prev_vec(req.prev_actions().begin(), req.prev_actions().end());
+        {
+            const int bad = find_non_finite(prev_vec.data(), static_cast<int>(prev_vec.size()));
+            if (bad >= 0) {
+                char buf[128]; std::snprintf(buf, sizeof(buf),
+                    "prev_actions[%d] = %g is not finite (NaN/Inf)", bad, prev_vec[bad]);
+                send_reply(make_error_response(rid, buf));
+                continue;
+            }
+        }
+
         vla::Inputs in;
         if (use_precomputed) {
             in.precomputed_img_emb = precomputed_emb.data();
@@ -554,6 +574,9 @@ int main(int argc, char ** argv) {
         in.attention_mask   = attn_mask_vec.empty() ? nullptr : attn_mask_vec.data();
         in.attention_mask_n = static_cast<int>(attn_mask_vec.size());
         in.timing_detail    = timing_detail;
+        in.prev_actions     = prev_vec.empty() ? nullptr : prev_vec.data();
+        in.n_prev           = static_cast<int>(prev_vec.size()/size_t(cfg.max_action_dim));
+        in.inference_delay  = static_cast<int>(req.inference_delay());
 
         std::vector<float> action_chunk = vla::predict(model, in);
         const auto & st = vla::last_stats(model);
