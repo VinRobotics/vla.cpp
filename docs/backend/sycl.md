@@ -253,6 +253,61 @@ episodes per suite, `n_action_steps` 10:
 The two are within the noise of 500 episodes on every suite; one step of
 inference took 35-43 ms in both.
 
+### 2-bit expert weights: `VLA_PI05_W2=expert` (W2A8, on top of `VLA_PI05_W8A8`)
+
+The action expert's seven projections (q|k|v, o, gate|up, down) on 2-bit
+weights with INT8 per-token activations, on an ESIMD XMX kernel
+(`src/sycl/vla_sycl_w2a8.cpp`). It needs `VLA_PI05_W8A8` with `expert` (or
+`all`) and replaces `VLA_PI05_W4` for the expert. Measured on a Core Ultra 7
+356H (Panther Lake, Xe3 iGPU with 4 Xe cores, LPDDR5X), oneAPI 2026.0, oneDNN
+3.11, two 224 px views, 10 flow steps.
+
+- **Format ("W2P").** `w = (2q - 3) * u * s_n`: a 2-bit code `q` per weight, an
+  integer unit `u` in 1..42 per group of 64 (one byte) and one float scale per
+  output channel (`s_n = max|row| / 126`), so every weight is an exact INT8
+  value and the kernel unpacks the codes in registers into plain s8 x s8 DPAS
+  with int32 accumulation, applying the two scales once at the end: 2.25 bits
+  per weight, 3.6x fewer bytes than INT8, no per-group folding. The weights are
+  quantized at load (~1 s, 16 threads; no new GGUF) with the per-group clip
+  search of `scripts/fakequant_expert_2bit.py` (`fake_quant_pow2`, 100/100 on
+  LIBERO-object on the BF16 path), each group's unit rounded onto the integer
+  grid (weight rel-error 0.350 vs 0.351 for that search; `VLA_PI05_W2_QUANT=0`
+  picks the least-squared-error unit instead: 0.320, but a larger action error).
+- **Fusions.** The gate|up GEMM's epilogue is the GeGLU (weights packed as
+  gate/up tile pairs, F16 [4096, M] out, the down GEMM quantizes it on the way
+  in), and the gated residual adds after o and down are the GEMMs' epilogues.
+  The q|k|v GEMM's epilogue applies RoPE and writes K and V into the cache
+  (weights packed as (i, i + hd/2) tile pairs per head, a cos/sin table on the
+  device, q out in F16), and the attention node is typed F16 so oneDNN's SDPA
+  writes the o GEMM's input directly. Nine kernel launches per expert layer
+  step. `VLA_PI05_W2_NO_GEGLU=1`, `VLA_PI05_W2_NO_ROPE=1` and
+  `VLA_PI05_W2_O_BF16=1` revert the fusions one by one (A/B runs; the GeGLU
+  epilogue agrees with the separate pass to F16 rounding, max action delta
+  0.0037).
+- **Kernel.** Standalone, M = 50: 2.6-2.9x faster than oneDNN INT8 on every
+  expert shape (gate|up 46 vs 128 us, down 19 vs 73, q|k|v 21 vs 38, o 12 vs
+  30); 72 GB/s at M = 1.
+- **Latency.** `vla-bench` p50 (2 views, 224 px, `--act-dtype bf16`, three
+  interleaved rounds): BF16 329 ms, W8A8 189 ms, W8A8 + INT4 expert 180 ms,
+  W8A8 + W2 expert 169 ms without and **161 ms** with the fused GeGLU (the RoPE
+  epilogue -1.1 ms and the F16 attention output -0.6 ms on top). The expert
+  goes from 6.8 to ~3.9 ms per flow step (~218 us per layer step: the four W2
+  GEMMs ~95 us, attention ~20-40, six small kernels ~45, ~50 us of inter-kernel
+  gaps).
+- **Action error** (`tests/vla_predict_check`, 2 views, max / mean over 1600
+  values) vs plain W8A8: 0.083 / 5.6e-3 (the per-group fake-quant GGUF on W8A8:
+  0.090 / 5.3e-3; W8A8 vs BF16 is 0.008 / 3.3e-4); vs that fake-quant GGUF
+  0.018 / 1.4e-3.
+- **LIBERO**, 10 tasks x 10 episodes, W8A8 + W2: object **94/100** (Wilson
+  87-97%; W8A8 94, W8A8 + INT4 93), spatial **86/100** (78-92%; W8A8 on the
+  same build 88/100, 80-93%; task 4 is 1/10 for both).
+
+| Variable | Effect |
+|---|---|
+| `VLA_PI05_W2=expert` | 2-bit expert weights (integer unit per group of 64) on the ESIMD W2A8 kernel (overrides `VLA_PI05_W4`) |
+| `VLA_PI05_W2_NO_GEGLU=1`, `VLA_PI05_W2_NO_ROPE=1`, `VLA_PI05_W2_O_BF16=1` | W2: separate GeGLU pass; separate RoPE/K-V pass; F16 -> BF16 before the o GEMM |
+| `VLA_PI05_W2_QUANT=0\|1\|2` | W2: the unit search (1 = default, the per-group clip search; 0 = least-squared-error unit; 2 = narrow window) |
+
 LIBERO success rate of the FoldQuant files and the bf16 GGUF on the same Arc B390
 at the latency table's build, same server and client, 10 tasks x 50 episodes per suite,
 environment seed 42, 10 denoise steps, `n_action_steps` 10. With openpi's prompt
