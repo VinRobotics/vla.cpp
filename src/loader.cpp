@@ -235,10 +235,14 @@ static int64_t w2p_tile_bytes(int64_t K) {
 }
 
 WeightLoader::QWeight WeightLoader::quant_w2p(const std::string & out_name, const std::vector<std::string> & srcs,
-                                              bool pairs) {
+                                              int pairs, int hd) {
     QWeight q = quant(out_name, srcs, 2, 64);
-    q.pairs = pairs && srcs.size() == 2;
-    if (q.pairs) quant_.back().q.pairs = true;
+    if (!q.w) return q;
+    if (pairs == 1 && srcs.size() != 2) pairs = 0;
+    if (pairs == 2 && (hd % 32 || (q.w->ne[1] * 16) % hd)) pairs = 0;
+    q.pairs = pairs;
+    q.hd    = hd;
+    quant_.back().q = q;
     return q;
 }
 
@@ -464,14 +468,19 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
                 }
                 n0 += n;
             }
-            if (n0 != N || (f.q.pairs && (NT % 2))) {
+            if (n0 != N || (f.q.pairs == 1 && (NT % 2))) {
                 std::fprintf(stderr, "vla(%s): W2P fill: %s rows %lld vs %lld\n", arch_, ggml_get_name(f.q.w),
                              (long long) n0, (long long) N);
                 return false;
             }
             for (int64_t nt = 0; nt < NT; ++nt) {
                 // source tile of packed tile nt
-                const int64_t src = f.q.pairs ? (nt % 2 ? NT / 2 + nt / 2 : nt / 2) : nt;
+                int64_t src = nt;
+                if (f.q.pairs == 1) src = nt % 2 ? NT / 2 + nt / 2 : nt / 2;
+                if (f.q.pairs == 2) {   // per head: pair c = (tile c, tile c + hd/32)
+                    const int64_t tph = f.q.hd / 16, head = nt / tph, p = nt % tph;
+                    src = head * tph + (p / 2) + (p % 2) * (tph / 2);
+                }
                 uint32_t * cw = (uint32_t *) (blob.data() + nt * TS);
                 for (int64_t s = 0; s < KS; ++s)
                     for (int j = 0; j < 32; ++j)

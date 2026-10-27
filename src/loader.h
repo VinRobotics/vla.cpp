@@ -69,7 +69,9 @@ public:
         int           bits = 8;
         int64_t       group = 0;  // INT4: K-elements per scale (0: per channel); W2P: the shift group (64)
         int64_t       k     = 0;  // W2P: K (the blob's shape does not say)
-        bool          pairs = false;  // W2P: tiles interleaved (gate tile j, up tile j) for the GeGLU epilogue
+        int           pairs = 0;      // W2P tile order: 1 = (gate j, up j) for the GeGLU epilogue;
+                                      // 2 = per head of `hd` columns, (tile i, tile i + hd/32) for the RoPE epilogue
+        int           hd    = 0;
         explicit operator bool() const { return w != nullptr; }
     };
     QWeight quant_i8(const std::string & out_name, const std::vector<std::string> & srcs);
@@ -84,7 +86,7 @@ public:
     // least squared error, scale = max|row| / 126). pairs: srcs are {gate, up}
     // of equal N and the 16-column tiles are packed (gate j, up j) interleaved,
     // for the fused GeGLU epilogue.
-    QWeight quant_w2p(const std::string & out_name, const std::vector<std::string> & srcs, bool pairs = false);
+    QWeight quant_w2p(const std::string & out_name, const std::vector<std::string> & srcs, int pairs = 0, int hd = 0);
 
     // A tensor of another type in the file (a FoldQuant site's INT codes) that
     // gemm/opt_gemm/fuse_gemm declare as a float [K, N] weight in the resident

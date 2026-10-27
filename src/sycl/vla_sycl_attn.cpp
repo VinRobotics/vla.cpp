@@ -207,7 +207,8 @@ Plan build(const Key & key, sycl::queue & q, Ctx & c) {
         return p;
     }
     p.d_scale = sycl::malloc_device<float>(1, q);
-    q.memcpy(p.d_scale, &key.scale, sizeof(float)).wait();
+    // Through a queue of its own: a wait on the compute queue is illegal while it records a SYCL graph.
+    sycl::queue(q.get_context(), q.get_device()).memcpy(p.d_scale, &key.scale, sizeof(float)).wait();
     p.ok = true;
     return p;
 }
@@ -219,10 +220,8 @@ half * scratch(sycl::queue & q, int slot, size_t elems) {
     static size_t     cap[4] = {0, 0, 0, 0};
     std::lock_guard<std::mutex> lock(mu);
     if (elems > cap[slot]) {
-        if (buf[slot]) {
-            q.wait();
-            sycl::free(buf[slot], q);
-        }
+        // The old block is not freed: that needs a wait on the compute queue, which is illegal while
+        // it records a SYCL graph. It grows a few times per process at most.
         buf[slot] = sycl::malloc_device<half>(elems, q);
         cap[slot] = elems;
     }

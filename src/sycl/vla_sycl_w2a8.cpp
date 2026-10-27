@@ -42,8 +42,11 @@
 #include <sycl/ext/intel/experimental/esimd/memory.hpp>
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
+#include <vector>
 
 namespace {
 
@@ -64,7 +67,15 @@ struct W2Args {
     const void *    res;   // [M][N] of res_type, row stride res_ld elements, or null
     const float *   gate;  // [N] or null
     int M, N, K, KS, TS, dst_type, res_type, res_ld, y_ld;
+    // RoPE + K/V-write epilogue (EPI_ROPE): tile pair p = (head hh, cols c*16.. and c*16 + hd/2..)
+    const int32_t * pos;   // [M]
+    const float *   rt;    // cos/sin table [npos][hd]: cos(pos * ts^i) for i < hd/2, then sin
+    void *          kb;    // K cache, F16; element strides kb_s1 (head), kb_s2 (row); rows row0 + m
+    void *          vb;
+    int nq, nkv, hd, row0, kb_s1, kb_s2, vb_s1, vb_s2, npos;
 };
+
+enum { EPI_NONE = 0, EPI_GEGLU = 1, EPI_ROPE = 2 };
 
 // The MTT A tiles (8 rows x 32 k each) of one k-step from row-major A: 32-row 2D
 // block loads; rows past M read as zero.
@@ -120,7 +131,7 @@ ESIMD_INLINE simd<float, 16> gelu_tanh(simd<float, 16> x) {
 }
 
 // S: split-K threads; NTT: 16-column tiles per thread (2 = a gate|up pair with the GeGLU epilogue); MTT: row tiles.
-template <int S, int NTT, int MTT, bool GEGLU>
+template <int S, int NTT, int MTT, int EPI>
 void launch(sycl::queue & q, const W2Args & a) {
     constexpr int ROWS = MTT * 8;
     const int NT = a.N / 16, NWG = NT / NTT, MC = (a.M + ROWS - 1) / ROWS, KSt = a.KS / S;
@@ -235,7 +246,26 @@ void launch(sycl::queue & q, const W2Args & a) {
             for (int r = 0; r < 8; ++r) {
                 const int m = row0 + i * 8 + r;
                 if (m < ar.M) {
-                    if constexpr (GEGLU) {
+                    if constexpr (EPI == EPI_ROPE) {
+                        // pair ntg: head hh, columns i = c*16 + lane and i + hd/2
+                        const int tph = ar.hd / 32, hh = ntg / tph, c = ntg % tph;
+                        simd<float, 16> x0 = f[0].template select<16, 1>(r * 16) * ar.SX[m];
+                        simd<float, 16> x1 = f[1].template select<16, 1>(r * 16) * ar.SX[m];
+                        uint16_t * o;
+                        if (hh < ar.nq)              o = (uint16_t *) ar.Y + ((int64_t) m * ar.nq + hh) * ar.hd;
+                        else if (hh < ar.nq + ar.nkv) o = (uint16_t *) ar.kb + (int64_t) (ar.row0 + m) * ar.kb_s2 + (hh - ar.nq) * ar.kb_s1;
+                        else                         o = (uint16_t *) ar.vb + (int64_t) (ar.row0 + m) * ar.vb_s2 + (hh - ar.nq - ar.nkv) * ar.vb_s1;
+                        if (hh < ar.nq + ar.nkv) {
+                            int p = ar.pos[m]; p = p < ar.npos ? p : ar.npos - 1;
+                            const float * tb = ar.rt + (int64_t) p * ar.hd + c * 16;
+                            simd<float, 16> cs = xe::lsc_block_load<float, 16>(tb);
+                            simd<float, 16> sn = xe::lsc_block_load<float, 16>(tb + ar.hd / 2);
+                            simd<float, 16> y0 = x0 * cs - x1 * sn, y1 = x0 * sn + x1 * cs;
+                            x0 = y0; x1 = y1;
+                        }
+                        store_row(o, GGML_TYPE_F16, c * 16, x0);
+                        store_row(o, GGML_TYPE_F16, c * 16 + ar.hd / 2, x1);
+                    } else if constexpr (EPI == EPI_GEGLU) {
                         // tile pair (gate, up) -> gelu_tanh(gate) * up, F16, column block ntg
                         simd<float, 16> gv = f[0].template select<16, 1>(r * 16) * ar.SX[m];
                         simd<float, 16> uv = f[NTT - 1].template select<16, 1>(r * 16) * ar.SX[m];
@@ -288,12 +318,58 @@ bool sycl_w2a8_linear(sycl::queue & q, const ggml_tensor * dst, const uint8_t * 
     // split K in two when a thread would otherwise walk 64+ k-steps (K >= 2048)
     const bool split = K >= 2048 && (K / 32 / 2) % 2 == 0;
     if (geglu) {
-        if (split) launch<2, 2, 7, true>(q, a);
-        else       launch<1, 2, 7, true>(q, a);
+        if (split) launch<2, 2, 7, EPI_GEGLU>(q, a);
+        else       launch<1, 2, 7, EPI_GEGLU>(q, a);
     } else {
-        if (split) launch<2, 1, 8, false>(q, a);
-        else       launch<1, 1, 8, false>(q, a);
+        if (split) launch<2, 1, 8, EPI_NONE>(q, a);
+        else       launch<1, 1, 8, EPI_NONE>(q, a);
     }
+    return true;
+}
+
+// cos/sin table for the RoPE epilogue: [npos][hd], cos(p * ts^i) for i < hd/2 then sin, computed in double on the
+// host once per (hd, theta_scale) and kept on the device (the queue is in order; one table serves every call).
+static const float * rope_table(sycl::queue & q, int hd, float theta_scale, int npos) {
+    static std::mutex mu;
+    struct Entry { int hd; float ts; int npos; float * dev; };
+    static std::vector<Entry> tables;
+    std::lock_guard<std::mutex> lock(mu);
+    for (const Entry & e : tables)
+        if (e.hd == hd && e.ts == theta_scale && e.npos == npos) return e.dev;
+    std::vector<float> h((size_t) npos * hd);
+    for (int p = 0; p < npos; ++p)
+        for (int i = 0; i < hd / 2; ++i) {
+            const double th = (double) p * std::pow((double) theta_scale, (double) i);
+            h[(size_t) p * hd + i]          = (float) std::cos(th);
+            h[(size_t) p * hd + hd / 2 + i] = (float) std::sin(th);
+        }
+    float * dev = sycl::malloc_device<float>(h.size(), q);
+    // through a queue of its own: a wait on the compute queue is illegal while it records a SYCL graph
+    sycl::queue(q.get_context(), q.get_device()).memcpy(dev, h.data(), h.size() * sizeof(float)).wait();
+    tables.push_back({ hd, theta_scale, npos, dev });
+    return dev;
+}
+
+bool sycl_w2a8_ropekv(sycl::queue & q, const ggml_tensor * dst, const uint8_t * W, const float * sn, const int8_t * qx,
+                      const float * sx, long long M, long long K, long long TS, const int32_t * pos, ggml_tensor * kb,
+                      ggml_tensor * vb, int nq, int nkv, int hd, long long row0, float theta_scale) {
+    const long long N = (long long) (nq + 2 * nkv) * hd;
+    if (hd % 32 || K % 128 || K > (1 << 23) || M > (1 << 23) || ((uintptr_t) qx % 64) || dst->type != GGML_TYPE_F16 ||
+        kb->type != GGML_TYPE_F16 || vb->type != GGML_TYPE_F16 || kb->nb[1] % 32 || kb->nb[2] % 32 || vb->nb[1] % 32 ||
+        vb->nb[2] % 32)
+        return false;
+    constexpr int NPOS = 8192;
+    W2Args a{};
+    a.W = W; a.SN = sn; a.A = qx; a.SX = sx; a.Y = dst->data;
+    a.M = (int) M; a.N = (int) N; a.K = (int) K; a.KS = (int) (K / 32); a.TS = (int) TS;
+    a.dst_type = GGML_TYPE_F16; a.y_ld = hd;
+    a.pos = pos; a.rt = rope_table(q, hd, theta_scale, NPOS); a.npos = NPOS;
+    a.kb = kb->data; a.vb = vb->data; a.nq = nq; a.nkv = nkv; a.hd = hd; a.row0 = (int) row0;
+    a.kb_s1 = (int) (kb->nb[1] / 2); a.kb_s2 = (int) (kb->nb[2] / 2);
+    a.vb_s1 = (int) (vb->nb[1] / 2); a.vb_s2 = (int) (vb->nb[2] / 2);
+    const bool split = K >= 2048 && (K / 32 / 2) % 2 == 0;
+    if (split) launch<2, 2, 7, EPI_ROPE>(q, a);
+    else       launch<1, 2, 7, EPI_ROPE>(q, a);
     return true;
 }
 

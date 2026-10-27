@@ -606,7 +606,8 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
             if (!w.fq_q != !w.fq_k || !w.fq_q != !w.fq_v || !w.fq_gate != !w.fq_up)
                 L.fail("FoldQuant: an expert layer's q/k/v (and gate/up) must all be INT or all float");
         }
-        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), m->kv_inplace, q8_aex, aex_w4_group, aex_w2);
+        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), m->kv_inplace, q8_aex, aex_w4_group, aex_w2,
+                            (int) cfg.head_dim);
         if (m->fq_fast && w.fq_qkv) {
             // q/k/v GEMM, RoPE and the cached-KV attention as one node (gemma_attn).
             // VLA_FQ_NO_ROPE_ATTN=1 keeps them apart (A/B runs).

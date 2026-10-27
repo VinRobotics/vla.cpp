@@ -25,6 +25,7 @@
 
 #include "ggml.h"
 #include "env_flag.h"
+#include "layers/qlinear.h"
 #include "sycl/vla_sycl_ext.h"
 
 #include <sycl/sycl.hpp>
@@ -45,6 +46,10 @@ namespace vla {
 bool sycl_w2a8_linear(sycl::queue & q, const ggml_tensor * dst, const uint8_t * W, const float * sn, const int8_t * qx,
                       const float * sx, long long M, long long N, long long K, long long TS, const ggml_tensor * bias,
                       const ggml_tensor * res, const ggml_tensor * gate, bool geglu);
+// gelu == 3: RoPE + K/V write epilogue (src[3] pos I32, src[4]/src[5] K/V caches F16); dst q F16 [hd, nq, M]
+bool sycl_w2a8_ropekv(sycl::queue & q, const ggml_tensor * dst, const uint8_t * W, const float * sn, const int8_t * qx,
+                      const float * sx, long long M, long long K, long long TS, const int32_t * pos, ggml_tensor * kb,
+                      ggml_tensor * vb, int nq, int nkv, int hd, long long row0, float theta_scale);
 }
 
 namespace {
@@ -340,10 +345,8 @@ void * q8_scratch(sycl::queue & q, size_t bytes) {
     static size_t     cap = 0;
     std::lock_guard<std::mutex> lock(mu);
     if (bytes > cap) {
-        if (buf) {
-            q.wait();
-            sycl::free(buf, q);
-        }
+        // The old block is not freed: that needs a wait on the compute queue, which is
+        // illegal while it records a SYCL graph. It grows a few times per process at most.
         buf = sycl::malloc_device(bytes, q);
         cap = bytes;
     }
@@ -373,6 +376,7 @@ bool qlinear(ggml_tensor * dst, const void * spec_v, sycl::queue & q) {
     const ggml_tensor * gt  = dst->src[5];
     int32_t sp[4] = { 0, 8, 0, 0 };  // QLinearSpec after the magic: gelu, bits, group, k
     std::memcpy(sp, (const char *) spec_v + sizeof(uint32_t), sizeof(sp));
+    const auto * qs = static_cast<const vla::QLinearSpec *>(spec_v);
     const int32_t   gelu = sp[0], bits = sp[1];
     const long long K = bits == 2 ? sp[3] : bits == 4 ? 2 * W->ne[0] : W->ne[0];
     const long long N = bits == 2 ? W->ne[1] * 16 : W->ne[1];
@@ -396,6 +400,15 @@ bool qlinear(ggml_tensor * dst, const void * spec_v, sycl::queue & q) {
         else                               quant_rows<float>(q, x, qx, sx);
     }
 
+    if (bits == 2 && gelu == 3) {
+        if (!vla::sycl_w2a8_ropekv(q, dst, (const uint8_t *) W->data, (const float *) sw->data, qx, sx, M, K, W->ne[0],
+                                   (const int32_t *) b->data, dst->src[4], dst->src[5], qs->nq, qs->nkv, qs->hd,
+                                   qs->row0, qs->theta_scale)) {
+            std::fprintf(stderr, "vla(sycl_bf16): W2A8 rope-kv linear %lldx%lldx%lld: unsupported operands\n", M, N, K);
+            return false;
+        }
+        return true;
+    }
     if (bits == 2) {
         // W2A8 (src/sycl/vla_sycl_w2a8.cpp): the W2P blob is I8 [tile bytes, N/16].
         if (gelu == 1 || !vla::sycl_w2a8_linear(q, dst, (const uint8_t *) W->data, (const float *) sw->data, qx, sx, M,
@@ -577,10 +590,10 @@ bool norm(ggml_tensor * dst, sycl::queue & q) {
 namespace vla {
 // For vla_sycl_fused.cpp's fused linear node: the matmul and its epilogue.
 bool sycl_fused_linear(ggml_tensor * dst, const void * spec, sycl::queue & q) {
-    return fused_linear(dst, spec, q);
+    return ::fused_linear(dst, spec, q);
 }
 bool sycl_qlinear(ggml_tensor * dst, const void * spec, sycl::queue & q) {
-    return qlinear(dst, spec, q);
+    return ::qlinear(dst, spec, q);
 }
 bool sycl_flash_attn_ext(ggml_tensor * dst, sycl::queue & q);  // vla_sycl_attn.cpp
 bool sycl_flash_attn_ext_supported(const ggml_tensor * dst);   // vla_sycl_attn.cpp

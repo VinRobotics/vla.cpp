@@ -91,7 +91,7 @@ struct GemmaLayerW {
 // w2: 2-bit weights with power-of-two group shifts (WeightLoader::quant_w2p,
 // src/sycl/vla_sycl_w2a8.cpp) instead.
 inline void gemma_declare_float(WeightLoader & L, GemmaLayerW & w, const std::string & b, bool fuse,
-                                bool int8 = false, int64_t w4_group = 0, bool w2 = false) {
+                                bool int8 = false, int64_t w4_group = 0, bool w2 = false, int w2_hd = 0) {
     const char * p = b.c_str();
     if (int8 && !w.fq_q && !w.fq_qkv && !w.fq_o && !w.fq_gate && !w.fq_gu && !w.fq_down) {
         // q|k|v and gate|up fused as with fuse.
@@ -100,7 +100,11 @@ inline void gemma_declare_float(WeightLoader & L, GemmaLayerW & w, const std::st
         };
         // W2P gate|up as tile pairs for the fused GeGLU epilogue (VLA_PI05_W2_NO_GEGLU=1: plain, fused_geglu node)
         static const bool w2_geglu = !env_flag("VLA_PI05_W2_NO_GEGLU");
-        w.q_qkv  = q(b + ".attn_qkv.q8", {b + ".attn_q.weight", b + ".attn_k.weight", b + ".attn_v.weight"});
+        // W2P q|k|v as (i, i + hd/2) tile pairs per head for the RoPE + K/V-write epilogue (VLA_PI05_W2_NO_ROPE=1: plain)
+        static const bool w2_rope = !env_flag("VLA_PI05_W2_NO_ROPE");
+        w.q_qkv  = w2 && w2_rope && w2_hd > 0
+                       ? L.quant_w2p(b + ".attn_qkv.q8", {b + ".attn_q.weight", b + ".attn_k.weight", b + ".attn_v.weight"}, 2, w2_hd)
+                       : q(b + ".attn_qkv.q8", {b + ".attn_q.weight", b + ".attn_k.weight", b + ".attn_v.weight"});
         w.q_o    = q(b + ".attn_o.q8", {b + ".attn_o.weight"});
         w.q_gu   = w2 && w2_geglu ? L.quant_w2p(b + ".ffn_gateup.q8", {b + ".ffn_gate.weight", b + ".ffn_up.weight"}, true)
                                   : q(b + ".ffn_gateup.q8", {b + ".ffn_gate.weight", b + ".ffn_up.weight"});
@@ -256,7 +260,10 @@ inline ggml_tensor * gemma_attn_kv_tail(ggml_context * ctx, const GemmaLayerW & 
     if (w.q_o && fa_q8 && fused_ew_registered() && !mask)
         return qlinear(ctx, w.q_o, retype_blob(fa, seq * (qf + 4)), nullptr, o_res,
                        o_type == GGML_TYPE_COUNT ? at : o_type, false, o_gate);
-    if (at == GGML_TYPE_BF16)
+    // W2A8 o GEMM: its row quantizer reads the attention's F16 output as is
+    // (no F16 -> BF16 pass); VLA_PI05_W2_O_BF16=1 keeps the conversion.
+    static const bool o_f16 = !env_flag("VLA_PI05_W2_O_BF16");
+    if (at == GGML_TYPE_BF16 && !(w.q_o && w.q_o.bits == 2 && o_f16 && fa->type == GGML_TYPE_F16))
         retype(fa, GGML_TYPE_BF16);
     ggml_tensor * att = ggml_reshape_2d(ctx, fa, qf, seq);
     if (w.q_o)
@@ -301,10 +308,14 @@ inline ggml_tensor * gemma_attn_kv(
 
     static const bool rope_fuse = !env_flag("VLA_NO_ROPE_KV_FUSE");
     if (rope_fuse && fused_ew_registered() && (w.Wqkv || w.q_qkv) && q_h->view_src && kv.k->ne[1] == nkv) {
-        // One node: RoPE on q and k, k and v into the cache rows.
+        // One node: RoPE on q and k, k and v into the cache rows. With W2P q|k|v weights packed as rope pairs,
+        // that is the GEMM's own epilogue (no F32 q|k|v output).
         ggml_tensor * qkv = q_h->view_src;
-        ggml_tensor * q16 = fused_rope_kv(ctx, qkv, positions, kv.k, kv.v, (int) nq, (int) nkv, (int) hd, row0,
-                                          cfg.rope_freq_base);
+        ggml_tensor * q16 = w.q_qkv && w.q_qkv.pairs == 2
+                                ? qlinear_ropekv(ctx, w.q_qkv, x_norm, positions, kv.k, kv.v, (int) nq, (int) nkv, (int) hd,
+                                                 row0, cfg.rope_freq_base)
+                                : fused_rope_kv(ctx, qkv, positions, kv.k, kv.v, (int) nq, (int) nkv, (int) hd, row0,
+                                                cfg.rope_freq_base);
         if (!kv.k_pre)
             kv.k_pre = kv.v_pre = q16;
         return gemma_attn_kv_tail(ctx, w, q16, q16, q16, cfg, seq, row0, kv, mask, at, o_res, o_gate, o_type);

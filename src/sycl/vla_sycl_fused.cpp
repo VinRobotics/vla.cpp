@@ -533,6 +533,11 @@ bool supported(const ggml_tensor * op) {
             : (x->type == GGML_TYPE_BF16 || x->type == GGML_TYPE_F32 || (w2 && x->type == GGML_TYPE_F16)) &&
               x->nb[0] == ggml_type_size(x->type) && x->ne[2] == 1 && x->ne[3] == 1;
         const ggml_tensor * g = op->src[5];
+        if (w2 && sp->gelu == 3)   // RoPE + K/V write: pos I32, K/V caches F16, q out F16
+            return W->type == GGML_TYPE_I8 && ggml_is_contiguous(W) && op->src[1]->type == GGML_TYPE_F32 && x_ok &&
+                   op->src[3] && op->src[3]->type == GGML_TYPE_I32 && r && r->type == GGML_TYPE_F16 &&
+                   ggml_is_contiguous(r) && g && g->type == GGML_TYPE_F16 && ggml_is_contiguous(g) &&
+                   op->type == GGML_TYPE_F16 && ggml_is_contiguous(op);
         return W->type == GGML_TYPE_I8 && ggml_is_contiguous(W) && op->src[1]->type == GGML_TYPE_F32 && x_ok &&
                (!g || (g->type == GGML_TYPE_F32 && ggml_is_contiguous(g))) && ggml_is_contiguous(op) &&
                (op->type == GGML_TYPE_BF16 || op->type == GGML_TYPE_F32 || (w2 && op->type == GGML_TYPE_F16)) &&
