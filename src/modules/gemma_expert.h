@@ -263,8 +263,7 @@ inline ggml_tensor * gemma_attn_kv_tail(ggml_context * ctx, const GemmaLayerW & 
     // W2A8 o GEMM: its row quantizer reads the attention's F16 output as is
     // (no F16 -> BF16 pass); VLA_PI05_W2_O_BF16=1 keeps the conversion.
     static const bool o_f16 = !env_flag("VLA_PI05_W2_O_BF16");
-    if (at == GGML_TYPE_BF16 && !(w.q_o && w.q_o.bits == 2 && o_f16 && fa->type == GGML_TYPE_F16))
-        retype(fa, GGML_TYPE_BF16);
+    if (at == GGML_TYPE_BF16) retype(fa, w.q_o && w.q_o.bits == 2 && o_f16 ? GGML_TYPE_F16 : GGML_TYPE_BF16);
     ggml_tensor * att = ggml_reshape_2d(ctx, fa, qf, seq);
     if (w.q_o)
         return qlinear(ctx, w.q_o, att, nullptr, o_res, o_type == GGML_TYPE_COUNT ? at : o_type, false, o_gate);

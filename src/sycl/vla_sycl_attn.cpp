@@ -300,7 +300,7 @@ bool sycl_flash_attn_ext_supported(const ggml_tensor * dst) {
     if (!float_type(Q->type) || !float_type(K->type) || !float_type(V->type)) return false;
     // I8: a q8 blob (layers/fused_ew.h) of the S rows of H*D, for an INT8 GEMM.
     const bool blob = dst->type == GGML_TYPE_I8;
-    if (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_BF16 && !blob) return false;
+    if (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_BF16 && dst->type != GGML_TYPE_F16 && !blob) return false;
     if (blob && (dst->ne[0] != Q->ne[1] * (Q->ne[0] * Q->ne[2] + 4) || Q->ne[3] != 1 ||
                  (Q->ne[0] * Q->ne[2]) % 8)) return false;
     // A batch (ne[3] > 1) only on the in-place BF16 path: every operand BF16 with
@@ -384,7 +384,9 @@ bool sycl_flash_attn_ext(ggml_tensor * dst, sycl::queue & q) {
     if (!p->ok) return false;
 
     // A BF16 plan writes dst itself.
-    half * o16 = p->q.get_data_type() == gdt::bf16 ? static_cast<half *>(dst->data) : scratch(q, 3, (size_t) (D * S * H));
+    // A BF16 plan writes dst itself; an F16 dst takes the F16 result directly.
+    half * o16 = p->q.get_data_type() == gdt::bf16 || dst->type == GGML_TYPE_F16 ? static_cast<half *>(dst->data)
+                                                                                   : scratch(q, 3, (size_t) (D * S * H));
     half * q16 = p->conv_q ? scratch(q, 0, (size_t) (D * S * H)) : static_cast<half *>(Q->data);
     half * k16 = p->conv_k ? scratch(q, 1, (size_t) (D * Skv * Hkv)) : static_cast<half *>(K->data);
     half * v16 = p->conv_v ? scratch(q, 2, (size_t) (D * Skv * Hkv)) : static_cast<half *>(V->data);
@@ -407,7 +409,7 @@ bool sycl_flash_attn_ext(ggml_tensor * dst, sycl::queue & q) {
         return false;
     }
 
-    if (p->q.get_data_type() == gdt::bf16) return true;
+    if (p->q.get_data_type() == gdt::bf16 || dst->type == GGML_TYPE_F16) return true;
     if (dst->type == GGML_TYPE_I8) {
         // Rows of H*D (one token each) straight to INT8 codes + row scales.
         const long long R = H * D;
