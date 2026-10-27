@@ -44,7 +44,7 @@ namespace vla {
 // src/sycl/vla_sycl_w2a8.cpp
 bool sycl_w2a8_linear(sycl::queue & q, const ggml_tensor * dst, const uint8_t * W, const float * sn, const int8_t * qx,
                       const float * sx, long long M, long long N, long long K, long long TS, const ggml_tensor * bias,
-                      const ggml_tensor * res, const ggml_tensor * gate);
+                      const ggml_tensor * res, const ggml_tensor * gate, bool geglu);
 }
 
 namespace {
@@ -391,14 +391,15 @@ bool qlinear(ggml_tensor * dst, const void * spec_v, sycl::queue & q) {
         char *       scr    = (char *) q8_scratch(q, qbytes + (size_t) M * sizeof(float));
         qx = (int8_t *) scr;
         sx = (float *) (scr + qbytes);
-        if (x->type == GGML_TYPE_BF16) quant_rows<bf16>(q, x, qx, sx);
-        else                           quant_rows<float>(q, x, qx, sx);
+        if (x->type == GGML_TYPE_BF16)     quant_rows<bf16>(q, x, qx, sx);
+        else if (x->type == GGML_TYPE_F16) quant_rows<sycl::half>(q, x, qx, sx);
+        else                               quant_rows<float>(q, x, qx, sx);
     }
 
     if (bits == 2) {
         // W2A8 (src/sycl/vla_sycl_w2a8.cpp): the W2P blob is I8 [tile bytes, N/16].
-        if (gelu || !vla::sycl_w2a8_linear(q, dst, (const uint8_t *) W->data, (const float *) sw->data, qx, sx, M, N,
-                                           K, W->ne[0], b, res, gt)) {
+        if (gelu == 1 || !vla::sycl_w2a8_linear(q, dst, (const uint8_t *) W->data, (const float *) sw->data, qx, sx, M,
+                                                N, K, W->ne[0], b, res, gt, gelu == 2)) {
             std::fprintf(stderr, "vla(sycl_bf16): W2A8 linear %lldx%lldx%lld: unsupported operands\n", M, N, K);
             return false;
         }

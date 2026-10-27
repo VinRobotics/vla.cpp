@@ -525,15 +525,17 @@ bool supported(const ggml_tensor * op) {
     }
     if (m == QLINEAR_MAGIC) {
         const ggml_tensor * W = op->src[0], * x = op->src[2], * r = op->src[4];
-        const int64_t K = qlinear_k(W, static_cast<const QLinearSpec *>(custom_userdata(op))->bits);
+        const auto *        sp = static_cast<const QLinearSpec *>(custom_userdata(op));
+        const bool          w2 = sp->bits == 2;  // W2A8 (vla_sycl_w2a8.cpp): F16 in and out as well
+        const int64_t K = qlinear_k(W, sp->bits, sp->k);
         const bool x_ok = x->type == GGML_TYPE_I8
             ? ggml_is_contiguous(x) && x->ne[1] == 1 && x->ne[0] % (K + 4) == 0 && K % 4 == 0
-            : (x->type == GGML_TYPE_BF16 || x->type == GGML_TYPE_F32) && x->nb[0] == ggml_type_size(x->type) &&
-              x->ne[2] == 1 && x->ne[3] == 1;
+            : (x->type == GGML_TYPE_BF16 || x->type == GGML_TYPE_F32 || (w2 && x->type == GGML_TYPE_F16)) &&
+              x->nb[0] == ggml_type_size(x->type) && x->ne[2] == 1 && x->ne[3] == 1;
         const ggml_tensor * g = op->src[5];
         return W->type == GGML_TYPE_I8 && ggml_is_contiguous(W) && op->src[1]->type == GGML_TYPE_F32 && x_ok &&
                (!g || (g->type == GGML_TYPE_F32 && ggml_is_contiguous(g))) && ggml_is_contiguous(op) &&
-               (op->type == GGML_TYPE_BF16 || op->type == GGML_TYPE_F32) &&
+               (op->type == GGML_TYPE_BF16 || op->type == GGML_TYPE_F32 || (w2 && op->type == GGML_TYPE_F16)) &&
                (!r || (r->nb[0] == ggml_type_size(r->type) && (r->type == GGML_TYPE_BF16 || r->type == GGML_TYPE_F32)));
     }
     if (m == FUSED_LNORM_MAGIC) {

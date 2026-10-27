@@ -43,7 +43,7 @@ constexpr uint32_t QLINEAR_MAGIC = 0x4e494c51;  // "QLIN"
 
 struct QLinearSpec {
     uint32_t magic = QLINEAR_MAGIC;
-    int32_t  gelu  = 0;
+    int32_t  gelu  = 0;  // 1: gelu_tanh on the output; 2 (W2P only): GeGLU over interleaved gate/up tile pairs, N/2 outputs
     int32_t  bits  = 8;  // weight codes: 8, 4 (two per byte along K, low nibble first), or 2 (W2P blob)
     int32_t  group = 0;  // INT4: K-elements per weight scale (scale[g * N + n]); W2P: 64
     int32_t  k     = 0;  // W2P: K (the blob is I8 [tile bytes, N/16])
@@ -66,15 +66,15 @@ inline int64_t qlinear_k(const ggml_tensor * w, int bits, int64_t k = 0) {
 }
 
 // W2P (WeightLoader::quant_w2p, src/sycl/vla_sycl_w2a8.cpp): the exact integer
-// weight w[n][k] = (2 q - 3) << e from the packed blob.
+// weight w[n][k] = (2 q - 3) * u of row n of the packed blob (tile order).
 inline int w2p_weight(const uint8_t * blob, int64_t K, int64_t n, int64_t k) {
-    const int64_t KS = K / 32, NG = K / 64, TS = KS * 128 + (NG * 8 + 63) / 64 * 64;
+    const int64_t KS = K / 32, NG = K / 64, TS = KS * 128 + (NG * 16 + 63) / 64 * 64;
     const uint8_t * tile = blob + (n / 16) * TS;
     const int64_t s = k / 32, kk = k % 32, d = (kk / 4) * 16 + n % 16, b = kk % 4, t = d / 32, j = d % 32;
     const uint32_t P = ((const uint32_t *) tile)[s * 32 + j];
     const int q = (int) ((P >> (8 * b + 2 * t)) & 3u);
-    const int e = (tile[KS * 128 + (k / 64) * 8 + (n % 16) / 2] >> (4 * (n % 2))) & 0xf;
-    return (2 * q - 3) << e;
+    const int u = tile[KS * 128 + (k / 64) * 16 + n % 16];
+    return (2 * q - 3) * u;
 }
 
 using QWeight = WeightLoader::QWeight;
@@ -117,6 +117,19 @@ inline void qlinear_cpu(ggml_tensor * dst, int ith, int nth, void * ud) {
             xq = qx.data();
         }
         char * dr = (char *) dst->data + m * dst->nb[1];
+        if (s.bits == 2 && s.gelu == 2) {
+            // GeGLU: output column c from tile pair (2 (c/16), 2 (c/16) + 1), F16/F32 out
+            auto dot = [&](int64_t n) {
+                int32_t acc = 0;
+                for (int64_t k = 0; k < K; ++k) acc += (int32_t) xq[k] * w2p_weight((const uint8_t *) W->data, K, n, k);
+                return (float) acc * sx * sw[n];
+            };
+            for (int64_t c = 0; c < N / 2; ++c) {
+                const int64_t ng = (2 * (c / 16)) * 16 + c % 16;
+                fused_store(dst, dr, c, fused_gelu_tanh(dot(ng)) * dot(ng + 16));
+            }
+            continue;
+        }
         for (int64_t n = 0; n < N; ++n) {
             float v = 0.0f;
             if (s.bits == 2) {
@@ -166,6 +179,22 @@ inline ggml_tensor * qlinear(ggml_context * C, const QWeight & q, ggml_tensor * 
     ggml_tensor * t = ggml_custom_4d(C, out_type, N, M, 1, 1, args, n, qlinear_cpu, GGML_N_TASKS_MAX,
                                      (void *) qlinear_spec(gelu, q.bits, q.group, q.bits == 2 ? K : 0));
     ggml_format_name(t, "%s.q8", ggml_get_name(q.w));
+    return t;
+}
+
+// W2P gate|up weights packed as tile pairs (QWeight::pairs): gelu_tanh(gate) * up
+// in one node, [N/2, M] of out_type (F16 on SYCL), the down GEMM's input.
+inline ggml_tensor * qlinear_geglu(ggml_context * C, const QWeight & q, ggml_tensor * x, ggml_type out_type) {
+    GGML_ASSERT(q.bits == 2 && q.pairs);
+    const int64_t K = q.k, N = q.w->ne[1] * 16;
+    const bool    blob = x->type == GGML_TYPE_I8;
+    GGML_ASSERT(blob ? x->ne[0] % (K + 4) == 0
+                     : (K == x->ne[0] && x->ne[2] == 1 && x->ne[3] == 1 && x->nb[0] == ggml_type_size(x->type)));
+    const int64_t M = blob ? q8_rows(x, K) : x->ne[1];
+    ggml_tensor * args[4] = { q.w, q.s, x, nullptr };
+    ggml_tensor * t = ggml_custom_4d(C, out_type, N / 2, M, 1, 1, args, 3, qlinear_cpu, GGML_N_TASKS_MAX,
+                                     (void *) qlinear_spec(2, 2, q.group, K));
+    ggml_format_name(t, "%s.geglu", ggml_get_name(q.w));
     return t;
 }
 

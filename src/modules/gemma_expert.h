@@ -98,9 +98,12 @@ inline void gemma_declare_float(WeightLoader & L, GemmaLayerW & w, const std::st
         auto q = [&](const std::string & name, const std::vector<std::string> & srcs) {
             return w2 ? L.quant_w2p(name, srcs) : w4_group != 0 ? L.quant_i4(name, srcs, w4_group) : L.quant_i8(name, srcs);
         };
+        // W2P gate|up as tile pairs for the fused GeGLU epilogue (VLA_PI05_W2_NO_GEGLU=1: plain, fused_geglu node)
+        static const bool w2_geglu = !env_flag("VLA_PI05_W2_NO_GEGLU");
         w.q_qkv  = q(b + ".attn_qkv.q8", {b + ".attn_q.weight", b + ".attn_k.weight", b + ".attn_v.weight"});
         w.q_o    = q(b + ".attn_o.q8", {b + ".attn_o.weight"});
-        w.q_gu   = q(b + ".ffn_gateup.q8", {b + ".ffn_gate.weight", b + ".ffn_up.weight"});
+        w.q_gu   = w2 && w2_geglu ? L.quant_w2p(b + ".ffn_gateup.q8", {b + ".ffn_gate.weight", b + ".ffn_up.weight"}, true)
+                                  : q(b + ".ffn_gateup.q8", {b + ".ffn_gate.weight", b + ".ffn_up.weight"});
         w.q_down = q(b + ".ffn_down.q8", {b + ".ffn_down.weight"});
         return;
     }
@@ -609,6 +612,12 @@ inline ggml_tensor * gemma_mlp(ggml_context * ctx, const GemmaLayerW & w, ggml_t
 // GEMM's epilogue, in out_type (default: at).
 inline ggml_tensor * gemma_mlp_q8(ggml_context * ctx, const GemmaLayerW & w, ggml_tensor * xq, ggml_tensor * res,
                                   ggml_type at, ggml_tensor * gate = nullptr, ggml_type out_type = GGML_TYPE_COUNT) {
+    if (w.q_gu.pairs) {
+        // W2P: gelu_tanh(gate) * up is the gate|up GEMM's epilogue (F16); the down
+        // GEMM quantizes its rows on the way in.
+        ggml_tensor * gl = qlinear_geglu(ctx, w.q_gu, xq, GGML_TYPE_F16);
+        return qlinear(ctx, w.q_down, gl, nullptr, res, out_type == GGML_TYPE_COUNT ? at : out_type, false, gate);
+    }
     ggml_tensor * gu = qlinear(ctx, w.q_gu, xq, nullptr, nullptr, at);
     const int64_t n  = gu->ne[0] / 2;
     ggml_tensor * g  = ggml_view_2d(ctx, gu, n, gu->ne[1], gu->nb[1], 0);
