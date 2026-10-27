@@ -67,7 +67,8 @@ public:
     struct QWeight {
         ggml_tensor * w = nullptr, * s = nullptr;
         int           bits = 8;
-        int64_t       group = 0;  // INT4: K-elements per scale (0: per channel)
+        int64_t       group = 0;  // INT4: K-elements per scale (0: per channel); W2P: the shift group (64)
+        int64_t       k     = 0;  // W2P: K (the blob's shape does not say)
         explicit operator bool() const { return w != nullptr; }
     };
     QWeight quant_i8(const std::string & out_name, const std::vector<std::string> & srcs);
@@ -75,6 +76,12 @@ public:
     // first: I8 [K/2, N]) with one F32 scale per `group` K-elements and output
     // channel (F32 [N, K/group], scale[g * N + n]); group 0 = one per channel.
     QWeight quant_i4(const std::string & out_name, const std::vector<std::string> & srcs, int64_t group);
+    // The same as 2-bit codes with power-of-two group shifts and one F32 scale
+    // per output channel ("W2P", src/sycl/vla_sycl_w2a8.cpp): w[n][k] =
+    // (2 q - 3) << e[n][k / 64], q in 0..3, e in 0..4, times scale[n]. The blob
+    // is I8 [tile bytes, N/16]; quantized at upload with the search of
+    // scripts/fakequant_expert_2bit.py (fake_quant_pow2, one clip per row).
+    QWeight quant_w2p(const std::string & out_name, const std::vector<std::string> & srcs);
 
     // A tensor of another type in the file (a FoldQuant site's INT codes) that
     // gemm/opt_gemm/fuse_gemm declare as a float [K, N] weight in the resident

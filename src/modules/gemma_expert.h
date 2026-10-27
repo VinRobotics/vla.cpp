@@ -88,13 +88,15 @@ struct GemmaLayerW {
 // GEMM reads the activation row once. FoldQuant sites already declared are left
 // alone. int8: the four GEMMs as W8A8 instead (layers/qlinear.h); w4_group != 0
 // makes their weights INT4 with that many K-elements per scale (< 0: per channel).
+// w2: 2-bit weights with power-of-two group shifts (WeightLoader::quant_w2p,
+// src/sycl/vla_sycl_w2a8.cpp) instead.
 inline void gemma_declare_float(WeightLoader & L, GemmaLayerW & w, const std::string & b, bool fuse,
-                                bool int8 = false, int64_t w4_group = 0) {
+                                bool int8 = false, int64_t w4_group = 0, bool w2 = false) {
     const char * p = b.c_str();
     if (int8 && !w.fq_q && !w.fq_qkv && !w.fq_o && !w.fq_gate && !w.fq_gu && !w.fq_down) {
         // q|k|v and gate|up fused as with fuse.
         auto q = [&](const std::string & name, const std::vector<std::string> & srcs) {
-            return w4_group != 0 ? L.quant_i4(name, srcs, w4_group) : L.quant_i8(name, srcs);
+            return w2 ? L.quant_w2p(name, srcs) : w4_group != 0 ? L.quant_i4(name, srcs, w4_group) : L.quant_i8(name, srcs);
         };
         w.q_qkv  = q(b + ".attn_qkv.q8", {b + ".attn_q.weight", b + ".attn_k.weight", b + ".attn_v.weight"});
         w.q_o    = q(b + ".attn_o.q8", {b + ".attn_o.weight"});

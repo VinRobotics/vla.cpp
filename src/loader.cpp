@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <cstdio>
 
@@ -225,6 +226,59 @@ WeightLoader::QWeight WeightLoader::quant_i4(const std::string & out_name, const
     return quant(out_name, srcs, 4, group);
 }
 
+// W2P tile bytes for K (layers/qlinear.h and src/sycl/vla_sycl_w2a8.cpp agree).
+static int64_t w2p_tile_bytes(int64_t K) {
+    return (K / 32) * 128 + ((K / 64) * 8 + 63) / 64 * 64;
+}
+
+WeightLoader::QWeight WeightLoader::quant_w2p(const std::string & out_name, const std::vector<std::string> & srcs) {
+    return quant(out_name, srcs, 2, 64);
+}
+
+// fake_quant_pow2 of scripts/fakequant_expert_2bit.py for one row of K floats
+// (group 64, max_shift 4): row scale s = a * max|w| / 48 for a in the 10-point
+// clip grid 0.55..1, per group the smallest shift whose range covers the group
+// max, codes rint((w / (s 2^e) + 3) / 2) in 0..3; the a with the smallest total
+// squared error wins (the script keeps the best a per group; the kernel format
+// has one scale per row, so the choice is made per row here).
+static void w2p_quant_row(const float * w, int64_t K, uint8_t * q, uint8_t * e, float * scale) {
+    const int64_t NG = K / 64;
+    std::vector<float> gmax((size_t) NG, 0.0f);
+    float rmax = 0.0f;
+    for (int64_t g = 0; g < NG; ++g) {
+        for (int64_t k = g * 64; k < (g + 1) * 64; ++k) gmax[g] = std::max(gmax[g], std::fabs(w[k]));
+        rmax = std::max(rmax, gmax[g]);
+    }
+    rmax = std::max(rmax, 1e-12f);
+    double best_err = -1.0;
+    std::vector<uint8_t> bq((size_t) K), be((size_t) NG);
+    for (int ai = 0; ai < 10; ++ai) {
+        const float a     = 0.55f + 0.05f * (float) ai;
+        const float row_s = a * rmax / 48.0f;
+        double      err   = 0.0;
+        for (int64_t g = 0; g < NG; ++g) {
+            const float need = std::max(a * gmax[g] / (3.0f * row_s), 1e-12f);
+            int ee = (int) std::ceil(std::log2(need));
+            ee = std::min(4, std::max(0, ee));
+            const float unit = row_s * (float) (1 << ee);
+            be[g] = (uint8_t) ee;
+            for (int64_t k = g * 64; k < (g + 1) * 64; ++k) {
+                float qf = std::rint((w[k] / unit + 3.0f) / 2.0f);
+                qf = std::min(3.0f, std::max(0.0f, qf));
+                bq[k] = (uint8_t) qf;
+                const float d = (2.0f * qf - 3.0f) * unit - w[k];
+                err += (double) d * d;
+            }
+        }
+        if (best_err < 0.0 || err < best_err) {
+            best_err = err;
+            *scale = row_s;
+            std::memcpy(q, bq.data(), (size_t) K);
+            std::memcpy(e, be.data(), (size_t) NG);
+        }
+    }
+}
+
 WeightLoader::QWeight WeightLoader::quant(const std::string & out_name, const std::vector<std::string> & srcs,
                                           int bits, int64_t group) {
     int64_t K = -1, N = 0;
@@ -241,7 +295,27 @@ WeightLoader::QWeight WeightLoader::quant(const std::string & out_name, const st
     }
     QWeight q;
     q.bits  = bits;
-    q.group = bits == 4 ? (group > 0 ? group : K) : 0;
+    q.group = bits == 4 ? (group > 0 ? group : K) : bits == 2 ? 64 : 0;
+    q.k     = K;
+    if (bits == 2) {
+        if (K % 128 || N % 16) {
+            std::fprintf(stderr, "vla(%s): %s: W2P needs K %% 128 == 0 and N %% 16 == 0 (K %lld, N %lld)\n", arch_,
+                         out_name.c_str(), (long long) K, (long long) N);
+            ok_ = false;
+            return {};
+        }
+        q.w = ggml_new_tensor_2d(ctx_, GGML_TYPE_I8, w2p_tile_bytes(K), N / 16);
+        q.s = ggml_new_tensor_1d(ctx_, GGML_TYPE_F32, N);
+        if (!q.w || !q.s) {
+            std::fprintf(stderr, "vla(%s): ggml_new_tensor failed for %s\n", arch_, out_name.c_str());
+            ok_ = false;
+            return {};
+        }
+        ggml_set_name(q.w, out_name.c_str());
+        ggml_set_name(q.s, (out_name + ".scale").c_str());
+        quant_.push_back(Quant{q, K, srcs});
+        return q;
+    }
     if (bits == 4 && (K % 2 || K % q.group)) {
         std::fprintf(stderr, "vla(%s): %s: K %lld not a multiple of the INT4 group %lld\n", arch_, out_name.c_str(),
                      (long long) K, (long long) q.group);
@@ -315,6 +389,53 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
 
     for (const Quant & f : quant_) {
         const int64_t K = f.K;
+        if (f.q.bits == 2) {
+            // W2P: per row the 2-bit codes, the shifts and the scale; then packed
+            // per 16-column tile as src/sycl/vla_sycl_w2a8.cpp reads it.
+            const int64_t KS = K / 32, NG = K / 64, N = f.q.w->ne[1] * 16, TS = w2p_tile_bytes(K);
+            std::vector<uint8_t> codes((size_t) N * K), exps((size_t) N * NG), blob((size_t) N / 16 * TS, 0);
+            std::vector<float>   scales((size_t) N);
+            int64_t              n0 = 0;
+            for (const std::string & s : f.srcs) {
+                std::vector<uint8_t> b;
+                if (!read_resident(s, GGML_TYPE_F32, false, b) || b.size() % (K * sizeof(float))) {
+                    std::fprintf(stderr, "vla(%s): W2P fill: read %s failed\n", arch_, s.c_str());
+                    return false;
+                }
+                const float * w = (const float *) b.data();
+                const int64_t n = (int64_t) (b.size() / (K * sizeof(float)));
+                if (n0 + n > N) {
+                    std::fprintf(stderr, "vla(%s): W2P fill: %s has too many rows\n", arch_, ggml_get_name(f.q.w));
+                    return false;
+                }
+                for (int64_t r = 0; r < n; ++r)
+                    w2p_quant_row(w + r * K, K, codes.data() + (n0 + r) * K, exps.data() + (n0 + r) * NG,
+                                  &scales[(size_t) (n0 + r)]);
+                n0 += n;
+            }
+            if (n0 != N) {
+                std::fprintf(stderr, "vla(%s): W2P fill: %s rows %lld vs %lld\n", arch_, ggml_get_name(f.q.w),
+                             (long long) n0, (long long) N);
+                return false;
+            }
+            for (int64_t nt = 0; nt < N / 16; ++nt) {
+                uint32_t * cw = (uint32_t *) (blob.data() + nt * TS);
+                for (int64_t s = 0; s < KS; ++s)
+                    for (int j = 0; j < 32; ++j)
+                        for (int t = 0; t < 4; ++t)
+                            for (int b = 0; b < 4; ++b) {
+                                const int64_t n = nt * 16 + j % 16, k = s * 32 + 4 * (j / 16 + 2 * t) + b;
+                                cw[s * 32 + j] |= (uint32_t) codes[(size_t) n * K + k] << (8 * b + 2 * t);
+                            }
+                uint8_t * ex = blob.data() + nt * TS + KS * 128;
+                for (int64_t g = 0; g < NG; ++g)
+                    for (int n = 0; n < 16; ++n)
+                        ex[g * 8 + n / 2] |= (uint8_t) (exps[(size_t) (nt * 16 + n) * NG + g] << (4 * (n % 2)));
+            }
+            ggml_backend_tensor_set(f.q.w, blob.data(), 0, blob.size());
+            ggml_backend_tensor_set(f.q.s, scales.data(), 0, scales.size() * sizeof(float));
+            continue;
+        }
         const int64_t g = f.q.bits == 4 ? f.q.group : K;
         const float   qmax = f.q.bits == 4 ? 7.0f : 127.0f;
         std::vector<int8_t> codes;   // INT8: one per byte; INT4: packed below

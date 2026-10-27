@@ -40,6 +40,13 @@
 #include <unordered_map>
 #include <mutex>
 
+namespace vla {
+// src/sycl/vla_sycl_w2a8.cpp
+bool sycl_w2a8_linear(sycl::queue & q, const ggml_tensor * dst, const uint8_t * W, const float * sn, const int8_t * qx,
+                      const float * sx, long long M, long long N, long long K, long long TS, const ggml_tensor * bias,
+                      const ggml_tensor * res, const ggml_tensor * gate);
+}
+
 namespace {
 
 using bf16 = sycl::ext::oneapi::bfloat16;
@@ -364,10 +371,11 @@ bool qlinear(ggml_tensor * dst, const void * spec_v, sycl::queue & q) {
     const ggml_tensor * b   = dst->src[3];
     const ggml_tensor * res = dst->src[4];
     const ggml_tensor * gt  = dst->src[5];
-    int32_t sp[3] = { 0, 8, 0 };  // QLinearSpec after the magic: gelu, bits, group
+    int32_t sp[4] = { 0, 8, 0, 0 };  // QLinearSpec after the magic: gelu, bits, group, k
     std::memcpy(sp, (const char *) spec_v + sizeof(uint32_t), sizeof(sp));
     const int32_t   gelu = sp[0], bits = sp[1];
-    const long long K = bits == 4 ? 2 * W->ne[0] : W->ne[0], N = W->ne[1];
+    const long long K = bits == 2 ? sp[3] : bits == 4 ? 2 * W->ne[0] : W->ne[0];
+    const long long N = bits == 2 ? W->ne[1] * 16 : W->ne[1];
     const long long G = bits == 4 ? sp[2] : K;
     const bool      blob = x->type == GGML_TYPE_I8;
     const long long M = blob ? x->ne[0] / (K + 4) : x->ne[1];
@@ -387,6 +395,15 @@ bool qlinear(ggml_tensor * dst, const void * spec_v, sycl::queue & q) {
         else                           quant_rows<float>(q, x, qx, sx);
     }
 
+    if (bits == 2) {
+        // W2A8 (src/sycl/vla_sycl_w2a8.cpp): the W2P blob is I8 [tile bytes, N/16].
+        if (gelu || !vla::sycl_w2a8_linear(q, dst, (const uint8_t *) W->data, (const float *) sw->data, qx, sx, M, N,
+                                           K, W->ne[0], b, res, gt)) {
+            std::fprintf(stderr, "vla(sycl_bf16): W2A8 linear %lldx%lldx%lld: unsupported operands\n", M, N, K);
+            return false;
+        }
+        return true;
+    }
     const QKey key{ M, N, K, res ? (long long) (res->nb[1] / ggml_type_size(res->type)) : 0, b != nullptr, gelu,
                     res ? (int) res->type : -1, (int) dst->type, gt != nullptr, bits, G };
     static std::mutex            mu;

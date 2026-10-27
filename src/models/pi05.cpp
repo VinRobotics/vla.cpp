@@ -544,6 +544,15 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
         std::printf("vla(pi05): expert weights INT4 (W4A8), %s\n",
                     aex_w4_group > 0 ? ("group " + std::to_string(aex_w4_group)).c_str() : "per channel");
     }
+    // 2-bit expert weights with power-of-two group shifts on top of W8A8 (W2A8):
+    // VLA_PI05_W2=expert (src/sycl/vla_sycl_w2a8.cpp; quantized at load with the
+    // search of scripts/fakequant_expert_2bit.py, group 64).
+    bool aex_w2 = false;
+    if (const char * e = std::getenv("VLA_PI05_W2"); q8_aex && e && std::string(e) == "expert") {
+        aex_w2       = true;
+        aex_w4_group = 0;
+        std::printf("vla(pi05): expert weights 2-bit, pow2 group shifts, group 64 (W2A8)\n");
+    }
     m->vis.vit.enc.cfg.flash_attn = use_fused_attention();
     // Fused SigLIP blocks (modules/encoder.h, EncCfg::fused): SYCL, BF16, fused
     // attention. A FoldQuant GGUF takes them too: its integer sites are the LM's
@@ -597,7 +606,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
             if (!w.fq_q != !w.fq_k || !w.fq_q != !w.fq_v || !w.fq_gate != !w.fq_up)
                 L.fail("FoldQuant: an expert layer's q/k/v (and gate/up) must all be INT or all float");
         }
-        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), m->kv_inplace, q8_aex, aex_w4_group);
+        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), m->kv_inplace, q8_aex, aex_w4_group, aex_w2);
         if (m->fq_fast && w.fq_qkv) {
             // q/k/v GEMM, RoPE and the cached-KV attention as one node (gemma_attn).
             // VLA_FQ_NO_ROPE_ATTN=1 keeps them apart (A/B runs).

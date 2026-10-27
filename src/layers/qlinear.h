@@ -44,24 +44,37 @@ constexpr uint32_t QLINEAR_MAGIC = 0x4e494c51;  // "QLIN"
 struct QLinearSpec {
     uint32_t magic = QLINEAR_MAGIC;
     int32_t  gelu  = 0;
-    int32_t  bits  = 8;  // weight codes: 8, or 4 (two per byte along K, low nibble first)
-    int32_t  group = 0;  // INT4: K-elements per weight scale (scale[g * N + n])
+    int32_t  bits  = 8;  // weight codes: 8, 4 (two per byte along K, low nibble first), or 2 (W2P blob)
+    int32_t  group = 0;  // INT4: K-elements per weight scale (scale[g * N + n]); W2P: 64
+    int32_t  k     = 0;  // W2P: K (the blob is I8 [tile bytes, N/16])
 };
 
 // The spec a node points at, one per distinct value, at a stable address.
-inline const QLinearSpec * qlinear_spec(int gelu, int bits, int64_t group) {
-    static std::map<std::tuple<int, int, int64_t>, QLinearSpec> specs;
-    static std::mutex                                            mu;
+inline const QLinearSpec * qlinear_spec(int gelu, int bits, int64_t group, int64_t k = 0) {
+    static std::map<std::tuple<int, int, int64_t, int64_t>, QLinearSpec> specs;
+    static std::mutex                                                     mu;
     std::lock_guard<std::mutex> lock(mu);
-    auto it = specs.find({gelu, bits, group});
+    auto it = specs.find({gelu, bits, group, k});
     if (it == specs.end())
-        it = specs.emplace(std::make_tuple(gelu, bits, group),
-                           QLinearSpec{QLINEAR_MAGIC, gelu, bits, (int32_t) group}).first;
+        it = specs.emplace(std::make_tuple(gelu, bits, group, k),
+                           QLinearSpec{QLINEAR_MAGIC, gelu, bits, (int32_t) group, (int32_t) k}).first;
     return &it->second;
 }
 
-inline int64_t qlinear_k(const ggml_tensor * w, int bits) {
-    return bits == 4 ? 2 * w->ne[0] : w->ne[0];
+inline int64_t qlinear_k(const ggml_tensor * w, int bits, int64_t k = 0) {
+    return bits == 2 ? k : bits == 4 ? 2 * w->ne[0] : w->ne[0];
+}
+
+// W2P (WeightLoader::quant_w2p, src/sycl/vla_sycl_w2a8.cpp): the exact integer
+// weight w[n][k] = (2 q - 3) << e from the packed blob.
+inline int w2p_weight(const uint8_t * blob, int64_t K, int64_t n, int64_t k) {
+    const int64_t KS = K / 32, NG = K / 64, TS = KS * 128 + (NG * 8 + 63) / 64 * 64;
+    const uint8_t * tile = blob + (n / 16) * TS;
+    const int64_t s = k / 32, kk = k % 32, d = (kk / 4) * 16 + n % 16, b = kk % 4, t = d / 32, j = d % 32;
+    const uint32_t P = ((const uint32_t *) tile)[s * 32 + j];
+    const int q = (int) ((P >> (8 * b + 2 * t)) & 3u);
+    const int e = (tile[KS * 128 + (k / 64) * 8 + (n % 16) / 2] >> (4 * (n % 2))) & 0xf;
+    return (2 * q - 3) << e;
 }
 
 using QWeight = WeightLoader::QWeight;
@@ -88,7 +101,7 @@ inline void qlinear_cpu(ggml_tensor * dst, int ith, int nth, void * ud) {
     const ggml_tensor * b  = dst->src[3];
     const ggml_tensor * r  = dst->src[4];
     const float *       g  = dst->src[5] ? (const float *) dst->src[5]->data : nullptr;
-    const int64_t K = qlinear_k(W, s.bits), N = W->ne[1];
+    const int64_t K = qlinear_k(W, s.bits, s.k), N = s.bits == 2 ? W->ne[1] * 16 : W->ne[1];
     const int64_t G = s.bits == 4 ? s.group : K;
     const bool    blob = x->type == GGML_TYPE_I8;
     const int64_t M = blob ? q8_rows(x, K) : x->ne[1];
@@ -106,7 +119,11 @@ inline void qlinear_cpu(ggml_tensor * dst, int ith, int nth, void * ud) {
         char * dr = (char *) dst->data + m * dst->nb[1];
         for (int64_t n = 0; n < N; ++n) {
             float v = 0.0f;
-            if (s.bits == 4) {
+            if (s.bits == 2) {
+                int32_t acc = 0;
+                for (int64_t k = 0; k < K; ++k) acc += (int32_t) xq[k] * w2p_weight((const uint8_t *) W->data, K, n, k);
+                v = (float) acc * sx * sw[n];
+            } else if (s.bits == 4) {
                 const uint8_t * wr = (const uint8_t *) W->data + n * K / 2;
                 for (int64_t k0 = 0; k0 < K; k0 += G) {
                     int32_t acc = 0;
@@ -137,16 +154,17 @@ inline void qlinear_cpu(ggml_tensor * dst, int ith, int nth, void * ud) {
 // gated residual: res + out * gate). Returns [N, M] of out_type.
 inline ggml_tensor * qlinear(ggml_context * C, const QWeight & q, ggml_tensor * x, ggml_tensor * bias,
                              ggml_tensor * res, ggml_type out_type, int gelu = 0, ggml_tensor * gate = nullptr) {
-    const int64_t K = qlinear_k(q.w, q.bits);
+    const int64_t K = qlinear_k(q.w, q.bits, q.k);
     const bool    blob = x->type == GGML_TYPE_I8;
     GGML_ASSERT(blob ? x->ne[0] % (K + 4) == 0
                      : (K == x->ne[0] && x->ne[2] == 1 && x->ne[3] == 1 && x->nb[0] == ggml_type_size(x->type)));
-    GGML_ASSERT(!gate || (gate->type == GGML_TYPE_F32 && gate->ne[0] == q.w->ne[1]));
+    GGML_ASSERT(!gate || (gate->type == GGML_TYPE_F32 && gate->ne[0] == (q.bits == 2 ? q.w->ne[1] * 16 : q.w->ne[1])));
     const int64_t M = blob ? q8_rows(x, K) : x->ne[1];
     ggml_tensor * args[6] = { q.w, q.s, x, bias, res, gate };
     const int n = gate ? 6 : res ? 5 : 4;
-    ggml_tensor * t = ggml_custom_4d(C, out_type, q.w->ne[1], M, 1, 1, args, n, qlinear_cpu, GGML_N_TASKS_MAX,
-                                     (void *) qlinear_spec(gelu, q.bits, q.group));
+    const int64_t N = q.bits == 2 ? q.w->ne[1] * 16 : q.w->ne[1];
+    ggml_tensor * t = ggml_custom_4d(C, out_type, N, M, 1, 1, args, n, qlinear_cpu, GGML_N_TASKS_MAX,
+                                     (void *) qlinear_spec(gelu, q.bits, q.group, q.bits == 2 ? K : 0));
     ggml_format_name(t, "%s.q8", ggml_get_name(q.w));
     return t;
 }
