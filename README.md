@@ -6,74 +6,51 @@
 [![Built on llama.cpp](https://img.shields.io/badge/built%20on-llama.cpp-lightgrey)](https://github.com/ggml-org/llama.cpp)
 [![Models on HF](https://img.shields.io/badge/%F0%9F%A4%97%20models-Hugging%20Face-yellow)](https://huggingface.co/vrfai)
 [![arXiv](https://img.shields.io/badge/arXiv-2606.08094-b31b1b.svg)](http://arxiv.org/abs/2606.08094)
-[![Docs](https://img.shields.io/badge/docs-Learn%20vla.cpp-brightgreen)](https://fai-modelopt-tech.github.io/learn-vla-cpp/)
 
 A C++ inference engine for **Vision-Language-Action (VLA) models**, built on [`llama.cpp`](https://github.com/ggml-org/llama.cpp).
-It runs the open VLA policies - SmolVLA, π0, BitVLA, Evo-1, GR00T N1.5/1.6/1.7 and more -
-under one runtime, each packaged as a single self-contained GGUF that needs no Python or
-PyTorch at inference time. The binaries drive robots on **CPU**, **Apple Silicon**, **CUDA** -
-from consumer GPUs down to Jetson-class boards - or **Intel GPUs and NPUs** via
-SYCL and OpenVINO.
-
-[**Learn vla.cpp**](https://fai-modelopt-tech.github.io/learn-vla-cpp/) walks through the engine design and how each policy is implemented on ggml.
+It runs the open VLA policies under one runtime, each packaged as a single self-contained GGUF that needs no Python or
+PyTorch at inference time. The binaries drive robots on **CPU**, **Apple Silicon**,
+**NVIDIA** (including Jetson), **AMD**, **Intel** and **Qualcomm** hardware.
 
 ---
 
-## Build the server
+## Install
 
-### Prerequisites
+Download a prebuilt release, or build from source for any other platform or
+backend.
 
-- CMake ≥ 3.22
-- A C++17 compiler (GCC 11+ or Clang 14+)
-- CUDA 12.x (optional - required only for CUDA GPU builds)
-- Intel oneAPI 2025.x + GPU compute runtime (optional - only for Intel GPU
-  builds, see [docs/backend/sycl.md](docs/backend/sycl.md))
-- OpenVINO 2026.x runtime (optional - only for Intel CPU/GPU/NPU builds via
-  OpenVINO, see [docs/backend/ov.md](docs/backend/ov.md))
-- `libzmq3-dev`, `cppzmq-dev`, `libprotobuf-dev`, `protobuf-compiler`
+### Prebuilt binaries
+
+Each [release](https://github.com/VinRobotics/vla.cpp/releases) ships tarballs
+for Linux x86-64 and aarch64 (CPU and CUDA) and macOS arm64 (Metal):
+
+```bash
+TAG=<release tag>
+curl -LO https://github.com/VinRobotics/vla.cpp/releases/download/$TAG/vla.cpp-$TAG-linux-x86_64-cpu.tar.gz
+tar -xzf vla.cpp-$TAG-linux-x86_64-cpu.tar.gz
+```
+
+Each platform's requirements are in [docs/PREBUILT.md](docs/PREBUILT.md).
+
+### Build from source
+
+The CPU build needs CMake ≥ 3.22, a C++17 compiler (GCC 11+ or Clang 14+),
+ZeroMQ and protobuf. CMake fetches and pins `llama.cpp` itself:
 
 ```bash
 sudo apt-get install -y libzmq3-dev cppzmq-dev libprotobuf-dev protobuf-compiler
-```
-
-### From source
-
-Identify your machine CUDA architecture:
-
-| GPU family | Example cards | `CUDA_ARCHITECTURE` |
-|---|---|---|
-| Ampere (Jetson) | Orin Nano, Orin NX | `87` |
-| Ampere (consumer) | RTX 30-series, A40 | `86` |
-| Ada Lovelace | RTX 40-series, L40 | `89` |
-| Hopper | H100, H200 | `90` |
-| Blackwell (consumer) | RTX 50-series | `120` |
-| Blackwell (datacenter) | B100, B200, GB200 | `100` |
-
-Then configure and build. CMake fetches and pins `llama.cpp` automatically (no patch, no submodule):
-
-```bash
-# CPU build:
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
-
-# CUDA build (set CMAKE_CUDA_ARCHITECTURES for your GPU):
-cmake -B build \
-    -DGGML_CUDA=ON \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURE
-cmake --build build -j$(nproc)
 ```
 
-If CMake cannot find CUDA, point the environment at it explicitly:
+`-DVLA_BUILD_SERVER=OFF -DVLA_SPM=OFF` drops the apt packages and builds only
+`vla-cli`, `vla-bench` and `libvla`; Octo then takes `--tokens` instead of `--text`.
 
-```bash
-export PATH=/usr/local/cuda/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-```
-
-Check [docs/backend](docs/backend) for compiling `vla.cpp` on other platforms.
-WSL2, Apple Silicon, and Intel GPU are all tested.
-To build and run in containers instead, see [docs/DOCKER.md](docs/DOCKER.md).
+For a GPU or NPU, follow the backend's page in [docs/backend/](docs/backend):
+[CUDA](docs/backend/cuda.md), [ROCm](docs/backend/rocm.md),
+[SYCL](docs/backend/sycl.md), [OpenVINO](docs/backend/ov.md),
+[Metal](docs/backend/metal.md), [Hexagon](docs/backend/hexagon-windows.md).
+For containers, see [docs/DOCKER.md](docs/DOCKER.md).
 
 ---
 
@@ -93,256 +70,107 @@ pip install -U "huggingface_hub[cli]" transformers
     --image assets/front.jpg --text "pick up the black bowl" --pretty
 ```
 
-`vla-cli` runs a single prediction without a server or simulator: give it a model,
-an image, and an instruction, and it prints the action chunk. Handy for
-smoke-testing a GGUF or scripting a quick inference.
-
-There is no tokenizer in the C++ core, so `--text` calls
-`scripts/tokenize_prompt.py` with the tokenizer the architecture was trained on
-(`VLA_PYTHON` picks the interpreter, `VLA_TOKENIZE_SCRIPT` the script). Pass
-`--tokens 1,100,200,2` instead if you already have ids.
-`--pretty` prints one action row per line;
-`--state` sets proprioception (defaults to zeros).
-
-For the design overview see
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), for the long-running path see
-[Running the server](#running-the-server), and for the other checkpoints see [Roadmap](#roadmap).
-
-The rest of this README refers to a few shell variables:
-
-```bash
-export VLA_GGUF=models/smolvla/smolvla-libero.gguf   # the checkpoint to serve
-export VLA_ARCH=smolvla                              # client-side arch preset, see --help
-```
+With a prebuilt tarball, run `vla-cli` from the extracted
+`vla.cpp-<tag>-<platform>/` directory instead of `./build/`.
+`--pretty` prints one action row per line and `--state` sets proprioception.
+Prompt tokenization, `-hf` tags, `vla-server`, runtime flags and environment
+variables are in [docs/USAGE.md](docs/USAGE.md).
 
 ---
 
-## Install simulators
+## Support matrix
 
-The eval scaffold under [`eval/`](eval/) supports two simulators end-to-end. Each setup script bootstraps an isolated Python 3.10 `uv` venv next to itself and clones the upstream sim repo. Both require [`uv`](https://github.com/astral-sh/uv) on `PATH`.
-
-### LIBERO
-
-```bash
-bash eval/sim/libero/setup_libero.sh
-```
-
-Clones LIBERO into [`eval/sim/libero/LIBERO/`](eval/sim/libero/LIBERO), creates `eval/sim/libero/libero_uv/.venv/`, and pins compatible versions of torch, lerobot, transformers, and gymnasium.
-
-### SimplerEnv
-
-```bash
-bash eval/sim/simpler/setup_SimplerEnv.sh
-```
-
-Clones SimplerEnv (and its nested `ManiSkill2_real2sim`) into [`eval/sim/simpler/SimplerEnv/`](eval/sim/simpler/SimplerEnv), creates `eval/sim/simpler/simpler_uv/.venv/`.
-
----
-
-## Running the server
-
-`vla-server` loads the model once at startup and answers ZeroMQ REQ/REP requests synchronously.
-
-```bash
-./build/vla-server "$VLA_GGUF"
-```
-
-When ready, the server prints:
-
-```
-vla-server: bound to tcp://*:5555. ready.
-```
-
-Use `--bind` to change the address and port. Stop the server with `Ctrl-C`.
-
-`vla-server` also takes `-hf user/repo[:file.gguf]` in place of a checkpoint path.
-
-Precision flags (`vla-server --help` for the full list).
-The fastest configuration per model, with measured latency and success rate, is
-in [`CHANGELOG.md`](CHANGELOG.md):
-
-- `--weight-dtype f32|bf16` - resident dtype for GEMM weights.
-- `--act-dtype f32|bf16` - activation dtype; needs CUDA and bf16 weights.
-- `--flash-attn` - faster on the larger towers, but changes numerics.
-- `--mm-prec default|f32` - matmul accumulation precision.
+Models (rows) against platforms (columns).
+Per-device latency and memory are in [docs/benchmark/](docs/benchmark).
+Use [ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) and follow [the instruction](docs/ARCHITECTURE.md#adding-an-architecture) to add a new model.
 
 
-Environment knobs that apply to every arch:
+| Model | CPU (x86-64 / ARM) | [CUDA (NVIDIA)](docs/backend/cuda.md) | [ROCm (AMD)](docs/backend/rocm.md) | [SYCL (Intel)](docs/backend/sycl.md) | [Metal (Apple)](docs/backend/metal.md) | [OpenVINO (Intel)](docs/backend/ov.md) | [Hexagon (Qualcomm)](docs/backend/hexagon-windows.md) |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | Y | Y | Y |
+| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | Y | Y | Y | Y | ~ |
+| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | Y | Y | Y | Y | Y |
+| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | Y | Y | Y | Y | Y |
+| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | Y | Y | Y | Y | Y |
+| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | Y | Y | Y | Y | Y |
+| [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | - | - | - | - |
+| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | Y | Y | Y |
+| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | Y | Y | Y | Y | Y |
+| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | Y | - | Y | Y | - |
+| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | Y | Y | Y | Y | ~ |
+| [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | Y | - | Y |
+| [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | Y | Y | Y | Y | Y |
+| [ACT](https://hf.co/ravediamond/act-aloha-sim-transfer-cube-gguf) | Y | Y | Y | ~ | Y | ~ | ~ |
 
-- `VLA_N_THREADS` - CPU backend thread count, default core count capped at 16.
-- `VLA_DEVICE` - GPU ordinal for CUDA and SYCL builds, default 0.
-- `VLA_CACHE` - where `-hf` stores checkpoints, default `~/.cache/vla`.
+Legend: `Y` = supported (released and benchmarked), `~` = in progress, `-` = planned.
 
 ---
 
-## Running the client
+## Rollout on a real robot
 
-[`eval/client/`](eval/client/) ships an end-to-end LIBERO benchmark runner that drives `vla-server` directly over the protobuf protocol. Make sure the LIBERO venv from [Install simulators](#install-simulators) is set up first.
-
-### LIBERO
-
-With `vla-server` already running:
-
-```bash
-source eval/sim/libero/libero_uv/.venv/bin/activate
-python eval/client/run_sim_client_direct.py \
-    --task libero_object --task-id 0 --n-episodes 1 \
-    --output-dir /tmp/libero_outputs \
-    --arch "$VLA_ARCH"
-```
-
-The GR00T models need two extras:
-
-- client side: `--stats-json /path/to/dataset_statistics.json`
-- server side: `VLA_GR00T_EMBODIMENT` (`new_embodiment` for N1.5, `libero_panda` for N1.6, `libero_sim` for N1.7).
-
-### SimplerEnv
-
-So far only **GR00T-N1.6** is wired (the `gr00t-n1d6-bridge` checkpoint with the `oxe_widowx` embodiment). Start `vla-server` on port 5566 with `oxe_widowx` embodiment:
+The [LeRobot fork](https://github.com/khanhnd61-vr/lerobot/tree/vla-simd) adds a
+`lerobot-vla-cpp` client that drives an SO-101 arm against `vla-server`. It does
+the preprocessing for SmolVLA, π0, π0.5 and GR00T N1.5/1.6/1.7. Serve the policy
+on a GPU host; on a desktop CPU the action queue stalls:
 
 ```bash
-VLA_GR00T_EMBODIMENT=oxe_widowx \
-    ./build/vla-server "$GR00T_N1D6_GGUF"
+./build/vla-server smolvla-so101.gguf   # binds tcp://*:5555
 ```
 
-Then drive it from the SimplerEnv venv (set up via [Install simulators](#install-simulators)):
-
-```bash
-source eval/sim/simpler/simpler_uv/.venv/bin/activate
-python eval/client/run_simpler_client_direct.py \
-    --arch gr00t_n1_6 \
-    --task-id oxe_widowx/widowx_spoon_on_towel --n-episodes 1 \
-    --embodiment oxe_widowx --image-size 252 \
-    --stats-json "$VLA_STATS_JSON"
-```
+Installing, wiring and running the client are in the fork's
+[rollout guide](https://github.com/khanhnd61-vr/lerobot/tree/vla-simd#through-a-vlacpp-server).
 
 ---
 
-## Models
+## Companion Repos
 
-### Conversion
-
-Each model ships as a single self-contained GGUF. To convert a HuggingFace safetensors
-checkpoint yourself, [`scripts/`](scripts/) has a converter per arch. Set up its venv:
-
-```bash
-python3 -m venv .venv-converter
-source .venv-converter/bin/activate
-pip install -e ".[convert]"
-```
-
-Then run any of the per-arch converters (`--help` for the full flag list):
-
-```bash
-python scripts/convert_smolvla_to_gguf.py \
-    --ckpt /path/to/smolvla-libero \
-    --out  /path/to/smolvla-libero-bf16.gguf
-```
-
-### Quantization
-
-The shipped GGUFs are bf16. `scripts/quantize_gguf.py` repacks the LM-backbone weight
-matrices to a smaller type and copies everything else unchanged; the loader keeps the
-packed weights and lets `ggml_mul_mat` dequantize at compute, so the file just loads and
-runs like the bf16 one.
-
-```bash
-python scripts/quantize_gguf.py --in model-bf16.gguf --out model-q8_0.gguf --type Q8_0
-```
-
-`Q8_0` is near-lossless and roughly halves the LM. `Q4_0` is 4-bit for a bigger cut.
-Embeddings, the output head, norms and the action expert stay float; pass `--vision` to
-pack the vision tower too (smaller, but more accuracy loss).
+| Repo | Content |
+|---|---|
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | ggml and its backends; CMake fetches it at a pinned tag (`b11223`) |
+| [LeRobot fork](https://github.com/khanhnd61-vr/lerobot/tree/vla-simd) | `lerobot-vla-cpp`, the client that runs a real robot against `vla-server` |
+| [ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) | Generates ggml C++ from a policy's PyTorch implementation and verifies it, for porting a new model to `vla.cpp` |
+| [Learn vla.cpp](https://fai-modelopt-tech.github.io/learn-vla-cpp/) | Walkthrough of the engine design and how each policy is implemented on ggml |
 
 ---
 
-## Benchmarks
+## Documentation
 
-`vla-bench` times `predict()` in-process on synthetic inputs: engine only, no
-transport, no simulator, no claim about task success.
+| Doc | Content |
+|---|---|
+| [docs/PREBUILT.md](docs/PREBUILT.md) | Release tarballs: layout, glibc and CUDA runtime requirements, macOS and Windows notes |
+| [docs/USAGE.md](docs/USAGE.md) | `vla-cli`, `vla-server`, `vla-bench`: prompt tokenization, `-hf` tags, runtime flags, environment variables |
+| [docs/EVAL.md](docs/EVAL.md) | Installing LIBERO and SimplerEnv, running the eval clients against `vla-server` |
+| [docs/MODELS.md](docs/MODELS.md) | Converting safetensors checkpoints to GGUF, quantizing to Q8_0/Q4_0 |
+| [docs/QUANTIZATION.md](docs/QUANTIZATION.md) | FoldQuant W8A8 / W4A4: the GGUF contract, the integer arithmetic, converting a FoldQuantVLA quantized model |
+| [docs/DOCKER.md](docs/DOCKER.md) | Building and running the eval in containers |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Engine design: layers, the prediction path, backends, adding an architecture |
+| [docs/backend/](docs/backend) | Per-backend build and run notes: [CUDA](docs/backend/cuda.md), [ROCm](docs/backend/rocm.md), [SYCL](docs/backend/sycl.md), [OpenVINO](docs/backend/ov.md), [Metal](docs/backend/metal.md), [Hexagon](docs/backend/hexagon.md), [Hexagon on Windows](docs/backend/hexagon-windows.md), [WSL2](docs/backend/wsl.md) |
+| [docs/benchmark/](docs/benchmark) | Per-device latency and memory for every model, and the fastest flags per device |
+| [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) | Known issues and their resolutions |
+| [docs/ADOPTION.md](docs/ADOPTION.md) | C ABI, Python bindings, release packaging, and what is left |
+| [docs/UPSTREAMING.md](docs/UPSTREAMING.md) | The ggml-openvino fixes to send upstream to llama.cpp |
+| [CHANGELOG.md](CHANGELOG.md) | Per-release changes, with the fastest configuration and success rate per model |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Proving a change is numerically neutral, adding an architecture |
+| [bindings/python/](bindings/python/README.md) | Python bindings |
 
-```bash
-./build/vla-bench -hf vrfai/smolvla-libero-gguf --images 2 --size 512 --markdown
+---
+
+## Citation
+
+```bibtex
+@misc{nguyen2026vlacpp,
+  title         = {{vla.cpp}: A Unified Inference Runtime for Vision-Language-Action Models},
+  author        = {Khanh D. Nguyen and Hung T. Ho and Chinh T. Nguyen and
+                   Thanh Q. Duong and Linh D. Le and Duy M. H. Nguyen and
+                   Vien A. Ngo and An T. Le},
+  year          = {2026},
+  eprint        = {2606.08094},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.RO},
+  doi           = {10.48550/arXiv.2606.08094},
+  url           = {https://arxiv.org/abs/2606.08094}
+}
 ```
-
-RTX 5090, driver 595.84, CUDA 13.2, 24-core host, weights as shipped, 20 reps
-after 3 warmups, best of three sweeps, each model at its native input size and
-view count.
-
-| Model | Views | Input | min ms | p50 ms | p90 ms | vision ms |
-|---|--:|--:|--:|--:|--:|--:|
-| VLA-Adapter | 1 | 224 | 18.2 | 19.8 | 21.1 |  9.4 |
-| VLA-JEPA    | 1 | 256 | 19.9 | 21.5 | 22.9 |  6.3 |
-| BitVLA      | 1 | 224 | 23.6 | 25.3 | 26.4 |  5.4 |
-| GR00T N1.5  | 1 | 224 | 28.2 | 29.4 | 30.5 |  5.9 |
-| GR00T N1.7  | 1 | 256 | 31.0 | 33.4 | 34.6 |  6.2 |
-| GR00T N1.6  | 1 | 224 | 33.4 | 35.7 | 37.3 |  6.3 |
-| OpenVLA-OFT | 1 | 224 | 47.4 | 49.2 | 50.2 | 10.3 |
-| SmolVLA     | 2 | 512 | 47.8 | 49.6 | 54.0 | 16.1 |
-| pi0         | 2 | 224 | 48.9 | 52.1 | 55.0 | 11.6 |
-| Evo-1       | 1 | 448 | 52.2 | 55.2 | 57.3 | 17.8 |
-| pi0.5       | 2 | 224 | 53.4 | 56.1 | 59.3 | 11.4 |
-
-### Task success
-
-Latency says nothing about whether a policy works. LIBERO-Object, 10 tasks and 20
-episodes per model, terminated episodes counted as failures:
-
-| Model | Chunk replay | Success rate |
-|---|--:|--:|
-| BitVLA     |  8 | 100.0% |
-| GR00T N1.7 | 16 |  98.0% |
-| GR00T N1.5 | 16 |  96.0% |
-| Evo-1      |  8 |  94.5% |
-| SmolVLA    |  4 |  90.5% |
-| π0         | 32 |  87.5% |
-| GR00T N1.6 | 16 |  86.5% |
-
-Success rate belongs to the checkpoint, not the engine;
-`vla_predict_check` in [CONTRIBUTING.md](CONTRIBUTING.md) is how a
-change is shown to leave it alone.
-
-Experimental results on other platforms can be found in
-[eval/reports](eval/reports) or  [docs/backend](docs/backend).
-
----
-
-## Roadmap
-
-Support matrix of models (rows) against platforms (columns). Legend: `Y` =
-supported (released and benchmarked), `~` = in progress, `-` = planned.
-
-| Model | CPU (x86-64 / ARM) | CUDA | [SYCL (Intel)](docs/backend/sycl.md) | [Metal](docs/backend/metal.md) | [OpenVINO](docs/backend/ov.md) | Hexagon |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | Y | - | 
-| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | - | Y | Y | - | 
-| [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | - | Y | Y | - | 
-| [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | - | Y | Y | - | 
-| [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | - | Y | Y | - | 
-| [GR00T N1.7](https://hf.co/vrfai/gr00tn1d7-libero-gguf)        | Y | Y | - | Y | Y | - | 
-| [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | ~ | - | - | 
-| [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | Y | - | 
-| [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | ~ | Y | Y | - | 
-| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | - | Y | Y | - | 
-| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | - | Y | Y | - | 
-| [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | - | - | 
-| [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | Y | Y | Y | - | 
-
----
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to prove a change is numerically
-neutral, and the six sites you touch to add an architecture.
-
----
-
-## Contributors
-
-- [Khanh Dang Nguyen](https://github.com/khanhnd61-vr)
-- [Hung Thinh Ho](https://github.com/hungho77)
-- [Chinh Truong Nguyen](https://github.com/nguyentruongchinh04z)
-- [An Thai Le](https://github.com/anindex)
 
 ---
 
@@ -356,6 +184,7 @@ Licensed under the [Apache License, Version 2.0](LICENSE.md).
 
 Supported VLA models:
 
+- [ACT](https://arxiv.org/abs/2304.13705) - Zhao et al.
 - [SmolVLA](https://huggingface.co/lerobot/smolvla_base) - Hugging Face LeRobot team.
 - [π0,π0.5](https://github.com/Physical-Intelligence/openpi) - Physical Intelligence.
 - [BitVLA](https://github.com/ustcwhy/BitVLA) - Hongyu Wang et al.

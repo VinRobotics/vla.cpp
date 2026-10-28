@@ -21,6 +21,7 @@ from gguf_blocks import write_prismatic_lm, write_prismatic_tower
 from gguf_common import (
     add_bf16,
     arg_parser,
+    find_sidecar,
     finish,
     kv_prefix,
     kv_u32,
@@ -101,8 +102,8 @@ def main() -> int:
     ckpt = args.ckpt.resolve()
     out  = resolve_out(args, ckpt, ARCH)
 
-    ah_path = args.action_head or next(ckpt.glob("action_head--*checkpoint.pt"))
-    pp_path = args.proprio     or next(ckpt.glob("proprio_projector--*checkpoint.pt"))
+    ah_path = args.action_head or find_sidecar(ckpt, "action_head")
+    pp_path = args.proprio     or find_sidecar(ckpt, "proprio_projector")
     stats_path = ckpt / "dataset_statistics.json"
     require(stats_path)
 

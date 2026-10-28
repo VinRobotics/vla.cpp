@@ -12,15 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Every projection is a cat_linear row selected by embodiment_id.
+// Every projection is the embodiment_id row of a stacked weight, sliced at load.
 
 #pragma once
 
+#include "gguf_reader.h"
 #include "loader.h"
+#include "modules/dit_head.h"
 
 #include "ggml.h"
+#include "ggml-backend.h"
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace vla {
 
@@ -33,7 +38,12 @@ struct ActionExpert {
 
     int64_t embodiment_id = 0;
 
-    void declare(WeightLoader & L, const char * prefix);
+    ActionExpert() = default;
+    ActionExpert(const ActionExpert &) = delete;
+    ActionExpert & operator=(const ActionExpert &) = delete;
+    ~ActionExpert();
+
+    bool declare(WeightLoader & L, gguf_reader & g, ggml_backend_t backend, const char * prefix);
 
     ggml_tensor * encode_state(ggml_context * C, ggml_tensor * state) const;
 
@@ -41,6 +51,17 @@ struct ActionExpert {
                                 int64_t embed_dim, int64_t horizon) const;
 
     ggml_tensor * decode(ggml_context * C, ggml_tensor * model_out) const;
+
+    ggml_tensor * denoise(ggml_context * C, const DitHead & dit, const FlowTimes & times, bool interleave, int64_t every2,
+                          ggml_tensor * state, ggml_tensor * future, ggml_tensor * txt, ggml_tensor * img,
+                          ggml_tensor * x0) const;
+
+private:
+    ggml_context *        ctx = nullptr;
+    ggml_backend_buffer_t buf = nullptr;
 };
+
+bool resolve_embodiment(const char * arch, const std::string & mapping, const char * default_tag,
+                        int64_t max_id, int64_t & id);
 
 }

@@ -16,12 +16,11 @@
 // actually consumes belong here: an advertised flag nothing reads is how a
 // benchmark ends up measuring a configuration nobody asked for.
 //
-// Thread count, solver steps, GR00T embodiment and un-normalisation key stay
-// environment variables (VLA_N_THREADS, VLA_NUM_STEPS, VLA_GR00T_EMBODIMENT,
-// VLA_*_UNNORM_KEY) until the loaders read them from here.
+// Thread count, GR00T embodiment and un-normalisation key stay environment
+// variables (VLA_N_THREADS, VLA_GR00T_EMBODIMENT, VLA_*_UNNORM_KEY) until the
+// loaders read them from here.
 //
-// Runtime knobs that trade precision for speed. Every field is unset by
-// default; a model reads one with value_or() so its own default stays at its
+// Every field is unset by default; a model reads one with value_or() so its own default stays at its
 // own call site, and both branches are always compiled.
 //
 // The fastest setting differs per architecture and some of them change
@@ -41,6 +40,7 @@ struct Options {
     std::optional<ggml_type>   act_dtype;
     std::optional<bool>        flash_attn;
     std::optional<bool>        mm_prec_f32;
+    std::optional<int>         num_steps;
 
     // Consumes argv[i] (and its value) if it names an option. Returns false
     // with err set on a bad value; leaves i untouched and err empty when the
@@ -63,8 +63,17 @@ const char * dtype_name(ggml_type t);
 // every signature.
 void set_flash_attn(bool on);
 bool flash_attn_enabled();
+// Whether the active backend's FLASH_ATTN_EXT reads Q/K/V of any float type
+// through arbitrary strides (true on SYCL, where src/sycl/vla_sycl_attn.cpp
+// converts them itself). Graph builders then pass the projection views directly
+// instead of casting to F32 and ggml_cont-ing them first.
+void set_fa_takes_views(bool on);
+bool fa_takes_views();
 
 void set_mm_prec_f32(bool on);
 bool mm_prec_f32_enabled();
+
+bool resolve_num_steps(const char * arch, const Options & opts, int64_t & steps);
+bool resolve_num_steps(const char * arch, const Options & opts, int & steps);
 
 }

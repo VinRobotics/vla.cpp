@@ -1,7 +1,9 @@
 # Cross-platform VLA regression CI.
-# Fires when a PR from `dev` targets `main`. Runs on the self-hosted runner
-# labelled `vla-ci-orchestrator` (register your orchestrator host with that
-# label - the actual hostname stays out of the repo, in ci/config/hosts.env).
+# Fires on a push to `dev`, or by hand. Runs on the self-hosted runner labelled
+# `vla-ci-orchestrator` (register your orchestrator host with that label - the
+# actual hostname stays out of the repo, in the hosts.env that the runner's
+# VLA_CI_HOSTS_ENV points at). Keep that runner in a runner group restricted to
+# VinRobotics/vla.cpp/.github/workflows/vla-ci.yml@refs/heads/dev.
 # Every platform is a remote server reached over the LAN via vla-ci-agent (no
 # SSH); the orchestrator drives one LIBERO client per platform. The three
 # platforms are swept CONCURRENTLY in a single job (a self-hosted runner runs one
@@ -9,8 +11,9 @@
 name: vla-ci
 
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches: [dev]
+  workflow_dispatch:
 
 concurrency:
   group: vla-ci-${{ github.ref }}
@@ -18,13 +21,19 @@ concurrency:
 
 jobs:
   ci:
-    # Only PRs whose source branch is `dev`.
-    if: github.head_ref == 'dev'
     runs-on: [self-hosted, vla-ci-orchestrator]
     timeout-minutes: 240
+    env:
+      VLA_CI_EXPECTED_COMMIT: ${{ github.sha }}
+      CI_OUTPUT_ROOT: ${{ github.workspace }}/outputs/ci
     steps:
       - uses: actions/checkout@v7
-      - name: Sweep all platforms (parallel) + gate
+      - name: Host config + control tools
+        run: |
+          cp "${VLA_CI_HOSTS_ENV:?set VLA_CI_HOSTS_ENV in the runner .env}" ci/config/hosts.env
+          cmake -S ci/agent -B ci/agent/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build ci/agent/build -j
+      - name: Move servers to the pushed commit, build, sweep all platforms (parallel) + gate
         run: bash ci/orchestrate.sh all
       - uses: actions/upload-artifact@v7
         if: always()

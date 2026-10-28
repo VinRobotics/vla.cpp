@@ -18,7 +18,8 @@
 // others read it, so fixed noise is reproducible for all archs).
 //
 //   predict_check <ckpt.gguf> [mmproj.gguf] [n_images]
-//   env: VLA_IMG_SIZE (square input, default 224), VLA_BENCH_ITERS (>0 = time it),
+//   env: VLA_IMG_SIZE (input width, default 224), VLA_IMG_H (height, default the
+//        width), VLA_BENCH_ITERS (>0 = time it),
 //        VLA_TIMING=phase, VLA_EXTRA_TOKEN / VLA_EXTRA_COUNT
 
 #include "model.h"
@@ -28,7 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#include <ctime>
+#include <chrono>
 #include <vector>
 
 using namespace vla;
@@ -67,7 +68,8 @@ int main(int argc, char** argv) {
         (long long)cfg.n_suffix, cfg.num_steps);
 
     const char* isz = std::getenv("VLA_IMG_SIZE");
-    const int W = isz ? std::atoi(isz) : 224, H = W;
+    const char* ih  = std::getenv("VLA_IMG_H");
+    const int W = isz ? std::atoi(isz) : 224, H = ih ? std::atoi(ih) : W;
     std::vector<std::vector<uint8_t>> imgbuf(n_images, std::vector<uint8_t>((size_t)3 * W * H));
     std::vector<ImageView> views(n_images);
     for (int v = 0; v < n_images; ++v) {
@@ -113,11 +115,10 @@ int main(int argc, char** argv) {
         for (int w = 0; w < 3; ++w) (void)predict(m, in);
         double best = 1e30, sum = 0.0;
         for (int i = 0; i < iters; ++i) {
-            struct timespec t0, t1;
-            clock_gettime(CLOCK_MONOTONIC, &t0);
+            const auto t0 = std::chrono::steady_clock::now();
             std::vector<float> a = predict(m, in);
-            clock_gettime(CLOCK_MONOTONIC, &t1);
-            double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+            const auto t1 = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             best = ms < best ? ms : best;
             sum += ms;
         }

@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Post-LN encoder. The SigLIP vision blocks and the GR00T vision-language
+// Pre-LN encoder. The SigLIP vision blocks and the GR00T vision-language
 // self-attention blocks are the same computation under different tensor names,
 // which is what EncNames selects.
 
 #pragma once
 
+#include "layers/fused_ew.h"
 #include "loader.h"
 
 #include "ggml.h"
@@ -31,6 +32,11 @@ struct EncBlockW {
     ggml_tensor *ln1w, *ln1b, *ln2w, *ln2b;
     ggml_tensor *Wq, *bq, *Wk, *bk, *Wv, *bv, *Wo, *bo;
     ggml_tensor *Wfc1, *bfc1, *Wfc2, *bfc2;
+    // cfg.fused: q|k|v weights and biases concatenated (Wq..bv above are null).
+    ggml_tensor *Wqkv = nullptr, *bqkv = nullptr;
+    // cfg.int8: the four GEMMs as W8A8 (layers/qlinear.h) in place of Wqkv, Wo,
+    // Wfc1, Wfc2.
+    WeightLoader::QWeight q_qkv, q_o, q_fc1, q_fc2;
 };
 
 struct EncNames {
@@ -46,11 +52,23 @@ struct EncCfg {
     int64_t head_dim   = 0;
     float   ln_eps     = 1e-6f;
     bool    flash_attn = false;
+    // Activation dtype for the GEMMs (mm_act); F32 is the classic graph. The
+    // input must already be in this type (cast the patch embedding).
+    ggml_type act = GGML_TYPE_F32;
+    // Reduced-precision act on a backend that claims layers/fused_ew.h nodes:
+    // GEMMs take bias, GELU and residual as epilogue, q|k|v is one GEMM, and
+    // attention reads its output directly. Set before declare().
+    bool fused = false;
+    // With fused: the GEMMs as W8A8 with per-token INT8 activations.
+    bool int8 = false;
+    // F32 act on CUDA: layers/fused_ops.h nodes, bit-identical to this graph.
+    bool fused_ops = false;
 };
 
 struct EncStack {
     EncCfg                 cfg;
     std::vector<EncBlockW> blk;
+    FusedLNormSpec         ln_spec;  // cfg.fused; its address rides in the graph
 
     void declare(WeightLoader & L, const char * prefix, int64_t layers, const EncNames & n = EncNames{});
 

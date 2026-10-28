@@ -42,6 +42,9 @@
 // default path builds exactly the graph it built before.
 
 #include "ggml.h"
+#include "layers/fused_ops.h"
+
+#include <cstddef>
 
 namespace vla {
 
@@ -83,10 +86,70 @@ inline ggml_tensor * mul_mat_t(ggml_context * C, ggml_tensor * a, ggml_tensor * 
 // Those run the stock matmul at F32 and rejoin the activation stream after,
 // which is exactly what they did before the BF16 path existed.
 inline ggml_tensor * mm_act(ggml_context * C, ggml_tensor * w, ggml_tensor * x, ggml_type at) {
+    // F32 activations with the CUDA fused ops on: the BF16-weight GEMM runs
+    // through gemm_exact (bit-identical to ggml's cuBLAS call, often faster).
+    if (at == GGML_TYPE_F32 && fused_ops_for(w))
+        return mm_exact(C, w, x);
     if (w->type != at) {
         return as_type(C, ggml_mul_mat(C, w, as_type(C, x, GGML_TYPE_F32)), at);
     }
     return mul_mat_t(C, w, x, at);
+}
+
+// Give an op result another type before anything uses it. ggml's constructors
+// fix the result type (RoPE: the input's; flash attention: F32), but the SYCL
+// kernels can also write the other one (RoPE F32 -> F16, fused SDPA -> BF16),
+// which saves the conversion that would follow.
+inline ggml_tensor * retype(ggml_tensor * t, ggml_type type) {
+    GGML_ASSERT(t->view_src == nullptr && t->data == nullptr);
+    t->type  = type;
+    t->nb[0] = ggml_type_size(type);
+    for (int i = 1; i < GGML_MAX_DIMS; ++i)
+        t->nb[i] = t->nb[i - 1] * t->ne[i - 1];
+    return t;
+}
+
+// Make op result t a 1-D I8 tensor of `bytes` (a q8 blob, layers/fused_ew.h),
+// for a kernel that writes its result quantized. Call before anything uses it.
+inline ggml_tensor * retype_blob(ggml_tensor * t, int64_t bytes) {
+    GGML_ASSERT(t->view_src == nullptr && t->data == nullptr);
+    t->type = GGML_TYPE_I8;
+    t->ne[0] = bytes;
+    for (int i = 1; i < GGML_MAX_DIMS; ++i) t->ne[i] = 1;
+    t->nb[0] = 1;
+    for (int i = 1; i < GGML_MAX_DIMS; ++i) t->nb[i] = t->nb[i - 1] * t->ne[i - 1];
+    return t;
+}
+
+// Make op result t ([hd, n_kv, seq], contiguous) write into rows [row0, row0+seq)
+// of buf instead of its own memory, like ggml_cpy into a view but for any op.
+inline ggml_tensor * write_rows(ggml_tensor * t, ggml_tensor * buf, int64_t row0) {
+    GGML_ASSERT(t->type == buf->type && t->ne[0] == buf->ne[0] && t->ne[1] == buf->ne[1]);
+    GGML_ASSERT(row0 + t->ne[2] <= buf->ne[2] && t->view_src == nullptr && t->data == nullptr);
+    t->view_src  = buf;
+    t->view_offs = (size_t) row0 * buf->nb[2];
+    for (int i = 0; i < GGML_MAX_DIMS; ++i)
+        t->nb[i] = buf->nb[i];
+    return t;
+}
+
+// An ordering edge: node runs after dep. Kernels read only the srcs they know
+// (flash attention: 0-4), so the spare slots carry it.
+inline void add_dep(ggml_tensor * node, ggml_tensor * dep, int first_free = 5) {
+    for (int i = first_free; i < GGML_MAX_SRC; ++i) {
+        if (node->src[i] == dep) return;
+        if (!node->src[i]) { node->src[i] = dep; return; }
+    }
+    GGML_ABORT("add_dep: no free src slot");
+}
+
+// mul_mat with an F32 result whatever the activation type: a BF16 x BF16 GEMM
+// writes F32 directly where a kernel takes that pairing (src/sycl/vla_sycl_bf16.cpp),
+// rather than a BF16 result and a cast. Elsewhere, mm_act and a cast.
+inline ggml_tensor * mm_f32(ggml_context * C, ggml_tensor * w, ggml_tensor * x) {
+    if (w->type == GGML_TYPE_BF16 && x->type == GGML_TYPE_BF16)
+        return ggml_mul_mat(C, w, x);
+    return as_type(C, mm_act(C, w, x, x->type == GGML_TYPE_BF16 ? GGML_TYPE_BF16 : GGML_TYPE_F32), GGML_TYPE_F32);
 }
 
 }  // namespace vla

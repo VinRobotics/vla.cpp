@@ -24,6 +24,7 @@
 
 #include <climits>
 #include <cstdio>
+#include <exception>
 
 namespace vlm {
 
@@ -36,6 +37,18 @@ void ensure_global_init() {
         common_init();
         done = true;
     }
+}
+
+size_t utf8_complete_prefix(const std::string & s) {
+    for (size_t i=1; i<=4 && i<=s.size(); ++i) {
+        const unsigned char c = s[s.size()-i];
+        if ((c & 0xC0) == 0x80) {
+            continue;
+        }
+        const size_t need = (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
+        return need > i ? s.size()-i : s.size();
+    }
+    return s.size();
 }
 }
 
@@ -82,6 +95,8 @@ bool Engine::load(const LoadParams & lp) {
     if (lp.n_threads > 0) {
         params.cpuparams.n_threads = lp.n_threads;
     }
+    postprocess_cpu_params(params.cpuparams, nullptr);
+    postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
 
     impl_->llama_init = common_init_from_params(params);
     impl_->model = impl_->llama_init->model();
@@ -118,37 +133,6 @@ bool Engine::load(const LoadParams & lp) {
     return true;
 }
 
-namespace {
-
-bool bitmap_to_image(mtmd::bitmap & bmp, Image & out) {
-    if (!bmp.ptr || mtmd_bitmap_is_audio(bmp.ptr.get())) {
-        return false;
-    }
-    out.width  = bmp.nx();
-    out.height = bmp.ny();
-    out.rgb.assign(bmp.data(), bmp.data()+bmp.n_bytes());
-    return true;
-}
-}
-
-bool Engine::decode_image_file(const std::string & path, Image & out) const {
-    if (!loaded()) {
-        return false;
-    }
-    mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_file(impl_->vision.get(), path.c_str(), false,
-                                                      mtmd_helper_init_opt_default()).bitmap);
-    return bitmap_to_image(bmp, out);
-}
-
-bool Engine::decode_image_buf(const uint8_t * data, size_t len, Image & out) const {
-    if (!loaded() || !data || len == 0) {
-        return false;
-    }
-    mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(impl_->vision.get(), data, len, false,
-                                                     mtmd_helper_init_opt_default()).bitmap);
-    return bitmap_to_image(bmp, out);
-}
-
 ChatResult Engine::chat(const std::vector<Message> & messages,
                         const std::vector<Image> &   images,
                         const SamplingParams &       sampling,
@@ -167,14 +151,13 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
 
     llama_memory_clear(llama_get_memory(impl_->lctx), true);
     llama_pos n_past = 0;
-    std::vector<common_chat_msg> chat_history;
 
     common_params_sampling sp;
     sp.seed  = sampling.seed;
     sp.top_k = sampling.top_k;
     sp.top_p = sampling.top_p;
     sp.temp  = sampling.temperature;
-    common_sampler * smpl = common_sampler_init(impl_->model, sp);
+    common_sampler_ptr smpl(common_sampler_init(impl_->model, sp));
     if (!smpl) {
         res.finish_reason = "error";
         res.error         = "common_sampler_init failed";
@@ -195,76 +178,82 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
     const char * marker = mtmd_default_marker();
     const int64_t t_prefill_start = ggml_time_us();
 
-    for (size_t i=0; i<messages.size(); ++i) {
+    common_chat_templates_inputs ti;
+    ti.use_jinja             = impl_->use_jinja;
+    ti.add_generation_prompt = messages.back().role != "assistant";
+    ti.add_bos               = llama_vocab_get_add_bos(impl_->vocab);
+    ti.add_eos               = llama_vocab_get_add_eos(impl_->vocab);
+    for (const auto & m : messages) {
         common_chat_msg msg;
-        msg.role    = messages[i].role;
-        msg.content = messages[i].content;
-
-        std::vector<mtmd::bitmap> bmps;
-        if ((int) i == img_msg_idx && !images.empty()) {
-
-            if (msg.content.find(marker) == std::string::npos) {
-                std::string prefix;
-                for (size_t k=0; k<images.size(); ++k)
-                    prefix += marker;
-                msg.content = prefix+msg.content;
-            }
-            for (const auto & im : images) {
-                if (im.rgb.size() != (size_t) im.width*im.height*3) {
-                    res.finish_reason = "error";
-                    res.error         = "image rgb size != w*h*3";
-                    common_sampler_free(smpl);
-                    return res;
-                }
-                bmps.emplace_back(mtmd_bitmap_init(im.width, im.height, im.rgb.data()));
-            }
-        }
-
-        const bool add_special = chat_history.empty();
-        const std::string formatted =
-            common_chat_format_single(impl_->tmpls.get(), chat_history, msg,
-                                      msg.role == "user", impl_->use_jinja);
-        chat_history.push_back(msg);
-
-        mtmd_input_text text;
-        text.text          = formatted.c_str();
-        text.add_special   = add_special;
-        text.parse_special = true;
-
-        std::vector<const mtmd_bitmap *> bmp_ptrs(bmps.size());
-        for (size_t k=0; k<bmps.size(); ++k)
-            bmp_ptrs[k] = bmps[k].ptr.get();
-
-        mtmd::input_chunks chunks(mtmd_input_chunks_init());
-        if (mtmd_tokenize(impl_->vision.get(), chunks.ptr.get(), &text,
-                          bmp_ptrs.data(), bmp_ptrs.size()) != 0) {
-            res.finish_reason = "error";
-            res.error         = "mtmd_tokenize failed";
-            common_sampler_free(smpl);
-            return res;
-        }
-
-        llama_pos new_n_past = n_past;
-        if (mtmd_helper_eval_chunks(impl_->vision.get(), impl_->lctx, chunks.ptr.get(),
-                                    n_past, 0, impl_->n_batch,
-                                    true, &new_n_past) != 0) {
-            res.finish_reason = "error";
-            res.error         = "mtmd_helper_eval_chunks failed";
-            common_sampler_free(smpl);
-            return res;
-        }
-        n_past = new_n_past;
+        msg.role    = m.role;
+        msg.content = m.content;
+        ti.messages.push_back(std::move(msg));
     }
-    res.prompt_tokens = (int32_t) n_past;
+
+    std::vector<mtmd::bitmap> bmps;
+    if (!images.empty()) {
+        std::string & content = ti.messages[img_msg_idx].content;
+        if (content.find(marker) == std::string::npos) {
+            std::string prefix;
+            for (size_t k=0; k<images.size(); ++k)
+                prefix += marker;
+            content = prefix+content;
+        }
+        for (const auto & im : images) {
+            if (im.rgb.size() != (size_t) im.width*im.height*3) {
+                res.finish_reason = "error";
+                res.error         = "image rgb size != w*h*3";
+                return res;
+            }
+            bmps.emplace_back(mtmd_bitmap_init(im.width, im.height, im.rgb.data()));
+        }
+    }
+
+    std::string prompt;
+    try {
+        prompt = common_chat_templates_apply(impl_->tmpls.get(), ti).prompt;
+    } catch (const std::exception & e) {
+        res.finish_reason = "error";
+        res.error         = e.what();
+        return res;
+    }
+
+    mtmd_input_text text{};
+    text.text          = prompt.c_str();
+    text.text_len      = prompt.size();
+    text.add_special   = true;
+    text.parse_special = true;
+
+    std::vector<const mtmd_bitmap *> bmp_ptrs(bmps.size());
+    for (size_t k=0; k<bmps.size(); ++k)
+        bmp_ptrs[k] = bmps[k].ptr.get();
+
+    mtmd::input_chunks chunks(mtmd_input_chunks_init());
+    if (mtmd_tokenize(impl_->vision.get(), chunks.ptr.get(), &text,
+                      bmp_ptrs.data(), bmp_ptrs.size()) != 0) {
+        res.finish_reason = "error";
+        res.error         = "mtmd_tokenize failed";
+        return res;
+    }
+
+    if (mtmd_helper_eval_chunks(impl_->vision.get(), impl_->lctx, chunks.ptr.get(),
+                                0, 0, impl_->n_batch,
+                                true, &n_past) != 0) {
+        res.finish_reason = "error";
+        res.error         = "mtmd_helper_eval_chunks failed";
+        return res;
+    }
+    res.prompt_tokens = (int32_t) mtmd_helper_get_n_tokens(chunks.ptr.get());
     res.ms_prefill    = (ggml_time_us()-t_prefill_start)/1000.0f;
 
     const int n_predict = sampling.max_tokens <= 0 ? INT_MAX : sampling.max_tokens;
     std::vector<llama_token> generated;
+    std::string pending;
     const int64_t t_decode_start = ggml_time_us();
     res.finish_reason = "length";
     for (int i=0; i<n_predict; ++i) {
-        const llama_token tok = common_sampler_sample(smpl, impl_->lctx, -1);
-        common_sampler_accept(smpl, tok, true);
+        const llama_token tok = common_sampler_sample(smpl.get(), impl_->lctx, -1);
+        common_sampler_accept(smpl.get(), tok, true);
         generated.push_back(tok);
 
         if (llama_vocab_is_eog(impl_->vocab, tok)) {
@@ -274,14 +263,21 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
 
         const std::string piece = common_token_to_piece(impl_->lctx, tok);
         res.text += piece;
-        if (on_token && !on_token(piece)) {
+        pending  += piece;
+        const size_t n = utf8_complete_prefix(pending);
+        if (on_token && n > 0 && !on_token(pending.substr(0, n))) {
             res.finish_reason = "cancelled";
             break;
         }
+        pending.erase(0, n);
 
         common_batch_clear(impl_->batch);
         common_batch_add(impl_->batch, tok, n_past++, {0}, true);
-        if (llama_decode(impl_->lctx, impl_->batch) != 0) {
+        const int rc = llama_decode(impl_->lctx, impl_->batch);
+        if (rc == 1) {
+            break;
+        }
+        if (rc != 0) {
             res.finish_reason = "error";
             res.error         = "llama_decode failed";
             break;
@@ -293,8 +289,7 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
     if (res.finish_reason != "error") {
         res.text = common_detokenize(impl_->lctx, generated, false);
     }
-
-    common_sampler_free(smpl);
+    res.text.resize(utf8_complete_prefix(res.text));
     return res;
 }
 

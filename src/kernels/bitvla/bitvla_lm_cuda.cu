@@ -14,6 +14,8 @@
 
 #include "bitvla_lm_cuda.h"
 #include "bitnet_kernels.h"
+#include "bitnet_mma.cuh"
+#include "bitvla_rowops.cuh"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -22,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 extern "C" void bitlinear_int8xint2_m(int8_t* A, int8_t* B, __nv_bfloat16* out,
@@ -29,7 +32,12 @@ extern "C" void bitlinear_int8xint2_m(int8_t* A, int8_t* B, __nv_bfloat16* out,
                                        int M, int N, int K, cudaStream_t stream);
 extern "C" void bitvla_act_quant_cuda(const __nv_bfloat16* in, int8_t* out,
                                        float* scales,
-                                       int M, int K, cudaStream_t stream);
+                                       int M, int K, int ld_out, cudaStream_t stream);
+
+bool bitlinear_mma_enabled();
+void bitlinear_mma_segs(const int8_t * A, const float * s, bitmma::Segs segs, int M, int K, cudaStream_t stream);
+void bitlinear_repack_for_mma(int8_t * w, int N, int K);
+void bitlinear_repack_forget(const void * w);
 
 extern "C" void gate_up_fused_sqrelu_mul_bf16(const __nv_bfloat16* gu, __nv_bfloat16* out,
                                                int seq, int ffn, cudaStream_t stream);
@@ -132,6 +140,7 @@ __global__ void softmax_scaled_bf16_kernel(__nv_bfloat16* __restrict__ inout,
     }
     __syncthreads();
     const float max_v = smem[0];
+    __syncthreads();
 
     float s_sum = 0.0f;
     for (int i=tid; i<S; i += BLOCK) {
@@ -156,18 +165,6 @@ __global__ void softmax_scaled_bf16_kernel(__nv_bfloat16* __restrict__ inout,
         float v = expf(__bfloat162float(r[i])*scale-max_v)*inv_sum;
         r[i] = __float2bfloat16(v);
     }
-}
-
-__global__ void squared_relu_mul_bf16_kernel(const __nv_bfloat16* g,
-                                              const __nv_bfloat16* u,
-                                              __nv_bfloat16* out, int N) {
-    const int i = (int)(blockIdx.x*blockDim.x+threadIdx.x);
-    if (i >= N)
-        return;
-    float gv = __bfloat162float(g[i]);
-    if (gv < 0.0f)
-        gv = 0.0f;
-    out[i] = __float2bfloat16(gv * gv * __bfloat162float(u[i]));
 }
 
 __global__ void add_bf16_kernel(const __nv_bfloat16* a, const __nv_bfloat16* b,
@@ -237,13 +234,10 @@ extern "C" void bitvla_rope_neox_bf16(__nv_bfloat16* inout, const float* cos_tab
 }
 extern "C" void bitvla_softmax_scaled_bf16(__nv_bfloat16* inout, float scale,
                                             int n_rows, int S, cudaStream_t stream) {
+    if (bitlinear_mma_enabled() && bitvla_rowops::softmax_scaled(inout, scale, n_rows, S, stream))
+        return;
     constexpr int B = 256;
     softmax_scaled_bf16_kernel<B><<<dim3(n_rows, 1, 1), dim3(B, 1, 1), 0, stream>>>(inout, scale, S);
-}
-extern "C" void bitvla_squared_relu_mul_bf16(const __nv_bfloat16* g, const __nv_bfloat16* u,
-                                              __nv_bfloat16* out, int N, cudaStream_t stream) {
-    constexpr int B = 256;
-    squared_relu_mul_bf16_kernel<<<dim3((N+B-1)/B, 1, 1), dim3(B, 1, 1), 0, stream>>>(g, u, out, N);
 }
 extern "C" void bitvla_add_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b,
                                  __nv_bfloat16* out, int N, cudaStream_t stream) {
@@ -277,7 +271,7 @@ extern "C" void bitvla_gather_rows_bf16(const __nv_bfloat16* in, __nv_bfloat16* 
     return -1; } } while (0)
 #define CUDA_OKV(call) do { cudaError_t e = (call); if (e != cudaSuccess) { \
     std::fprintf(stderr, "vla(bitvla_lm_cuda): %s @ %s:%d\n", cudaGetErrorString(e), __FILE__, __LINE__); \
-    return nullptr; } } while (0)
+    bitvla_lm_cuda_free(ctx); return nullptr; } } while (0)
 
 struct bitvla_lm_cuda_ctx {
     int hidden, n_q, n_kv, head_dim, ffn, n_layers, max_seq;
@@ -370,6 +364,9 @@ extern "C" bitvla_lm_cuda_ctx* bitvla_lm_cuda_init(int hidden, int n_q, int n_kv
 extern "C" void bitvla_lm_cuda_free(bitvla_lm_cuda_ctx* ctx) {
     if (!ctx)
         return;
+    for (const auto & l : ctx->layers)
+        for (const void * w : {l.q_packed, l.k_packed, l.v_packed, l.o_packed, l.gate_up_packed, l.down_packed})
+            bitlinear_repack_forget(w);
     cublasDestroy(ctx->cublas);
     cudaFree(ctx->d_cos);  cudaFree(ctx->d_sin);
     cudaFree(ctx->d_h);    cudaFree(ctx->d_h_norm);
@@ -387,9 +384,119 @@ extern "C" void bitvla_lm_cuda_free(bitvla_lm_cuda_ctx* ctx) {
 extern "C" void bitvla_lm_cuda_set_layer(bitvla_lm_cuda_ctx* ctx, int L,
                                           const bitvla_lm_layer_cuda* layer) {
     ctx->layers[L] = *layer;
+    if (bitlinear_mma_enabled()) {
+        auto& l = ctx->layers[L];
+        bitlinear_repack_for_mma(l.q_packed,       ctx->hidden_q,  ctx->hidden);
+        bitlinear_repack_for_mma(l.k_packed,       ctx->hidden_kv, ctx->hidden);
+        bitlinear_repack_for_mma(l.v_packed,       ctx->hidden_kv, ctx->hidden);
+        bitlinear_repack_for_mma(l.o_packed,       ctx->hidden,    ctx->hidden_q);
+        bitlinear_repack_for_mma(l.gate_up_packed, 2*ctx->ffn,     ctx->hidden);
+        bitlinear_repack_for_mma(l.down_packed,    ctx->hidden,    ctx->ffn);
+    }
 }
 extern "C" void bitvla_lm_cuda_set_output_norm(bitvla_lm_cuda_ctx* ctx, const __nv_bfloat16* w) {
     ctx->output_norm_w = const_cast<__nv_bfloat16*>(w);
+}
+
+// run_layer on the fused kernels, same bits. GEMM epilogues do the head split,
+// repeat_kv(v) and residual adds; each norm is fused with its act_quant.
+static int run_layer_fused(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t stream) {
+    using namespace bitvla_rowops;
+    const auto& lr = ctx->layers[L];
+    const int hidden = ctx->hidden, n_q = ctx->n_q, n_kv = ctx->n_kv, hd = ctx->head_dim;
+    const int ffn = ctx->ffn, hq = ctx->hidden_q, hkv = ctx->hidden_kv;
+    auto norm_quant = [&](int in, const __nv_bfloat16* x, const __nv_bfloat16* w, int K, int8_t* q) {
+        const NormQuant p{x, w, nullptr, ctx->rms_eps, K, hd, seq, q, K, ctx->d_act_s};
+        const bool ok = in == IN_ROW   ? launch_norm_quant<IN_ROW,   NORM_RMS>(p, stream)
+                      : in == IN_HEADS ? launch_norm_quant<IN_HEADS, NORM_RMS>(p, stream)
+                      :                  launch_norm_quant<IN_SQRELU, NORM_RMS>(p, stream);
+        if (!ok)
+            std::fprintf(stderr, "vla(bitvla_lm_cuda): no norm_quant for K=%d\n", K);
+        return ok;
+    };
+    auto gemm = [&](const int8_t* A, bitmma::Segs sg, int K) { bitlinear_mma_segs(A, ctx->d_act_s, sg, seq, K, stream); };
+
+    if (!norm_quant(IN_ROW, ctx->d_h, lr.attn_norm_w, hidden, ctx->d_act_int8_h))
+        return -1;
+    {
+        // q/k/v in one launch, head-major; v straight to its repeated heads.
+        bitmma::Segs sg{};
+        sg.n = 3;
+        sg.s[0] = {lr.q_packed, ctx->d_q_HShd, lr.q_ws, hq,  hq,  0};
+        sg.s[1] = {lr.k_packed, ctx->d_k_HShd, lr.k_ws, hkv, hkv, 0};
+        sg.s[2] = {lr.v_packed, ctx->d_v_rep,  lr.v_ws, hkv, hkv, 0};
+        for (int i = 0; i < 3; ++i) sg.s[i].hd = hd;
+        sg.s[2].rep = n_q/n_kv;
+        gemm(ctx->d_act_int8_h, sg, hidden);
+    }
+    if (!rope_qk_repeat_launch(ctx->d_q_HShd, ctx->d_k_HShd, ctx->d_k_rep, ctx->d_cos, ctx->d_sin, n_q, n_kv, seq, hd, stream)) {
+        bitvla_rope_neox_bf16(ctx->d_q_HShd, ctx->d_cos, ctx->d_sin, n_q,  seq, hd, stream);
+        bitvla_rope_neox_bf16(ctx->d_k_HShd, ctx->d_cos, ctx->d_sin, n_kv, seq, hd, stream);
+        bitvla_repeat_kv_bf16(ctx->d_k_HShd, ctx->d_k_rep, n_q, n_kv, seq, hd, stream);
+    }
+
+    cublasSetStream(ctx->cublas, stream);
+    const float alpha = 1.0f, beta = 0.0f;
+    cublasStatus_t cbs = cublasGemmStridedBatchedEx(
+        ctx->cublas, CUBLAS_OP_T, CUBLAS_OP_N,
+        seq, seq, hd,
+        &alpha,
+        ctx->d_k_rep, CUDA_R_16BF, hd, (long long)seq * hd,
+        ctx->d_q_HShd,CUDA_R_16BF, hd, (long long)seq * hd,
+        &beta,
+        ctx->d_scores,CUDA_R_16BF, seq, (long long)seq * seq,
+        n_q,
+        CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    if (cbs != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(bitvla_lm_cuda): QK^T gemm failed @L%d (%d)\n", L, cbs);
+        return -1;
+    }
+    bitvla_softmax_scaled_bf16(ctx->d_scores, 1.0f/std::sqrt((float)hd), n_q * seq, seq, stream);
+    cbs = cublasGemmStridedBatchedEx(
+        ctx->cublas, CUBLAS_OP_N, CUBLAS_OP_N,
+        hd, seq, seq,
+        &alpha,
+        ctx->d_v_rep, CUDA_R_16BF, hd,  (long long)seq * hd,
+        ctx->d_scores,CUDA_R_16BF, seq, (long long)seq * seq,
+        &beta,
+        ctx->d_attn_out, CUDA_R_16BF, hd, (long long)seq * hd,
+        n_q,
+        CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    if (cbs != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vla(bitvla_lm_cuda): attn@V gemm failed @L%d (%d)\n", L, cbs);
+        return -1;
+    }
+
+    // Head merge + attn_sub_norm + act_quant, then o-proj adding into d_h.
+    if (!norm_quant(IN_HEADS, ctx->d_attn_out, lr.attn_sub_norm_w, hq, ctx->d_act_int8_h))
+        return -1;
+    {
+        bitmma::Segs sg{};
+        sg.n = 1;
+        sg.s[0] = {lr.o_packed, ctx->d_h, lr.o_ws, hidden, hidden, 0};
+        sg.s[0].res = ctx->d_h;
+        gemm(ctx->d_act_int8_h, sg, hq);
+    }
+
+    if (!norm_quant(IN_ROW, ctx->d_h, lr.ffn_norm_w, hidden, ctx->d_act_int8_h))
+        return -1;
+    {
+        bitmma::Segs sg{};
+        sg.n = 1;
+        sg.s[0] = {lr.gate_up_packed, ctx->d_gate_up, lr.gate_up_ws, 2*ffn, ffn, 0};
+        gemm(ctx->d_act_int8_h, sg, hidden);
+    }
+    // sqrelu(gate)*up + ffn_sub_norm + act_quant, then down adding into d_h.
+    if (!norm_quant(IN_SQRELU, ctx->d_gate_up, lr.ffn_sub_norm_w, ffn, ctx->d_act_int8_ffn))
+        return -1;
+    {
+        bitmma::Segs sg{};
+        sg.n = 1;
+        sg.s[0] = {lr.down_packed, ctx->d_h, lr.down_ws, hidden, hidden, 0};
+        sg.s[0].res = ctx->d_h;
+        gemm(ctx->d_act_int8_ffn, sg, ffn);
+    }
+    return 0;
 }
 
 static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t stream) {
@@ -398,6 +505,8 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
     const int ffn = ctx->ffn, hq = ctx->hidden_q, hkv = ctx->hidden_kv;
 
     const char* l0_dir = (L == 0) ? std::getenv("VLA_BITVLA_DUMP_L0") : nullptr;
+    if (bitlinear_mma_enabled() && !l0_dir)
+        return run_layer_fused(ctx, L, seq, stream);
     auto l0_dump = [&](const char* name, const __nv_bfloat16* d_ptr, size_t n) {
         if (!l0_dir)
             return;
@@ -422,7 +531,7 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
     bitvla_rmsnorm_bf16(ctx->d_h, lr.attn_norm_w, ctx->d_h_norm, ctx->rms_eps, seq, hidden, stream);
     l0_dump("L0_01_attn_norm", ctx->d_h_norm, (size_t)seq * hidden);
 
-    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hidden, stream);
+    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hidden, hidden, stream);
 
     __nv_bfloat16* q_dense = ctx->d_qkv;
     __nv_bfloat16* k_dense = ctx->d_qkv+(size_t)seq * hq;
@@ -490,7 +599,7 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
     bitvla_rmsnorm_bf16(ctx->d_attn_merged, lr.attn_sub_norm_w, ctx->d_h_norm, ctx->rms_eps, seq, hq, stream);
     l0_dump("L0_04_attn_sub_norm", ctx->d_h_norm, (size_t)seq * hq);
 
-    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hq, stream);
+    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hq, hq, stream);
     bitlinear_int8xint2_m(ctx->d_act_int8_h, lr.o_packed, ctx->d_o_out,
                           ctx->d_act_s, lr.o_ws, seq, hidden, hq, stream);
 
@@ -501,7 +610,7 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
 
     bitvla_rmsnorm_bf16(ctx->d_h, lr.ffn_norm_w, ctx->d_h_norm, ctx->rms_eps, seq, hidden, stream);
     l0_dump("L0_07_ffn_norm", ctx->d_h_norm, (size_t)seq * hidden);
-    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hidden, stream);
+    bitvla_act_quant_cuda(ctx->d_h_norm, ctx->d_act_int8_h, ctx->d_act_s, seq, hidden, hidden, stream);
 
     bitlinear_int8xint2_m(ctx->d_act_int8_h, lr.gate_up_packed, ctx->d_gate_up,
                           ctx->d_act_s, lr.gate_up_ws, seq, 2*ffn, hidden, stream);
@@ -513,7 +622,7 @@ static int run_layer(bitvla_lm_cuda_ctx* ctx, int L, int seq, cudaStream_t strea
 
     l0_dump("L0_08_ffn_sub_norm", ctx->d_gate_sq_up, (size_t)seq * ffn);
 
-    bitvla_act_quant_cuda(ctx->d_gate_sq_up, ctx->d_act_int8_ffn, ctx->d_act_s, seq, ffn, stream);
+    bitvla_act_quant_cuda(ctx->d_gate_sq_up, ctx->d_act_int8_ffn, ctx->d_act_s, seq, ffn, ffn, stream);
     bitlinear_int8xint2_m(ctx->d_act_int8_ffn, lr.down_packed, ctx->d_down_out,
                           ctx->d_act_s, lr.down_ws, seq, hidden, ffn, stream);
     l0_dump("L0_09_down_out", ctx->d_down_out, (size_t)seq * hidden);
@@ -578,6 +687,7 @@ __global__ void layernorm_bias_bf16_kernel(const __nv_bfloat16* __restrict__ x,
     }
     __syncthreads();
     const float mean = smem[0]/(float)K;
+    __syncthreads();
 
     float vsum = 0.0f;
     for (int k=tid; k<K; k += BLOCK) {
@@ -630,14 +740,6 @@ __global__ void add_bias_bf16_kernel(const __nv_bfloat16* x, const __nv_bfloat16
     out[i] = __float2bfloat16(__bfloat162float(x[i])+__bfloat162float(bias[k]));
 }
 
-__global__ void zero_tail_bf16_kernel(__nv_bfloat16* x, int total_cols, int start_col) {
-    const int m = (int)blockIdx.x;
-    const int k = (int)(start_col+blockIdx.y*blockDim.x+threadIdx.x);
-    if (k >= total_cols)
-        return;
-    x[(size_t)m * total_cols+k] = __float2bfloat16(0.0f);
-}
-
 extern "C" void bitvla_layernorm_bf16(const __nv_bfloat16* x, const __nv_bfloat16* w,
                                        const __nv_bfloat16* b, __nv_bfloat16* out,
                                        float eps, int M, int K, cudaStream_t stream) {
@@ -654,15 +756,6 @@ extern "C" void bitvla_add_bias_bf16(const __nv_bfloat16* x, const __nv_bfloat16
     constexpr int B = 256;
     const int n_kb = (K+B-1)/B;
     add_bias_bf16_kernel<<<dim3(M, n_kb, 1), dim3(B, 1, 1), 0, stream>>>(x, bias, out, M, K);
-}
-extern "C" void bitvla_zero_tail_bf16(__nv_bfloat16* x, int M, int total_cols,
-                                       int start_col, cudaStream_t stream) {
-    if (start_col >= total_cols)
-        return;
-    constexpr int B = 128;
-    const int len = total_cols-start_col;
-    const int n_kb = (len+B-1)/B;
-    zero_tail_bf16_kernel<<<dim3(M, n_kb, 1), dim3(B, 1, 1), 0, stream>>>(x, total_cols, start_col);
 }
 
 extern "C" int bitvla_lm_cuda_forward(bitvla_lm_cuda_ctx* ctx,
@@ -720,5 +813,6 @@ extern "C" int bitvla_lm_cuda_forward(bitvla_lm_cuda_ctx* ctx,
         cudaStreamSynchronize(stream);
         dump_to_file("lm_final", d_out);
     }
+    CUDA_OK(cudaGetLastError());
     return 0;
 }

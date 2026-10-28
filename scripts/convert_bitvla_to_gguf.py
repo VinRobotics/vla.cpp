@@ -15,9 +15,6 @@
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 import numpy as np
 import torch
 
@@ -25,6 +22,7 @@ import gguf
 from gguf_common import (
     add,
     arg_parser,
+    find_sidecar,
     finish,
     kv_f32,
     kv_prefix,
@@ -196,14 +194,6 @@ def _add_bit_fused(writer, base: str, Ws: list[torch.Tensor]) -> None:
     packed, scales = pack_fused_projection(Ws)
     _add_packed(writer, base, packed, scales)
 
-def _find_sidecar(ckpt: Path, stem: str) -> Path | None:
-
-    cands = sorted(
-        ckpt.glob(f"{stem}--*_checkpoint.pt"),
-        key=lambda p: int(m.group(1)) if (m := re.search(r"--(\d+)_checkpoint\.pt$", p.name)) else -1,
-    )
-    return cands[-1] if cands else None
-
 def _add_kv(writer, statistics_json: str, processor_json: str, preproc_json: str) -> None:
 
     kv_u32(
@@ -294,10 +284,8 @@ def main() -> int:
     W = load_safetensors(ckpt)
     print(f"  {len(W)} main tensors")
 
-    ah_path = _find_sidecar(ckpt, "action_head")
-    pp_path = _find_sidecar(ckpt, "proprio_projector")
-    if ah_path is None or pp_path is None:
-        raise SystemExit(f"missing action_head/proprio_projector sidecars in {ckpt}")
+    ah_path = find_sidecar(ckpt, "action_head")
+    pp_path = find_sidecar(ckpt, "proprio_projector")
     print(f"  sidecars: {ah_path.name}, {pp_path.name}")
     AH = load_pt_module(ah_path)
     PP = load_pt_module(pp_path)

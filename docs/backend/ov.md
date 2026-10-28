@@ -26,6 +26,8 @@ Measured on an **Intel Core Ultra X7 358H** (Panther Lake) with the Arc B390
 iGPU and the AI Boost NPU, Ubuntu 24.04, OpenVINO 2026.2.1, llama.cpp `b10729`,
 on the checkpoints under `vrfai/` on the Hub. Every **fidelity** number was
 re-measured on that pin; only the **latency** table still dates from `b10331`.
+The build now pins llama.cpp `b11223` and `install_ov.sh` installs OpenVINO
+2026.4; the numbers below have not been re-measured on that pin yet.
 
 ggml's backend translates a ggml compute graph into an OpenVINO model and hands
 it to the CPU, GPU or NPU plugin, which compiles and fuses it for the device.
@@ -139,9 +141,11 @@ carry them across restarts; it produces silently wrong actions here - see
 one camera view, best of 4-6 iterations after 3 warmups. "CPU backend" is ggml's
 own CPU backend on the same 16-core host. No `GGML_OPENVINO_CACHE_DIR`.
 
-Latencies were taken at `b10331` and have not been re-timed on `b10729`. Read the
-GPU column for VLA-JEPA and GR00T N1.7 as the cost of a wrong answer at that pin;
-both are correct now.
+Latencies were taken at `b10331` and have not been re-timed on `b10729` or
+`b11223`, except π0.5's in the [FoldQuant section](#foldquant-w8a8--w4a4-checkpoints)
+(`vla-bench`, 2 views: 243 ms on the GPU at `b11223`). Read the GPU column for
+VLA-JEPA and GR00T N1.7 as the cost of a wrong answer at that pin; both are
+correct now.
 
 | Model | input | CPU backend | OpenVINO CPU | OpenVINO GPU | OpenVINO NPU |
 |---|---|---:|---:|---:|---:|
@@ -268,7 +272,7 @@ the ggml contract, or fills a gap:
 | Folded weights padded to full rank | a 2-D weight becomes a rank-2 constant, but views index it at ggml rank |
 | CONCAT input ranks aligned | same rank-2 constants, and concat cannot broadcast rank |
 | Missing `GELU_ERF` translator | the exact-erf GELU op had no table entry at all, so a graph using it could not run |
-| Naive-path graph cache | that path re-compiled the whole model on every graph_compute, and its `graph_key` is a node count plus two names, which two graphs can share |
+| Naive-path graph cache | that path re-compiled the whole model on every graph_compute, and its `graph_key` is a node count plus tensor names, which two graphs of different shapes can share |
 | Interleaved-mrope sectors bounded | the sector cycle ignored `sections`, so the last few took the wrong stream |
 | Naive-path threshold settable | the 20-node constant is what picks the literal path |
 
@@ -284,6 +288,45 @@ graph at a stage, which makes that stage the terminal node, or set
 `GGML_OPENVINO_DEBUG_NODE` to materialise one node as an extra `ov::Result`. Both
 of the subtlest fixes above were found by bisecting that way, comparing each
 stage against a CPU-backend reference; neither logs anything when it goes wrong.
+
+## FoldQuant (W8A8 / W4A4) checkpoints
+
+A FoldQuant GGUF runs on the CPU and GPU plugins through
+`src/openvino/foldquant_ov.cpp`, which translates FoldQuant's two custom nodes
+into OpenVINO ops with the weights kept as `i8` / `i4` constants (hunk 14 of
+`scripts/patch_ggml_openvino.py` registers it). The NPU, and `VLA_FQ_DEQUANT=1`,
+read the sites back as float weights instead. See
+[QUANTIZATION.md](../QUANTIZATION.md#openvino) for the arithmetic and accuracy.
+
+π0.5 LIBERO, 2 views at 224 px, 48 tokens, Intel Core Ultra X7 358H with an Arc
+B390 iGPU, OpenVINO 2026.4, llama.cpp `b11223`, `vla-bench` p50 over 10 calls
+after 3 warmups:
+
+| Device | Checkpoint | p50 ms | Peak RSS |
+|---|---|--:|--:|
+| CPU | bf16 | 6601 | 16.6 GB |
+| CPU | FoldQuant W4A4 | 3751 | 6.5 GB |
+| CPU | FoldQuant W4A4, o/down INT8 | 3682 | 7.1 GB |
+| CPU | FoldQuant W8A8 | 3536 | 8.6 GB |
+| GPU | bf16 | 243 | 11.5 GB |
+| GPU | FoldQuant W4A4 | 227 | 3.7 GB |
+| GPU | FoldQuant W4A4, o/down INT8 | 229 | 4.1 GB |
+| GPU | FoldQuant W8A8 | 241 | 4.8 GB |
+
+On the GPU the per-site activation ops (reduction, rounding, the rotation
+MatMul) run on top of the GEMMs, so FoldQuant is only 7% faster than bf16 there,
+at a third of the memory. On an Intel GPU the SYCL backend is the faster
+FoldQuant path: built with sycl-tla, the same W4A4 file runs in 92 ms on this
+iGPU, against 263 ms for bf16 on SYCL
+([sycl.md](sycl.md#foldquant-w8a8--w4a4-checkpoints)). The NPU does not run π0.5
+at this pin (see [Known issues](#known-issues)).
+
+The FoldQuant files are FoldQuantVLA quantized checkpoints converted with
+`scripts/convert_quantized_model_to_gguf.py`: W4A4 and W4A4 with INT8 o/down are
+[vrfai/pi05-libero-w4a4](https://huggingface.co/vrfai/pi05-libero-w4a4) and
+[vrfai/pi05-libero-w4a4-res8](https://huggingface.co/vrfai/pi05-libero-w4a4-res8);
+W8A8 is FoldQuantVLA's W8A8 arm (`--llm-scheme w8a8_sr --expert-scheme w8a8_sh`)
+calibrated on the same 128 LIBERO frames, seed 0.
 
 ## Known issues
 
@@ -308,7 +351,8 @@ several graphs, so one graph gets another's blob - the same class of bug as the
 in-process `graph_key` above, which is now keyed on shapes. In practice, pay the
 compile once per process and leave it unset.
 
-**The NPU accepts three of the ten archs, and only two of those are correct.**
+**At `b10729` the NPU accepted three of the ten archs, and only two of those were
+correct; at `b11223` π0.5 no longer compiles.**
 Check every NPU run against the startup banner: an unavailable NPU falls back to
 the CPU plugin silently and would otherwise report excellent numbers that are not
 NPU numbers at all. A partially-failing run still reports a wall-clock time, so
@@ -317,7 +361,7 @@ do not read a latency off a run whose actions did not come out.
 | Model | NPU outcome |
 |---|---|
 | SmolVLA | runs, 1.1e-2 (the compile config's dynamic quantization) |
-| π0.5 | runs, 1.6e-3 |
+| π0.5 | runs, 1.6e-3 at `b10729`; at `b11223` / OpenVINO 2026.4 the compiler rejects the main graph: `IE.Reshape doesn't support dynamic shapes` |
 | π0 | runs, but **1.7e0 wrong** - see below |
 | VLA-JEPA | compiles and runs, returns all `NaN` (not diagnosed) |
 | GR00T N1.5 / N1.6 / N1.7 | `NPUW: Assertion all_ok failed`, `partitioning.cpp:1350` |

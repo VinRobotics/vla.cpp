@@ -16,19 +16,26 @@
 
 #pragma once
 
+#include "backend.h"
+#include "gguf_reader.h"
 #include "layers/attn.h"
+#include "layers/fused_ops.h"
 #include "loader.h"
 #include "layers/rope.h"
 #include "model.h"
+#include "modules/preprocess.h"
+#include "scratch_ctx.h"
 
 #include "ggml.h"
 #include "options.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace vla {
@@ -38,8 +45,14 @@ constexpr float QWEN3VL_STD [3] = {0.5f, 0.5f, 0.5f};
 
 struct VitLayerW { ggml_tensor *ln1w,*ln1b,*ln2w,*ln2b,*Wqkv,*bqkv,*Wo,*bo,*Wfc1,*bfc1,*Wfc2,*bfc2; };
 struct MergerW   { ggml_tensor *nw,*nb,*fc1w,*fc1b,*fc2w,*fc2b; };
+struct VitIO     { ggml_tensor *t_patches=nullptr,*t_pos=nullptr,*t_cos=nullptr,*t_sin=nullptr,*embeds=nullptr,*ds[3]={}; };
 
 struct Qwen3VLTower {
+    int64_t hidden = 1024, layers = 24, heads = 16, patch = 16, temporal = 2, merge = 2;
+    int64_t num_pos = 2304, patch_flat = 1536, side = 256;
+    int64_t deepstack_idx[3] = {5, 11, 17};
+    float   ln_eps = 1e-6f, rope_theta = 10000.0f, conn_eps = 1e-6f;
+
     std::vector<VitLayerW> blk;
     MergerW                deepstack[3];
     MergerW                merger;
@@ -47,7 +60,30 @@ struct Qwen3VLTower {
     ggml_tensor *          patch_b = nullptr;
     ggml_tensor *          pos     = nullptr;
 
-    void declare(WeightLoader & L, const char * prefix, int64_t layers) {
+    std::vector<int64_t> row, col;
+    std::vector<float>   rope_cos, rope_sin, pos_interp;
+    bool                 fused_ops = false;   // layers/fused_ops.h nodes (CUDA only)
+
+    int64_t grid() const {
+        return side/patch;
+    }
+    int64_t n_tokens() const {
+        return (grid()/merge)*(grid()/merge);
+    }
+
+    bool load_config(const char * arch, const gguf_reader & g, const char * ns);
+
+    bool build_caches(const char * arch, gguf_reader & io);
+
+    bool encode(const char * arch, ggml_backend_t backend, graph_cache<int, VitIO> & cache, const ImageView * images,
+                int64_t n_views, const float * patches_in, std::vector<float> & emb, std::vector<float> (&ds)[3]) const;
+
+    // The tower over nv views stacked view-major in t_patches [patch_flat, n_patches*nv];
+    // t_pos/t_cos/t_sin hold one view and broadcast. Outputs are [hidden_out, n_tokens*nv].
+    void build(ggml_context * C, ggml_tensor * t_patches, ggml_tensor * t_pos, ggml_tensor * t_cos, ggml_tensor * t_sin,
+               int64_t nv, ggml_tensor *& embeds, ggml_tensor * (&ds)[3]) const;
+
+    void declare(WeightLoader & L, const char * prefix) {
         patch_w = L.gemm("%s.patch_embd.weight", prefix);
         patch_b = L.f32 ("%s.patch_embd.bias",   prefix);
         pos     = L.f32 ("%s.pos_embd",          prefix);
@@ -88,31 +124,70 @@ struct Qwen3VLTower {
     }
 };
 
+// GEMM over nv stacked views. With the fused ops (CUDA) each view is its own
+// cuBLAS call of M = seq, exactly as a single-view graph issues it, so the
+// results are bit-identical to running the views one at a time; one GEMM of
+// M = seq*nv would pick other kernels. An F32 operand is rounded to BF16 the
+// way ggml does inside its own BF16 matmul.
+inline ggml_tensor * vit_mm(ggml_context * C, ggml_tensor * W, ggml_tensor * x, int64_t seq, int64_t nv, bool fused) {
+    if (!fused || W->type != GGML_TYPE_BF16 || !ggml_is_contiguous(x))
+        return ggml_mul_mat(C, W, x);
+    if (nv == 1)
+        return mm_exact(C, W, x);
+    return fused_gemm_views(C, W, x, seq, nv);
+}
+
+// x is [hidden, seq*nv]: nv views stacked view-major, attending only within their own view.
 inline ggml_tensor * build_vit_layer(ggml_context * C, const VitLayerW & w, ggml_tensor * x,
                                      ggml_tensor * cos_t, ggml_tensor * sin_t,
-                                     int64_t seq, int64_t heads, int64_t hd, int64_t hidden, float ln_eps) {
+                                     int64_t seq, int64_t heads, int64_t hd, int64_t hidden, float ln_eps,
+                                     int64_t nv = 1, bool fused = false) {
     const float scale = 1.0f/std::sqrt((float) hd);
+    const int64_t T = seq*nv;
+    if (fused) {
+        const bool fa = vla::flash_attn_enabled();
+        ggml_tensor * n1  = fused_ln(C, x, w.ln1w, w.ln1b, ln_eps, false, bf16_operand(w.Wqkv, seq));
+        ggml_tensor * mm = vit_mm(C, w.Wqkv, n1, seq, nv, true);
+        ggml_tensor * att;
+        if (fa) {
+            // Q stays F32; K/V are written F16, the type flash attention casts them to.
+            ggml_tensor * q  = fused_qkv_heads(C, mm, w.bqkv, cos_t, sin_t, 3, hd, heads, seq, nv, 0, 3, 1);
+            ggml_tensor * kv = fused_qkv_heads(C, mm, w.bqkv, cos_t, sin_t, 3, hd, heads, seq, nv, 0, 3, 6, true);
+            att = ggml_reshape_2d(C, flash_attention(C, fused_part(C, q, 0, false), fused_part(C, kv, 0, false),
+                                                     fused_part(C, kv, 1, false), nullptr, scale), hidden, T);
+        } else {
+            ggml_tensor * qkv = fused_qkv_heads(C, mm, w.bqkv, cos_t, sin_t, 3, hd, heads, seq, nv, 4, 3);
+            att = attention_rows_exact(C, fused_part(C, qkv, 0, false), fused_part(C, qkv, 1, false), fused_part(C, qkv, 2, true),
+                                       scale, hidden, seq, nv, bf16_operand(w.Wo, seq));
+        }
+        ggml_tensor * h1 = fused_bias_res(C, vit_mm(C, w.Wo, att, seq, nv, true), w.bo, x);
+        ggml_tensor * n2 = fused_ln(C, h1, w.ln2w, w.ln2b, ln_eps, false, bf16_operand(w.Wfc1, seq));
+        ggml_tensor * g  = fused_bias_gelu(C, vit_mm(C, w.Wfc1, n2, seq, nv, true), w.bfc1, bf16_operand(w.Wfc2, seq));
+        return fused_bias_res(C, vit_mm(C, w.Wfc2, g, seq, nv, true), w.bfc2, h1);
+    }
     ggml_tensor * n1 = ggml_add(C, ggml_mul(C, ggml_norm(C, x, ln_eps), w.ln1w), w.ln1b);
     ggml_tensor * qkv = ggml_add(C, ggml_mul_mat(C, w.Wqkv, n1), w.bqkv);
-    ggml_tensor * q = ggml_cont(C, ggml_view_2d(C, qkv, hidden, seq, qkv->nb[1], 0));
-    ggml_tensor * k = ggml_cont(C, ggml_view_2d(C, qkv, hidden, seq, qkv->nb[1], (size_t) hidden * qkv->nb[0]));
-    ggml_tensor * v = ggml_cont(C, ggml_view_2d(C, qkv, hidden, seq, qkv->nb[1], (size_t) 2*hidden * qkv->nb[0]));
-    ggml_tensor * Q = rope_2d(C, to_heads(C, q, hd, heads, seq), cos_t, sin_t);
-    ggml_tensor * K = rope_2d(C, to_heads(C, k, hd, heads, seq), cos_t, sin_t);
+    ggml_tensor * q = ggml_cont(C, ggml_view_2d(C, qkv, hidden, T, qkv->nb[1], 0));
+    ggml_tensor * k = ggml_cont(C, ggml_view_2d(C, qkv, hidden, T, qkv->nb[1], (size_t) hidden * qkv->nb[0]));
+    ggml_tensor * v = ggml_cont(C, ggml_view_2d(C, qkv, hidden, T, qkv->nb[1], (size_t) 2*hidden * qkv->nb[0]));
+    ggml_tensor * Q = rope_2d(C, to_heads(C, q, hd, heads, seq, nv), cos_t, sin_t);
+    ggml_tensor * K = rope_2d(C, to_heads(C, k, hd, heads, seq, nv), cos_t, sin_t);
     ggml_tensor * att;
     if (vla::flash_attn_enabled())
-        att = flash_attention(C, Q, K, to_heads  (C, v, hd, heads, seq), nullptr, scale);
+        att = flash_attention(C, Q, K, to_heads  (C, v, hd, heads, seq, nv), nullptr, scale);
     else
-        att = attention      (C, Q, K, to_heads_v(C, v, hd, heads, seq), nullptr, scale, hidden, seq);
+        att = attention      (C, Q, K, to_heads_v(C, v, hd, heads, seq, nv), nullptr, scale, hidden, seq, nv);
+    att = ggml_reshape_2d(C, att, hidden, T);
     ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, ggml_mul_mat(C, w.Wo, att), w.bo));
     ggml_tensor * n2 = ggml_add(C, ggml_mul(C, ggml_norm(C, h1, ln_eps), w.ln2w), w.ln2b);
-    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, ggml_gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);
+    ggml_tensor * ff = ggml_add(C, ggml_mul_mat(C, w.Wfc2, vla::gelu(C, ggml_add(C, ggml_mul_mat(C, w.Wfc1, n2), w.bfc1))), w.bfc2);
     return ggml_add(C, h1, ff);
 }
 
 // pre_merge normalizes before the reshape, the deepstack taps after.
 inline ggml_tensor * build_merger(ggml_context * C, const MergerW & w, ggml_tensor * x,
-                                  int64_t hidden, int64_t merge2, float ln_eps, bool pre_merge) {
+                                  int64_t hidden, int64_t merge2, float ln_eps, bool pre_merge, int64_t nv = 1,
+                                  bool fused = false) {
     const int64_t n_patches = x->ne[1], c_merged = hidden * merge2*merge2, n_merged = n_patches/(merge2*merge2);
     ggml_tensor * m;
     if (pre_merge) {
@@ -122,8 +197,8 @@ inline ggml_tensor * build_merger(ggml_context * C, const MergerW & w, ggml_tens
         ggml_tensor * mr = ggml_reshape_2d(C, ggml_cont(C, x), c_merged, n_merged);
         m = ggml_add(C, ggml_mul(C, ggml_norm(C, mr, ln_eps), w.nw), w.nb);
     }
-    ggml_tensor * z1 = ggml_add(C, ggml_mul_mat(C, w.fc1w, m), w.fc1b);
-    return ggml_add(C, ggml_mul_mat(C, w.fc2w, ggml_gelu(C, z1)), w.fc2b);
+    ggml_tensor * z1 = ggml_add(C, vit_mm(C, w.fc1w, m, n_merged/nv, nv, fused), w.fc1b);
+    return ggml_add(C, vit_mm(C, w.fc2w, ggml_gelu_erf(C, z1), n_merged/nv, nv, fused), w.fc2b);
 }
 
 // Patch row/col after the spatial merge.
@@ -159,9 +234,11 @@ inline void vit_rope_tables(const std::vector<int64_t> & row, const std::vector<
 }
 
 // Bilinear resample of the pretrained position table onto gh x gw.
-inline void interp_pos_embed(const std::vector<float> & table, int64_t num_side, int64_t hidden,
+inline bool interp_pos_embed(const std::vector<float> & table, int64_t num_side, int64_t hidden,
                              const std::vector<int64_t> & row, const std::vector<int64_t> & col, int64_t gh, int64_t gw,
                              std::vector<float> & out) {
+    if (num_side <= 0 || (int64_t) table.size() != num_side*num_side*hidden)
+        return false;
     const int64_t S = (int64_t) row.size();
     out.assign((size_t) S * hidden, 0.0f);
     auto src_coord = [&](int64_t k, int64_t g) -> double { return (g <= 1) ? 0.0 : (double) k * (double)(num_side-1)/(double)(g-1); };
@@ -179,17 +256,15 @@ inline void interp_pos_embed(const std::vector<float> & table, int64_t num_side,
         for (int64_t c=0; c<hidden; ++c)
             out[s * hidden+c] = (float)(c00*T00[c]+c01*T01[c]+c10*T10[c]+c11*T11[c]);
     }
+    return true;
 }
 
 // HWC to flat patches. No resize: the view must already be side x side.
 inline bool preprocess_image_patches(const char * arch, const ImageView & v, int64_t side, int64_t ps, int64_t tps,
                                      const std::vector<int64_t> & row, const std::vector<int64_t> & col,
                                      std::vector<float> & out) {
-    if (v.w != (int) side || v.h != (int) side || !v.data) {
-        std::fprintf(stderr, "vla(%s): image view is %dx%d, expected %lldx%lld\n",
-                     arch, v.w, v.h, (long long) side, (long long) side);
+    if (!view_ok(arch, v, side))
         return false;
-    }
     const int64_t S = (int64_t) row.size(), pf = 3*tps * ps * ps;
     out.assign((size_t) pf * S, 0.0f);
     auto px = [&](int64_t r, int64_t c, int64_t ch) -> float {
@@ -205,6 +280,170 @@ inline bool preprocess_image_patches(const char * arch, const ImageView & v, int
                     for (int64_t t=0; t<tps; ++t)
                         out[s * pf+ch * tps * ps * ps+t * ps * ps+ph * ps+pw] = val;
                 }
+    return true;
+}
+
+inline bool mrope_positions(const char * arch, const std::vector<int32_t> & ids, int32_t image_token, int64_t grid,
+                            std::vector<int32_t> & pp) {
+    const int64_t seq = (int64_t) ids.size(), g2 = grid*grid;
+    pp.assign((size_t) 4*seq, 0);
+    int64_t st = 0, st_idx = 0;
+    while (st < seq) {
+        int64_t img = st;
+        while (img < seq && ids[img] != image_token)
+            ++img;
+        for (int64_t i=st; i<img; ++i)
+            pp[i] = pp[seq+i] = pp[2*seq+i] = (int32_t) (st_idx+i-st);
+        if (img == seq)
+            break;
+        int64_t end = img;
+        while (end < seq && ids[end] == image_token)
+            ++end;
+        if ((end-img)%g2 != 0) {
+            std::fprintf(stderr, "vla(%s): image run length %lld not a multiple of %lld (post-merge grid)\n",
+                         arch, (long long) (end-img), (long long) g2);
+            return false;
+        }
+        const int64_t off = st_idx+img-st;
+        for (int64_t k=0; k<end-img; ++k) {
+            pp[img+k]       = (int32_t) (off+k/g2);
+            pp[seq+img+k]   = (int32_t) (off+k%g2/grid);
+            pp[2*seq+img+k] = (int32_t) (off+k%grid);
+        }
+        st_idx = off+std::max((end-img)/g2, grid);
+        st     = end;
+    }
+    std::copy(pp.begin(), pp.begin()+seq, pp.begin()+3*seq);
+    return true;
+}
+
+inline bool Qwen3VLTower::load_config(const char * arch, const gguf_reader & g, const char * ns) {
+    auto U = [&](const char * k, int64_t & dst) {
+        const std::string key = std::string(ns)+"."+k;
+        if (g.has(key.c_str()))
+            dst = (int64_t) g.u32(key.c_str());
+    };
+    auto F = [&](const char * k, float & dst) {
+        const std::string key = std::string(ns)+"."+k;
+        if (g.has(key.c_str()))
+            dst = g.f32(key.c_str());
+    };
+    U("vit_hidden", hidden); U("vit_layers", layers); U("vit_heads", heads);
+    U("patch_size", patch); U("temporal_patch_size", temporal); U("spatial_merge_size", merge);
+    U("vit_num_position_embeddings", num_pos); U("vit_patch_flat", patch_flat); U("image_target_size", side);
+    U("deepstack_idx_0", deepstack_idx[0]); U("deepstack_idx_1", deepstack_idx[1]); U("deepstack_idx_2", deepstack_idx[2]);
+    F("vit_ln_eps", ln_eps); F("vit_rope_theta", rope_theta); F("connector_ln_eps", conn_eps);
+
+    // merge_block_coords only enumerates the patch grid exactly when the spatial
+    // merge divides it; otherwise it emits rows past the position table.
+    if (patch <= 0 || merge <= 0 || side%patch != 0 || (side/patch)%merge != 0) {
+        std::fprintf(stderr, "vla(%s): image %lld / patch %lld / merge %lld do not divide evenly\n",
+                     arch, (long long) side, (long long) patch, (long long) merge);
+        return false;
+    }
+    if (heads <= 0 || patch_flat != 3*temporal*patch*patch) {
+        std::fprintf(stderr, "vla(%s): vit_heads %lld or vit_patch_flat %lld is inconsistent\n",
+                     arch, (long long) heads, (long long) patch_flat);
+        return false;
+    }
+    return true;
+}
+
+inline bool Qwen3VLTower::build_caches(const char * arch, gguf_reader & io) {
+    merge_block_coords(grid(), grid(), merge, row, col);
+    vit_rope_tables(row, col, hidden/heads, (double) rope_theta, rope_cos, rope_sin);
+
+    const std::vector<float> table = io.read_f32("vit.pos_embd");
+    if (table.empty() || (int64_t) table.size() != num_pos*hidden) {
+        std::fprintf(stderr, "vla(%s): build_caches: vit.pos_embd unreadable\n", arch);
+        return false;
+    }
+    const int64_t num_side = (int64_t) std::lround(std::sqrt((double) num_pos));
+    if (!interp_pos_embed(table, num_side, hidden, row, col, grid(), grid(), pos_interp)) {
+        std::fprintf(stderr, "vla(%s): build_caches: vit_num_position_embeddings %lld is not a square\n",
+                     arch, (long long) num_pos);
+        return false;
+    }
+    return true;
+}
+
+inline void Qwen3VLTower::build(ggml_context * C, ggml_tensor * t_patches, ggml_tensor * t_pos, ggml_tensor * t_cos,
+                                ggml_tensor * t_sin, int64_t nv, ggml_tensor *& embeds, ggml_tensor * (&ds)[3]) const {
+    const int64_t n_patches = grid()*grid(), hd = hidden/heads;
+    ggml_tensor * h = ggml_add(C, vit_mm(C, patch_w, t_patches, n_patches, nv, fused_ops), patch_b);
+    h = ggml_reshape_2d(C, ggml_add(C, ggml_reshape_3d(C, h, hidden, n_patches, nv), t_pos), hidden, n_patches*nv);
+
+    ggml_tensor * stash[3] = {nullptr, nullptr, nullptr};
+    for (int64_t i=0; i<layers; ++i) {
+        h = build_vit_layer(C, blk[i], h, t_cos, t_sin, n_patches, heads, hd, hidden, ln_eps, nv, fused_ops);
+        for (int j=0; j<3; ++j)
+            if (i == deepstack_idx[j])
+                stash[j] = h;
+    }
+    // The merge reads 4 consecutive patches, which never straddle two views.
+    for (int j=0; j<3; ++j)
+        ds[j] = build_merger(C, deepstack[j], stash[j] ? stash[j] : h, hidden, merge, conn_eps, false, nv, fused_ops);
+    embeds = build_merger(C, merger, h, hidden, merge, conn_eps, true, nv, fused_ops);
+}
+
+inline bool Qwen3VLTower::encode(const char * arch, ggml_backend_t backend, graph_cache<int, VitIO> & cache, const ImageView * images,
+                                 int64_t n_views, const float * patches_in, std::vector<float> & emb,
+                                 std::vector<float> (&ds)[3]) const {
+    const int64_t n_patches = grid()*grid(), hd = hidden/heads;
+
+    const bool built = cache.ensure(backend, 0, (size_t) 512*1024*1024, [&](ggml_context * VC, VitIO & io) -> ggml_cgraph * {
+        ggml_tensor * t_patches = ggml_new_tensor_2d(VC, GGML_TYPE_F32, patch_flat, n_patches); ggml_set_input(t_patches);
+        ggml_tensor * t_pos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hidden, n_patches);     ggml_set_input(t_pos);
+        ggml_tensor * t_cos     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hd, n_patches);         ggml_set_input(t_cos);
+        ggml_tensor * t_sin     = ggml_new_tensor_2d(VC, GGML_TYPE_F32, hd, n_patches);         ggml_set_input(t_sin);
+        build(VC, t_patches, t_pos, t_cos, t_sin, 1, io.embeds, io.ds);
+        for (int j=0; j<3; ++j)
+            ggml_set_output(io.ds[j]);
+        ggml_set_output(io.embeds);
+        io.t_patches = t_patches; io.t_pos = t_pos; io.t_cos = t_cos; io.t_sin = t_sin;
+
+        ggml_cgraph * vg = ggml_new_graph_custom(VC, 16384, false);
+        ggml_build_forward_expand(vg, io.embeds);
+        for (int j=0; j<3; ++j)
+            ggml_build_forward_expand(vg, io.ds[j]);
+        return vg;
+    });
+    if (!built) {
+        std::fprintf(stderr, "vla(%s): vision graph build failed\n", arch);
+        return false;
+    }
+    const VitIO & io = cache.io();
+    ggml_cgraph * vg = cache.graph();
+    ggml_tensor * t_patches = io.t_patches, * t_pos = io.t_pos, * t_cos = io.t_cos, * t_sin = io.t_sin;
+    ggml_tensor * embeds = io.embeds;
+    ggml_tensor * const * ds_out = io.ds;
+
+    const size_t per_view = (size_t) ggml_nelements(embeds);
+    emb.assign((size_t) n_views*per_view, 0.0f);
+    for (int j=0; j<3; ++j)
+        ds[j].assign((size_t) n_views*per_view, 0.0f);
+
+    std::vector<float> patches;
+    for (int64_t v=0; v<n_views; ++v) {
+        const float * px = patches_in ? patches_in+(size_t) v*n_patches*patch_flat : nullptr;
+        if (!px) {
+            if (!preprocess_image_patches(arch, images[v], side, patch, temporal, row, col, patches))
+                return false;
+            px = patches.data();
+        }
+        ggml_backend_tensor_set(t_patches, px, 0, ggml_nbytes(t_patches));
+        ggml_backend_tensor_set(t_pos, pos_interp.data(), 0, ggml_nbytes(t_pos));
+        ggml_backend_tensor_set(t_cos, rope_cos.data(), 0, ggml_nbytes(t_cos));
+        ggml_backend_tensor_set(t_sin, rope_sin.data(), 0, ggml_nbytes(t_sin));
+        graph_unique_names(vg);
+        if (ggml_backend_graph_compute(backend, vg) != GGML_STATUS_SUCCESS) {
+            std::fprintf(stderr, "vla(%s): vision compute failed\n", arch);
+            return false;
+        }
+        ggml_backend_tensor_get(embeds, emb.data()+v*per_view, 0, ggml_nbytes(embeds));
+        for (int j=0; j<3; ++j)
+            ggml_backend_tensor_get(ds_out[j], ds[j].data()+v*per_view, 0, ggml_nbytes(ds_out[j]));
+    }
     return true;
 }
 

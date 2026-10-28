@@ -6,109 +6,125 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 
-- **OpenVINO backend.** `-DGGML_OPENVINO=ON` runs the archs on Intel CPUs, iGPUs
-  and NPUs through ggml's OpenVINO backend. SmolVLA, π0.5, Evo-1 and VLA-Adapter
-  match an F32 CPU reference to 1e-3; on an Arc B390 iGPU that is 3.0x to 9.6x
-  the native CPU backend. Every arch that can reach this backend - ten of the
-  eleven - is inside the accuracy bar on the OpenVINO CPU plugin, and nine of the
-  ten on the iGPU. BitVLA is the eleventh and pins to the CPU backend by design.
-  See `docs/backend/ov.md`.
-- `scripts/install_ov.sh` installs the OpenVINO runtime and the Intel GPU/NPU
-  driver stack on Ubuntu 22.04 and 24.04, with the runtime archive checksummed
-  against a digest pinned in the script.
-- `scripts/patch_ggml_openvino.py` applies thirteen fixes to the fetched
-  ggml-openvino sources at configure time. Each hunk is checked on its own, so a
-  `build/_deps` patched by an older checkout fails loudly instead of building
-  something quietly wrong.
-- `tests/test_graph_names.cpp` pins `vla::graph_unique_names`.
-- CI now checks that both llama.cpp patch scripts still apply, on a copy of
-  the fetched tree. Neither ran on a CPU build, so their anchors could rot
-  unnoticed until someone configured a CUDA or OpenVINO tree.
-- `docs/UPSTREAMING.md` and `scripts/upstream_split.py` regroup the thirteen
-  ggml-openvino fixes into one llama.cpp branch per PR. They are generic
-  backend defects, not vla.cpp workarounds; landing them upstream removes the
-  configure-time patch step entirely.
-
-### Fixed
-
-- Two elementwise adds stacked on a GEMM came out wrong on the Intel iGPU. The
-  GPU plugin folds elementwise ops into the preceding GEMM as post-ops, and given
-  `ADD(ADD(residual, GEMM), graph_input)` it folds both and silently drops the
-  second operand - the result equals the inner add. A llama.cpp graph never builds
-  that chain; a VLA does, wherever a vision tower's features are added on top of an
-  FFN residual. VLA-JEPA (5.4e-1) and GR00T N1.7 (1.9e0) were wrong on the iGPU
-  while matching the CPU plugin to 1e-4. Re-associating the two adds so the GEMM
-  keeps one post-op puts both at 2.6e-3. Bisected with `GGML_OPENVINO_DEBUG_NODE`.
-- π0's action dims drifted 4e-2 on the iGPU and its gripper flipped a step late,
-  because the GPU plugin computes in F16 and π0 unrolls its whole denoise loop
-  inside one graph. `GGML_OPENVINO_GPU_PRECISION` now exposes the plugin's
-  inference precision; `backend_init` defaults it to f32 for π0 alone, which costs
-  about 3x on that arch and puts it at 6.5e-5.
-- `scripts/patch_ggml_openvino.py` now fails if `EDITS` has a duplicate key. Python
-  keeps the last one silently, and a duplicate briefly removed the whole Intel
-  OpenCL platform fix from the patch without any error.
-- The position-input fix stopped running when llama.cpp moved to `b10729`. That
-  release relocated the naming out of `GgmlOvDecoder::get_graph_input_ov_name()`,
-  which the patch guards, into a new free `get_tensor_graph_input_ov_name()`, and
-  left the member behind with no callers. The hunk still applied cleanly, so
-  nothing failed loudly - SmolVLA and π0.5 simply stopped returning actions
-  ("Argument shapes are inconsistent", a 113-token prefix ROPE reading the
-  50-token suffix's table). Both functions are guarded now, and the patch script
-  says to check for a live caller, not just a matching anchor, on every tag bump.
-- `scripts/upstream_split.py` addressed hunks by position in the patch script's
-  edit list. Adding a hunk to the front of a file's list silently handed every
-  later hunk to the wrong branch, and its own coverage count still read 29/29
-  because each index was still used exactly once. Two branches had been swapped
-  this way. Hunks are now addressed by a unique substring of their anchor, which
-  fails loudly instead. The PERMUTE `op_case` fix, which had no branch at all,
-  now has one.
-- `graph_unique_names` renamed through `ggml_format_name`, which passes the
-  tensor's own name to `vsnprintf` as both destination and `%s` source. glibc
-  empties it, so every duplicate node became the bare string `#<index>`.
-- The OpenVINO naive-path compiled-model cache was keyed on node count plus the
-  first and last node name. Two graphs of the same size collided and the second
-  ran the first's compiled model. It now also keys on every node's op and shape,
-  and the map is bounded.
-- `GGML_OPENVINO_NAIVE_GRAPH_SIZE` went through `atoi`, so junk parsed to 0 and
-  sent every graph down the decoder-only-LLM path with nothing said. Empty
-  environment values no longer count as a setting either.
-- `GGML_OPENVINO_CACHE_DIR` is cleared rather than warned about: a warm cache
-  returns wrong actions, and stderr is not always read. `VLA_ALLOW_OV_CACHE=1`
-  keeps it.
-- `scripts/print_versions.sh` printed `?` for the llama.cpp pin ever since the
-  tag moved behind `VLA_LLAMA_TAG`.
-- The OpenVINO `find_package` failure message was unreachable, sitting after the
-  fetch whose own `find_package(REQUIRED)` fired first.
-- BitVLA indexed its action slots as `seq-2-n_action+i` with no check that the
-  sequence is long enough. Neither `ggml_get_rows` nor the CUDA gather
-  bound-checks, so a short prompt read out of bounds and returned it as hidden
-  states. One guard now covers both LM paths.
-- pi0 and pi0.5 fell back to identity normalisation stats on a dimension mismatch
-  or a short read, and said so on stdout. That returns un-denormalised actions
-  from a checkpoint that looked fine. Both now fail the load, and the message
-  goes to stderr - stdout is the action stream `predict_check` diffs.
-- `scratch_ctx::reset` ignored an arena larger than the first call's, which would
-  abort in `ggml_new_tensor` if any call site ever sized one from the input.
-- The safetensors arch probe would allocate up to 256 MB for a header it only
-  substring-searches. Capped at 16 MB.
-- The two CUDA targets were the only first-party code built without
-  `-Wall -Wextra`.
-- `tests/bitvla_gemm_check.cu` had no build target and a comment claiming it was
-  never committed. It builds now, under `GGML_CUDA`.
-- Stale references to `vision_common.h` (now `modules/preprocess.h`) and to the
-  retired `VLA_EVO1_BF16_ACT` switch.
+- **ROCm/HIP backend for VLA inference.** `-DGGML_HIP=ON` selects ggml's HIP
+  backend without compiling vla.cpp's CUDA-only kernels. On Linux `gfx1200`
+  (Radeon RX 9060 XT) with ROCm 7.14 and llama.cpp `b11223`, every arch except
+  BitVLA (int2, CUDA only) runs and is benchmarked in
+  `docs/benchmark/rx-9060-xt.md`, and all but OpenVLA-OFT were checked against
+  the CPU build on fixed inputs; SmolVLA and π0.5 were also checked on
+  `gfx1151`. SmolVLA takes the same F32 LM weights and F16
+  cross-attention K/V on HIP as on CUDA. See `docs/backend/rocm.md` for the
+  measured numerical differences, build commands and current limits.
+- **New model: ACT** (LeRobot `policies/act`). `scripts/convert_act_to_gguf.py`
+  converts a LeRobot `pretrained_model` directory, folding the ResNet's frozen
+  batch norms and dropping the training-only VAE encoder. No language input, so
+  `vla-server` and `vla-cli` accept requests without tokens for it. The ResNet
+  runs at the cameras' own size, all views in one batch; on CUDA (Turing and
+  newer) it is ggml's direct convolution on F16 kernels, unless
+  `--weight-dtype f32` is given. `vla-bench --height` and `VLA_IMG_H` in
+  `vla_predict_check` give non-square inputs.
+- **FoldQuant W8A8 / W4A4 inference** for GR00T N1.5 / N1.6 / N1.7 and π0.5. A
+  FoldQuant GGUF carries the language backbone and the action
+  module as INT8 or INT4 codes with per-row scales in a block-Hadamard,
+  SmoothQuant-folded frame; activations are quantized per token and the
+  projections run as integer GEMMs (`src/kernels/foldquant/` on CUDA,
+  `src/sycl/vla_sycl_foldquant.cpp` on SYCL with oneDNN's int8 matmul, both
+  bit-identical to the reference in `src/foldquant_ref.cpp` that the CPU runs;
+  OpenVINO ops on the OpenVINO CPU and GPU plugins with INT8/INT4 weight
+  constants). On every other backend
+  (Metal, Hexagon, OpenCL, the OpenVINO NPU) the sites are read back as
+  float weights with FoldQuant's rounding and run the stock float path;
+  `VLA_FQ_DEQUANT=1` does the same on CUDA or CPU. The format and arithmetic are
+  in `docs/QUANTIZATION.md`.
+- `scripts/convert_quantized_model_to_gguf.py` converts a FoldQuantVLA quantized
+  model (its quantized checkpoint or its earlier fake-quant state) to a FoldQuant
+  GGUF with no calibration and nothing re-rounded; `--check-onnx` byte-compares
+  every site against the TensorRT plugin graphs. The family converters expose
+  `convert(ckpt, out, writer_factory=...)` for it.
+- **Faster π0.5 FoldQuant on Intel GPUs** with `-DVLA_SYCL_TLA_DIR=<sycl-tla>`:
+  INT4 x INT4 DPAS GEMMs for the W4A4 sites, flash attention over the cached
+  prefix K/V with q/k/v + RoPE fused, and the expert's adaRMS folded into the
+  activation nodes. On an Arc B390, W4A4 runs in 92 ms against 263 ms for bf16
+  (2 views, 48 tokens). See `docs/backend/sycl.md`.
+- `vla_encode_images` (C API and Python) runs only the vision tower, so its
+  output can go into `precomputed_img_emb` later or on another device (π0.5).
+  `vla-server --warmup N` runs N dummy predicts before binding (default 1).
+- `scripts/foldquant_fake_export.py` (uncalibrated file for bring-up),
+  `scripts/inspect_gguf_quant.py` (contract check) and `scripts/foldquant_ref.py`
+  (numpy reference).
 
 ### Changed
 
-- llama.cpp pinned at `b10729`, up from `b10331`. Brings OpenVINO 2026.3.1, the
-  IM2COL+MatMul to native-convolution fusion, and the `RELU`/`NEG`/`SQR`
-  translators, which the local patch no longer has to add. Byte-identical on the
-  CPU backend for all eleven archs. The build.yml cache key now reads the tag out
-  of `CMakeLists.txt` instead of repeating it.
-- `src/models/dit_common.h` is gone. It redefined six `vla::` functions that
-  `src/layers/` already had, with both copies linked into `vla_core`. Every
-  includer used only `sinusoidal_time_emb` or `build_causal_mask`, so they now
-  include `layers/embed.h`. Byte-identical across all 11 archs.
+- **Faster CUDA inference with the same output.** At the default precision,
+  every arch except ACT runs fused CUDA nodes, BF16 GEMMs on the fastest
+  cuBLASLt algorithm that matches ggml's call (`gemm_exact`) and fused
+  attention (`attn_exact`). The actions are bit-identical to the plain ggml
+  graph, so success rates at the defaults carry over. BitVLA's ternary GEMM
+  moves to tensor cores. On a Jetson AGX Orin, mean latency drops 23-40% for
+  every arch except Octo-Small, which is host-bound (BitVLA 134 -> 80 ms,
+  GR00T N1.7 134 -> 94 ms, π0 350 -> 269 ms), for 0-207 MiB more device memory.
+  `VLA_FUSED_OPS=0` runs the old path; `tests/test_fused_cuda_ops.cpp` checks
+  each node against the ggml chain it replaces. See
+  `docs/backend/cuda-exact.md`.
+- **Faster FoldQuant checkpoints on CUDA, same output.** The fused path also
+  covers π0.5 and the GR00T models around their integer sites, and the act
+  node absorbs the gate or norm before it (`glu_act`, `norm_act`). On the Jetson
+  AGX Orin the calibrated LIBERO W4A4 files run 30-35% faster than on
+  `1012c05` (GR00T N1.7 84 -> 56 ms, π0.5 216 -> 143 ms), with the same action
+  bits.
+
+## [0.4.0] - 2026-09-30
+
+### Added
+
+- **New models: Octo-Small and TurboVLA**, both with LIBERO checkpoints
+  ([octo](https://hf.co/vrfai/octo-small-libero-gguf),
+  [turbovla](https://hf.co/vrfai/turbovla-libero-gguf)). vla.cpp now runs 13
+  architectures.
+- **OpenVINO backend** (`-DGGML_OPENVINO=ON`) for Intel CPUs, iGPUs and NPUs.
+  Every arch except BitVLA runs on it within 1e-3 of an F32 CPU reference on the
+  OpenVINO CPU plugin; 3.0x to 9.6x the native CPU backend on an Arc B390 iGPU.
+  See `docs/backend/ov.md`.
+- **Snapdragon X on Windows on Arm**: Hexagon NPU (`-DGGML_HEXAGON=ON`) and
+  Adreno GPU (`-DGGML_OPENCL=ON`), with unsupported ops falling back to the CPU.
+  See `docs/backend/hexagon-windows.md`.
+- **Portable release tarballs** for Linux x86-64 (CPU, CUDA 12.8, CUDA 13.4),
+  Linux aarch64 (CPU, CUDA 13.4 for Orin, Thor and DGX Spark) and macOS Metal,
+  plus `cmake --install` rules and a self-contained Python wheel.
+- **Tokenizer in the GGUF**: `vla-cli --text` builds each arch's real prompt
+  and tokenizes in-process for Octo, π0, π0.5 and OpenVLA-OFT, with no Python.
+- `-hf` picks files and tags within a repo (`user/repo:Q8_0`), `--num-steps`
+  sets the flow-matching step count, and `--weight-dtype f16` is 2.5-3.5x faster
+  than BF16 on CPUs without BF16 matmul.
+- GR00T N1.7 checkpoints trained with relative actions.
+- Per-device latency and memory reports in `docs/benchmark/`, and a real-robot
+  rollout guide in the README.
+
+### Changed
+
+- **Faster predict**: 6-18% lower latency on an RTX 5090 for every arch except
+  BitVLA, with byte-identical actions.
+- llama.cpp `b11223`, SentencePiece `v0.2.1`, OpenVINO 2026.4.
+- The Docker image covers sm_75 to sm_120 instead of sm_89 only.
+- The x86 CUDA 12.8 tarball is renamed `linux-x86_64-cuda-12.8`, and the macOS
+  tarball ships `vla-cli` and `vla-bench` only.
+- `VLA_OCTO` is renamed `VLA_SPM`; the old name still works with a warning.
+- The command line now overrides a `--config` file, and a missing file or a bad
+  value in it is an error.
+
+### Fixed
+
+- **Numerics now match each model's reference** for π0, SmolVLA, GR00T N1.7,
+  VLA-JEPA, Evo-1 and BitVLA, and the eval client
+  normalizes VLA-Adapter and GR00T state like the reference. On 100 paired
+  LIBERO-Object episodes π0 goes from 83 to 90 successes, SmolVLA from 90 to 92
+  and GR00T N1.7 from 97 to 99 (none statistically significant).
+- `vla-server` and `vlm-server` return an error on a bad request instead of
+  crashing, and malformed GGUF metadata is rejected at load.
+- BitVLA on CUDA: wrong actions from BF16/F16/Q8_0 weights, ignored
+  `VLA_DEVICE`, and kernel races.
+- The C API and Python bindings are safe to call from several threads.
+- Quantized SmolVLA, TurboVLA and Evo-1 files failed to load.
 
 ## [0.3.0] - 2026-08-14
 
@@ -222,6 +238,9 @@ expert + dataset stats), CPU or CUDA, no external mmproj and no patch to llama.c
 - llama.cpp is fetched + pinned via CMake `FetchContent` (tag `b9866`); bumping is a
   one-line `GIT_TAG` change. Removed the `patches/` fetch script.
 
+[Unreleased]: https://github.com/VinRobotics/vla.cpp/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.4.0
+[0.3.0]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.2.0
 [0.1.1]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/VinRobotics/vla.cpp/releases/tag/v0.1.0
