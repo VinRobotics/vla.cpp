@@ -20,7 +20,9 @@
 // tensor's own name as the "%s" source, and glibc empties it instead of
 // appending, so every duplicate collapsed to "#<index>".
 
+#ifndef GGML_USE_OPENVINO   // an OpenVINO build defines it already
 #define GGML_USE_OPENVINO
+#endif
 #include "backend.h"
 
 #undef NDEBUG  // keep assert() live even in Release builds

@@ -59,7 +59,7 @@ inline int default_cpu_threads() {
  * (@ref detect_arch_from_ckpt) and routed to the corresponding factory.
  */
 enum class Arch {
-    SMOLVLA,    // Hugging Face SmolVLA (mmproj + LM + flow-matching head).
+    SMOLVLA,    // Hugging Face SmolVLA (SigLIP + LM + flow-matching head).
     PI0,        // Physical Intelligence pi0 (PaliGemma + flow-matching).
     PI05,       // PaliGemma-3B + SigLIP-So400m + Gemma-300m + FM.
     EVO1,       // MINT-SJTU Evo-1 (InternVL3 + cross-attention head).
@@ -72,6 +72,7 @@ enum class Arch {
     OPENVLA_OFT,// DINOv2-L/14-reg4 + SigLIP-so400m/14 +Llama-2-7B + MLPResNet.
     VLA_JEPA,   // LeRobot Qwen3-VL-2B-Instruct+V-JEPÀ+DiT-B FM.
     TURBOVLA,   // TurboVLA (DINOv3 + BERT + VL Fusion + ACT decoder).
+    ACT,        // LeRobot ACT (ResNet + transformer encoder-decoder, no language).
 };
 
 /**
@@ -102,12 +103,28 @@ public:
      *         @c cfg.num_steps*cfg.real_action_dim.
      */
     virtual std::vector<float> predict(const Inputs& in) = 0;
+
+    /**
+     * @brief Run only the vision tower (and projector) on @p n_images views.
+     *
+     * The result is what @ref Inputs::precomputed_img_emb takes, so a second
+     * process (or another device) can run the LM and action head on it.
+     * Archs that do not support it return false.
+     * @param images  Camera views.
+     * @param n_images Number of @p images.
+     * @param out     Receives [n_images * tokens_per_view, hidden] floats.
+     * @return true on success.
+     */
+    virtual bool encode_images(const ImageView* images, int n_images, std::vector<float>& out) {
+        (void) images; (void) n_images; (void) out;
+        return false;
+    }
 };
 
 /**
- * @brief Build a SmolVLA model from its mmproj and checkpoint GGUFs.
- * @param mmproj_path Path to the vision-tower GGUF.
- * @param ckpt_path   Path to the LM+action-expert GGUF.
+ * @brief Build a SmolVLA model from its checkpoint GGUF.
+ * @param mmproj_path Ignored; the vision tower is bundled in @p ckpt_path.
+ * @param ckpt_path   Path to the vision+LM+action-expert GGUF.
  * @param config_path Optional JSON override; pass empty to use bundled config.
  * @return Owning pointer to the constructed model.
  */
@@ -117,7 +134,7 @@ std::unique_ptr<ModelArchBase> smolvla_create(const std::string& mmproj_path,
                                               const Options& opts);
 
 /**
- * @brief Build a pi0 model from its mmproj and checkpoint GGUFs.
+ * @brief Build a pi0 model from its checkpoint GGUF.
  * @copydetails smolvla_create
  */
 std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
@@ -126,7 +143,7 @@ std::unique_ptr<ModelArchBase> pi0_create(const std::string& mmproj_path,
                                               const Options& opts);
 
 /**
- * @brief Build a pi0.5 model from its mmproj and checkpoint GGUFs.
+ * @brief Build a pi0.5 model from its checkpoint GGUF.
  * @copydetails smolvla_create
  */
 std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
@@ -173,14 +190,12 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
 
 /**
  * @brief Build an Octo model. Vision, T5 text encoder and tokenizer vocab are
- *        all baked into @p ckpt_path. Only compiled when VLA_OCTO is on.
+ *        all baked into @p ckpt_path.
  * @copydetails smolvla_create
  */
-#ifdef VLA_USE_OCTO
 std::unique_ptr<ModelArchBase> octo_create(const std::string& mmproj_path,
                                            const std::string& ckpt_path,
                                            const std::string& config_path);
-#endif
 
 /**
  * @brief Build a BitVLA model. Vision is baked into @p ckpt_path.
@@ -226,6 +241,15 @@ std::unique_ptr<ModelArchBase> turbovla_create(const std::string& mmproj_path,
                                                   const std::string& ckpt_path,
                                                   const std::string& config_path,
                                               const Options& opts);
+
+/**
+ * @brief Build an ACT model. The ResNet backbone is baked into @p ckpt_path.
+ * @copydetails smolvla_create
+ */
+std::unique_ptr<ModelArchBase> act_create(const std::string& mmproj_path,
+                                          const std::string& ckpt_path,
+                                          const std::string& config_path,
+                                          const Options& opts);
 
 /**
  * @brief Inspect a GGUF and identify the architecture tag.

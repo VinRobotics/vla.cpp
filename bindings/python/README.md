@@ -14,24 +14,41 @@ actions = model.predict(frame_hwc_uint8, tokens=[1, 100, 200, 2])
 `model.config.real_action_dim` columns carry values. `model.config.denormalized`
 says whether they are already in world units.
 
-## Finding the library
+## Installing
 
-Wheels bundle `libvla.so`. From a source checkout, build it and point at it:
+From a checkout of the repo:
+
+```bash
+pip install ./bindings/python
+```
+
+This builds `libvla.so` with CMake and puts it inside the package, so nothing
+else needs to be on the library path. You need a C++17 compiler and network
+access (CMake fetches llama.cpp). The build is CPU only (Metal on macOS). It
+uses `GGML_NATIVE=OFF`, so the wheel runs on other machines (on x86 it needs
+AVX2).
+`pip wheel ./bindings/python -w dist` gives you the wheel file. With
+`python -m build`, pass `--wheel`: the sdist does not include the C++ sources.
+
+## Using your own build
+
+Point `VLA_LIBRARY` at a `libvla.so` from a normal CMake build:
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)" --target vla
-VLA_LIBRARY=build/libvla.so LD_LIBRARY_PATH=build:build/bin python your_script.py
+VLA_LIBRARY=build/libvla.so python your_script.py
 ```
 
-`LD_LIBRARY_PATH` is needed because `libvla.so` links `libvla_core.so` and the
-ggml libraries from the same build tree.
+`cmake --install build --prefix <dir>` gives a relocatable copy that does not
+need the build tree. The libraries go to `<dir>/lib`, or `<dir>/lib64` on
+Fedora and RHEL.
 
 ## API
 
 | | |
 |---|---|
-| `load(ckpt, mmproj=None, config=None)` | `mmproj` only for SmolVLA, pi0, pi0.5 |
+| `load(ckpt_path, mmproj_path=None, config_path=None)` | every arch ignores `mmproj_path`; the `runtime` block of `config_path` sets the precision options |
 | `Model.predict(images, tokens, state=None, noise=None, ...)` | `images` is one HWC array or a sequence |
 | `Model.config` | resolved hyper-parameters |
 | `Model.last_stats()` | per-phase timings, needs `timing=TIMING_PHASE` |

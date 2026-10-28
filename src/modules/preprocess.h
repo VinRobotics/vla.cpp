@@ -21,7 +21,6 @@
 
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <vector>
 
 namespace vla {
@@ -32,55 +31,59 @@ inline bool view_is_side(const void * data, int w, int h, int64_t side) {
     return data != nullptr && (int64_t) w == side && (int64_t) h == side;
 }
 
-// IDEFICS3/SmolVLM pixel-shuffle (space-to-depth), c-innermost channel order.
-// src [embed, n_patches] row-major (patch p, channel e) -> dst [embed*s^2, (grid/s)^2].
-inline void pixel_shuffle_hf(const float * src, float * dst,
-                             int64_t embed, int64_t grid, int64_t s) {
-    const int64_t g2 = grid/s, c4 = embed * s * s;
-    for (int64_t h2=0; h2<g2; ++h2)
-        for (int64_t w2=0; w2<g2; ++w2) {
-            const int64_t t = h2*g2+w2;
-            for (int64_t hs=0; hs<s; ++hs)
-                for (int64_t ws=0; ws<s; ++ws) {
-                    const int64_t p    = (h2*s+hs)*grid+(w2*s+ws);
-                    const int64_t base = (hs * s+ws)*embed;
-                    std::memcpy(dst+t * c4+base, src+p * embed,
-                                (size_t) embed * sizeof(float));
-                }
-        }
+inline bool view_ok(const char * arch, const ImageView & v, int64_t side) {
+    if (view_is_side(v.data, v.w, v.h, side))
+        return true;
+    std::fprintf(stderr, "vla(%s): image view is %dx%d, expected %lldx%lld\n",
+                 arch, v.w, v.h, (long long) side, (long long) side);
+    return false;
 }
 
-// HWC to CHW planar in [-1, 1], the SigLIP convention used by SmolVLA, pi0, pi0.5
-// and GR00T N1.5. No resize: the view must already be side x side. arch only
-// labels the error.
+// HWC to CHW planar with per-channel mean/std, into 3*v.w*v.h floats at out.
+// Any size; the caller has checked the view holds real data.
+inline void image_to_chw(const ImageView & v, const float mean[3], const float std_[3], float * out) {
+    const int64_t n = (int64_t) v.w * v.h;
+    for (int64_t c=0; c<3; ++c) {
+        float * dst = out + c*n;
+        if (v.format == PixelFormat::U8) {
+            // A byte has 256 values: a table of the exact results replaces a
+            // per-pixel divide, which does not vectorize for a stride-3 read.
+            float lut[256];
+            for (int k=0; k<256; ++k)
+                lut[k] = (k/255.0f-mean[c])/std_[c];
+            const uint8_t * src = (const uint8_t *) v.data + c;
+            for (int64_t i=0; i<n; ++i)
+                dst[i] = lut[src[3*i]];
+        } else {
+            const float m = mean[c], s = std_[c];
+            const float * src = (const float *) v.data + c;
+            for (int64_t i=0; i<n; ++i)
+                dst[i] = (src[3*i]-m)/s;
+        }
+    }
+}
+
+// The same for a view that must already be side x side. arch only labels the error.
+inline bool preprocess_image_chw(const char * arch, const ImageView & v, int64_t side,
+                                 const float mean[3], const float std_[3], std::vector<float> & out) {
+    if (!view_ok(arch, v, side))
+        return false;
+    out.resize((size_t) 3*side * side);
+    image_to_chw(v, mean, std_, out.data());
+    return true;
+}
+
+// [-1, 1], the SigLIP convention used by SmolVLA, pi0, pi0.5 and GR00T N1.5.
 inline bool preprocess_image_chw(const char * arch, const ImageView & v, int64_t side,
                                  std::vector<float> & out) {
-    if (v.w != (int) side || v.h != (int) side || !v.data) {
-        std::fprintf(stderr, "vla(%s): image view is %dx%d, expected %lldx%lld\n",
-                     arch, v.w, v.h, (long long) side, (long long) side);
-        return false;
-    }
-    out.assign((size_t) 3*side * side, 0.0f);
-    for (int64_t h=0; h<side; ++h)
-        for (int64_t w=0; w<side; ++w)
-            for (int64_t c=0; c<3; ++c) {
-                float px;
-                if (v.format == PixelFormat::U8)
-                    px = ((const uint8_t *) v.data)[(h * side+w)*3+c]/255.0f;
-                else
-                    px = ((const float  *) v.data)[(h * side+w)*3+c];
-                out[c * side * side+h * side+w] = px*2.0f-1.0f;
-            }
-    return true;
+    static const float half[3] = {0.5f, 0.5f, 0.5f};
+    return preprocess_image_chw(arch, v, side, half, half, out);
 }
 
 inline bool preprocess_image_patches(const char * arch, const ImageView & v, int64_t side, int64_t ps,
                                      std::vector<float> & out) {
-    if (v.w != (int) side || v.h != (int) side || !v.data) {
-        std::fprintf(stderr, "vla(%s): image view is %dx%d, expected %lldx%lld\n",
-                     arch, v.w, v.h, (long long) side, (long long) side);
+    if (!view_ok(arch, v, side))
         return false;
-    }
     const int64_t grid = side/ps, pd = 3*ps*ps, np = grid*grid;
     out.assign((size_t) pd*np, 0.0f);
 
@@ -99,22 +102,6 @@ inline bool preprocess_image_patches(const char * arch, const ImageView & v, int
                         out[t*pd+ph*ps*3+pw*3+ch] = px(row*ps+ph, col*ps+pw, ch)*2.0f-1.0f;
         }
     return true;
-}
-
-// c-outermost channel order, the inverse layout to pixel_shuffle_hf above.
-inline void pixel_shuffle_back(const float * src, int64_t grid, int64_t hidden, int64_t r, float * dst) {
-    const int64_t g2 = grid/r, c4 = hidden*r*r;
-    for (int64_t y=0; y<g2; ++y)
-        for (int64_t x=0; x<g2; ++x) {
-            const int64_t t = y*g2+x;
-            for (int64_t c=0; c<hidden; ++c)
-                for (int64_t i=0; i<r; ++i)
-                    for (int64_t j=0; j<r; ++j) {
-                        const int64_t pp = (r*y+i)*grid+(r*x+j);
-                        const int64_t cp = c*r*r+i*r+j;
-                        dst[t*c4+cp] = src[pp*hidden+c];
-                    }
-        }
 }
 
 }  // namespace vla

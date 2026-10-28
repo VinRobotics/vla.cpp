@@ -11,8 +11,15 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+include(GNUInstallDirs)
+if(APPLE)
+    set(CMAKE_INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}" CACHE STRING "")
+elseif(UNIX)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}" CACHE STRING "")
+endif()
+
 set(_vla_accel "")
-foreach(_flag GGML_CUDA GGML_SYCL GGML_METAL GGML_OPENVINO)
+foreach(_flag GGML_CUDA GGML_HIP GGML_VULKAN GGML_SYCL GGML_METAL GGML_OPENVINO GGML_HEXAGON GGML_OPENCL)
     if(${_flag})
         list(APPEND _vla_accel ${_flag})
     endif()
@@ -32,6 +39,11 @@ if(_vla_accel_n GREATER 0 AND GGML_BACKEND_DL)
         "GGML_BACKEND_DL=ON is not supported with ${_vla_accel}: the backend is "
         "built as a module and src/backend.h links its init directly.")
 endif()
+foreach(_flag GGML_VULKAN GGML_MUSA GGML_CANN GGML_WEBGPU)
+    if(${_flag})
+        message(WARNING "${_flag}=ON reaches vlm-server through llama only; src/backend.h has no ${_flag} path, so the VLA archs run on CPU.")
+    endif()
+endforeach()
 
 set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS    ON  CACHE BOOL "" FORCE)
@@ -39,10 +51,38 @@ set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(_vla_llama_patch "")
+if(GGML_SYCL AND NOT GGML_CUDA)
+    # The hook FoldQuant's SYCL kernels (src/sycl/vla_sycl_foldquant.cpp) run behind.
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_sycl_ext_hook.py <SOURCE_DIR>)
+endif()
 if(GGML_CUDA)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_ggml_cuda_ext_hook.py <SOURCE_DIR>)
+
+    find_package(CUDAToolkit REQUIRED)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND "$ENV{CUDAARCHS}" STREQUAL "")
+        # SASS per supported GPU, sm_90 PTX so future cards JIT.
+        set(_vla_cuda_archs 80-real 86-real 87-real 89-real 90-real)
+        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+            list(APPEND _vla_cuda_archs 100-real 120-real)
+        else()
+            message(WARNING
+                "CUDA ${CUDAToolkit_VERSION} < 12.8: omitting Blackwell sm_100/sm_120. "
+                "Pass -DCMAKE_CUDA_ARCHITECTURES=<arch> explicitly to override.")
+        endif()
+        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
+            list(APPEND _vla_cuda_archs 121-real)
+        endif()
+        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+            list(APPEND _vla_cuda_archs 110-real)
+        endif()
+        set(CMAKE_CUDA_ARCHITECTURES ${_vla_cuda_archs} 90-virtual
+            CACHE STRING "" FORCE)
+    endif()
+    set(GGML_CUDA_FA_QUANTS "f16-f16" CACHE STRING "")
 elseif(GGML_OPENVINO)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_vla_llama_patch PATCH_COMMAND ${Python3_EXECUTABLE}
@@ -63,7 +103,7 @@ endif()
 # build dir (-DVLA_LLAMA_TAG=b10326) without editing this file. The patch
 # anchors in scripts/patch_ggml_cuda_ext_hook.py and scripts/patch_ggml_openvino.py
 # are checked against the default.
-set(_vla_llama_tag_default "b10729")
+set(_vla_llama_tag_default "b11223")
 set(VLA_LLAMA_TAG "${_vla_llama_tag_default}" CACHE STRING "llama.cpp tag to fetch")
 # A cache entry survives an edit to the line above, so an existing build dir keeps
 # the tag it was first configured with and quietly builds the wrong llama.cpp.
@@ -74,6 +114,14 @@ if(NOT VLA_LLAMA_TAG STREQUAL _vla_llama_tag_default)
         "-DVLA_LLAMA_TAG=${_vla_llama_tag_default} or use a fresh one.")
 endif()
 
+# Ahead-of-time device code for the SYCL build: a device list in ocloc's
+# spelling (e.g. "ptl-u,ptl-h" or "bmg") compiles native binaries for those parts
+# and keeps SPIR-V for any other GPU. Empty (the default) JITs at first use.
+set(VLA_SYCL_DEVICE_ARCH "" CACHE STRING "ocloc device list for SYCL AOT (empty = JIT)")
+if(GGML_SYCL AND VLA_SYCL_DEVICE_ARCH AND NOT GGML_SYCL_DEVICE_ARCH)
+    set(GGML_SYCL_DEVICE_ARCH "${VLA_SYCL_DEVICE_ARCH}" CACHE STRING "" FORCE)
+endif()
+
 include(FetchContent)
 FetchContent_Declare(llama
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp
@@ -82,6 +130,17 @@ FetchContent_Declare(llama
     ${_vla_llama_patch}
 )
 FetchContent_MakeAvailable(llama)
+
+# FoldQuant on OpenVINO: the translator for FoldQuant's two custom nodes is
+# in-tree and compiled into ggml's OpenVINO backend, which reaches it through the
+# hook scripts/patch_ggml_openvino.py adds (op table entry, supports_op).
+if(GGML_OPENVINO)
+    target_sources(ggml-openvino PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/openvino/foldquant_ov.cpp)
+    target_include_directories(ggml-openvino PRIVATE
+        ${llama_SOURCE_DIR}/ggml/src/ggml-openvino
+        ${llama_SOURCE_DIR}/ggml/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+endif()
 
 # Drop the whole fetched tree from the default build: llama.cpp's ~20 tool
 # binaries and their impl libraries are dead weight here. What we link (llama,
@@ -100,33 +159,86 @@ function(vla_exclude_fetched_targets dir)
 endfunction()
 vla_exclude_fetched_targets(${llama_SOURCE_DIR})
 
-# Octo is the one arch that tokenizes in-process, so it is also the one that
-# needs SentencePiece and, through it, a protobuf. Optional so a build that does
-# not want Octo does not inherit that dependency.
-option(VLA_OCTO "Build the Octo arch (fetches SentencePiece, needs system protobuf)" ON)
-if(VLA_OCTO)
+# SentencePiece, and through it a protobuf, is only needed to tokenize --text with
+# a tokenizer stored in the GGUF. Optional so a build without it has no protobuf.
+option(VLA_SPM "Link SentencePiece for in-GGUF tokenizers (needs system protobuf)" ON)
+if(DEFINED VLA_OCTO)
+    message(DEPRECATION "VLA_OCTO is deprecated, use VLA_SPM")
+    set_property(CACHE VLA_SPM PROPERTY VALUE ${VLA_OCTO})
+    unset(VLA_OCTO CACHE)
+endif()
+if(VLA_SPM)
     # The system protobuf, not sentencepiece's vendored protobuf-lite: vla-server
     # aborts at static-init if two protobuf runtimes reach the same binary.
     set(SPM_ENABLE_SHARED    OFF        CACHE BOOL   "" FORCE)
     set(SPM_BUILD_TEST       OFF        CACHE BOOL   "" FORCE)
     set(SPM_ENABLE_TCMALLOC  OFF        CACHE BOOL   "" FORCE)
     set(SPM_PROTOBUF_PROVIDER "package" CACHE STRING "" FORCE)
+    if(NOT WIN32)
+        find_package(Protobuf QUIET)
+        if(Protobuf_VERSION VERSION_GREATER_EQUAL 4.22)
+            set(SPM_ABSL_PROVIDER "package" CACHE STRING "" FORCE)
+        endif()
+    endif()
+    set(_vla_spm_patch "")
+    if(WIN32 AND NOT MSVC)
+        set(_vla_spm_patch PATCH_COMMAND ${CMAKE_COMMAND} -P
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_sentencepiece_fpic.cmake)
+    endif()
     FetchContent_Declare(sentencepiece
         GIT_REPOSITORY https://github.com/google/sentencepiece
-        GIT_TAG        v0.2.0
+        GIT_TAG        v0.2.1
         GIT_SHALLOW    TRUE
+        ${_vla_spm_patch}
     )
-    # sentencepiece v0.2.0 still asks for cmake_minimum_required(VERSION 3.1),
-    # which CMake 4 refuses outright.
-    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
     FetchContent_MakeAvailable(sentencepiece)
-    unset(CMAKE_POLICY_VERSION_MINIMUM)
+    # Only the static library is linked; its CLI tools are dead weight.
+    set_property(DIRECTORY ${sentencepiece_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
+    # vcpkg's FindProtobuf shim reports the DLL, not its import library, as
+    # PROTOBUF_LITE_LIBRARY, and sentencepiece links that path verbatim. Link the
+    # imported target instead, which carries the import library and protobuf's
+    # abseil deps. The full runtime, not lite: vla-server links it too, and one
+    # protobuf runtime per binary is the rule above.
+    # Imported targets are directory-scoped, so find it again up here.
+    if(WIN32)
+        find_package(Protobuf CONFIG QUIET)
+    endif()
+    # The link goes on vla_core below rather than on sentencepiece-static:
+    # names in a target's link interface resolve in the directory that made the
+    # target, and sentencepiece's directory has its own copies of abseil's
+    # imported targets, which still carry the MSVC flag stripped further down.
+    if(WIN32 AND TARGET protobuf::libprotobuf)
+        set_property(TARGET sentencepiece-static PROPERTY
+            INTERFACE_LINK_LIBRARIES Threads::Threads)
+        set(VLA_SPM_PROTOBUF protobuf::libprotobuf)
+    endif()
 endif()
 
-add_library(vla_core
+# oneAPI's icpx (the compiler of a SYCL build) defaults to -fp-model=fast, which
+# reassociates sums and drops IEEE division and NaN semantics; vla.cpp's code and
+# tests are written for what GCC, Clang and MSVC do by default. Set here, after
+# the dependencies, so ggml keeps its own flags. The FoldQuant sources then add
+# -ffp-contract=off on top, which icpx reports as an override; that is the intent.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    add_compile_options(-fp-model=precise -Wno-overriding-option)
+endif()
+
+# llama.cpp turns BUILD_SHARED_LIBS on, so these follow it. That is harmless on
+# ELF, which exports everything, but a Windows DLL exports nothing unannotated:
+# the import library comes out empty and every consumer fails to link. Nothing
+# outside this tree links the cores, so on Windows they are static.
+if(WIN32)
+    set(VLA_CORE_LIB_TYPE STATIC)
+else()
+    set(VLA_CORE_LIB_TYPE "")
+endif()
+
+add_library(vla_core ${VLA_CORE_LIB_TYPE}
     src/model.cpp
     src/loader.cpp
     src/options.cpp
+    src/foldquant.cpp
+    src/foldquant_ref.cpp
     src/modules/action_expert.cpp
     src/modules/dit_head.cpp
     src/modules/encoder.cpp
@@ -145,6 +257,9 @@ add_library(vla_core
     src/models/openvla_oft.cpp
     src/models/vla_jepa.cpp
     src/models/turbovla.cpp
+    src/models/act.cpp
+    src/models/octo.cpp
+    src/tokenizer.cpp
 )
 target_include_directories(vla_core
     PUBLIC
@@ -153,33 +268,20 @@ target_include_directories(vla_core
 )
 # The VLA archs call no llama_* API; only vlm_core needs llama.
 target_link_libraries(vla_core PUBLIC ggml)
-if(VLA_OCTO)
-    target_sources(vla_core PRIVATE src/models/octo.cpp)
+# The FoldQuant CPU reference must match the CUDA and SYCL kernels bit for bit,
+# so no FMA contraction on either side (aarch64 GCC contracts by default; under
+# icpx, after the project-wide -fp-model=precise, which would allow it).
+set_source_files_properties(src/foldquant.cpp src/foldquant_ref.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+if(VLA_SPM)
     target_include_directories(vla_core PRIVATE ${sentencepiece_SOURCE_DIR}/src)
-    target_link_libraries(vla_core PRIVATE sentencepiece-static)
-    target_compile_definitions(vla_core PUBLIC VLA_USE_OCTO)
+    target_link_libraries(vla_core PRIVATE sentencepiece-static ${VLA_SPM_PROTOBUF})
+    target_compile_definitions(vla_core PRIVATE VLA_USE_SPM)
 endif()
 
 if(GGML_CUDA)
     target_compile_definitions(vla_core PUBLIC GGML_USE_CUDA)
 
     enable_language(CUDA)
-    find_package(CUDAToolkit REQUIRED)
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        # SASS per supported GPU, PTX only for the newest arch so future cards JIT.
-        set(_vla_cuda_archs 80-real 86-real 87-real 89-real 90-real)
-        set(_vla_cuda_ptx 90-virtual)
-        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-            list(APPEND _vla_cuda_archs 100-real 120-real)
-            set(_vla_cuda_ptx 120-virtual)
-        else()
-            message(WARNING
-                "CUDA ${CUDAToolkit_VERSION} < 12.8: omitting Blackwell sm_100/sm_120. "
-                "Pass -DCMAKE_CUDA_ARCHITECTURES=<arch> explicitly to override.")
-        endif()
-        set(CMAKE_CUDA_ARCHITECTURES ${_vla_cuda_archs} ${_vla_cuda_ptx}
-            CACHE STRING "" FORCE)
-    endif()
     add_library(bitvla_cuda_kernels STATIC
         src/kernels/bitvla/bitnet_kernels.cu
         src/kernels/bitvla/bitvla_lm_cuda.cu
@@ -207,8 +309,36 @@ if(GGML_CUDA)
     target_compile_definitions(vla_core PUBLIC VLA_BITVLA_CUDA_KERNELS)
     target_include_directories(vla_core PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
 
+    # FoldQuant kernels: their own archive, device-linked on its own like bitvla
+    # above, because they compile with -fmad=false (bit-exact against the CPU
+    # reference in src/foldquant_ref.h) and no other archive does.
+    add_library(vla_fq_kernels STATIC
+        src/kernels/foldquant/fq_prologue.cu
+        src/kernels/foldquant/fq_gemm_i8.cu
+        src/kernels/foldquant/fq_gemm_mma.cu
+    )
+    set_target_properties(vla_fq_kernels PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_include_directories(vla_fq_kernels PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_features(vla_fq_kernels PRIVATE cxx_std_17)
+    target_compile_options(vla_fq_kernels PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3 -Xptxas=-O3 -fmad=false>
+    )
+    target_link_libraries(vla_fq_kernels PUBLIC CUDA::cudart)
+
     # ggml-cuda link: the hook resolves ggml_cuda_ext_forward out of it.
-    add_library(vla_cuda_ops STATIC src/cuda/vla_cuda_bf16.cu)
+    add_library(vla_cuda_ops STATIC
+        src/cuda/vla_cuda_ext.cu
+        src/cuda/vla_cuda_bf16.cu
+        src/cuda/vla_cuda_foldquant.cu
+    )
+    # The staging shim in vla_cuda_foldquant.cu runs the CPU reference on the
+    # host; it must round exactly like vla_core's copy.
+    set_source_files_properties(src/cuda/vla_cuda_foldquant.cu PROPERTIES
+        COMPILE_OPTIONS "-Xcompiler=-ffp-contract=off")
     target_include_directories(vla_cuda_ops PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${llama_SOURCE_DIR}/ggml/include
@@ -222,8 +352,32 @@ if(GGML_CUDA)
     target_compile_options(vla_cuda_ops PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-O3 -Xptxas=-O3>
     )
-    target_link_libraries(vla_cuda_ops PUBLIC CUDA::cublas CUDA::cudart ggml-cuda)
+    target_link_libraries(vla_cuda_ops PUBLIC CUDA::cublas CUDA::cublasLt CUDA::cudart ggml-cuda vla_fq_kernels)
     target_link_libraries(vla_core PRIVATE vla_cuda_ops)
+
+    # Fused nodes: their own archive, device-linked on its own like bitvla
+    # above. They must round exactly like the ggml-cuda kernels they replace,
+    # which ggml builds with -use_fast_math (ftz, approximate div/tanh), and no
+    # other archive here does.
+    add_library(vla_cuda_fused STATIC src/cuda/vla_cuda_fused.cu)
+    set_target_properties(vla_cuda_fused PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_include_directories(vla_cuda_fused PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${llama_SOURCE_DIR}/ggml/include
+    )
+    target_compile_features(vla_cuda_fused PRIVATE cxx_std_17)
+    target_compile_options(vla_cuda_fused PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3 -Xptxas=-O3 -use_fast_math>
+    )
+    target_link_libraries(vla_cuda_fused PUBLIC CUDA::cublas CUDA::cublasLt CUDA::cudart ggml-cuda vla_cuda_ops)
+    target_link_libraries(vla_core PRIVATE vla_cuda_fused)
+elseif(GGML_HIP)
+    # ggml-hip also exports GGML_USE_CUDA; distinguish HIP from CUDA-only code.
+    target_compile_definitions(vla_core PUBLIC GGML_USE_HIP)
 endif()
 
 if(GGML_SYCL AND NOT GGML_CUDA)
@@ -235,6 +389,91 @@ if(GGML_SYCL AND NOT GGML_CUDA)
             "See docs/backend/sycl.md.")
     endif()
     target_compile_definitions(vla_core PUBLIC GGML_USE_SYCL)
+
+    # Intel GPU ops behind the ggml-sycl hook (src/sycl/vla_sycl_ext.cpp): BF16
+    # matmul/norm/scale, flash attention on oneDNN's fused SDPA, the fused
+    # elementwise nodes and the W8A8 linear. oneDNN ships with oneAPI.
+    find_package(DNNL REQUIRED)
+    add_library(vla_sycl_ops STATIC src/sycl/vla_sycl_ext.cpp src/sycl/vla_sycl_bf16.cpp src/sycl/vla_sycl_attn.cpp
+                src/sycl/vla_sycl_fused.cpp)
+    target_include_directories(vla_sycl_ops PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${llama_SOURCE_DIR}/ggml/include
+    )
+    set_target_properties(vla_sycl_ops PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_compile_features(vla_sycl_ops PRIVATE cxx_std_17)
+    # icpx defaults to -fp-model=fast (reassociation); keep IEEE semantics.
+    target_compile_options(vla_sycl_ops PRIVATE
+        -O3 -fsycl -fp-model=precise -foffload-fp32-prec-div -foffload-fp32-prec-sqrt)
+    # PUBLIC: the device images live in this static archive, so whoever links it
+    # must run the SYCL device link, or the first kernel launch fails.
+    target_link_options(vla_sycl_ops PUBLIC -fsycl)
+    if(VLA_SYCL_DEVICE_ARCH)
+        set(_vla_aot -fsycl-targets=spir64_gen,spir64
+                     "SHELL:-Xsycl-target-backend=spir64_gen \"-device ${VLA_SYCL_DEVICE_ARCH}\"")
+        target_compile_options(vla_sycl_ops PRIVATE ${_vla_aot})
+        target_link_options(vla_sycl_ops PUBLIC ${_vla_aot})
+    endif()
+    target_link_libraries(vla_sycl_ops PUBLIC DNNL::dnnl ggml ggml-sycl)
+    target_link_libraries(vla_core PRIVATE vla_sycl_ops)
+
+    # FoldQuant kernels for Intel GPUs, behind the hook the patch above adds. Built
+    # without FMA contraction, and with the device JIT told to round division and
+    # sqrt correctly (the GPU driver approximates both otherwise), so the codes
+    # match the CPU reference bit for bit. The JIT option is a link option: it
+    # rides in the executable's device image. One image per kernel, so a device
+    # JIT-compiles only what it launches (not the XMX kernel on a device without
+    # XMX: the OpenCL CPU device's compiler has crashed on the whole module).
+    target_sources(vla_core PRIVATE src/sycl/vla_sycl_foldquant.cpp)
+    set_source_files_properties(src/sycl/vla_sycl_foldquant.cpp PROPERTIES
+        COMPILE_OPTIONS "-fsycl;-ffp-contract=off")
+    target_link_options(vla_core PUBLIC -fsycl -fsycl-device-code-split=per_kernel
+        "SHELL:-Xsycl-target-backend=spir64 \"-cl-fp32-correctly-rounded-divide-sqrt\"")
+    target_compile_definitions(vla_core PRIVATE VLA_FQ_SYCL)
+    # pi0.5's FoldQuant fast path from sycl-tla (header-only CUTLASS for SYCL),
+    # behind the same hook: flash attention and the fused q/k/v + RoPE nodes
+    # (src/sycl/vla_sycl_fmha.cpp) and the INT4 x INT4 DPAS GEMMs of the W4A4
+    # sites (src/sycl/vla_sycl_s4gemm.cpp). Off unless VLA_SYCL_TLA_DIR points
+    # at a sycl-tla checkout; its templates take a minute or two to build.
+    set(VLA_SYCL_TLA_DIR "" CACHE PATH "sycl-tla checkout for the SYCL FoldQuant attention and INT4 GEMMs (empty: off)")
+    if(VLA_SYCL_TLA_DIR)
+        if(NOT EXISTS "${VLA_SYCL_TLA_DIR}/applications/flash_attention_v2/kernel/xe_fmha_fwd_kernel.hpp")
+            message(FATAL_ERROR "VLA_SYCL_TLA_DIR=${VLA_SYCL_TLA_DIR} is not a sycl-tla checkout")
+        endif()
+        # Its FMHA drops or mis-masks the last partial key tile; the patch fixes both
+        # (in place, idempotent) and the kernel is wrong without it.
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_sycl_tla_fmha.py ${VLA_SYCL_TLA_DIR}
+            RESULT_VARIABLE _vla_tla_patch)
+        if(NOT _vla_tla_patch EQUAL 0)
+            message(FATAL_ERROR "scripts/patch_sycl_tla_fmha.py failed on ${VLA_SYCL_TLA_DIR}")
+        endif()
+        target_sources(vla_core PRIVATE src/sycl/vla_sycl_fmha.cpp src/sycl/vla_sycl_s4gemm.cpp)
+        set_source_files_properties(src/sycl/vla_sycl_s4gemm.cpp PROPERTIES
+            COMPILE_OPTIONS "-fsycl;-fno-sycl-instrument-device-code;-w"
+            COMPILE_DEFINITIONS "CUTLASS_ENABLE_SYCL;SYCL_INTEL_TARGET"
+            INCLUDE_DIRECTORIES "${VLA_SYCL_TLA_DIR}/include;${VLA_SYCL_TLA_DIR}/tools/util/include")
+        target_compile_definitions(vla_core PRIVATE VLA_SYCL_S4GEMM)
+        set_source_files_properties(src/sycl/vla_sycl_fmha.cpp PROPERTIES
+            COMPILE_OPTIONS "-fsycl;-fno-sycl-instrument-device-code;-w"
+            COMPILE_DEFINITIONS "CUTLASS_ENABLE_SYCL;SYCL_INTEL_TARGET"
+            INCLUDE_DIRECTORIES "${VLA_SYCL_TLA_DIR}/include;${VLA_SYCL_TLA_DIR}/tools/util/include;${VLA_SYCL_TLA_DIR}/applications")
+        target_compile_definitions(vla_core PRIVATE VLA_SYCL_FMHA)
+        # The kernels use Xe 2D block loads, DPAS and split barriers.
+        target_link_options(vla_core PUBLIC
+            "SHELL:-Xspirv-translator -spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,+SPV_INTEL_subgroup_matrix_multiply_accumulate")
+        message(STATUS "vla.cpp: SYCL FoldQuant attention and INT4 GEMMs from sycl-tla at ${VLA_SYCL_TLA_DIR}")
+    endif()
+    # Prefill-sized FoldQuant GEMMs go to oneDNN's int8 matmul when ggml-sycl
+    # was built with it (GGML_SYCL_DNN, the default).
+    if(GGML_SYCL_DNN)
+        find_package(DNNL QUIET)
+        if(DNNL_FOUND)
+            target_link_libraries(vla_core PRIVATE DNNL::dnnl)
+            target_compile_definitions(vla_core PRIVATE VLA_FQ_SYCL_DNNL)
+        endif()
+    endif()
 endif()
 
 # Precedence matches the ladder in src/backend.h.
@@ -246,91 +485,116 @@ if(GGML_OPENVINO AND NOT GGML_CUDA AND NOT GGML_SYCL AND NOT GGML_METAL)
     # Only tells the archs which branch of the backend.h ladder to compile; the
     # toolkit was located before the fetch above.
     target_compile_definitions(vla_core PUBLIC GGML_USE_OPENVINO)
+    # FoldQuant nodes run natively through the translator compiled into ggml-openvino.
+    target_compile_definitions(vla_core PRIVATE VLA_FQ_OPENVINO)
 endif()
 
-add_library(vlm_core
+# Hexagon and OpenCL reject some ops the archs build; the wrapper in
+# backend_fallback.cpp runs those on the CPU. It reaches into ggml's internal
+# headers for the backend vtable, hence the private include.
+if(GGML_HEXAGON OR GGML_OPENCL)
+    target_sources(vla_core PRIVATE src/backend_fallback.cpp)
+    target_include_directories(vla_core SYSTEM PRIVATE ${llama_SOURCE_DIR}/ggml/src)
+    if(GGML_HEXAGON)
+        target_compile_definitions(vla_core PUBLIC GGML_USE_HEXAGON)
+    else()
+        target_compile_definitions(vla_core PUBLIC GGML_USE_OPENCL)
+    endif()
+endif()
+
+add_library(vlm_core ${VLA_CORE_LIB_TYPE}
     src/vlm/engine.cpp
 )
-target_include_directories(vlm_core
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    PRIVATE
-        ${llama_SOURCE_DIR}/common
-        ${llama_SOURCE_DIR}/tools/mtmd
-        ${llama_SOURCE_DIR}/vendor
+target_include_directories(vlm_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(vlm_core SYSTEM PRIVATE
+    ${llama_SOURCE_DIR}/common
+    ${llama_SOURCE_DIR}/tools/mtmd
+    ${llama_SOURCE_DIR}/vendor
 )
 target_link_libraries(vlm_core PUBLIC llama ggml mtmd llama-common)
 
-find_package(Protobuf REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(ZeroMQ REQUIRED IMPORTED_TARGET libzmq)
+# vla-cli and vla-bench link neither protobuf nor ZeroMQ; turning this off lets
+# them configure on a machine that has not installed the serving stack.
+option(VLA_BUILD_SERVER "Build vla-server and vlm-server (needs protobuf, libzmq, cppzmq)" ON)
+if(VLA_BUILD_SERVER)
+    find_package(Protobuf REQUIRED)
+    if(WIN32)
+        # vcpkg ships ZeroMQ's CMake package and no pkg-config.
+        find_package(ZeroMQ CONFIG REQUIRED)
+        set(VLA_ZMQ_TARGET libzmq)
+    else()
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(ZeroMQ REQUIRED IMPORTED_TARGET libzmq)
+        set(VLA_ZMQ_TARGET PkgConfig::ZeroMQ)
+    endif()
 
-find_path(CPPZMQ_INCLUDE_DIR NAMES zmq.hpp)
-if(NOT CPPZMQ_INCLUDE_DIR)
-    message(FATAL_ERROR
-        "cppzmq (zmq.hpp) not found. Install 'cppzmq-dev' (Debian/Ubuntu) or set "
-        "CMAKE_PREFIX_PATH to your cppzmq install prefix.")
+    find_path(CPPZMQ_INCLUDE_DIR NAMES zmq.hpp)
+    if(NOT CPPZMQ_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "cppzmq (zmq.hpp) not found. Install 'cppzmq-dev' (Debian/Ubuntu) or set "
+            "CMAKE_PREFIX_PATH to your cppzmq install prefix.")
+    endif()
+
+    set(VLA_PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/serving/vla.proto)
+    set(VLA_PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/proto-gen/serving)
+    file(MAKE_DIRECTORY ${VLA_PROTO_GEN_DIR})
+
+    add_custom_command(
+        OUTPUT  ${VLA_PROTO_GEN_DIR}/vla.pb.h
+                ${VLA_PROTO_GEN_DIR}/vla.pb.cc
+        COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+                --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/src/serving
+                --cpp_out=${VLA_PROTO_GEN_DIR}
+                ${VLA_PROTO_SRC}
+        DEPENDS ${VLA_PROTO_SRC}
+        VERBATIM
+    )
+
+    add_executable(vla-server
+        src/serving/server.cpp
+        ${VLA_PROTO_GEN_DIR}/vla.pb.cc
+    )
+    target_include_directories(vla-server PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/proto-gen
+        ${llama_SOURCE_DIR}/vendor/stb
+        ${CPPZMQ_INCLUDE_DIR}
+    )
+    target_link_libraries(vla-server PRIVATE
+        vla_core
+        protobuf::libprotobuf
+        ${VLA_ZMQ_TARGET}
+    )
+
+    set(VLM_PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/serving/vlm.proto)
+    set(VLM_PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/proto-gen/serving)
+    file(MAKE_DIRECTORY ${VLM_PROTO_GEN_DIR})
+
+    add_custom_command(
+        OUTPUT  ${VLM_PROTO_GEN_DIR}/vlm.pb.h
+                ${VLM_PROTO_GEN_DIR}/vlm.pb.cc
+        COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+                --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/src/serving
+                --cpp_out=${VLM_PROTO_GEN_DIR}
+                ${VLM_PROTO_SRC}
+        DEPENDS ${VLM_PROTO_SRC}
+        VERBATIM
+    )
+
+    add_executable(vlm-server
+        src/serving/vlm-server.cpp
+        ${VLM_PROTO_GEN_DIR}/vlm.pb.cc
+    )
+    target_include_directories(vlm-server PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/proto-gen
+        ${llama_SOURCE_DIR}/vendor/stb
+        ${CPPZMQ_INCLUDE_DIR}
+    )
+    target_link_libraries(vlm-server PRIVATE
+        vlm_core
+        protobuf::libprotobuf
+        ${VLA_ZMQ_TARGET}
+    )
 endif()
-
-set(VLA_PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/serving/vla.proto)
-set(VLA_PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/proto-gen/serving)
-file(MAKE_DIRECTORY ${VLA_PROTO_GEN_DIR})
-
-add_custom_command(
-    OUTPUT  ${VLA_PROTO_GEN_DIR}/vla.pb.h
-            ${VLA_PROTO_GEN_DIR}/vla.pb.cc
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE}
-            --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/src/serving
-            --cpp_out=${VLA_PROTO_GEN_DIR}
-            ${VLA_PROTO_SRC}
-    DEPENDS ${VLA_PROTO_SRC}
-    VERBATIM
-)
-
-add_executable(vla-server
-    src/serving/server.cpp
-    ${VLA_PROTO_GEN_DIR}/vla.pb.cc
-)
-target_include_directories(vla-server PRIVATE
-    ${CMAKE_CURRENT_BINARY_DIR}/proto-gen
-    ${llama_SOURCE_DIR}/vendor/stb
-    ${CPPZMQ_INCLUDE_DIR}
-)
-target_link_libraries(vla-server PRIVATE
-    vla_core
-    protobuf::libprotobuf
-    PkgConfig::ZeroMQ
-)
-
-set(VLM_PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/serving/vlm.proto)
-set(VLM_PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/proto-gen/serving)
-file(MAKE_DIRECTORY ${VLM_PROTO_GEN_DIR})
-
-add_custom_command(
-    OUTPUT  ${VLM_PROTO_GEN_DIR}/vlm.pb.h
-            ${VLM_PROTO_GEN_DIR}/vlm.pb.cc
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE}
-            --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/src/serving
-            --cpp_out=${VLM_PROTO_GEN_DIR}
-            ${VLM_PROTO_SRC}
-    DEPENDS ${VLM_PROTO_SRC}
-    VERBATIM
-)
-
-add_executable(vlm-server
-    src/serving/vlm-server.cpp
-    ${VLM_PROTO_GEN_DIR}/vlm.pb.cc
-)
-target_include_directories(vlm-server PRIVATE
-    ${CMAKE_CURRENT_BINARY_DIR}/proto-gen
-    ${llama_SOURCE_DIR}/vendor/stb
-    ${CPPZMQ_INCLUDE_DIR}
-)
-target_link_libraries(vlm-server PRIVATE
-    vlm_core
-    protobuf::libprotobuf
-    PkgConfig::ZeroMQ
-)
 
 add_library(vla SHARED src/vla_c_api.cpp)
 target_include_directories(vla
@@ -351,7 +615,7 @@ target_include_directories(vla-cli PRIVATE
     ${llama_SOURCE_DIR}/vendor/stb
 )
 target_link_libraries(vla-cli PRIVATE vla_core)
-# --text shells out to the tokenizer script; VLA_TOKENIZE_SCRIPT overrides it.
+# --text shells out to the tokenizer script when the GGUF has no tokenizer.
 target_compile_definitions(vla-cli PRIVATE VLA_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 add_executable(vla-bench
@@ -359,16 +623,64 @@ add_executable(vla-bench
 )
 target_link_libraries(vla-bench PRIVATE vla_core)
 
-# Warnings and LTO for our own targets only, never the llama.cpp subtree.
-set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla vla-server vlm-server vla-cli vla-bench)
-# The CUDA targets were the only first-party code compiled without warnings.
-if(GGML_CUDA)
-    list(APPEND VLA_FIRST_PARTY_TARGETS bitvla_cuda_kernels vla_cuda_ops)
+install(TARGETS vla COMPONENT libvla)
+install(FILES LICENSE.md ${llama_SOURCE_DIR}/licenses/LICENSE-jsonhpp
+    DESTINATION ${CMAKE_INSTALL_DOCDIR} COMPONENT libvla)
+install(FILES ${llama_SOURCE_DIR}/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}
+    RENAME LICENSE.llama.cpp COMPONENT libvla)
+install(TARGETS vla_core vla-cli vla-bench)
+install(FILES scripts/tokenize_prompt.py DESTINATION ${CMAKE_INSTALL_DATADIR}/vla)
+if(VLA_BUILD_SERVER)
+    install(TARGETS vlm_core vla-server vlm-server)
 endif()
 
+# Warnings and LTO for our own targets only, never the llama.cpp subtree.
+set(VLA_FIRST_PARTY_TARGETS vla_core vlm_core vla vla-cli vla-bench)
+if(VLA_BUILD_SERVER)
+    list(APPEND VLA_FIRST_PARTY_TARGETS vla-server vlm-server)
+endif()
+# The CUDA targets were the only first-party code compiled without warnings.
+if(GGML_CUDA)
+    list(APPEND VLA_FIRST_PARTY_TARGETS bitvla_cuda_kernels vla_cuda_ops vla_cuda_fused vla_fq_kernels)
+endif()
+
+option(VLA_WERROR "Treat warnings in first-party code as errors" OFF)
 foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)
-    target_compile_options(${tgt} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
+    target_compile_options(${tgt} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra $<$<BOOL:${VLA_WERROR}>:-Werror>>)
 endforeach()
+
+# llama.cpp sends its DLLs to <build>/bin, and Windows has no rpath: a binary
+# finds a DLL beside itself or on PATH. Put ours next to them.
+if(WIN32)
+    foreach(tgt IN LISTS VLA_FIRST_PARTY_TARGETS)
+        set_target_properties(${tgt} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    endforeach()
+    # Same problem for the servers' protobuf / abseil / libzmq DLLs, which live
+    # in the package manager's tree.
+    if(VLA_BUILD_SERVER)
+        foreach(tgt vla-server vlm-server)
+            add_custom_command(TARGET ${tgt} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_RUNTIME_DLLS:${tgt}> $<TARGET_FILE_DIR:${tgt}>
+                COMMAND_EXPAND_LISTS)
+        endforeach()
+    endif()
+endif()
+
+# The NPU-side HTP skels are built (and, with HEXAGON_HTP_CERT, signed) inside
+# the fetched tree. FastRPC finds them through ADSP_LIBRARY_PATH, which the
+# Hexagon rung defaults to the binary's own directory, so copy them there.
+if(GGML_HEXAGON AND TARGET ggml-hexagon)
+    set(_vla_htp_dir ${CMAKE_BINARY_DIR}/_deps/llama-build/ggml/src/ggml-hexagon)
+    add_custom_target(vla-htp-skels ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/bin
+        COMMAND ${CMAKE_COMMAND} -DSRC=${_vla_htp_dir} -DDST=${CMAKE_BINARY_DIR}/bin
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_htp_skels.cmake
+        DEPENDS ggml-hexagon
+        COMMENT "copying HTP skels next to the binaries"
+        VERBATIM)
+endif()
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT VLA_IPO_OK OUTPUT VLA_IPO_MSG)
@@ -378,6 +690,20 @@ if(VLA_IPO_OK AND CMAKE_BUILD_TYPE STREQUAL "Release")
     endforeach()
 else()
     message(STATUS "vla: IPO/LTO disabled (${VLA_IPO_MSG})")
+endif()
+
+# vcpkg's abseil hands every consumer "-ignore:4221", an MSVC link.exe flag,
+# through INTERFACE_LINK_LIBRARIES. clang++ driving lld-link rejects it as an
+# unknown argument. The warning it silences is harmless, so drop the flag.
+if(WIN32 AND NOT MSVC)
+    get_directory_property(_vla_imported IMPORTED_TARGETS)
+    foreach(tgt IN LISTS _vla_imported)
+        get_target_property(_libs ${tgt} INTERFACE_LINK_LIBRARIES)
+        if(_libs AND "-ignore:4221" IN_LIST _libs)
+            list(REMOVE_ITEM _libs "-ignore:4221")
+            set_property(TARGET ${tgt} PROPERTY INTERFACE_LINK_LIBRARIES "${_libs}")
+        endif()
+    endforeach()
 endif()
 
 option(VLA_BUILD_TESTS "Build vla.cpp test harnesses and unit tests" OFF)

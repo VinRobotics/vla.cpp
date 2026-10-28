@@ -13,15 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Thirteen fixes to the fetched ggml OpenVINO backend.
+"""Fourteen fixes to the fetched ggml OpenVINO backend, and the FoldQuant hook.
 
 ggml-openvino is written against llama.cpp's graphs: one decoder-only
 transformer, one position input, an F16 KV cache. vla.cpp drives it with vision
 towers and action experts instead, which is legal ggml but nothing the backend
 has seen. Eight of the hunks below narrow an llama.cpp-shaped assumption back to
-the ggml contract, one fills a gap in the op table, and two are about the path
-those graphs take. Together they are what lets SmolVLA and pi0.5 run end to end
-on the CPU, GPU and NPU plugins. Numbers 4 and 5 are the ones worth upstreaming.
+the ggml contract, one fills a gap in the op table, and the rest are about the
+path those graphs take and the precision the GPU plugin runs them at. Together
+they are what lets SmolVLA and pi0.5 run end to end on the CPU, GPU and NPU
+plugins. Numbers 4 and 5 are the ones worth upstreaming.
 
 A hunk that applies is not a hunk that runs. Whenever VLA_LLAMA_TAG moves, check
 that each patched function still has a live caller, not just that its anchor
@@ -74,6 +75,15 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      patching only the member applies cleanly and does nothing at all. Both are
      patched here so the fix survives whichever one upstream keeps.
 
+     openvino/op/rope.cpp - key the per-op sin/cos cache on the position input.
+     b11223's translate_rope() caches each sin/cos table under the ROPE's
+     op_params alone, so two ROPEs with the same parameters share one table
+     whatever their positions. pi0, pi0.5 and SmolVLA rotate the prefix and the
+     action suffix with the same parameters and different position tensors, and
+     the suffix then multiplies by the prefix's table:
+     "Multiply (Reshape[0]:f32[1,50,1,256], Concat[0]:f32[1,528,1,256])
+      Argument shapes are inconsistent." on every OpenVINO device.
+
   5. utils.{h,cpp} - cache what the naive path compiles.
      The dynamic and static paths keep a `graph_key`-indexed cache of the
      decoder and the compiled infer request; the naive path has none, so it
@@ -83,12 +93,15 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      1.4 s per prediction with the cache in place. A hit rebinds the cached
      decoder to the new graph through the existing update_io(), which is how the
      dynamic path already handles freshly built tensors.
-     The key is `naive_key`, not `graph_key`: the latter is n_nodes plus the
-     first and last node name, which two graphs of the same size can share, and
-     a compiled model is bound to the shapes it was built for. Reusing one
-     across a shape change returns another graph's answer with no error, so the
-     key mixes in every node's op and shape. The map is bounded; see the comment
-     on the flush.
+     The key is `naive_key`, not `graph_key`: the latter is n_nodes, the first
+     and last node name and the input names, which two graphs of the same size
+     can share, and a compiled model is bound to the shapes it was built for.
+     Reusing one across a shape change returns another graph's answer with no
+     error, so the key mixes in every node's op and shape. The map is bounded;
+     see the comment on the flush. In front of it sits a cheaper fingerprint of
+     the graph object and its tensor addresses: on a hit the cached decoder is
+     already bound to these tensors, so both naive_key and update_io(), costly
+     on a graph of thousands of nodes, are skipped.
 
   6. openvino/op_table.cpp - get both GELU flavours right.
      ggml has two: GGML_UNARY_OP_GELU is the tanh approximation, GGML_UNARY_OP_
@@ -182,6 +195,23 @@ See docs/backend/ov.md for the measured results and for what is still blocked.
      6.5e-5. Exposed rather than forced: f32 costs about 3x on this plugin, so
      src/backend.h defaults it for pi0 alone and an explicit setting still wins.
 
+ 14. utils.cpp - let a model opt every naive graph into PERFORMANCE mode.
+     naive_compute() compiles any graph that does not open with a MUL_MAT in
+     ACCURACY mode, which also pins the inference precision to f32, so a vision
+     tower (which opens with its patch convolution) ran at f32 whatever
+     GGML_OPENVINO_GPU_PRECISION asked for. GGML_OPENVINO_EXEC_MODE=performance
+     compiles every graph in PERFORMANCE mode; a model that holds at f16 sets it.
+     Read with getenv rather than the backend's env allowlist, which is cached
+     at backend init: the model sets it once it knows the backend is OpenVINO.
+ 15. op_table.{h,cpp}, ggml-openvino.cpp, ggml-quants.cpp, ggml-decoder.cpp -
+     the hook for FoldQuant. A FoldQuant GGUF builds two GGML_OP_CUSTOM nodes
+     per INT8/INT4 site, which ggml leaves to the CPU backend. The translator
+     that maps them onto OpenVINO ops lives in-tree (src/openvino/
+     foldquant_ov.cpp, compiled into this target by vla.cpp's CMakeLists); this
+     hunk only registers it for GGML_OP_CUSTOM, lets supports_op accept
+     FoldQuant's nodes (and no other custom op) ahead of the type checks that
+     would refuse their INT8 tensors, and keeps an INT8 weight as an i8 constant.
+
 Idempotent - re-running on a patched tree is a no-op, so a reconfigure that
 re-populates the FetchContent source dir is safe either way.
 
@@ -241,11 +271,13 @@ USM_LOOKUP_NEW = """        cl_platform_id platform = ggml_openvino_get_intel_pl
 NAIVE_COMPUTE_OLD = """enum ggml_status naive_compute(ggml_cgraph * cgraph,
                                ov::Core & core,
                                const std::string & device,
-                               const ov::AnyMap & config) {
+                               const ov::AnyMap & config,
+                               ov_compiled_model_cache & cache) {
     if (cgraph->n_nodes == 1 && (cgraph->nodes[0]->op == GGML_OP_NONE || cgraph->nodes[0]->op == GGML_OP_VIEW)) {
         return GGML_STATUS_SUCCESS;
     }
 
+    std::unique_lock<std::mutex> compile_lock(cache.mutex);
     bool naive = true;
     auto model_weights = GgmlOvDecoder::create_weight_nodes(cgraph, naive);
     auto decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights);
@@ -257,46 +289,59 @@ NAIVE_COMPUTE_OLD = """enum ggml_status naive_compute(ggml_cgraph * cgraph,
 
     std::shared_ptr<ov::InferRequest> infer_request;
     auto remote_context = ggml_openvino_get_remote_context();
+    ov::AnyMap compile_config = config;
     if (cgraph->nodes[0]->op == GGML_OP_MUL_MAT) {
         // TODO ACCURACY hint triggers a bug in GPU plugin/driver on Lunar Lake. Remove once CVS-182166 is resolved
-        core.set_property(device, ov::hint::execution_mode(ov::hint::ExecutionMode::PERFORMANCE));
+        compile_config[ov::hint::execution_mode.name()] = ov::hint::ExecutionMode::PERFORMANCE;
     } else {
-        core.set_property(device, ov::hint::execution_mode(ov::hint::ExecutionMode::ACCURACY));
+        compile_config[ov::hint::execution_mode.name()] = ov::hint::ExecutionMode::ACCURACY;
     }
     if (remote_context.has_value()) {
         infer_request = std::make_shared<ov::InferRequest>(
-            core.compile_model(model, remote_context.value(), config).create_infer_request());
+            core.compile_model(model, remote_context.value(), compile_config).create_infer_request());
     } else {
-        infer_request =
-            std::make_shared<ov::InferRequest>(core.compile_model(model, device, config).create_infer_request());
+        infer_request = std::make_shared<ov::InferRequest>(
+            core.compile_model(model, device, compile_config).create_infer_request());
     }
-
-    auto ov_params = model->get_parameters();"""
+    std::vector<std::string> input_names;
+    std::vector<std::string> output_names;
+    for (const auto & param : model->get_parameters()) {
+        input_names.push_back(param->get_friendly_name());
+    }
+    for (const auto & result : model->get_results()) {
+        output_names.push_back(result->get_friendly_name());
+    }
+    // Destroy the frontend graph under the compilation lock as well: it can
+    // still own edges into the shared weight nodes.
+    model.reset();
+    input_model.reset();
+    decoder->clear_model_weights();
+    model_weights.clear();
+    compile_lock.unlock();
+"""
 
 NAIVE_COMPUTE_NEW = """enum ggml_status naive_compute(ggml_cgraph * cgraph,
                                ov::Core & core,
                                const std::string & device,
                                const ov::AnyMap & config,
-                               std::shared_ptr<ov_runtime_context> r_ctx) {
+                               const std::shared_ptr<ov_runtime_context> & r_ctx) {
     if (cgraph->n_nodes == 1 && (cgraph->nodes[0]->op == GGML_OP_NONE || cgraph->nodes[0]->op == GGML_OP_VIEW)) {
         return GGML_STATUS_SUCCESS;
     }
 
-    // vla.cpp: reuse the decoder, the converted model and the compiled infer
-    // request across calls on the same graph, the way the dynamic and static
-    // paths already do. Conversion plus compile_model dominates a naive call, so
-    // without this every graph_compute pays it again.
+    // vla.cpp: reuse the decoder and the compiled infer request across calls on
+    // the same graph, the way the dynamic and static paths already do.
+    // Conversion plus compile_model dominates a naive call, so without this every
+    // graph_compute pays it again.
     static const bool cache_enabled = !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_CACHE");
-    const naive_key key(cgraph);
 
     std::shared_ptr<naive_runtime_ctx> entry;
-    bool cache_hit = false;
-    if (cache_enabled && r_ctx != nullptr) {
+    if (cache_enabled) {
+        const naive_key key(cgraph);
         std::lock_guard<std::mutex> lock(r_ctx->ctx_mutex);
         auto it = r_ctx->naive_cache.find(key);
         if (it != r_ctx->naive_cache.end()) {
             entry = it->second;
-            cache_hit = true;
         } else {
             // Each entry holds a compiled model, so this cannot grow forever.
             // Flush rather than evict: a caller sees a handful of shapes, and an
@@ -307,55 +352,68 @@ NAIVE_COMPUTE_NEW = """enum ggml_status naive_compute(ggml_cgraph * cgraph,
             entry = std::make_shared<naive_runtime_ctx>();
             r_ctx->naive_cache[key] = entry;
         }
-    } else {
-        entry = std::make_shared<naive_runtime_ctx>();
     }
 
-    // One graph at a time: an ov::InferRequest is not re-entrant, and a hit
-    // rebinds the decoder to this cgraph.
-    std::lock_guard<std::mutex> entry_lock(entry->mutex);
-
-    bool naive = true;
     std::shared_ptr<GgmlOvDecoder> decoder;
-    std::shared_ptr<ov::Model> model;
     std::shared_ptr<ov::InferRequest> infer_request;
+    std::vector<std::string> input_names;
+    std::vector<std::string> output_names;
 
-    if (cache_hit && entry->infer_request != nullptr) {
+    if (entry != nullptr && entry->infer_request != nullptr) {
         decoder = entry->decoder;
-        model = entry->model;
         infer_request = entry->infer_request;
+        input_names = entry->input_names;
+        output_names = entry->output_names;
         // Same shapes, new tensors: point the decoder at this call's graph.
         decoder->update_io(cgraph);
     } else {
+        std::unique_lock<std::mutex> compile_lock(r_ctx->compiled_cache->mutex);
+        bool naive = true;
         auto model_weights = GgmlOvDecoder::create_weight_nodes(cgraph, naive);
         decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights);
         auto input_model = std::make_shared<ov::frontend::ggml::InputModel>(decoder);
-        model = ov::frontend::ggml::FrontEnd::convert(input_model, naive);
+        auto model = ov::frontend::ggml::FrontEnd::convert(input_model, naive);
         if (ggml_openvino_getenv_int("GGML_OPENVINO_DUMP_IR")) {
             ov::serialize(model, "IR_naive.xml");
         }
 
         auto remote_context = ggml_openvino_get_remote_context();
+        ov::AnyMap compile_config = config;
         if (cgraph->nodes[0]->op == GGML_OP_MUL_MAT) {
             // TODO ACCURACY hint triggers a bug in GPU plugin/driver on Lunar Lake. Remove once CVS-182166 is resolved
-            core.set_property(device, ov::hint::execution_mode(ov::hint::ExecutionMode::PERFORMANCE));
+            compile_config[ov::hint::execution_mode.name()] = ov::hint::ExecutionMode::PERFORMANCE;
         } else {
-            core.set_property(device, ov::hint::execution_mode(ov::hint::ExecutionMode::ACCURACY));
+            compile_config[ov::hint::execution_mode.name()] = ov::hint::ExecutionMode::ACCURACY;
         }
         if (remote_context.has_value()) {
             infer_request = std::make_shared<ov::InferRequest>(
-                core.compile_model(model, remote_context.value(), config).create_infer_request());
+                core.compile_model(model, remote_context.value(), compile_config).create_infer_request());
         } else {
-            infer_request =
-                std::make_shared<ov::InferRequest>(core.compile_model(model, device, config).create_infer_request());
+            infer_request = std::make_shared<ov::InferRequest>(
+                core.compile_model(model, device, compile_config).create_infer_request());
         }
+        for (const auto & param : model->get_parameters()) {
+            input_names.push_back(param->get_friendly_name());
+        }
+        for (const auto & result : model->get_results()) {
+            output_names.push_back(result->get_friendly_name());
+        }
+        // Destroy the frontend graph under the compilation lock as well: it can
+        // still own edges into the shared weight nodes.
+        model.reset();
+        input_model.reset();
+        decoder->clear_model_weights();
+        model_weights.clear();
+        compile_lock.unlock();
 
-        entry->decoder = decoder;
-        entry->model = model;
-        entry->infer_request = infer_request;
+        if (entry != nullptr) {
+            entry->decoder = decoder;
+            entry->infer_request = infer_request;
+            entry->input_names = input_names;
+            entry->output_names = output_names;
+        }
     }
-
-    auto ov_params = model->get_parameters();"""
+"""
 
 # file -> [(anchor, replacement), ...]. Every anchor must match exactly once.
 EDITS = {
@@ -383,11 +441,11 @@ EDITS = {
         (USM_LOOKUP % (("clEnqueueMemcpyINTEL",) * 2), USM_LOOKUP_NEW % (("clEnqueueMemcpyINTEL",) * 2)),
         (
             """        "GGML_OPENVINO_LOG_UNSUPPORTED_OPS",
-    };""",
+""",
             """        "GGML_OPENVINO_LOG_UNSUPPORTED_OPS",
         // vla.cpp: f16 (default) or f32 for the GPU plugin's inference precision.
         "GGML_OPENVINO_GPU_PRECISION",
-    };""",
+""",
         ),
         (
             """    } else if (cache_dir && strlen(cache_dir) > 0) {
@@ -417,27 +475,35 @@ EDITS = {
     ],
     "ggml/src/ggml-openvino/openvino/op/add.cpp": [
         (
-            """    auto input_0 = process_view_input_new(context, 0);
-    auto input_1 = process_view_input_new(context, 1);
-    auto res = std::make_shared<ov::op::v1::Add>(input_0, input_1);""",
-            """    auto input_0 = process_view_input_new(context, 0);
-    auto input_1 = process_view_input_new(context, 1);
-
-    // vla.cpp: re-hang the outer add on the inner one's non-GEMM operand so the
+            """    ov::Output<ov::Node> res = std::make_shared<ov::op::v1::Add>(input_0, input_1);""",
+            """    // vla.cpp: re-hang the outer add on the inner one's non-GEMM operand so the
     // GEMM is left with a single post-op. Addition is associative.
+    ov::Output<ov::Node> res;
     const int oc = context.get_op_case();
-    if (oc == 2 || oc == 3) {
-        auto inner = input_0.get_node_shared_ptr();
-        if (inner->get_input_size() == 2) {
-            const size_t keep = (oc == 2) ? 0 : 1;
-            const size_t fold = 1 - keep;
-            auto folded = std::make_shared<ov::op::v1::Add>(inner->input_value(fold), input_1);
-            auto res2 = std::make_shared<ov::op::v1::Add>(inner->input_value(keep), folded);
-            return rename_outputs_with_suffix({res2}, context.get_name());
+    auto inner = input_0.get_node_shared_ptr();
+    if ((oc == 2 || oc == 3) && inner->get_input_size() == 2) {
+        const size_t keep = (oc == 2) ? 0 : 1;
+        const size_t fold = 1 - keep;
+        auto folded = std::make_shared<ov::op::v1::Add>(inner->input_value(fold), input_1);
+        res = std::make_shared<ov::op::v1::Add>(inner->input_value(keep), folded);
+    } else {
+        res = std::make_shared<ov::op::v1::Add>(input_0, input_1);
+    }""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/op/rope.cpp": [
+        (
+            """        if (context.get_input_size() == 3) {
+            cache_key += "_ff_" + context.get_input_names()[2];
         }
-    }
-
-    auto res = std::make_shared<ov::op::v1::Add>(input_0, input_1);""",
+""",
+            """        if (context.get_input_size() == 3) {
+            cache_key += "_ff_" + context.get_input_names()[2];
+        }
+        // vla.cpp: two ROPEs with the same op_params but different position
+        // inputs (a prefix and an action suffix) must not share one table.
+        cache_key += "_pos_" + context.get_input_names()[1];
+""",
         ),
     ],
     "ggml/src/ggml-openvino/openvino/op/concat.cpp": [
@@ -573,6 +639,56 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
         // defaults to erf, so the tanh variant must set its mode explicitly.
         {"GGML_UNARY_OP_GELU_ERF",  op::translate_1to1_match_1_input<v7::Gelu>     },""",
         ),
+        (
+            """        {"GGML_OP_ADD",             op::translate_add                              },""",
+            """        {"GGML_OP_ADD",             op::translate_add                              },
+        // vla.cpp: FoldQuant's two custom nodes (src/openvino/foldquant_ov.cpp).
+        {"GGML_OP_CUSTOM",          op::translate_vla_foldquant                    },""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/openvino/op_table.h": [
+        (
+            """GGML_OP_CONVERTER(translate_add);""",
+            """GGML_OP_CONVERTER(translate_add);
+GGML_OP_CONVERTER(translate_vla_foldquant);  // vla.cpp: src/openvino/foldquant_ov.cpp""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/ggml-openvino.cpp": [
+        (
+            """static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(ggml_backend_dev_t dev, const ggml_tensor * op) {
+    GGML_ASSERT(dev->reg != nullptr);
+""",
+            """// vla.cpp: defined in src/openvino/foldquant_ov.cpp.
+bool vla_foldquant_ov_supports(const ggml_tensor * op);
+
+static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(ggml_backend_dev_t dev, const ggml_tensor * op) {
+    GGML_ASSERT(dev->reg != nullptr);
+
+    // vla.cpp: FoldQuant's custom nodes carry INT8 weights and an INT8 blob,
+    // which the type checks below would refuse; they have their own test.
+    if (op->op == GGML_OP_CUSTOM) {
+        if (vla_foldquant_ov_supports(op)) {
+            return {true, ""};
+        }
+        return {false, "GGML_OP_CUSTOM other than FoldQuant's"};
+    }
+""",
+        ),
+    ],
+    "ggml/src/ggml-openvino/ggml-quants.cpp": [
+        (
+            """    if (tensor->type == GGML_TYPE_F32 || tensor->type == GGML_TYPE_F16 || tensor->type == GGML_TYPE_BF16) {
+        ov::element::Type element_type;
+        switch (tensor->type) {""",
+            """    // vla.cpp: GGML_TYPE_I8 is a FoldQuant site's codes, kept as an i8 constant.
+    if (tensor->type == GGML_TYPE_F32 || tensor->type == GGML_TYPE_F16 || tensor->type == GGML_TYPE_BF16 ||
+        tensor->type == GGML_TYPE_I8) {
+        ov::element::Type element_type;
+        switch (tensor->type) {
+        case GGML_TYPE_I8:
+            element_type = ov::element::i8;
+            break;""",
+        ),
     ],
     "ggml/src/ggml-openvino/openvino/op/flash_attn_ext.cpp": [
         (
@@ -642,7 +758,7 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
     }""",
             """    if (GgmlOvDecoder::is_inp_pos(tensor, op)) {
         // vla.cpp: this free function is the live naming path -- the
-        // GgmlOvDecoder member of the same intent is unreferenced at b10729.
+        // GgmlOvDecoder member of the same intent is unreferenced at b11223.
         // Only collapse ROPE position inputs onto one "inp_pos" parameter when
         // the graph really has one. See scripts/patch_ggml_openvino.py.
         return decoder->has_multiple_inp_pos() ? get_tensor_ov_name(cgraph, tensor) : std::string("inp_pos");
@@ -699,6 +815,11 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {""",
 
 int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {""",
         ),
+        (
+            """    static const std::set<ggml_type> weight_types = {GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_Q8_0,""",
+            """    // vla.cpp: GGML_TYPE_I8 is a FoldQuant site's codes (see ggml-quants.cpp).
+    static const std::set<ggml_type> weight_types = {GGML_TYPE_I8,   GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_Q8_0,""",
+        ),
     ],
     "ggml/src/ggml-openvino/utils.h": [
         (
@@ -707,16 +828,16 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {""",
 // it that path rebuilt the decoder, re-converted the model and called
 // compile_model() on every ggml_backend_graph_compute, which dominated runtime.
 struct naive_runtime_ctx {
-    std::mutex mutex;
     std::shared_ptr<GgmlOvDecoder> decoder;
-    std::shared_ptr<ov::Model> model;
     std::shared_ptr<ov::InferRequest> infer_request;
+    std::vector<std::string> input_names;
+    std::vector<std::string> output_names;
 };
 
-// vla.cpp: graph_key is {n_nodes, first name, last name}, which two graphs of the
-// same size can share. A compiled model is bound to the shapes it was built for,
-// so reusing one across a shape change returns another graph's answer with no
-// error. Mix the ops and shapes in as well.
+// vla.cpp: graph_key is {n_nodes, first name, last name, input names}, which two
+// graphs of the same size can share. A compiled model is bound to the shapes it
+// was built for, so reusing one across a shape change returns another graph's
+// answer with no error. Mix the ops and shapes in as well.
 inline uint64_t naive_graph_sig(const ggml_cgraph * cgraph) {
     uint64_t h = 1469598103934665603ull;
     auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
@@ -768,22 +889,28 @@ struct decoder_runtime_ctx {""",
         naive_cache.clear();
         infer_request_cache.clear();""",
         ),
+        # Graph-fingerprint fast path, see naive_graph_fp in utils.cpp. Both are
+        # appended after the hunks above, so those stay intact as their markers.
         (
-            """enum ggml_status naive_compute(struct ggml_cgraph * cgraph,
-                               ov::Core & core,
-                               const std::string & device,
-                               const ov::AnyMap & config);""",
-            """enum ggml_status naive_compute(struct ggml_cgraph * cgraph,
-                               ov::Core & core,
-                               const std::string & device,
-                               const ov::AnyMap & config,
-                               std::shared_ptr<ov_runtime_context> r_ctx);""",
+            "    std::unordered_map<naive_key, std::shared_ptr<naive_runtime_ctx>, naive_key_hash> naive_cache;",
+            "    std::unordered_map<naive_key, std::shared_ptr<naive_runtime_ctx>, naive_key_hash> naive_cache;\n"
+            "    // vla.cpp: naive_graph_fp -> entry, and the fingerprint each entry's decoder is bound to.\n"
+            "    std::unordered_map<uint64_t, std::shared_ptr<naive_runtime_ctx>> naive_fp_cache;\n"
+            "    std::unordered_map<const naive_runtime_ctx *, uint64_t> naive_io_fp;",
+        ),
+        (
+            """        naive_cache.clear();
+        infer_request_cache.clear();""",
+            """        naive_cache.clear();
+        infer_request_cache.clear();
+        naive_fp_cache.clear();
+        naive_io_fp.clear();""",
         ),
     ],
     "ggml/src/ggml-openvino/utils.cpp": [
         (
             """        if (!model_is_splitted) {
-            return naive_compute(cgraph, core, device, config);
+            return naive_compute(cgraph, core, device, config, *r_ctx->compiled_cache);
         }""",
             """        if (!model_is_splitted) {
             return naive_compute(cgraph, core, device, config, r_ctx);
@@ -791,7 +918,7 @@ struct decoder_runtime_ctx {""",
         ),
         (
             """    if (is_naive(cgraph)) {
-        return naive_compute(cgraph, core, device, config);
+        return naive_compute(cgraph, core, device, config, *r_ctx->compiled_cache);
     }""",
             """    if (is_naive(cgraph)) {
         return naive_compute(cgraph, core, device, config, r_ctx);
@@ -800,6 +927,9 @@ struct decoder_runtime_ctx {""",
         (
             NAIVE_COMPUTE_OLD,
             NAIVE_COMPUTE_NEW,
+            # The hunks below rewrite parts of this replacement, so it cannot be
+            # its own marker. This line survives them and is unique to it.
+            "            r_ctx->naive_cache[key] = entry;",
         ),
         (
             """bool is_naive(ggml_cgraph * cgraph) {
@@ -823,6 +953,115 @@ struct decoder_runtime_ctx {""",
         }
         return n;
     }();""",
+        ),
+        (
+            "enum ggml_status naive_compute(ggml_cgraph * cgraph,",
+            """// vla.cpp: identity of one concrete graph, cheap enough to take per call:
+// naive_graph_sig plus the address and data pointer of every node and source.
+// vla.cpp reuses one graph object per shape, so a match means the same tensors
+// in the same buffers, and the decoder bound to them last time still is. That
+// skips naive_key and update_io(), both costly on a graph of thousands of nodes.
+inline uint64_t naive_graph_fp(const ggml_cgraph * cgraph) {
+    uint64_t h = naive_graph_sig(cgraph);
+    auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+    mix((uint64_t) (uintptr_t) cgraph);
+    mix((uint64_t) cgraph->n_nodes);
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        const ggml_tensor * node = cgraph->nodes[i];
+        mix((uint64_t) (uintptr_t) node);
+        mix((uint64_t) (uintptr_t) node->data);
+        for (int s = 0; s < GGML_MAX_SRC; s++) {
+            const ggml_tensor * src = node->src[s];
+            if (src) {
+                mix((uint64_t) (uintptr_t) src);
+                mix((uint64_t) (uintptr_t) src->data);
+            }
+        }
+    }
+    return h;
+}
+
+enum ggml_status naive_compute(ggml_cgraph * cgraph,""",
+        ),
+        (
+            """    std::shared_ptr<naive_runtime_ctx> entry;
+    if (cache_enabled) {
+        const naive_key key(cgraph);
+        std::lock_guard<std::mutex> lock(r_ctx->ctx_mutex);
+        auto it = r_ctx->naive_cache.find(key);
+        if (it != r_ctx->naive_cache.end()) {
+            entry = it->second;
+        } else {""",
+            """    std::shared_ptr<naive_runtime_ctx> entry;
+    // vla.cpp: try the fingerprint first; only a miss builds naive_key.
+    const uint64_t graph_fp = cache_enabled ? naive_graph_fp(cgraph) : 0;
+    if (cache_enabled) {
+        std::lock_guard<std::mutex> lock(r_ctx->ctx_mutex);
+        auto fit = r_ctx->naive_fp_cache.find(graph_fp);
+        if (fit != r_ctx->naive_fp_cache.end()) {
+            entry = fit->second;
+        }
+    }
+    if (cache_enabled && entry == nullptr) {
+        const naive_key key(cgraph);
+        std::lock_guard<std::mutex> lock(r_ctx->ctx_mutex);
+        auto it = r_ctx->naive_cache.find(key);
+        if (it != r_ctx->naive_cache.end()) {
+            entry = it->second;
+            r_ctx->naive_fp_cache[graph_fp] = entry;
+        } else {""",
+        ),
+        (
+            """            if (r_ctx->naive_cache.size() >= 32) {
+                r_ctx->naive_cache.clear();
+            }
+            entry = std::make_shared<naive_runtime_ctx>();
+            r_ctx->naive_cache[key] = entry;""",
+            """            if (r_ctx->naive_cache.size() >= 32) {
+                r_ctx->naive_cache.clear();
+                r_ctx->naive_fp_cache.clear();
+                r_ctx->naive_io_fp.clear();
+            }
+            entry = std::make_shared<naive_runtime_ctx>();
+            r_ctx->naive_cache[key] = entry;
+            r_ctx->naive_fp_cache[graph_fp] = entry;""",
+        ),
+        (
+            """        // Same shapes, new tensors: point the decoder at this call's graph.
+        decoder->update_io(cgraph);""",
+            """        // Same shapes, new tensors: point the decoder at this call's graph,
+        // unless it is the graph the decoder is already bound to.
+        bool bound;
+        {
+            std::lock_guard<std::mutex> lock(r_ctx->ctx_mutex);
+            bound = r_ctx->naive_io_fp[entry.get()] == graph_fp;
+        }
+        if (!bound) {
+            decoder->update_io(cgraph);
+            std::lock_guard<std::mutex> lock(r_ctx->ctx_mutex);
+            r_ctx->naive_io_fp[entry.get()] = graph_fp;
+        }""",
+        ),
+        (
+            """            entry->output_names = output_names;
+        }""",
+            """            entry->output_names = output_names;
+            std::lock_guard<std::mutex> lock(r_ctx->ctx_mutex);
+            r_ctx->naive_io_fp[entry.get()] = graph_fp;
+        }""",
+        ),
+        (
+            """            compile_config[ov::hint::execution_mode.name()] = ov::hint::ExecutionMode::ACCURACY;
+        }""",
+            """            compile_config[ov::hint::execution_mode.name()] = ov::hint::ExecutionMode::ACCURACY;
+        }
+        // vla.cpp: ACCURACY also pins the precision to f32. A model that holds at
+        // f16 opts every graph into PERFORMANCE. getenv, not the env allowlist:
+        // that is cached at backend init, and the model sets this afterwards.
+        const char * exec_mode = getenv("GGML_OPENVINO_EXEC_MODE");
+        if (exec_mode != nullptr && strcmp(exec_mode, "performance") == 0) {
+            compile_config[ov::hint::execution_mode.name()] = ov::hint::ExecutionMode::PERFORMANCE;
+        }""",
         ),
     ],
 }
@@ -849,12 +1088,13 @@ def main() -> int:
             return 1
         original = src.read_text()
         text = original
-        for anchor, replacement in edits:
+        for anchor, replacement, *marker in edits:
             # Per hunk, not per file. The hunk list grows between commits, so a
             # tree patched by an older checkout still needs the newer ones and a
             # file-wide marker would skip them, leaving a build that runs and is
-            # quietly wrong.
-            if replacement in text:
+            # quietly wrong. A hunk that later hunks edit into names a marker
+            # of its own, since its replacement text no longer appears whole.
+            if (marker[0] if marker else replacement) in text:
                 continue
             n = text.count(anchor)
             if n != 1:

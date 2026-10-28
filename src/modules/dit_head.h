@@ -18,9 +18,11 @@
 
 #pragma once
 
+#include "foldquant.h"
 #include "loader.h"
 
 #include "ggml.h"
+#include "ggml-backend.h"
 
 #include <cstdint>
 #include <vector>
@@ -33,6 +35,10 @@ struct DitLayerW {
     ggml_tensor *Wff0, *bff0, *Wff2, *bff2;
 
     ggml_tensor *Wqkv = nullptr, *bqkv = nullptr, *Wkv = nullptr, *bkv = nullptr;
+
+    // FoldQuant sites (docs/QUANTIZATION.md); empty where the file ships a float
+    // GEMM. fq_qkv / fq_kv are the fused forms of fq_q/fq_k/fq_v.
+    FqLinear fq_q, fq_k, fq_v, fq_o, fq_ff0, fq_ff2, fq_qkv, fq_kv;
 };
 
 struct DitCfg {
@@ -42,6 +48,7 @@ struct DitCfg {
     int64_t layers       = 16;
     float   ln_eps       = 1e-5f;
     float   norm_out_eps = 1e-6f;
+    bool    fused_ops    = false;   // layers/fused_ops.h nodes (CUDA only)
 };
 
 struct DitHead {
@@ -52,19 +59,41 @@ struct DitHead {
 
     // outer names time_emb and proj_out when they do not sit under the block
     // prefix; null means they do.
+    // fq: the action module's FoldQuant parameters when the GGUF carries them.
     void declare(WeightLoader & L, const char * prefix, bool fuse_qkv = false, bool interleave = false,
-                 const char * outer = nullptr);
+                 const char * outer = nullptr, const FqModuleSpec * fq = nullptr);
 
+    // xq_pre: an activation blob already computed from src (shared with q).
     void kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
-            ggml_tensor ** K_out, ggml_tensor ** V_out) const;
+            ggml_tensor ** K_out, ggml_tensor ** V_out, ggml_tensor * xq_pre = nullptr) const;
 
-    ggml_tensor * block(ggml_context * C, const DitLayerW & w, ggml_tensor * h, ggml_tensor * temb,
+    ggml_tensor * block(ggml_context * C, const DitLayerW & w, ggml_tensor * h, ggml_tensor * mod,
                         ggml_tensor * enc, ggml_tensor * K_pre = nullptr, ggml_tensor * V_pre = nullptr) const;
 
     ggml_tensor * time_emb(ggml_context * C, ggml_tensor * tproj) const;
 
-    // (shift, scale) adaLN, opposite to layers/norm.h adaln.
-    ggml_tensor * proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * temb) const;
+    // (shift, scale), opposite to the blocks.
+    ggml_tensor * proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * mod) const;
+};
+
+struct FlowTimes {
+    std::vector<ggml_tensor *> tau;
+
+    FlowTimes() = default;
+    FlowTimes(const FlowTimes &) = delete;
+    FlowTimes & operator=(const FlowTimes &) = delete;
+    ~FlowTimes();
+
+    bool build(const char * arch, ggml_backend_t backend, const DitHead & dit,
+               int64_t steps, int64_t buckets, int64_t embed_dim, int64_t horizon);
+
+    ggml_tensor * mod(ggml_context * C, int64_t s, int64_t i) const;
+
+private:
+    ggml_tensor *         mods = nullptr;
+    int64_t               per_step = 0;
+    ggml_context *        ctx = nullptr;
+    ggml_backend_buffer_t buf = nullptr;
 };
 
 }

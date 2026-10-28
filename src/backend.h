@@ -21,10 +21,12 @@
  * instead; the ladder lives here once.
  *
  * Exactly one accelerator is compiled in, picked by the CMake flag that was
- * used (`GGML_CUDA` / `GGML_SYCL` / `GGML_METAL` / `GGML_OPENVINO`). There is no
- * per-op CPU fallback: the core drives a single backend through `gallocr` rather
- * than a scheduler, so an arch that hits an op the backend does not implement
- * asserts at predict time instead of silently limping.
+ * used (`GGML_CUDA` / `GGML_HIP` / `GGML_SYCL` / `GGML_METAL` /
+ * `GGML_OPENVINO` / `GGML_HEXAGON` / `GGML_OPENCL`). The core drives a single
+ * backend through `gallocr` rather than a scheduler. CUDA, HIP, SYCL, Metal and
+ * OpenVINO have no per-op CPU fallback: an unsupported op fails prediction.
+ * Hexagon and OpenCL are wrapped by @ref fallback_backend_new, which runs the
+ * ops they reject on the CPU.
  */
 
 #pragma once
@@ -38,12 +40,24 @@
 #endif
 #ifdef GGML_USE_SYCL
 #include "ggml-sycl.h"
+#include "options.h"
+#include "layers/fused_ew.h"
+#include "sycl/vla_sycl_ops.h"
 #endif
 #ifdef GGML_USE_METAL
 #include "ggml-metal.h"
 #endif
 #ifdef GGML_USE_OPENVINO
 #include "ggml-openvino.h"
+#endif
+#ifdef GGML_USE_HEXAGON
+#include "ggml-hexagon.h"
+#endif
+#ifdef GGML_USE_OPENCL
+#include "ggml-opencl.h"
+#endif
+#if defined(GGML_USE_HEXAGON) || defined(GGML_USE_OPENCL)
+#include "backend_fallback.h"
 #endif
 
 #include <cstdio>
@@ -53,16 +67,17 @@
 #include <string>
 #include <unordered_set>
 #endif
-#if defined(GGML_USE_SYCL) || defined(GGML_USE_OPENVINO)
 #include <stdlib.h>  // setenv / _putenv_s
+#if defined(GGML_USE_SYCL) || defined(GGML_USE_OPENVINO) || \
+    defined(GGML_USE_HEXAGON) || defined(GGML_USE_OPENCL)
 #include <mutex>
 #endif
 
 namespace vla {
 
-#if defined(GGML_USE_SYCL) || defined(GGML_USE_OPENVINO)
 // setenv is POSIX. _putenv_s has no "do not overwrite" mode, so check first.
 // Empty counts as unset; an empty KEY= in a compose file is not a choice.
+// Used by the SYCL/OpenVINO/Hexagon/OpenCL ladders and by the FoldQuant reference switch.
 inline void setenv_default(const char * key, const char * val) {
 #ifdef _WIN32
     size_t len = 0;
@@ -76,7 +91,6 @@ inline void setenv_default(const char * key, const char * val) {
     setenv(key, val, /*overwrite=*/1);
 #endif
 }
-#endif
 
 /// Outcome of @ref backend_init. @c handle is null only if even the CPU backend
 /// failed to come up, which callers treat as a fatal load error.
@@ -86,6 +100,14 @@ struct Backend {
     /// activation path needs the CUDA BF16 GEMM and elementwise kernels, so
     /// archs gate on this rather than on the compiled-in accelerator.
     bool           is_cuda = false;
+    /// Same, for a live ROCm/HIP backend. It runs ggml-cuda's kernels, so graph
+    /// choices made for those hold here too; vla.cpp's own CUDA kernels do not.
+    bool           is_hip = false;
+    /// Same, for a live SYCL backend. The BF16 activation path is served there
+    /// by src/sycl/vla_sycl_bf16.cpp plus ggml-sycl's own BF16 add/mul/unary.
+    bool           is_sycl = false;
+    /// Same, for a live OpenVINO backend.
+    bool           is_openvino = false;
 };
 
 /**
@@ -151,8 +173,95 @@ inline ggml_backend_buffer_t alloc_weights(ggml_context * ctx, ggml_backend_t ba
     return buf;
 }
 
-/// GPU ordinal for CUDA and SYCL; `VLA_DEVICE` overrides. Junk is rejected, not
-/// silently read as device 0.
+/**
+ * @brief K or V as the compiled-in backend's flash-attention kernel takes it.
+ *
+ * The archs hand `ggml_flash_attn_ext` F32 K/V. Hexagon's kernel accepts only
+ * F16 or Q8_0 K/V, so F32 sends every attention to the CPU fallback, and a
+ * 10-step denoise loop then copies its activations back and forth once per
+ * layer per step. Cast before any permute: the NPU's copy kernel converts
+ * contiguous tensors only. Everywhere else this returns @p t untouched, so the
+ * graph and its numerics are unchanged.
+ */
+inline ggml_tensor * fa_kv([[maybe_unused]] ggml_context * ctx, ggml_tensor * t) {
+#ifdef GGML_USE_HEXAGON
+    return t->type == GGML_TYPE_F16 ? t : ggml_cast(ctx, t, GGML_TYPE_F16);
+#else
+    return t;
+#endif
+}
+
+/**
+ * @brief `ggml_gelu` (the tanh form), in ops the compiled-in backend gets right.
+ *
+ * ggml-hexagon runs GELU as x*sigmoid(1.702x), which is GELU_QUICK, so the
+ * fallback wrapper refuses it and every tower layer would round-trip its MLP
+ * activations through the CPU. The tanh form is exactly
+ * x*sigmoid(2*sqrt(2/pi)*(x + 0.044715x^3)), since (1+tanh z)/2 = sigmoid(2z),
+ * and HTP implements each of those ops. Elsewhere this is plain ggml_gelu.
+ */
+inline ggml_tensor * gelu(ggml_context * ctx, ggml_tensor * x) {
+#ifdef GGML_USE_HEXAGON
+    const float   c  = 0.7978845608028654f;  // sqrt(2/pi)
+    ggml_tensor * x3 = ggml_mul(ctx, ggml_mul(ctx, x, x), x);
+    ggml_tensor * z  = ggml_add(ctx, x, ggml_scale(ctx, x3, 0.044715f));
+    return ggml_mul(ctx, x, ggml_sigmoid(ctx, ggml_scale(ctx, z, 2.0f * c)));
+#else
+    return ggml_gelu(ctx, x);
+#endif
+}
+
+inline ggml_tensor * geglu(ggml_context * ctx, ggml_tensor * gate, ggml_tensor * up) {
+#if !defined(GGML_USE_METAL) && !defined(GGML_USE_OPENVINO) && \
+    !defined(GGML_USE_HEXAGON) && !defined(GGML_USE_OPENCL)
+    // ggml-sycl's fused GEGLU (b11223+) handles F32/F16 only and asserts on BF16
+    // without declining it in supports_op, hence the type check.
+    if (gate->type == GGML_TYPE_F32 && up->type == GGML_TYPE_F32)
+        return ggml_geglu_split(ctx, gate, up);
+#endif
+#ifdef GGML_USE_SYCL
+    // BF16 goes through the in-tree fused node, when a model registered it.
+    if (gate->type == GGML_TYPE_BF16 && up->type == GGML_TYPE_BF16 && fused_ew_registered())
+        return fused_geglu(ctx, gate, up);
+#endif
+    return ggml_mul(ctx, gelu(ctx, gate), up);
+}
+
+/**
+ * @brief An arch's default resident type for GEMM weights, on this backend.
+ *
+ * Most archs keep BF16 weights resident. Hexagon has no BF16 kernel for any op
+ * and Adreno's OpenCL backend none for MUL_MAT, so BF16 there means every GEMM
+ * runs on the CPU fallback. F16 holds every BF16 value in the normal range
+ * exactly (it has more mantissa bits), so the swap costs nothing. (On Adreno
+ * that holds only with the xmem GEMM off; see the OpenCL rung.)
+ * `--weight-dtype` still overrides.
+ */
+inline ggml_type default_weight_dtype(ggml_type arch_default) {
+#if defined(GGML_USE_HEXAGON) || defined(GGML_USE_OPENCL)
+    return arch_default == GGML_TYPE_BF16 ? GGML_TYPE_F16 : arch_default;
+#else
+    return arch_default;
+#endif
+}
+
+/**
+ * @brief Whether towers use flash attention when `--flash-attn` is not given.
+ *
+ * On Hexagon the explicit path's 1024x1024 F32 score matmuls are what make
+ * SmolVLA's vision stage take 3.8 s; flash attention runs it in 0.44 s within
+ * the fidelity bar. Everywhere else the default stays off.
+ */
+constexpr bool default_flash_attn() {
+#ifdef GGML_USE_HEXAGON
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// GPU ordinal for CUDA, HIP and SYCL; `VLA_DEVICE` overrides. Junk is rejected,
+/// not silently read as device 0.
 inline int backend_device_index() {
     const char * e = std::getenv("VLA_DEVICE");
     if (!e || !*e)
@@ -176,7 +285,7 @@ inline int backend_device_index() {
 inline Backend backend_init(const char * tag, int n_threads) {
     Backend b;
 
-#ifdef GGML_USE_CUDA
+#if defined(GGML_USE_CUDA) && !defined(GGML_USE_HIP)
     {
         const int dev = backend_device_index();
         b.handle = ggml_backend_cuda_init(dev);
@@ -185,6 +294,20 @@ inline Backend backend_init(const char * tag, int n_threads) {
             std::printf("%s: backend = CUDA (device %d)\n", tag, dev);
         } else {
             std::fprintf(stderr, "%s: ggml_backend_cuda_init failed; falling back to CPU\n", tag);
+        }
+    }
+#elif defined(GGML_USE_HIP)
+    {
+        // ggml-hip compiles the ggml-cuda sources and keeps their entry points.
+        const int dev = backend_device_index();
+        b.handle = ggml_backend_cuda_init(dev);
+        if (b.handle) {
+            b.is_hip = true;
+            char desc[256] = { 0 };
+            ggml_backend_cuda_get_device_description(dev, desc, sizeof(desc));
+            std::printf("%s: backend = ROCm/HIP (device %d: %s)\n", tag, dev, desc);
+        } else {
+            std::fprintf(stderr, "%s: ggml_backend_cuda_init failed on ROCm; falling back to CPU\n", tag);
         }
     }
 #elif defined(GGML_USE_SYCL)
@@ -212,6 +335,12 @@ inline Backend backend_init(const char * tag, int n_threads) {
             std::fprintf(stderr, "%s: SYCL device %d out of range (%d visible); falling back to CPU\n",
                          tag, dev, n_dev);
         } else if ((b.handle = ggml_backend_sycl_init(dev)) != nullptr) {
+            b.is_sycl = true;
+            // The in-tree hook declines every op it does not own, so it is safe
+            // on F32 graphs. FLASH_ATTN_EXT, which it does own, runs on oneDNN's
+            // SDPA for every activation dtype.
+            vla::sycl_register_bf16_ops();
+            vla::set_fa_takes_views(true);
             char desc[256] = { 0 };
             ggml_backend_sycl_get_device_description(dev, desc, sizeof(desc));
             std::printf("%s: backend = SYCL (device %d: %s)\n", tag, dev, desc);
@@ -286,11 +415,59 @@ inline Backend backend_init(const char * tag, int n_threads) {
         // so this line is the request. ggml logs what actually ran.
         const char * want = std::getenv("GGML_OPENVINO_DEVICE");
         b.handle = ggml_backend_openvino_init(0);
+        b.is_openvino = b.handle != nullptr;
         if (b.handle) {
             std::printf("%s: backend = OPENVINO (asked for %s, see ggml's \"using device\" line)\n",
                         tag, (want && *want) ? want : "CPU");
         } else {
             std::fprintf(stderr, "%s: ggml_backend_openvino_init failed; falling back to CPU\n", tag);
+        }
+    }
+#elif defined(GGML_USE_HEXAGON) || defined(GGML_USE_OPENCL)
+    {
+        // Both go through the registry: ggml_backend_hexagon_init is declared
+        // but has no definition upstream. VLA_DEVICE indexes the registry's
+        // devices (HTP sessions, or OpenCL GPUs), and VLA_DEVICE=cpu skips the
+        // accelerator so the same build yields the CPU reference an
+        // accelerator run is checked against.
+        const char * want = std::getenv("VLA_DEVICE");
+        if (want && (std::strcmp(want, "cpu") == 0 || std::strcmp(want, "CPU") == 0)) {
+            std::printf("%s: VLA_DEVICE=%s, not starting the accelerator\n", tag, want);
+        } else {
+#ifdef GGML_USE_HEXAGON
+            // Op fusion (MUL_MAT+ADD, RMS_NORM+MUL) takes SmolVLA from 1.6e-3 to
+            // 1.2e-2 max|delta| against the CPU reference, past the 2.9e-3 bar
+            // the other backends are held to. Only a default: an explicit
+            // GGML_HEXAGON_OPFUSION wins. Read at registry init, so set it first.
+            static std::once_flag fuse_once;
+            std::call_once(fuse_once, [] { setenv_default("GGML_HEXAGON_OPFUSION", "0"); });
+            hexagon_default_skel_path();
+            ggml_backend_reg_t reg  = ggml_backend_hexagon_reg();
+            const char *       what = "Hexagon";
+#else
+            // Adreno's "xmem" F16xF32 GEMM prepacks weights into images: it
+            // rounds activations (SmolVLA 5.0e-3 max|delta| against an F32
+            // reference, 2.9e-4 without it) and aborts with CL_OUT_OF_RESOURCES
+            // on GR00T N1.7's larger weights. It is ~1.4x faster where it works,
+            // so only a default: GGML_OPENCL_ADRENO_XMEM_GEMM=1 turns it back on.
+            static std::once_flag xmem_once;
+            std::call_once(xmem_once, [] { setenv_default("GGML_OPENCL_ADRENO_XMEM_GEMM", "0"); });
+            ggml_backend_reg_t reg  = ggml_backend_opencl_reg();
+            const char *       what = "OpenCL";
+#endif
+            const int      dev   = backend_device_index();
+            const size_t   n_dev = reg ? ggml_backend_reg_dev_count(reg) : 0;
+            ggml_backend_t accel = nullptr;
+            if ((size_t) dev >= n_dev) {
+                std::fprintf(stderr,
+                             "%s: %s device %d out of range (%zu visible); falling back to CPU\n",
+                             tag, what, dev, n_dev);
+            } else if (!(accel = ggml_backend_dev_init(ggml_backend_reg_dev_get(reg, dev), nullptr))) {
+                std::fprintf(stderr, "%s: %s init failed; falling back to CPU\n", tag, what);
+            } else if ((b.handle = fallback_backend_new(accel, n_threads)) != nullptr) {
+                std::printf("%s: backend = %s (%s), rejected ops on CPU (%d threads)\n",
+                            tag, what, ggml_backend_name(b.handle), n_threads);
+            }
         }
     }
 #endif

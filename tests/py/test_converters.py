@@ -305,6 +305,7 @@ def test_turbovla_converter_remap():
         "vit.blk.0.attn_v.weight", "vit.blk.0.attn_v.bias", "vit.blk.0.attn_o.weight", "vit.blk.0.attn_o.bias",
         "vit.blk.0.ln1.weight", "vit.blk.0.ln1.bias", "vit.blk.0.ln2.weight", "vit.blk.0.ln2.bias",
         "vit.blk.0.fc1.weight", "vit.blk.0.fc1.bias", "vit.blk.0.fc2.weight", "vit.blk.0.fc2.bias",
+        "vit.norm.weight", "vit.norm.bias",
         "text.embed.word_embeddings", "text.embed.position_embeddings", "text.embed.token_type_embeddings",
         "text.embed.LayerNorm.weight", "text.embed.LayerNorm.bias",
         "text.encoder.layer.0.attention.self.query.weight", "text.encoder.layer.0.attention.self.query.bias",
@@ -346,6 +347,82 @@ def test_turbovla_converter_remap():
         "action_head.state_projection.net.4.weight",
         "view_embedding",
     } <= set(tensors.keys_read)
+
+
+def test_act_converter_remap():
+    import importlib
+
+    A = importlib.import_module("convert_act_to_gguf")
+    tensors = _SourceTensors()
+    writer = _Writer()
+    # Folding needs real tensors; the remap only needs to know which ones were read.
+    fold_bn, A.fold_bn = A.fold_bn, lambda w, bn, t: (t[f"{bn}.weight"], w)
+    try:
+        A.write_backbone(writer, tensors, (1, 1, 1, 1))
+    finally:
+        A.fold_bn = fold_bn
+    assert writer.names[:4] == ["bb.conv1.weight", "bb.conv1.bias", "bb.layer1.0.conv1.weight", "bb.layer1.0.conv1.bias"]
+    assert writer.names[-2:] == ["bb.layer4.0.down.weight", "bb.layer4.0.down.bias"]
+    assert {"model.backbone.conv1.weight", "model.backbone.bn1.weight", "model.backbone.layer4.0.downsample.0.weight",
+            "model.backbone.layer4.0.downsample.1.weight"} <= set(tensors.keys_read)
+
+    class _Rows(_Tensor):
+        def __getitem__(self, s): return self  # in_proj is sliced into q, k, v
+
+    class _SlicedSource(_SourceTensors):
+        def __getitem__(self, key):
+            self.keys_read.append(key)
+            return _Rows()
+
+    tensors = _SlicedSource()
+    writer = _Writer()
+    A.write_transformer(writer, tensors, 1, 1, 4, pre_norm=False)
+    attn = ["{}_" + f"{x}.{y}" for x in "qkvo" for y in ("weight", "bias")]
+    enc = [a.format("enc.blk.0.attn") for a in attn]
+    ffn = lambda p, n: [f"{p}.fc1.weight", f"{p}.fc1.bias", f"{p}.fc2.weight", f"{p}.fc2.bias"] + \
+        [f"{p}.ln{i}.{y}" for i in range(1, n + 1) for y in ("weight", "bias")]
+    assert writer.names == enc + ffn("enc.blk.0", 2) + [a.format("dec.blk.0.attn") for a in attn] + \
+        [a.format("dec.blk.0.cross") for a in attn] + ffn("dec.blk.0", 3) + ["dec.norm.weight", "dec.norm.bias"]
+    assert "model.decoder.layers.0.multihead_attn.in_proj_weight" in tensors.keys_read
+    assert "model.encoder.norm.weight" not in tensors.keys_read
+
+
+def test_quantize_skip_names():
+    import importlib
+    Q = importlib.import_module("quantize_gguf")
+    default = Q.SKIP + Q.SKIP_VISION
+    keep = [
+        "aex.blk.0.attn_q.weight", "aex.vlsa.0.ff0.weight", "aex.head.fc1.weight", "aex.seq_pool.weight",
+        "ah.act_enc.l2.weight", "act.dec.0.fc1.weight", "octo.head.diffusion.reverse.out.weight",
+        "octo.t5.tok_embd.weight", "vis.d.blk.0.qkv.weight", "vis.s.blk.0.fc1.weight",
+        "octo.obs.primary.proj.weight",
+    ]
+    pack = [
+        "vlm.blk.0.attn_q.weight", "lm.blk.0.ffn_up.weight", "octo.t5.blk.0.attn_q.weight",
+        "text.encoder.layer.0.attention.self.query.weight", "mm.fc1.weight", "vis.proj.fc1.weight",
+    ]
+    for n in keep:
+        assert not Q.eligible(n, (64, 64), "Q8_0", default), n
+    for n in pack:
+        assert Q.eligible(n, (64, 64), "Q8_0", default), n
+    assert Q.eligible("vis.d.blk.0.qkv.weight", (64, 64), "Q8_0", Q.SKIP)
+
+
+def test_find_sidecar():
+    import tempfile
+    from gguf_common import find_sidecar
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        try:
+            find_sidecar(d, "action_head")
+            raise AssertionError("missing sidecar must exit")
+        except SystemExit:
+            pass
+        (d / "action_head--checkpoint.pt").touch()
+        assert find_sidecar(d, "action_head").name == "action_head--checkpoint.pt"
+        for step in (5000, 30000, 10000):
+            (d / f"action_head--{step}_checkpoint.pt").touch()
+        assert find_sidecar(d, "action_head").name == "action_head--30000_checkpoint.pt"
 
 
 def test_every_converter_imports():

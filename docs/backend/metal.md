@@ -85,8 +85,8 @@ transport, no simulator, no claim about task success. Apple M5 Max (18-core CPU,
 40-core GPU, 64 GB unified memory), macOS 26.6.1, High Power Mode, llama.cpp
 `b10331`, weights as shipped, 20 reps after 3 warmups, best of three sweeps (the
 sweep with the lowest p50), each model at its native input size and view count -
-the same counts the RTX 5090 table in
-[the README](../../README.md#benchmarks) uses, so the two compare cell for cell.
+the same counts the
+[RTX 5090 report](../benchmark/rtx-5090.md) uses, so the two compare cell for cell.
 
 | Model | Views | Input | min ms | p50 ms | p90 ms | vision ms |
 |---|--:|--:|--:|--:|--:|--:|

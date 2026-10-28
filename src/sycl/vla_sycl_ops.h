@@ -14,18 +14,20 @@
 
 #pragma once
 
-#include <cstdint>
-#include <string>
-#include <vector>
+// Registration for the in-tree BF16 SYCL kernels (src/sycl/vla_sycl_bf16.cpp).
+// The twin of cuda/vla_cuda_ops.h.
+//
+// Off every other build: without SYCL there is no hook to install and the BF16
+// activation path is unreachable anyway, so this compiles to nothing.
 
 namespace vla {
 
-// T5 SentencePiece-unigram tokenization, against the vocab the converter baked
-// into the GGUF. Pads or truncates to octo.tokens.language and appends EOS,
-// matching t5-base at max_length=16, padding="max_length", truncation=True.
-bool octo_tokenize_text(const std::string& ckpt_path,
-                        const std::string& text,
-                        std::vector<int32_t>& input_ids,
-                        std::vector<int32_t>& attention_mask);
+#ifdef GGML_USE_SYCL
+void sycl_register_bf16_ops();
+void sycl_register_fused_ops();  // vla_sycl_fused.cpp: layers/fused_ew.h nodes
+#else
+inline void sycl_register_bf16_ops() {}
+inline void sycl_register_fused_ops() {}
+#endif
 
 }  // namespace vla

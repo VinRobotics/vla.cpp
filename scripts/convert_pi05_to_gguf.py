@@ -24,6 +24,7 @@ from safetensors import safe_open
 
 from gguf_blocks import (
     norm_eps,
+    pi_root,
     probe_paligemma_vision,
     write_decoder_blocks,
     write_paligemma_vision,
@@ -89,11 +90,11 @@ PROJ_SUFFIXES = [
     "action_out_proj.bias",
 ]
 
-def _write_adarms_blocks(writer, sf, n_layers: int) -> None:
+def _write_adarms_blocks(writer, sf, aex: str, n_layers: int) -> None:
 
     for i in range(n_layers):
         for src_suf, dst_suf in AEX_MAP:
-            add(writer, f"aex.blk.{i}.{dst_suf}", sf.get_tensor(f"{PFX_AEX}.layers.{i}.{src_suf}"))
+            add(writer, f"aex.blk.{i}.{dst_suf}", sf.get_tensor(f"{aex}.layers.{i}.{src_suf}"))
 
 def _load_dataset_stats(
     stats_json: Optional[Path],
@@ -121,6 +122,9 @@ def _load_dataset_stats(
                 out[q] = np.asarray(s[q], dtype=np.float32).reshape(-1)[:dim]
             return out
 
+        if "norm_stats" in d:
+            # OpenPI assets/<org>/<dataset>/norm_stats.json: {"norm_stats": {"state": .., "actions": ..}}
+            d = {"observation.state": d["norm_stats"]["state"], "action": d["norm_stats"]["actions"]}
         st = grab("observation.state", state_dim)
         ac = grab("action", action_dim)
         return {
@@ -149,30 +153,37 @@ def _load_dataset_stats(
         "--dataset-stats <meta/stats.json> or --dataset-repo lerobot/libero. "
         "Refusing to bake identity stats (would make the policy miss; skill footgun #1).")
 
-def main() -> int:
-    ap = arg_parser(ARCH, "lerobot π0.5 checkpoint dir (model.safetensors + config.json + policy_*processor.json)")
-    ap.add_argument(
-        "--dataset-stats",
-        type=Path,
-        default=None,
-        help="Path to a LIBERO dataset meta/stats.json for MEAN_STD norm stats"
-    )
-    ap.add_argument(
-        "--dataset-repo",
-        type=str,
-        default=None,
-        help="HF dataset repo to fetch meta/stats.json from (e.g. lerobot/libero)"
-    )
-    args = ap.parse_args()
+def convert(ckpt: Path, out: Path, *, writer_factory=open_writer, dataset_stats: Optional[Path] = None,
+            dataset_repo: Optional[str] = None, config: Optional[dict] = None) -> Path:
+    """Write the GGUF for the checkpoint at `ckpt` to `out` and return `out`.
 
-    ckpt = args.ckpt.resolve()
-    out  = resolve_out(args, ckpt, ARCH)
+    `writer_factory(out, arch)` supplies the gguf.GGUFWriter; the quantized-model converter passes one
+    that rewrites the FoldQuant sites (docs/QUANTIZATION.md) as they are added.
+    `dataset_stats` / `dataset_repo` are --dataset-stats / --dataset-repo (a
+    LeRobot meta/stats.json or an OpenPI norm_stats.json). `config` supplies the
+    lerobot policy fields (chunk_size, num_inference_steps, n_action_steps,
+    max_state_dim, max_action_dim, min_period, max_period, tokenizer_max_length,
+    input_features, output_features) for an OpenPI-converted checkpoint whose
+    config.json carries none of them (--config-json)."""
+    ckpt = ckpt.resolve()
+    out  = out.resolve()
     sf_path = ckpt / "model.safetensors"
     require(sf_path)
 
-    cfg_json = read_json(ckpt / "config.json")
+    # An OpenPI checkpoint may carry no config.json at all; `config` then supplies everything.
+    cfg_json = read_json(ckpt / "config.json") if (ckpt / "config.json").exists() or config is None else {}
     if cfg_json.get("type") != ARCH:
-        raise SystemExit(f"config.json type is {cfg_json.get('type')!r}, expected 'pi05'")
+        if config is None:
+            raise SystemExit(f"config.json type is {cfg_json.get('type')!r}, expected 'pi05'")
+        # An OpenPI-converted checkpoint (config.json carries only the variants):
+        # the policy fields come from the caller (the quantized model's export metadata, or
+        # --config-json), in the lerobot field names.
+        cfg_json = {**cfg_json, **config}
+    norm_map = cfg_json.get("normalization_mapping") or {}
+    norm_mode = norm_map.get("ACTION", "QUANTILES")
+    if norm_mode != "QUANTILES" or norm_map.get("STATE", "QUANTILES") != norm_mode:
+        raise SystemExit(f"unsupported pi05 normalization_mapping {norm_map}: only QUANTILES is supported, "
+                         f"the state prompt is always binned with q01/q99")
 
     cfg = dict(GEMMA_2B, **GEMMA_300M)
     cfg["paligemma_variant"]     = str(cfg_json.get("paligemma_variant", "gemma_2b"))
@@ -190,22 +201,25 @@ def main() -> int:
     cfg["rope_theta"]            = ROPE_THETA
     cfg["rms_norm_eps"]          = RMS_NORM_EPS
     cfg["norm_eps"]              = norm_eps(ckpt)
+    cfg["norm_mode"]             = norm_mode.lower()
 
     print(f"opening {sf_path}")
     sf = safe_open(sf_path, framework="pt")
     keys = set(sf.keys())
+    root = pi_root(keys)
+    vlm, head, aex = root + PFX_VLM, root + PFX_VLM_HEAD, root + PFX_AEX
 
-    n_layers_vlm = max_layer(keys, f"{PFX_VLM}.layers.")
-    n_layers_aex = max_layer(keys, f"{PFX_AEX}.layers.")
+    n_layers_vlm = max_layer(keys, f"{vlm}.layers.")
+    n_layers_aex = max_layer(keys, f"{aex}.layers.")
     if n_layers_vlm <= 0:
         raise SystemExit("cannot find PaliGemma language-model layers in checkpoint")
     if n_layers_aex != n_layers_vlm:
         raise SystemExit(f"layer count mismatch: VLM={n_layers_vlm} expert={n_layers_aex}")
     cfg["n_layers"] = n_layers_vlm
 
-    q0    = sf.get_slice(f"{PFX_VLM}.layers.0.self_attn.q_proj.weight").get_shape()
-    kv0   = sf.get_slice(f"{PFX_VLM}.layers.0.self_attn.k_proj.weight").get_shape()
-    gate0 = sf.get_slice(f"{PFX_VLM}.layers.0.mlp.gate_proj.weight").get_shape()
+    q0    = sf.get_slice(f"{vlm}.layers.0.self_attn.q_proj.weight").get_shape()
+    kv0   = sf.get_slice(f"{vlm}.layers.0.self_attn.k_proj.weight").get_shape()
+    gate0 = sf.get_slice(f"{vlm}.layers.0.mlp.gate_proj.weight").get_shape()
     if q0[1] != cfg["hidden"]:
         raise SystemExit(f"hidden mismatch: cfg={cfg['hidden']} ckpt={q0[1]}")
     if q0[0] != cfg["n_q_heads"] * cfg["head_dim"]:
@@ -215,15 +229,15 @@ def main() -> int:
     if gate0[0] != cfg["intermediate"]:
         raise SystemExit(f"intermediate mismatch: cfg={cfg['intermediate']} ckpt={gate0[0]}")
 
-    ada0 = sf.get_slice(f"{PFX_AEX}.layers.0.input_layernorm.dense.weight").get_shape()
+    ada0 = sf.get_slice(f"{aex}.layers.0.input_layernorm.dense.weight").get_shape()
     if ada0 != [3 * cfg["expert_h"], cfg["expert_h"]]:
         raise SystemExit(f"expert adaRMS dense shape {ada0} != [3*expert_h, expert_h] "
                          f"{[3*cfg['expert_h'], cfg['expert_h']]}")
-    aex_o0 = sf.get_slice(f"{PFX_AEX}.layers.0.self_attn.o_proj.weight").get_shape()
+    aex_o0 = sf.get_slice(f"{aex}.layers.0.self_attn.o_proj.weight").get_shape()
     if aex_o0 != [cfg["expert_h"], cfg["n_q_heads"] * cfg["head_dim"]]:
         raise SystemExit(f"expert o_proj shape {aex_o0} unexpected")
 
-    cfg["vocab_size"] = int(sf.get_slice(PFX_VLM_HEAD).get_shape()[0])
+    cfg["vocab_size"] = int(sf.get_slice(head).get_shape()[0])
 
     print(f"resolved cfg: hidden={cfg['hidden']} n_layers={cfg['n_layers']} "
           f"expert_h={cfg['expert_h']} vocab={cfg['vocab_size']} chunk={cfg['chunk_size']} "
@@ -231,7 +245,8 @@ def main() -> int:
           f"real_action={cfg['real_action_dim']} max_len={cfg['tokenizer_max_length']} "
           f"norm_eps={cfg['norm_eps']:g}")
 
-    cfg["vit"] = probe_paligemma_vision(sf, keys, cfg_json, PFX_VIS_CANDIDATES, PFX_MMP_CANDIDATES)
+    cfg["vit"] = probe_paligemma_vision(sf, keys, cfg_json, [root + p for p in PFX_VIS_CANDIDATES],
+                                        [root + p for p in PFX_MMP_CANDIDATES])
     v = cfg["vit"]
     print(f"vision: SigLIP hidden={v['vit_hidden']} layers={v['vit_layers']} "
           f"heads={v['vit_heads']} image={v['image_size']} patch={v['patch_size']} "
@@ -239,37 +254,65 @@ def main() -> int:
 
     print("loading dataset normalizer stats...")
     stats = _load_dataset_stats(
-        args.dataset_stats,
-        args.dataset_repo,
+        dataset_stats,
+        dataset_repo,
         cfg["real_state_dim"],
         cfg["real_action_dim"]
     )
     print(f"  state_q01[:3]={stats['state_q01'][:3]}  state_q99[:3]={stats['state_q99'][:3]}")
     print(f"  action_q01[:3]={stats['action_q01'][:3]}  action_q99[:3]={stats['action_q99'][:3]}  (QUANTILES)")
 
-    writer = open_writer(out, ARCH)
+    writer = writer_factory(out, ARCH)
     write_pi_kv(writer, KV, cfg, adarms=True)
 
-    add(writer, "token_embd.weight",      sf.get_tensor(PFX_VLM_HEAD))
-    add(writer, "vlm.output_norm.weight", sf.get_tensor(f"{PFX_VLM}.norm.weight"))
-    write_decoder_blocks(writer, sf.get_tensor, PFX_VLM, "vlm", cfg["n_layers"])
+    add(writer, "token_embd.weight",      sf.get_tensor(head))
+    add(writer, "vlm.output_norm.weight", sf.get_tensor(f"{vlm}.norm.weight"))
+    write_decoder_blocks(writer, sf.get_tensor, vlm, "vlm", cfg["n_layers"])
 
-    add(writer, "aex.output_norm.weight", sf.get_tensor(f"{PFX_AEX}.norm.dense.weight"))
-    add(writer, "aex.output_norm.bias",   sf.get_tensor(f"{PFX_AEX}.norm.dense.bias"))
-    _write_adarms_blocks(writer, sf, cfg["n_layers"])
+    add(writer, "aex.output_norm.weight", sf.get_tensor(f"{aex}.norm.dense.weight"))
+    add(writer, "aex.output_norm.bias",   sf.get_tensor(f"{aex}.norm.dense.bias"))
+    _write_adarms_blocks(writer, sf, aex, cfg["n_layers"])
 
     for suf in PROJ_SUFFIXES:
-        add(writer, suf, sf.get_tensor(suf))
+        add(writer, suf, sf.get_tensor(root + suf))
 
     write_paligemma_vision(writer, sf, cfg["vit"])
 
     for name, vec in stats.items():
         add_array(writer, name, vec)
 
-    rc = finish(writer, out)
+    finish(writer, out)
     print("note: self-contained GGUF — SigLIP vision tower + PaliGemma projector are baked in; "
           "no separate mmproj is needed.")
-    return rc
+    return out
+
+def main() -> int:
+    ap = arg_parser(ARCH, "lerobot π0.5 checkpoint dir (model.safetensors + config.json + policy_*processor.json)")
+    ap.add_argument(
+        "--dataset-stats",
+        type=Path,
+        default=None,
+        help="Path to a LIBERO dataset meta/stats.json for QUANTILES norm stats"
+    )
+    ap.add_argument(
+        "--dataset-repo",
+        type=str,
+        default=None,
+        help="HF dataset repo to fetch meta/stats.json from (e.g. lerobot/libero)"
+    )
+    ap.add_argument(
+        "--config-json",
+        type=Path,
+        default=None,
+        help="[OpenPI-converted checkpoint] JSON with the lerobot policy fields its config.json lacks "
+             "(chunk_size, num_inference_steps, n_action_steps, max_state_dim, max_action_dim, "
+             "min_period, max_period, tokenizer_max_length, input_features, output_features)"
+    )
+    args = ap.parse_args()
+    ckpt = args.ckpt.resolve()
+    convert(ckpt, resolve_out(args, ckpt, ARCH), dataset_stats=args.dataset_stats, dataset_repo=args.dataset_repo,
+            config=read_json(args.config_json) if args.config_json else None)
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -7,7 +7,7 @@
 //
 // Single-threaded request loop (the orchestrator drives it serially). Spawned
 // servers are detached into their own session/group so `stop` can signal the
-// whole group; dead detached children are reaped at the top of the loop.
+// whole group; only `stop` or a respawn reaps them, so a dead one keeps its pgid.
 //
 // Security: with --token T (or env VLA_CI_TOKEN) every request must carry a
 // matching token. Bind to a LAN address only - this runs arbitrary commands by
@@ -41,14 +41,6 @@ using vla_ctl::Reply;
 namespace {
 
 std::map<std::string, pid_t> g_spawned;   // name -> session-leader pid
-
-std::vector<char*> to_argv(const google::protobuf::RepeatedPtrField<std::string>& a) {
-    std::vector<char*> v;
-    v.reserve(a.size() + 1);
-    for (const auto& s : a) v.push_back(const_cast<char*>(s.c_str()));
-    v.push_back(nullptr);
-    return v;
-}
 
 void apply_env(const google::protobuf::RepeatedPtrField<std::string>& env) {
     for (const auto& kv : env) {
@@ -297,20 +289,19 @@ void handle(const Request& req, Reply& rep) {
 
 int main(int argc, char** argv) {
     GOOGLE_PROTOBUF_VERIFY_VERSION;
-    std::string bind = "tcp://*:5600";
+    std::string bind = "tcp://127.0.0.1:5600";
     std::string token = std::getenv("VLA_CI_TOKEN") ? std::getenv("VLA_CI_TOKEN") : "";
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--bind" && i + 1 < argc) bind = argv[++i];
         else if (a == "--token" && i + 1 < argc) token = argv[++i];
         else if (a == "-h" || a == "--help") {
-            std::printf("usage: %s [--bind tcp://*:5600] [--token SECRET]\n", argv[0]);
+            std::printf("usage: %s [--bind tcp://127.0.0.1:5600] [--token SECRET]\n", argv[0]);
             return 0;
         } else { std::fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 2; }
     }
 
-    // A dropped peer must not kill us with SIGPIPE; detached children are reaped
-    // at the top of the request loop instead.
+    // A dropped peer must not kill us with SIGPIPE.
     signal(SIGPIPE, SIG_IGN);
 
     zmq::context_t zctx(1);
@@ -323,7 +314,6 @@ int main(int argc, char** argv) {
 
     zmq::pollitem_t poll[] = {{static_cast<void*>(sock), 0, ZMQ_POLLIN, 0}};
     for (;;) {
-        while (waitpid(-1, nullptr, WNOHANG) > 0) {}   // reap dead detached children
         try {
             zmq::poll(poll, 1, std::chrono::milliseconds(200));
         } catch (const zmq::error_t&) { continue; }

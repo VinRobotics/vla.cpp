@@ -1,9 +1,9 @@
 # vla.cpp cross-platform CI
 
-Per-PR regression gate for `vla.cpp` across the three target platforms - RTX 3090
-(`rtx3090`), Jetson Orin Nano (`orin`), Apple M4 (`m4`). On a PR from `dev` into
-`main`, each platform's `vla-server` is evaluated in LIBERO and gated on success
-rate (client side) + latency / memory (server side).
+Regression gate for `vla.cpp` across the three target platforms - RTX 3090
+(`rtx3090`), Jetson Orin Nano (`orin`), Apple M4 (`m4`). On every push to `dev`,
+each platform's `vla-server` is evaluated in LIBERO and gated on success rate
+(client side) + latency / memory (server side).
 
 Machines are referred to by **role** (`orchestrator`) and **platform key**; real
 hostnames / IPs live only in the gitignored `ci/config/hosts.env`.
@@ -37,7 +37,9 @@ Every cell is **10 tasks × 1 episode**.
 
 ## Gating
 
-- **SR** (client side) - must be **> 0**.
+- **SR** (client side) - must be **≥ 0.5× `sr_reported`** of the baseline
+  (`sr_tolerance` in `ci/baselines/<platform>.json` overrides 0.5; **> 0** where a
+  model has no `sr_reported`).
 - **Server latency & memory** - must be **≤ 1.10× baseline**
   (`ci/baselines/<platform>.json`). M4 memory has no baseline (recorded, not gated).
 
@@ -65,7 +67,8 @@ $EDITOR ci/config/hosts.env     # LAN IPs, ctrl/data ports, repo paths, MODELS_R
 ### 3. Bring up servers + agents, check with ping
 
 On each server (its own git checkout, with `vla-server` already built), run the
-agent as a service (systemd / launchd / nohup):
+agent as a service (systemd / launchd / nohup). It binds 127.0.0.1 unless given
+`--bind`:
 
 ```bash
 ci/agent/build/vla-ci-agent --bind 'tcp://*:5600' [--token "$VLA_CI_TOKEN"]
@@ -113,5 +116,17 @@ python ci/check_thresholds.py --platform rtx3090 \
 ## CI trigger
 
 `.github/workflows/vla-ci.yml` runs `ci/orchestrate.sh all` on a self-hosted
-runner labelled `vla-ci-orchestrator` for PRs from `dev` into `main`, and uploads
-`outputs/ci/` as an artifact.
+runner labelled `vla-ci-orchestrator` on every push to `dev` (or by hand via
+workflow_dispatch), and uploads `outputs/ci/` as an artifact. It sets
+`VLA_CI_EXPECTED_COMMIT` to the pushed commit, so every server first fetches that
+commit from its `origin`, checks it out and rebuilds (`ci/build_servers.sh`); the
+gate fails if a server is on any other commit. The runner's `.env` must set
+`VLA_CI_HOSTS_ENV` to a hosts.env outside the workspace (checkout wipes ignored
+files).
+
+It does not run on `pull_request`: a PR run takes its workflow file from the PR's
+merge commit, so a fork could drop any guard in it and reach the LAN agents. Put
+the orchestrator runner in an org runner group whose workflow access is restricted
+to `VinRobotics/vla.cpp/.github/workflows/vla-ci.yml@refs/heads/dev`. A path-only
+restriction is not enough, because a fork edits the same path. With that group,
+a manual dispatch gets a runner only when run from `dev`.

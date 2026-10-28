@@ -21,7 +21,9 @@
 
 #include "ggml.h"
 
+#include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace vla {
 
@@ -51,10 +53,11 @@ inline ggml_tensor * rope_2d(ggml_context * C, ggml_tensor * x, ggml_tensor * co
     const int64_t hd = x->ne[0];
     const int64_t S  = x->ne[1];
     const int64_t Hh = x->ne[2];
+    const int64_t nv = x->ne[3];
     const int64_t half = hd/2;
 
-    ggml_tensor * x1  = ggml_cont(C, ggml_view_3d(C, x, half, S, Hh, x->nb[1], x->nb[2], 0));
-    ggml_tensor * x2  = ggml_cont(C, ggml_view_3d(C, x, half, S, Hh, x->nb[1], x->nb[2], (size_t)half*x->nb[0]));
+    ggml_tensor * x1  = ggml_cont(C, ggml_view_4d(C, x, half, S, Hh, nv, x->nb[1], x->nb[2], x->nb[3], 0));
+    ggml_tensor * x2  = ggml_cont(C, ggml_view_4d(C, x, half, S, Hh, nv, x->nb[1], x->nb[2], x->nb[3], (size_t)half*x->nb[0]));
     ggml_tensor * rot = ggml_concat(C, ggml_neg(C, x2), x1, 0);
     return ggml_add(C, ggml_mul(C, x, cos_t), ggml_mul(C, rot, sin_t));
 }
@@ -73,6 +76,21 @@ inline ggml_tensor * rope_pairwise(ggml_context * C, ggml_tensor * x, ggml_tenso
     ggml_tensor * c = ggml_reshape_3d(C, cs, HD, x->ne[1], 1);
     ggml_tensor * s = ggml_reshape_3d(C, sn, HD, x->ne[1], 1);
     return ggml_add(C, ggml_mul(C, x, c), ggml_mul(C, rope_pairwise_rot(C, x, HD), s));
+}
+
+inline void rope_pairwise_table(int64_t HD, int64_t T, float base, std::vector<float> & cs, std::vector<float> & sn) {
+    const int64_t half = HD/2;
+    cs.resize((size_t)(HD*T));
+    sn.resize((size_t)(HD*T));
+    for (int64_t t = 0; t < T; ++t) {
+        for (int64_t mi = 0; mi < HD; ++mi) {
+            const int64_t j   = mi % half;
+            const double  inv = 1.0/std::pow((double)base, (2.0*j)/(double)HD);
+            const double  a   = (double)t*inv;
+            cs[t*HD + mi] = (float)std::cos(a);
+            sn[t*HD + mi] = (float)std::sin(a);
+        }
+    }
 }
 
 }

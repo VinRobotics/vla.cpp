@@ -16,7 +16,8 @@
 // BERT-base over the instruction, six Grounding-DINO bi-attention fusion layers
 // each followed by a text enhancer, and a three-layer ACT decoder whose twelve
 // learned queries read the fused tokens plus two state tokens. One forward pass,
-// no denoising loop, so the whole model is one cached graph.
+// no denoising loop, so the model is one cached graph plus a BERT graph that
+// reruns only when the instruction changes.
 
 #include "arch.h"
 #include "backend.h"
@@ -26,8 +27,10 @@
 #include "model.h"
 #include "options.h"
 #include "scratch_ctx.h"
+#include "cuda/vla_cuda_ops.h"
 #include "layers/attn.h"
 #include "layers/ffn.h"
+#include "layers/fused_ops.h"
 #include "layers/linear.h"
 #include "layers/norm.h"
 #include "modules/preprocess.h"
@@ -100,6 +103,7 @@ struct TurboVlaModelArch : public ModelArchBase {
     TurboVlaModelArch() : ModelArchBase(Arch::TURBOVLA) {}
     ~TurboVlaModelArch() override {
         graph.release();
+        text.release();
         if (const_buf)   ggml_backend_buffer_free(const_buf);
         if (ctx_const)   ggml_free(ctx_const);
         if (weight_buf)  ggml_backend_buffer_free(weight_buf);
@@ -114,6 +118,7 @@ struct TurboVlaModelArch : public ModelArchBase {
     ggml_context *        ctx_const   = nullptr;
     ggml_backend_buffer_t const_buf   = nullptr;
     ggml_type             mt          = GGML_TYPE_F32;
+    bool                  fused_ops   = false;   // CUDA fused (bit-exact) paths
 
     int64_t hidden = 256, n_views = 2, image_size = 256, patch = 16, n_reg = 4;
     int64_t vit_dim = 768, vit_layers = 12, vit_heads = 12;
@@ -127,6 +132,7 @@ struct TurboVlaModelArch : public ModelArchBase {
 
     ggml_tensor *patch_w = nullptr, *patch_b = nullptr, *cls_tok = nullptr, *reg_tok = nullptr;
     std::vector<VitLayerW> vit;
+    ggml_tensor *vit_norm_w = nullptr, *vit_norm_b = nullptr;
     ggml_tensor *vp_in_w = nullptr, *vp_in_b = nullptr, *vp_fc1_w = nullptr, *vp_fc1_b = nullptr;
     ggml_tensor *vp_fc2_w = nullptr, *vp_fc2_b = nullptr, *vp_skip_w = nullptr;
     ggml_tensor *vp_out_w = nullptr, *vp_out_b = nullptr, *view_emb = nullptr;
@@ -148,25 +154,31 @@ struct TurboVlaModelArch : public ModelArchBase {
     // over heads. Rows for the CLS and register tokens are the identity (cos 1,
     // sin 0), which lets the rotation cover the whole sequence instead of
     // splitting off the prefix in every layer. rope_sin carries rotate_half's
-    // sign: negative on the first half of the head.
-    ggml_tensor *rope_cos = nullptr, *rope_sin = nullptr;
+    // sign: negative on the first half of the head. rope_sin_abs is sin itself,
+    // the table the fused path's rotation takes.
+    ggml_tensor *rope_cos = nullptr, *rope_sin = nullptr, *rope_sin_abs = nullptr;
 
     struct Key {
         int64_t bert_len = -1;
         bool operator==(const Key & o) const { return bert_len == o.bert_len; }
     };
     struct IO {
-        ggml_tensor *patches = nullptr, *ids = nullptr, *pos = nullptr, *bert_mask = nullptr;
-        ggml_tensor *enh_mask = nullptr, *fus_mask = nullptr, *state = nullptr, *actions = nullptr;
+        ggml_tensor *patches = nullptr, *enh_mask = nullptr, *fus_mask = nullptr, *state = nullptr, *actions = nullptr;
     };
-    graph_cache<Key, IO> graph;
+    struct TextIO {
+        ggml_tensor *ids = nullptr, *pos = nullptr, *bert_mask = nullptr, *lang = nullptr;
+    };
+    graph_cache<Key, IO>     graph;
+    graph_cache<Key, TextIO> text;
+    std::vector<int32_t>     text_ids;
 
     int64_t grid() const      { return image_size / patch; }
     int64_t n_patches() const { return grid() * grid(); }
     int64_t vit_seq() const   { return 1 + n_reg + n_patches(); }
 
     int64_t text_len(const int32_t * ids, int64_t n) const;
-    ggml_cgraph * build(ggml_context * C, IO & io, int64_t bert_len) const;
+    ggml_cgraph * build_text(ggml_context * C, TextIO & io, int64_t bert_len) const;
+    ggml_cgraph * build(ggml_context * C, IO & io, ggml_tensor * text_out) const;
     bool upload_rope_tables();
 
     std::vector<float> predict(const Inputs& in) override;
@@ -210,9 +222,8 @@ ggml_tensor * vit_attention(ggml_context * C, ggml_tensor * qkv, ggml_tensor * c
     ggml_tensor * k = rope_heads(C, split_heads(C, qkv, hd, heads, T, nv, 1), cos_t, sin_signed);
     ggml_tensor * v = split_heads(C, qkv, hd, heads, T, nv, 2);
     if (flash) {
-        ggml_tensor * o = flash_attention(C, ggml_permute(C, q, 0, 2, 1, 3), ggml_permute(C, k, 0, 2, 1, 3),
-                                          ggml_permute(C, v, 0, 2, 1, 3), nullptr, scale);
-        return ggml_reshape_3d(C, o, hd*heads, T, nv);
+        return flash_attention(C, ggml_permute(C, q, 0, 2, 1, 3), ggml_permute(C, k, 0, 2, 1, 3),
+                               ggml_permute(C, v, 0, 2, 1, 3), nullptr, scale);
     }
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, q, 0, 2, 1, 3));
     ggml_tensor * K = ggml_cont(C, ggml_permute(C, k, 0, 2, 1, 3));
@@ -273,12 +284,13 @@ bool TurboVlaModelArch::upload_rope_tables() {
     // [-1, 1] per axis, head_dim/4 periods base^(4i/head_dim), angles ordered
     // [h, w, h, w] across the head, rotated half-split. See rope_heads.
     const int64_t hd = vit_dim / vit_heads, q = hd / 4, T = vit_seq(), g = grid(), pre = 1 + n_reg;
-    std::vector<float> c((size_t) hd*T, 1.0f), s((size_t) hd*T, 0.0f);
+    std::vector<float> c((size_t) hd*T, 1.0f), s((size_t) hd*T, 0.0f), sa((size_t) hd*T, 0.0f);
     for (int64_t p = 0; p < n_patches(); ++p) {
         const float h = 2.0f * ((float) (p / g) + 0.5f) / (float) g - 1.0f;
         const float w = 2.0f * ((float) (p % g) + 0.5f) / (float) g - 1.0f;
         float * cr = c.data() + (size_t) (pre + p)*hd;
         float * sr = s.data() + (size_t) (pre + p)*hd;
+        float * ar = sa.data() + (size_t) (pre + p)*hd;
         for (int64_t i = 0; i < q; ++i) {
             const float period = std::pow(rope_theta, 4.0f * (float) i / (float) hd);
             const float ah = 6.28318530717958647692f * h / period;
@@ -287,57 +299,29 @@ bool TurboVlaModelArch::upload_rope_tables() {
                 const float a = (blk % 2 == 0) ? ah : aw;
                 cr[blk*q + i] = std::cos(a);
                 sr[blk*q + i] = blk < 2 ? -std::sin(a) : std::sin(a);
+                ar[blk*q + i] = std::sin(a);
             }
         }
     }
 
-    ggml_init_params p = { 2*ggml_tensor_overhead(), nullptr, true };
+    ggml_init_params p = { 3*ggml_tensor_overhead(), nullptr, true };
     ctx_const = ggml_init(p);
     if (!ctx_const)
         return false;
     rope_cos = ggml_new_tensor_3d(ctx_const, GGML_TYPE_F32, hd, 1, T);
     rope_sin = ggml_new_tensor_3d(ctx_const, GGML_TYPE_F32, hd, 1, T);
+    rope_sin_abs = ggml_new_tensor_2d(ctx_const, GGML_TYPE_F32, hd, T);
     const_buf = alloc_weights(ctx_const, backend);
     if (!const_buf)
         return false;
     ggml_backend_tensor_set(rope_cos, c.data(), 0, ggml_nbytes(rope_cos));
     ggml_backend_tensor_set(rope_sin, s.data(), 0, ggml_nbytes(rope_sin));
+    ggml_backend_tensor_set(rope_sin_abs, sa.data(), 0, ggml_nbytes(rope_sin_abs));
     return true;
 }
 
-ggml_cgraph * TurboVlaModelArch::build(ggml_context * C, IO & io, int64_t bert_len) const {
-    const int64_t NP = n_patches(), T = vit_seq(), nv = n_views, VS = nv*NP, LT = text_len_max;
-    const int64_t pdim = 3*patch*patch;
-
-    // DINOv3. Patches arrive flattened on the host; views are the batch dim.
-    io.patches = ggml_new_tensor_3d(C, GGML_TYPE_F32, pdim, NP, nv);
-    ggml_set_input(io.patches);
-    ggml_tensor * prefix = ggml_reshape_2d(C, cls_tok, vit_dim, 1);
-    if (reg_tok)
-        prefix = ggml_concat(C, prefix, reg_tok, 1);
-    prefix = ggml_repeat_4d(C, prefix, vit_dim, 1 + n_reg, nv, 1);
-    ggml_tensor * x = ggml_concat(C, prefix, linear(C, patch_w, patch_b, io.patches), 1);
-    for (const VitLayerW & l : vit) {
-        ggml_tensor * qkv = linear(C, l.qkv_w, l.qkv_b, layer_norm(C, x, l.ln1_w, l.ln1_b, kLnEps));
-        ggml_tensor * att = vit_attention(C, qkv, rope_cos, rope_sin, vit_dim / vit_heads, vit_heads, T, nv,
-                                          flash_attn_enabled());
-        x = ggml_add(C, x, linear(C, l.o_w, l.o_b, att));
-        x = ggml_add(C, x, ffn_gelu_erf(C, l.fc1_w, l.fc1_b, l.fc2_w, l.fc2_b,
-                                        layer_norm(C, x, l.ln2_w, l.ln2_b, kLnEps)));
-    }
-    // TurboVLA reads hidden_states[-1], which is before DINOv3's final norm
-    // (models/vision_encoder.py:109), then drops the CLS and register tokens.
-    x = ggml_view_3d(C, x, vit_dim, NP, nv, x->nb[1], x->nb[2], (size_t) (1 + n_reg)*x->nb[1]);
-    x = ggml_reshape_2d(C, ggml_cont(C, x), vit_dim, VS);
-
-    // VisionProjection, then one learned embedding per camera.
-    ggml_tensor * mlp = linear(C, vp_fc1_w, vp_fc1_b, layer_norm(C, x, vp_in_w, vp_in_b, kLnEps));
-    mlp = linear(C, vp_fc2_w, vp_fc2_b, ggml_gelu_erf(C, mlp));
-    ggml_tensor * v = layer_norm(C, ggml_add(C, ggml_mul_mat(C, vp_skip_w, x), mlp), vp_out_w, vp_out_b, kLnEps);
-    v = ggml_reshape_2d(C, ggml_add(C, ggml_reshape_3d(C, v, hidden, NP, nv),
-                                    ggml_reshape_3d(C, view_emb, hidden, 1, nv)), hidden, VS);
-
-    // BERT over the checkpoint's padded length, token type 0 throughout.
+// BERT over the checkpoint's padded length, token type 0 throughout.
+ggml_cgraph * TurboVlaModelArch::build_text(ggml_context * C, TextIO & io, int64_t bert_len) const {
     io.ids = ggml_new_tensor_1d(C, GGML_TYPE_I32, bert_len);
     io.pos = ggml_new_tensor_1d(C, GGML_TYPE_I32, bert_len);
     io.bert_mask = ggml_new_tensor_2d(C, GGML_TYPE_F32, bert_len, bert_len);
@@ -354,9 +338,75 @@ ggml_cgraph * TurboVlaModelArch::build(ggml_context * C, IO & io, int64_t bert_l
         t = layer_norm(C, ggml_add(C, t, ffn_gelu_erf(C, l.fc1_w, l.fc1_b, l.fc2_w, l.fc2_b, t)),
                        l.ln2_w, l.ln2_b, kBertEps);
     }
-    ggml_tensor * lang = linear(C, text_proj_w, text_proj_b, t);
-    if (bert_len < LT)
-        lang = ggml_concat(C, lang, ggml_repeat_4d(C, text_proj_b, hidden, LT - bert_len, 1, 1), 1);
+    io.lang = linear(C, text_proj_w, text_proj_b, t);
+    if (bert_len < text_len_max)
+        io.lang = ggml_concat(C, io.lang, ggml_repeat_4d(C, text_proj_b, hidden, text_len_max - bert_len, 1, 1), 1);
+    ggml_set_output(io.lang);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(C, 8192, false);
+    ggml_build_forward_expand(gf, io.lang);
+    return gf;
+}
+
+ggml_cgraph * TurboVlaModelArch::build(ggml_context * C, IO & io, ggml_tensor * text_out) const {
+    const int64_t NP = n_patches(), T = vit_seq(), nv = n_views, VS = nv*NP, LT = text_len_max;
+    const int64_t pdim = 3*patch*patch;
+
+    // DINOv3. Patches arrive flattened on the host; views are the batch dim.
+    io.patches = ggml_new_tensor_3d(C, GGML_TYPE_F32, pdim, NP, nv);
+    ggml_set_input(io.patches);
+    ggml_tensor * prefix = ggml_reshape_2d(C, cls_tok, vit_dim, 1);
+    if (reg_tok)
+        prefix = ggml_concat(C, prefix, reg_tok, 1);
+    prefix = ggml_repeat_4d(C, prefix, vit_dim, 1 + n_reg, nv, 1);
+    ggml_tensor * x = ggml_concat(C, prefix, linear(C, patch_w, patch_b, io.patches), 1);
+    const bool fused_vit = fused_ops && !flash_attn_enabled();
+    // LayerNorm and residual epilogues on the fused kernels when available.
+    auto ln = [&](ggml_tensor * t, ggml_tensor * w, ggml_tensor * b) {
+        return fused_ops ? fused_ln(C, t, w, b, kLnEps, false) : layer_norm(C, t, w, b, kLnEps);
+    };
+    auto res = [&](ggml_tensor * r, ggml_tensor * W, ggml_tensor * b, ggml_tensor * t) {   // r + linear(W, b, t)
+        return fused_ops ? fused_bias_res(C, ggml_mul_mat(C, W, t), b, r) : ggml_add(C, r, linear(C, W, b, t));
+    };
+    for (const VitLayerW & l : vit) {
+        if (fused_vit) {
+            // The same layer on the fused (bit-identical) kernels: LayerNorm,
+            // bias + RoPE + head layout in one pass, exact attention, and the
+            // bias + residual and bias + GELU (erf) epilogues.
+            const int64_t hd = vit_dim / vit_heads;
+            ggml_tensor * qkv = fused_qkv_heads(C, ggml_mul_mat(C, l.qkv_w, fused_ln(C, x, l.ln1_w, l.ln1_b, kLnEps, false)),
+                                                l.qkv_b, ggml_reshape_2d(C, rope_cos, hd, T), rope_sin_abs,
+                                                3, hd, vit_heads, T, nv, 0b100, 0b011);
+            ggml_tensor * att = attention_rows_exact(C, fused_part(C, qkv, 0, false), fused_part(C, qkv, 1, false),
+                                                     fused_part(C, qkv, 2, true), 1.0f / std::sqrt((float) hd),
+                                                     vit_dim, T, nv, false);
+            x = fused_bias_res(C, ggml_mul_mat(C, l.o_w, ggml_reshape_3d(C, att, vit_dim, T, nv)), l.o_b, x);
+            ggml_tensor * h = fused_bias_gelu_erf(C, ggml_mul_mat(C, l.fc1_w, fused_ln(C, x, l.ln2_w, l.ln2_b, kLnEps, false)),
+                                                  l.fc1_b);
+            x = fused_bias_res(C, ggml_mul_mat(C, l.fc2_w, h), l.fc2_b, x);
+            continue;
+        }
+        ggml_tensor * qkv = linear(C, l.qkv_w, l.qkv_b, layer_norm(C, x, l.ln1_w, l.ln1_b, kLnEps));
+        ggml_tensor * att = vit_attention(C, qkv, rope_cos, rope_sin, vit_dim / vit_heads, vit_heads, T, nv,
+                                          flash_attn_enabled());
+        x = ggml_add(C, x, linear(C, l.o_w, l.o_b, att));
+        x = ggml_add(C, x, ffn_gelu_erf(C, l.fc1_w, l.fc1_b, l.fc2_w, l.fc2_b,
+                                        layer_norm(C, x, l.ln2_w, l.ln2_b, kLnEps)));
+    }
+    // TurboVLA reads hidden_states[-1] (models/vision_encoder.py:109), which is
+    // after DINOv3's final norm in the transformers it was trained with, then
+    // drops the CLS and register tokens. The norm is per token.
+    x = ggml_view_3d(C, x, vit_dim, NP, nv, x->nb[1], x->nb[2], (size_t) (1 + n_reg)*x->nb[1]);
+    x = ggml_reshape_2d(C, ggml_cont(C, x), vit_dim, VS);
+    x = ln(x, vit_norm_w, vit_norm_b);
+
+    // VisionProjection, then one learned embedding per camera.
+    ggml_tensor * mlp = ggml_gelu_erf(C, linear(C, vp_fc1_w, vp_fc1_b, ln(x, vp_in_w, vp_in_b)));
+    ggml_tensor * v = ln(res(ggml_mul_mat(C, vp_skip_w, x), vp_fc2_w, vp_fc2_b, mlp), vp_out_w, vp_out_b);
+    v = ggml_reshape_2d(C, ggml_add(C, ggml_reshape_3d(C, v, hidden, NP, nv),
+                                    ggml_reshape_3d(C, view_emb, hidden, 1, nv)), hidden, VS);
+
+    ggml_tensor * lang = ggml_view_tensor(C, text_out);
 
     // Fusion. One score matrix serves both directions upstream (the language
     // side softmaxes its transpose); two small products are cheaper than a
@@ -365,14 +415,16 @@ ggml_cgraph * TurboVlaModelArch::build(ggml_context * C, IO & io, int64_t bert_l
     io.fus_mask = ggml_new_tensor_2d(C, GGML_TYPE_F32, LT, VS);
     ggml_set_input(io.enh_mask);
     ggml_set_input(io.fus_mask);
+    ggml_set_output(io.enh_mask);
+    ggml_set_output(io.fus_mask);
     const int64_t fhd = fusion_dim / fusion_heads, ehd = hidden / enh_heads;
     const float   fscale = 1.0f / std::sqrt((float) fhd);
     for (int64_t i = 0; i < fusion_layers; ++i) {
         const FusionLayerW & f = fusion[(size_t) i];
-        ggml_tensor * vn = layer_norm(C, v, f.norm_v_w, f.norm_v_b, kLnEps);
-        ggml_tensor * ln = layer_norm(C, lang, f.norm_l_w, f.norm_l_b, kLnEps);
+        ggml_tensor * vn = ln(v, f.norm_v_w, f.norm_v_b);
+        ggml_tensor * lnm = ln(lang, f.norm_l_w, f.norm_l_b);
         ggml_tensor * vp = linear(C, f.v_w, f.v_b, vn);    // [q_v | values_v]
-        ggml_tensor * lp = linear(C, f.l_w, f.l_b, ln);    // [k_l | values_l]
+        ggml_tensor * lp = linear(C, f.l_w, f.l_b, lnm);   // [k_l | values_l]
         auto heads = [&](ggml_tensor * p, int64_t L, int part) {
             return ggml_view_3d(C, p, fhd, fusion_heads, L, (size_t) fhd*ggml_element_size(p), p->nb[1],
                                 (size_t) part*fusion_dim*ggml_element_size(p));
@@ -384,17 +436,21 @@ ggml_cgraph * TurboVlaModelArch::build(ggml_context * C, IO & io, int64_t bert_l
         ggml_tensor * dv = attention(C, qv, kl, vl, io.fus_mask, fscale, fusion_dim, VS);
         ggml_tensor * dl = attention(C, kl, qv, vv, nullptr,     fscale, fusion_dim, LT);
         // residual_style "normalized": the gated deltas land on the normed tokens.
-        v    = ggml_add(C, vn, ggml_mul(C, linear(C, f.out_v_w, f.out_v_b, dv), f.gamma_v));
-        lang = ggml_add(C, ln, ggml_mul(C, linear(C, f.out_l_w, f.out_l_b, dl), f.gamma_l));
+        if (fused_ops) {
+            v    = fused_bias_gate_res(C, ggml_mul_mat(C, f.out_v_w, dv), f.out_v_b, f.gamma_v, vn);
+            lang = fused_bias_gate_res(C, ggml_mul_mat(C, f.out_l_w, dl), f.out_l_b, f.gamma_l, lnm);
+        } else {
+            v    = ggml_add(C, vn, ggml_mul(C, linear(C, f.out_v_w, f.out_v_b, dv), f.gamma_v));
+            lang = ggml_add(C, lnm, ggml_mul(C, linear(C, f.out_l_w, f.out_l_b, dl), f.gamma_l));
+        }
 
         // Text enhancer: post-norm, ReLU, the sub-sentence mask and no
         // key-padding mask (the key_padding_mask argument is commented out
         // upstream, models/components/transformer.py).
         const EnhancerLayerW & e = enhancer[(size_t) i];
         ggml_tensor * att = self_attention(C, linear(C, e.qkv_w, e.qkv_b, lang), io.enh_mask, ehd, enh_heads, LT, 1);
-        lang = layer_norm(C, ggml_add(C, lang, linear(C, e.o_w, e.o_b, att)), e.ln1_w, e.ln1_b, kLnEps);
-        lang = layer_norm(C, ggml_add(C, lang, ffn_relu(C, e.fc1_w, e.fc1_b, e.fc2_w, e.fc2_b, lang)),
-                          e.ln2_w, e.ln2_b, kLnEps);
+        lang = ln(res(lang, e.o_w, e.o_b, att), e.ln1_w, e.ln1_b);
+        lang = ln(res(lang, e.fc2_w, e.fc2_b, ggml_relu(C, linear(C, e.fc1_w, e.fc1_b, lang))), e.ln2_w, e.ln2_b);
     }
 
     // State tokens: LayerNorm, MLP to num_state_tokens*hidden, + position, norm.
@@ -412,22 +468,21 @@ ggml_cgraph * TurboVlaModelArch::build(ggml_context * C, IO & io, int64_t bert_l
     const float   dscale = 1.0f / std::sqrt((float) dhd);
     ggml_tensor * a = act_q;
     for (const DecoderLayerW & l : dec) {
-        ggml_tensor * qkv = linear(C, l.self_qkv_w, l.self_qkv_b, layer_norm(C, a, l.ln1_w, l.ln1_b, kLnEps));
+        ggml_tensor * qkv = linear(C, l.self_qkv_w, l.self_qkv_b, ln(a, l.ln1_w, l.ln1_b));
         ggml_tensor * att = self_attention(C, qkv, nullptr, dhd, dec_heads, horizon, 1);
-        a = ggml_add(C, a, linear(C, l.self_o_w, l.self_o_b, att));
+        a = res(a, l.self_o_w, l.self_o_b, att);
 
         // in_proj is [W_q; W_k; W_v]: the queries keep the Q block of their
         // projection, the memory its K and V blocks. Slicing the weight instead
         // saves little and breaks ggml-openvino once the weights are BF16.
-        ggml_tensor * q  = linear(C, l.cross_qkv_w, l.cross_qkv_b, layer_norm(C, a, l.ln2_w, l.ln2_b, kLnEps));
+        ggml_tensor * q  = linear(C, l.cross_qkv_w, l.cross_qkv_b, ln(a, l.ln2_w, l.ln2_b));
         ggml_tensor * kv = linear(C, l.cross_qkv_w, l.cross_qkv_b, mem);
         ggml_tensor * Q = ggml_cont(C, ggml_permute(C, split_heads(C, q, dhd, dec_heads, horizon, 1, 0), 0, 2, 1, 3));
         ggml_tensor * K = ggml_cont(C, ggml_permute(C, split_heads(C, kv, dhd, dec_heads, M, 1, 1), 0, 2, 1, 3));
         ggml_tensor * V = ggml_cont(C, ggml_permute(C, split_heads(C, kv, dhd, dec_heads, M, 1, 2), 1, 2, 0, 3));
         att = attention(C, Q, K, V, nullptr, dscale, hidden, horizon);
-        a = ggml_add(C, a, linear(C, l.cross_o_w, l.cross_o_b, att));
-        a = ggml_add(C, a, ffn_relu(C, l.fc1_w, l.fc1_b, l.fc2_w, l.fc2_b,
-                                    layer_norm(C, a, l.ln3_w, l.ln3_b, kLnEps)));
+        a = res(a, l.cross_o_w, l.cross_o_b, att);
+        a = res(a, l.fc2_w, l.fc2_b, ggml_relu(C, linear(C, l.fc1_w, l.fc1_b, ln(a, l.ln3_w, l.ln3_b))));
     }
     a = ggml_relu(C, linear(C, ap0_w, ap0_b, a));
     a = ggml_relu(C, linear(C, ap1_w, ap1_b, a));
@@ -470,11 +525,21 @@ bool load_config(const gguf_reader & g, TurboVlaModelArch & m) {
     I("period_token_id", m.period_id);       I("question_token_id", m.question_id);
     if (g.has("turbovla.rope_theta"))
         m.rope_theta = g.f32("turbovla.rope_theta");
+    bool ok = std::isfinite(m.rope_theta) && m.rope_theta > 0.f && m.image_size <= 4096;
+    for (int64_t v : { m.hidden, m.n_views, m.image_size, m.patch, m.vit_dim, m.vit_layers, m.vit_heads,
+                       m.bert_dim, m.bert_layers, m.bert_heads, m.vocab, m.fusion_layers, m.fusion_heads,
+                       m.enh_heads, m.dec_layers, m.dec_heads, m.horizon, m.action_dim, m.state_dim,
+                       m.n_state_tok, m.text_len_max })
+        ok = ok && v >= 1;
+    if (!ok) {
+        std::fprintf(stderr, "vla(turbovla): inconsistent dimensions in GGUF metadata\n");
+        return false;
+    }
     int64_t fhd = m.fusion_dim / m.fusion_heads;
     U("fusion_head_dim", fhd);
     m.fusion_dim = fhd * m.fusion_heads;
 
-    if (m.image_size % m.patch || m.vit_dim % m.vit_heads || (m.vit_dim / m.vit_heads) % 4 ||
+    if (m.fusion_dim < 1 || m.image_size % m.patch || m.vit_dim % m.vit_heads || (m.vit_dim / m.vit_heads) % 4 ||
         m.bert_dim % m.bert_heads || m.hidden % m.enh_heads || m.hidden % m.dec_heads) {
         std::fprintf(stderr, "vla(turbovla): inconsistent dimensions in GGUF metadata\n");
         return false;
@@ -556,6 +621,13 @@ bool load_weights(TurboVlaModelArch & m, gguf_reader & g) {
         w.fc2_w = L.gemm("%s", N(f, i, "fc2.weight").c_str());
         w.fc2_b = L.f32("%s", N(f, i, "fc2.bias").c_str());
     }
+    if (gguf_find_tensor(g.gctx, "vit.norm.weight") < 0) {
+        std::fprintf(stderr, "vla(turbovla): GGUF has no DINOv3 final norm (vit.norm); re-convert it with "
+                             "scripts/convert_turbovla_to_gguf.py\n");
+        return false;
+    }
+    m.vit_norm_w = L.f32("vit.norm.weight");
+    m.vit_norm_b = L.f32("vit.norm.bias");
 
     m.vp_in_w   = L.f32("vit_proj.input_norm.weight");
     m.vp_in_b   = L.f32("vit_proj.input_norm.bias");
@@ -681,7 +753,7 @@ bool load_weights(TurboVlaModelArch & m, gguf_reader & g) {
     if (m.vocab != m.word_emb->ne[1] || m.text_len_max > m.bert_max_pos ||
         m.patch_w->ne[0] != 3*m.patch*m.patch || (m.reg_tok && m.reg_tok->ne[1] != m.n_reg) ||
         ggml_nelements(m.view_emb) != m.hidden*m.n_views || m.act_q->ne[1] != m.horizon ||
-        m.dec[0].cross_qkv_w->ne[1] != 3*m.hidden) {
+        m.act_q->type != GGML_TYPE_F32 || m.dec[0].cross_qkv_w->ne[1] != 3*m.hidden) {
         std::fprintf(stderr, "vla(turbovla): tensor shapes disagree with GGUF metadata\n");
         return false;
     }
@@ -733,6 +805,7 @@ std::unique_ptr<ModelArchBase> turbovla_create(const std::string& mmproj_path,
     if (!b.handle)
         return nullptr;
     m->backend = b.handle;
+    m->fused_ops = enable_fused_ops("turbovla", b.is_cuda);
 
     if (!load_weights(*m, g) || !m->upload_rope_tables())
         return nullptr;
@@ -794,23 +867,21 @@ std::vector<float> TurboVlaModelArch::predict(const Inputs& in) {
     std::vector<int32_t> ids((size_t) bert_len, pad_id);
     std::copy(in.lang_tokens, in.lang_tokens + in.n_lang, ids.begin());
 
-    std::vector<uint8_t> allowed;
-    std::vector<int32_t> pos;
-    special_token_blocks(ids, *this, allowed, pos);
-    const float NEG = -INFINITY;
-    std::vector<float> bert_mask((size_t) bert_len*bert_len), enh_mask((size_t) LT*LT, NEG), fus_mask((size_t) LT*VS);
-    for (int64_t q = 0; q < bert_len; ++q)
-        for (int64_t k = 0; k < bert_len; ++k) {
-            bert_mask[(size_t) q*bert_len + k] = allowed[(size_t) q*bert_len + k] ? 0.0f : NEG;
-            enh_mask[(size_t) q*LT + k] = bert_mask[(size_t) q*bert_len + k];
-        }
-    for (int64_t q = bert_len; q < LT; ++q)
-        enh_mask[(size_t) q*LT + q] = 0.0f;
-    for (int64_t k = 0; k < LT; ++k) {
-        const float val = (k < bert_len && ids[(size_t) k] != pad_id) ? 0.0f : NEG;
-        for (int64_t q = 0; q < VS; ++q)
-            fus_mask[(size_t) q*LT + k] = val;
+    const size_t arena = ggml_tensor_overhead()*8192 + ggml_graph_overhead_custom(8192, false);
+    bool fresh = false;
+    if (!text.ensure(backend, Key{bert_len}, arena,
+                     [&](ggml_context * C, TextIO & t) { fresh = true; return build_text(C, t, bert_len); })) {
+        std::fprintf(stderr, "vla(turbovla): graph build/alloc failed\n");
+        return {};
     }
+    if (fresh)
+        graph.release();
+    if (!graph.ensure(backend, Key{bert_len}, arena,
+                      [&](ggml_context * C, IO & io) { fresh = true; return build(C, io, text.io().lang); })) {
+        std::fprintf(stderr, "vla(turbovla): graph build/alloc failed\n");
+        return {};
+    }
+    IO & io = graph.io();
 
     std::vector<float> patches((size_t) 3*patch*patch*VS);
     for (int64_t i = 0; i < n_views; ++i)
@@ -819,22 +890,44 @@ std::vector<float> TurboVlaModelArch::predict(const Inputs& in) {
     if (in.state)
         std::copy(in.state, in.state + state_dim, state.begin());
 
-    const size_t arena = ggml_tensor_overhead()*8192 + ggml_graph_overhead_custom(8192, false);
-    if (!graph.ensure(backend, Key{bert_len}, arena,
-                      [&](ggml_context * C, IO & io) { return build(C, io, bert_len); })) {
-        std::fprintf(stderr, "vla(turbovla): graph build/alloc failed\n");
-        return {};
-    }
-    IO & io = graph.io();
-    ggml_backend_tensor_set(io.patches,   patches.data(),   0, ggml_nbytes(io.patches));
-    ggml_backend_tensor_set(io.ids,       ids.data(),       0, ggml_nbytes(io.ids));
-    ggml_backend_tensor_set(io.pos,       pos.data(),       0, ggml_nbytes(io.pos));
-    ggml_backend_tensor_set(io.bert_mask, bert_mask.data(), 0, ggml_nbytes(io.bert_mask));
-    ggml_backend_tensor_set(io.enh_mask,  enh_mask.data(),  0, ggml_nbytes(io.enh_mask));
-    ggml_backend_tensor_set(io.fus_mask,  fus_mask.data(),  0, ggml_nbytes(io.fus_mask));
-    ggml_backend_tensor_set(io.state,     state.data(),     0, ggml_nbytes(io.state));
+    ggml_backend_tensor_set(io.patches, patches.data(), 0, ggml_nbytes(io.patches));
+    ggml_backend_tensor_set(io.state,   state.data(),   0, ggml_nbytes(io.state));
 
     const auto tc = clock::now();
+    if (fresh || ids != text_ids) {
+        text_ids.clear();
+        std::vector<uint8_t> allowed;
+        std::vector<int32_t> pos;
+        special_token_blocks(ids, *this, allowed, pos);
+        const float NEG = -INFINITY;
+        std::vector<float> bert_mask((size_t) bert_len*bert_len), enh_mask((size_t) LT*LT, NEG), fus_mask((size_t) LT*VS);
+        for (int64_t q = 0; q < bert_len; ++q)
+            for (int64_t k = 0; k < bert_len; ++k) {
+                bert_mask[(size_t) q*bert_len + k] = allowed[(size_t) q*bert_len + k] ? 0.0f : NEG;
+                enh_mask[(size_t) q*LT + k] = bert_mask[(size_t) q*bert_len + k];
+            }
+        for (int64_t q = bert_len; q < LT; ++q)
+            enh_mask[(size_t) q*LT + q] = 0.0f;
+        for (int64_t k = 0; k < LT; ++k) {
+            const float val = (k < bert_len && ids[(size_t) k] != pad_id) ? 0.0f : NEG;
+            for (int64_t q = 0; q < VS; ++q)
+                fus_mask[(size_t) q*LT + k] = val;
+        }
+
+        TextIO & t = text.io();
+        ggml_backend_tensor_set(t.ids,        ids.data(),       0, ggml_nbytes(t.ids));
+        ggml_backend_tensor_set(t.pos,        pos.data(),       0, ggml_nbytes(t.pos));
+        ggml_backend_tensor_set(t.bert_mask,  bert_mask.data(), 0, ggml_nbytes(t.bert_mask));
+        ggml_backend_tensor_set(io.enh_mask,  enh_mask.data(),  0, ggml_nbytes(io.enh_mask));
+        ggml_backend_tensor_set(io.fus_mask,  fus_mask.data(),  0, ggml_nbytes(io.fus_mask));
+        graph_unique_names(text.graph());
+        if (ggml_backend_graph_compute(backend, text.graph()) != GGML_STATUS_SUCCESS) {
+            std::fprintf(stderr, "vla(turbovla): compute failed\n");
+            return {};
+        }
+        text_ids = ids;
+    }
+
     graph_unique_names(graph.graph());
     if (ggml_backend_graph_compute(backend, graph.graph()) != GGML_STATUS_SUCCESS) {
         std::fprintf(stderr, "vla(turbovla): compute failed\n");

@@ -14,21 +14,20 @@
 
 // One-shot action prediction from the command line. Loads a model, decodes an
 // image plus an instruction, runs one predict(), and prints the action chunk.
-// No server, no simulator. Most archs have no tokenizer in the C++ core, so
-// --text shells out to scripts/tokenize_prompt.py; --tokens takes ids directly.
-// Octo is the exception: its T5 SentencePiece vocab is baked into the GGUF, so
-// --text is tokenized in-process (no Python) and also yields the attention mask
-// that Octo's predict() requires.
+// No server, no simulator. --text is tokenized in-process when the GGUF carries a
+// SentencePiece tokenizer (Octo, or pi0/pi05/OpenVLA-OFT after
+// scripts/add_tokenizer_to_gguf.py) and shells out to scripts/tokenize_prompt.py
+// otherwise; --tokens takes ids directly. ACT takes neither.
 //
 //   vla-cli [--mmproj m.gguf] --ckpt c.gguf --image img.jpg [--image img2.jpg]
 //           (--text "pick up the bowl" | --tokens id,id,...) [--state f,f,...] [--pretty]
+//           [--config c.json] [precision flags]
 
 #include "arch.h"
 #include "model.h"
+#include "options.h"
 #include "serving/hf_fetch.h"
-#ifdef VLA_USE_OCTO
-#include "models/octo.h"
-#endif
+#include "tokenizer.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
@@ -45,6 +44,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -131,34 +131,10 @@ const char * arch_slug(Arch a) {
         case Arch::VLA_JEPA:    return "vla_jepa";
         case Arch::OCTO:        return "octo";
         case Arch::TURBOVLA:    return "turbovla";
+        case Arch::ACT:         return "act";
     }
     return "";
 }
-
-#ifdef VLA_USE_OCTO
-bool octo_ckpt(const std::string & ckpt) {
-    Arch a;
-    return detect_arch_from_ckpt(ckpt, &a) && a == Arch::OCTO;
-}
-
-// Octo's tokenizer ships inside the checkpoint, so --text needs no Python here
-// and yields the attention mask its T5 encoder wants alongside the ids.
-bool octo_tokens(const std::string & ckpt, const std::string & text,
-                 std::vector<int32_t> & lang, std::vector<int32_t> & attn) {
-    if (octo_tokenize_text(ckpt, text, lang, attn))
-        return true;
-    std::fprintf(stderr, "vla-cli: octo tokenization failed\n");
-    return false;
-}
-#else
-bool octo_ckpt(const std::string &) {
-    return false;
-}
-
-bool octo_tokens(const std::string &, const std::string &, std::vector<int32_t> &, std::vector<int32_t> &) {
-    return false;
-}
-#endif
 
 // The instruction reaches a shell command, so keep it to plain prose.
 bool text_ok(const std::string & s) {
@@ -174,35 +150,75 @@ bool text_ok(const std::string & s) {
     return true;
 }
 
+std::string tokenize_script(const char * argv0) {
+    const char * env = std::getenv("VLA_TOKENIZE_SCRIPT");
+    if (env && *env)
+        return env;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path exe = fs::read_symlink("/proc/self/exe", ec);
+    if (ec && fs::path(argv0).has_parent_path())
+        exe = fs::absolute(argv0, ec);
+    const fs::path dir = exe.parent_path();
+    if (exe.has_parent_path())
+        for (const fs::path & p : {dir / "scripts", dir / ".." / "share" / "vla", dir / ".." / "scripts"}) {
+            if (fs::exists(p / "tokenize_prompt.py", ec))
+                return (p / "tokenize_prompt.py").string();
+        }
+    return std::string(VLA_SOURCE_DIR) + "/scripts/tokenize_prompt.py";
+}
+
 // Ask scripts/tokenize_prompt.py for the ids, using the tokenizer the arch was
 // trained with. Returns "" and explains on stderr.
-std::string tokenize_text(const std::string & ckpt, const std::string & text) {
-    Arch arch;
-    if (!detect_arch_from_ckpt(ckpt, &arch)) {
-        std::fprintf(stderr, "vla-cli: cannot detect the arch of %s for --text\n", ckpt.c_str());
-        return "";
-    }
+std::string tokenize_text(const char * argv0, Arch arch, const std::string & text, size_t n_views,
+                          const std::vector<float> & state) {
     if (!text_ok(text)) {
         std::fprintf(stderr, "vla-cli: --text takes plain prose (letters, digits, space . , - _ ')\n");
         return "";
     }
-    std::string esc;
-    for (const char c : text) {
-        if (c == '\'')
-            esc += "'\\''";
-        else
-            esc += c;
-    }
-    // Env first so a packaged binary can point at its own copy of the script.
-    const char * env = std::getenv("VLA_TOKENIZE_SCRIPT");
-    const std::string script = (env && *env) ? std::string(env)
-                                             : std::string(VLA_SOURCE_DIR) + "/scripts/tokenize_prompt.py";
+#ifdef _WIN32
+    // cmd.exe has no single quotes. text_ok already rules out '"', so the text
+    // needs no escaping inside double quotes.
+    const auto esc = [](const std::string & s) { return s; };
+    const std::string q = "\"";
+#else
+    const auto esc = [](const std::string & s) {
+        std::string out;
+        for (const char c : s) {
+            if (c == '\'')
+                out += "'\\''";
+            else
+                out += c;
+        }
+        return out;
+    };
+    const std::string q = "'";
+#endif
+    const std::string script = tokenize_script(argv0);
     const char * py = std::getenv("VLA_PYTHON");
-    const std::string interp = (py && *py) ? std::string(py) : std::string("python3");
-    const std::string cmd = "'" + interp + "' '" + script + "' --arch " + arch_slug(arch) +
-                            " --text '" + esc + "'";
-
+#ifdef _WIN32
+    const char * def_py = "python";  // python3.exe is the Store stub on Windows
+#else
+    const char * def_py = "python3";
+#endif
+    const std::string interp = (py && *py) ? std::string(py) : std::string(def_py);
+    std::string cmd = q + esc(interp) + q + " " + q + esc(script) + q + " --arch " + arch_slug(arch) +
+                      " --views " + std::to_string(n_views) + " --text " + q + esc(text) + q;
+    if (!state.empty()) {
+        cmd += " --state=";
+        for (size_t i=0; i<state.size(); ++i) {
+            char num[32];
+            std::snprintf(num, sizeof(num), "%s%.9g", i ? "," : "", state[i]);
+            cmd += num;
+        }
+    }
+#ifdef _WIN32
+    // cmd /c strips the first and last quote of the line; give it a pair to eat.
+    cmd = "\"" + cmd + "\"";
+    FILE * fp = _popen(cmd.c_str(), "r");
+#else
     FILE * fp = popen(cmd.c_str(), "r");
+#endif
     if (!fp) {
         std::fprintf(stderr, "vla-cli: cannot run %s\n", cmd.c_str());
         return "";
@@ -211,11 +227,12 @@ std::string tokenize_text(const std::string & ckpt, const std::string & text) {
     char buf[4096];
     while (std::fgets(buf, sizeof(buf), fp))
         out += buf;
+#ifdef _WIN32
+    if (_pclose(fp) != 0) {
+#else
     if (pclose(fp) != 0) {
-        std::fprintf(stderr,
-                     "vla-cli: tokenizing failed. Install the client extras with\n"
-                     "         pip install -e \".[client]\"\n"
-                     "         (VLA_PYTHON selects a different interpreter)\n");
+#endif
+        std::fprintf(stderr, "vla-cli: tokenizing failed, see above (VLA_PYTHON selects a different interpreter)\n");
         return "";
     }
     while (!out.empty() && (out.back() == '\n' || out.back() == '\r'))
@@ -227,24 +244,32 @@ void usage(const char * prog) {
     std::fprintf(stderr,
         "usage: %s [--mmproj m.gguf] (--ckpt c.gguf | -hf user/repo) --image img.jpg [--image ...]\n"
         "          (--text \"...\" | --tokens id,id,...) [--state f,f,...] [--pretty]\n"
-        "  --mmproj   vision-tower GGUF (SmolVLA/pi0/pi0.5); omit for baked-vision archs\n"
+        "          [--config c.json] [precision flags]\n"
+        "  --mmproj   ignored; every arch bundles its vision tower in the ckpt GGUF\n"
         "  --ckpt     model checkpoint GGUF\n"
-        "  -hf        HuggingFace repo, user/repo[:file.gguf], cached under $VLA_CACHE\n"
+        "  -hf        HuggingFace repo, user/repo[:file.gguf|:tag], cached under $VLA_CACHE\n"
         "  --image    image file, repeat for multi-view (decoded via stb_image)\n"
-        "  --text     instruction; tokenized by scripts/tokenize_prompt.py (needs\n"
-        "             transformers), or in-process for Octo, whose vocab is in the GGUF\n"
+        "  --text     instruction; tokenized in-process when the GGUF carries its\n"
+        "             tokenizer, else by scripts/tokenize_prompt.py (needs transformers)\n"
         "  --tokens   language token ids, comma-separated, if you tokenized already\n"
-        "  --state    proprioception floats, comma-separated (default zeros)\n"
-        "  --pretty   print one action row (max_action_dim values) per line\n",
-        prog);
+        "             (ACT reads no instruction: pass neither --text nor --tokens)\n"
+        "  --state    proprioception floats, comma-separated (default zeros); pi05\n"
+        "             --text needs it, since the state is part of the prompt\n"
+        "  --pretty   print one action row (max_action_dim values) per line\n"
+        "  --config   policy config.json; its \"runtime\" block sets the flags below,\n"
+        "             and flags given here win\n"
+        "%s",
+        prog, Options::usage());
 }
 
 }  // namespace
 
 int main(int argc, char ** argv) {
-    std::string mmproj, ckpt, hf, tokens_s, state_s, text_s;
+    std::string mmproj, ckpt, hf, tokens_s, state_s, text_s, config_path;
     std::vector<std::string> image_paths;
     bool pretty = false;
+    Options opts;
+    std::string opt_err;
 
     for (int i=1; i<argc; ++i) {
         const std::string a = argv[i];
@@ -264,6 +289,13 @@ int main(int argc, char ** argv) {
         else if (a == "--text")    text_s = need("--text");
         else if (a == "--state")   state_s = need("--state");
         else if (a == "--pretty")  pretty = true;
+        else if (a == "--config")  config_path = need("--config");
+        else if (opts.parse_arg(argc, argv, i, opt_err)) continue;
+        else if (!opt_err.empty()) {
+            std::fprintf(stderr, "vla-cli: %s\n", opt_err.c_str());
+            usage(argv[0]);
+            return 1;
+        }
         else if (a == "-h" || a == "--help") {
             usage(argv[0]);
             return 0;
@@ -274,6 +306,10 @@ int main(int argc, char ** argv) {
             return 1;
         }
     }
+    if (!opts.load_json(config_path, opt_err)) {
+        std::fprintf(stderr, "vla-cli: %s\n", opt_err.c_str());
+        return 1;
+    }
     if (!hf.empty()) {
         if (!ckpt.empty()) {
             std::fprintf(stderr, "vla-cli: pass --ckpt or -hf, not both\n");
@@ -283,7 +319,7 @@ int main(int argc, char ** argv) {
         if (ckpt.empty())
             return 1;
     }
-    if (ckpt.empty() || image_paths.empty() || (tokens_s.empty() && text_s.empty())) {
+    if (ckpt.empty() || image_paths.empty()) {
         usage(argv[0]);
         return 1;
     }
@@ -291,32 +327,53 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "vla-cli: pass --text or --tokens, not both\n");
         return 1;
     }
+    Arch arch;
+    if (!detect_arch_from_ckpt(ckpt, &arch)) {
+        std::fprintf(stderr, "vla-cli: cannot detect the arch of %s\n", ckpt.c_str());
+        return 1;
+    }
+    // ACT reads no instruction; every other arch needs one.
+    const bool takes_lang = arch != Arch::ACT;
+    if (takes_lang && tokens_s.empty() && text_s.empty()) {
+        usage(argv[0]);
+        return 1;
+    }
+    if (!takes_lang && (!tokens_s.empty() || !text_s.empty())) {
+        std::fprintf(stderr, "vla-cli: %s takes no instruction; drop --text/--tokens\n", arch_slug(arch));
+        return 1;
+    }
     // Validate the cheap args before loading the model.
     std::vector<int32_t> lang;
     std::vector<int32_t> attn;   // Octo only; empty leaves Inputs::attention_mask null.
     std::vector<float>   state;
 
-    if (octo_ckpt(ckpt) && !text_s.empty()) {
-        if (!octo_tokens(ckpt, text_s, lang, attn))
-            return 1;
-    } else {
-        if (!text_s.empty()) {
-            tokens_s = tokenize_text(ckpt, text_s);
-            if (tokens_s.empty())
-                return 1;
-            std::fprintf(stderr, "vla-cli: --text tokenized to %s\n", tokens_s.c_str());
-        }
-        if (!parse_ints(tokens_s, lang))
-            return 1;
-    }
     if (!parse_floats(state_s, state))
         return 1;
-    if (lang.empty()) {
+    if (!text_s.empty()) {
+        if (has_spm_tokenizer(ckpt, arch_slug(arch))) {
+            if (!tokenize_prompt(ckpt, arch_slug(arch), text_s, state, lang, attn))
+                return 1;
+            for (size_t i=0; i<lang.size(); ++i)
+                tokens_s += (i ? "," : "") + std::to_string(lang[i]);
+        } else if (arch == Arch::OCTO) {
+            std::fprintf(stderr, "vla-cli: octo --text needs its tokenizer in the GGUF and a VLA_SPM=ON "
+                                 "build; pass --tokens instead\n");
+            return 1;
+        } else {
+            tokens_s = tokenize_text(argv[0], arch, text_s, image_paths.size(), state);
+            if (tokens_s.empty())
+                return 1;
+        }
+        std::fprintf(stderr, "vla-cli: --text tokenized to %s\n", tokens_s.c_str());
+    }
+    if (!parse_ints(tokens_s, lang))
+        return 1;
+    if (takes_lang && lang.empty()) {
         std::fprintf(stderr, "vla-cli: --tokens parsed to nothing\n");
         return 1;
     }
 
-    Model * m = model_load(mmproj, ckpt, "");
+    Model * m = model_load(mmproj, ckpt, config_path, opts);
     if (!m) {
         std::fprintf(stderr, "vla-cli: model_load failed\n");
         return 1;

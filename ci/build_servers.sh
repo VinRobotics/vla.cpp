@@ -4,8 +4,9 @@
 # Build vla-server on the platform servers via the control agent (vla-ci-ctl
 # build), in parallel. A convenience for the self-managed model: it builds each
 # server's OWN checkout with that platform's CMake flags (from hosts.env) and does
-# NOT change the server's commit. Run it after the servers are at the target
-# commit, before `ci/orchestrate.sh all`.
+# NOT change the server's commit, unless VLA_CI_EXPECTED_COMMIT is set: then each
+# server first fetches that commit from its `origin` and checks it out. Otherwise
+# run it after the servers are at the target commit, before `ci/orchestrate.sh all`.
 #
 #   bash ci/build_servers.sh                 # all ALL_PLATFORMS, in parallel
 #   bash ci/build_servers.sh rtx3090 orin    # a subset
@@ -30,8 +31,13 @@ for p in ${PLATFORMS}; do
     resolve_platform "${p}" || exit 1
     ep="tcp://${SRV_HOST}:${CTRL_PORT}"
     echo "[build] ${p} -> ${ep}  cwd=${RROOT}  flags=[${CMAKE_FLAGS:-<Metal auto>}]  prelude=[${BUILD_ENV:+set}]  log=${CI_OUTPUT_ROOT}/${p}.build.log"
-    ( "${CTL}" --endpoint "${ep}" build --cwd "${RROOT}" --flags "${CMAKE_FLAGS}" --prelude "${BUILD_ENV:-}" ) \
-        >"${CI_OUTPUT_ROOT}/${p}.build.log" 2>&1 &
+    (
+        if [[ -n "${VLA_CI_EXPECTED_COMMIT:-}" ]]; then
+            "${CTL}" --endpoint "${ep}" exec --cwd "${RROOT}" -- git fetch --quiet origin "${VLA_CI_EXPECTED_COMMIT}"
+            "${CTL}" --endpoint "${ep}" exec --cwd "${RROOT}" -- git checkout --quiet --detach "${VLA_CI_EXPECTED_COMMIT}"
+        fi
+        "${CTL}" --endpoint "${ep}" build --cwd "${RROOT}" --flags "${CMAKE_FLAGS}" --prelude "${BUILD_ENV:-}"
+    ) >"${CI_OUTPUT_ROOT}/${p}.build.log" 2>&1 &
     PID[$p]=$!
 done
 

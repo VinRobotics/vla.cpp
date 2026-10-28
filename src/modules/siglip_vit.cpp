@@ -35,7 +35,12 @@ void SigLipTower::declare(WeightLoader & L, const char * prefix, int64_t layers,
 
 ggml_tensor * SigLipTower::embed_conv(ggml_context * C, ggml_tensor * pixels, int64_t patch, int64_t grid) const {
     ggml_tensor * conv = ggml_conv_2d(C, patch_w, pixels, (int)patch, (int)patch, 0, 0, 1, 1);
-    ggml_tensor * flat = ggml_cont(C, ggml_transpose(C, ggml_reshape_2d(C, conv, grid*grid, enc.cfg.hidden)));
+    const int64_t nv = pixels->ne[3];
+    // One view: [hidden, grid*grid]. A batch of views ([W, H, 3, nv] pixels):
+    // [hidden, grid*grid, nv], what build(..., nv) takes.
+    ggml_tensor * flat = nv == 1
+        ? ggml_cont(C, ggml_transpose(C, ggml_reshape_2d(C, conv, grid*grid, enc.cfg.hidden)))
+        : ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, conv, grid*grid, enc.cfg.hidden, nv), 1, 0, 2, 3));
     return ggml_add(C, ggml_add(C, flat, patch_b), pos);
 }
 
