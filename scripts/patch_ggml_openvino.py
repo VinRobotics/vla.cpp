@@ -1063,6 +1063,35 @@ enum ggml_status naive_compute(ggml_cgraph * cgraph,""",
             compile_config[ov::hint::execution_mode.name()] = ov::hint::ExecutionMode::PERFORMANCE;
         }""",
         ),
+        # vla.cpp: no NPUW for naive graphs on the NPU. Anchored on the
+        # GGML_OPENVINO_EXEC_MODE block in naive_compute.
+        (
+            """        if (exec_mode != nullptr && strcmp(exec_mode, "performance") == 0) {
+            compile_config[ov::hint::execution_mode.name()] = ov::hint::ExecutionMode::PERFORMANCE;
+        }
+        if (remote_context.has_value()) {""",
+            """        if (exec_mode != nullptr && strcmp(exec_mode, "performance") == 0) {
+            compile_config[ov::hint::execution_mode.name()] = ov::hint::ExecutionMode::PERFORMANCE;
+        }
+        // vla.cpp: NO NPUW FOR NAIVE GRAPHS ON THE NPU. The NPU compile config
+        // turns on NPUW (FOLD, FUNCALL_FOR_ALL) for llama.cpp's decoder layers,
+        // and its partitioning hands the compiler subgraphs with dynamic Reshape
+        // inputs: Evo-1's LM + DiT, fully static as exported, failed with
+        // "IE.Reshape doesn't support dynamic shapes" in 4 s under that config
+        // and compiled in 113 s without it (pi0.5, GR00T and VLA-JEPA the same).
+        // A naive graph is never a KV-cached decoder, so NPUW does nothing for it.
+        if (ggml_openvino_is_npu()) {
+            for (auto it = compile_config.begin(); it != compile_config.end();) {
+                if (it->first.rfind("NPUW", 0) == 0 || it->first == "NPU_USE_NPUW") {
+                    it = compile_config.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        if (remote_context.has_value()) {""",
+            "// vla.cpp: NO NPUW FOR NAIVE GRAPHS ON THE NPU.",
+        ),
     ],
 }
 
