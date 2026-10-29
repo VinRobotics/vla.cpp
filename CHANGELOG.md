@@ -6,6 +6,14 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 
+- **Hexagon NPU on Snapdragon Linux (IQ-10).** `scripts/build_linux_snapdragon.sh`
+  cross-builds vla.cpp with `GGML_HEXAGON=ON` in Qualcomm's toolchain
+  container, `vla-server` included. On an IQ-10 (v81, llama.cpp `b11223`)
+  SmolVLA, π0.5, Evo-1 and GR00T N1.5 / N1.6 / N1.7 run and were checked
+  against the CPU build on fixed inputs; GR00T N1.7 is above the 2.9e-3 bar.
+  Concats the NPU refuses on buffers above 4 GB of DSP address space run on
+  the CPU. See `docs/backend/hexagon.md` for the build, the skel install and
+  the numbers.
 - **ROCm/HIP backend for VLA inference.** `-DGGML_HIP=ON` selects ggml's HIP
   backend without compiling vla.cpp's CUDA-only kernels. On Linux `gfx1200`
   (Radeon RX 9060 XT) with ROCm 7.14 and llama.cpp `b11223`, every arch except
