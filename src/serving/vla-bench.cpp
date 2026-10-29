@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -47,6 +48,8 @@ void usage(const char * prog) {
         "                 <embodied> tokens)\n"
         "  --warmup   untimed calls before measuring (default 3)\n"
         "  --reps     timed calls (default 20)\n"
+        "  --gap-ms   idle time between timed calls (default 0); a policy server sees\n"
+        "             50-500 ms between requests, and the NPU drops its clock in them\n"
         "  --markdown print a markdown table row instead of a plain summary\n"
         "%s",
         prog, vla::Options::usage());
@@ -65,7 +68,7 @@ double percentile(const std::vector<double> & v, double p) {
 
 int main(int argc, char ** argv) {
     std::string ckpt, mmproj, hf, label;
-    int n_images = 1, side = 224, height = 0, n_tokens = 16, warmup = 3, reps = 20;
+    int n_images = 1, side = 224, height = 0, n_tokens = 16, warmup = 3, reps = 20, gap_ms = 0;
     int extra_token = -1, extra_count = 0;
     bool markdown = false;
     vla::Options opts;
@@ -93,6 +96,7 @@ int main(int argc, char ** argv) {
         else if (a == "--extra-count") extra_count = std::atoi(need("--extra-count"));
         else if (a == "--warmup")   warmup   = std::atoi(need("--warmup"));
         else if (a == "--reps")     reps     = std::atoi(need("--reps"));
+        else if (a == "--gap-ms")   gap_ms   = std::atoi(need("--gap-ms"));
         else if (a == "--markdown") markdown = true;
         else if (opts.parse_arg(argc, argv, i, opt_err)) continue;
         else if (!opt_err.empty()) {
@@ -186,6 +190,7 @@ int main(int argc, char ** argv) {
     ms.reserve((size_t) reps);
     double vision_sum = 0.0;
     for (int i=0; i<reps; ++i) {
+        if (gap_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(gap_ms));
         const auto t0 = std::chrono::steady_clock::now();
         const std::vector<float> out = vla::predict(m, in);
         const auto t1 = std::chrono::steady_clock::now();
