@@ -122,6 +122,11 @@ One more op is claimed and then refused at run time. On buffers mapped above
 `NO_SUPPORT`, and the host aborts on the first predict. The wrapper sends those
 concats to the CPU.
 
+Flash attention on the HMX (v81) keeps scores and probabilities in F16. That is
+a precision limit rather than a wrong op, but in GR00T N1.7's LM it moves the
+action chunk 5.4e-3 from the CPU reference. N1.7's LM therefore takes the
+explicit path unless `--flash-attn` is given: 2.0e-3, at the same latency.
+
 ## What changed in `vla.cpp`
 
 The shape of the diff was predicted correctly, apart from the scheduler:
@@ -166,7 +171,8 @@ found.
    detail).
 4. **Fidelity before latency.**
    - Compare `vla_predict_check` output against the same binary with
-     `VLA_DEVICE=cpu`, and against `--weight-dtype f32`.
+     `VLA_DEVICE=cpu`, and against `--weight-dtype f32`. Add `--flash-attn 0`
+     to the reference: a Hexagon build defaults to flash attention on the CPU too.
    - The bar is 2.9e-3.
    - A run with a wrong kernel still prints a latency, and it is usually a good
      one.
@@ -268,7 +274,9 @@ export LD_LIBRARY_PATH=$PWD/pkg/lib
 ### Fidelity
 
 `vla_predict_check` at the Hexagon defaults, against the same binary with
-`VLA_DEVICE=cpu --weight-dtype f32`:
+`VLA_DEVICE=cpu --weight-dtype f32 --flash-attn 0`. A Hexagon build turns flash
+attention on by default even on the CPU, so the reference asks for the explicit
+path that other builds run:
 
 | Model | max\|Δ\| |
 |---|--:|
@@ -276,11 +284,10 @@ export LD_LIBRARY_PATH=$PWD/pkg/lib
 | π0.5 | 3.6e-4 |
 | Evo-1 | 4.1e-4 |
 | GR00T N1.5 | 1.7e-3 |
-| GR00T N1.6 | 1.3e-3 |
-| GR00T N1.7 | 5.4e-3 |
+| GR00T N1.6 | 1.4e-3 |
+| GR00T N1.7 | 2.0e-3 |
 
-GR00T N1.7 is above the 2.9e-3 bar. The other archs have not been run on the
-board yet.
+The other archs have not been run on the board yet.
 
 ## IQ-10, imagined
 
