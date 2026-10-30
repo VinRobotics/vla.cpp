@@ -136,7 +136,12 @@ bool load_config(const gguf_reader & g, const Options & opts, Gr00tN1d7ModelArch
     m.lm.cfg.head_dim    = m.lm_head_dim;
     m.lm.cfg.inter       = m.lm_inter;
     m.lm.cfg.rms_eps     = m.lm_rms_eps;
-    m.lm.cfg.flash_attn  = flash_attn_enabled();
+    // The LM takes flash attention only when --flash-attn asks for it. Where it
+    // is the default (Hexagon), the HMX kernel keeps scores and probabilities in
+    // F16; with it in this LM the action chunk is 5.4e-3 from the CPU F32
+    // reference on an IQ-10 (v81), 2.0e-3 with the explicit path, at the same
+    // latency.
+    m.lm.cfg.flash_attn  = opts.flash_attn.value_or(false);
     m.lm.cfg.rope.type   = GGML_ROPE_TYPE_IMROPE;
     m.lm.cfg.rope.n_dims = (int) m.lm_head_dim;
     m.lm.cfg.rope.freq_base  = m.lm_rope_base;
@@ -226,6 +231,8 @@ std::unique_ptr<ModelArchBase> gr00t_n1_7_create(const std::string& mmproj_path,
             return nullptr;
         }
         m->backend = b.handle;
+        if (!opts.flash_attn.has_value() && vla::default_flash_attn())
+            std::printf("vla(gr00tn1d7): flash attention = on, except the LM (--flash-attn 1 for all)\n");
         if (!foldquant_check_backend("vla(gr00tn1d7)", b, fq, opts.weight_dtype.has_value()))
             return nullptr;
         // VLA_FUSED_OPS=vit or =dit limits the fused ops to one tower (A/B checks).
