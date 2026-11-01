@@ -45,6 +45,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -287,6 +288,58 @@ void launch(sycl::queue & q, const W2Args & a) {
                    sycl::ext::oneapi::experimental::properties{ sycl::ext::intel::experimental::grf_size<256> }, kern);
 }
 
+// Work split per call. A work-group owns NTT 16-column tiles and MTT*8 rows; S threads split K. A thread walks
+// K/32/S k-steps in pairs of 64-k groups, two groups per loop trip, so KS/S must be a multiple of 4.
+// At M = 50, one 56/64-row work-group per tile fills a 4-Xe-core part (32 XVEs) but leaves a 12-Xe-core part
+// (96 XVEs) mostly idle. Measured on the Arc B390 (SYCL graph, weights from DRAM), per expert layer
+// q|k|v 26.7 -> 15.7 us, o 12.0 -> 9.7, gate|up 33.3 -> 28.9, down 17.8 -> 14.8: on parts with >= 64 XVEs use 32-row
+// blocks (the second block's weight reads hit the cache), then split K until there are ~2 threads per XVE; K >= 2048
+// is always split at least in two. On 32-XVE parts this picks the original split (K >= 2048 -> 2, else 1).
+// The int32 partials are summed exactly, so every choice gives bit-identical results.
+// VLA_W2_SPLIT=1|2|4|8 and VLA_W2_MTT=2|4|7 (rows/8; 7 = 56/64-row blocks) override, for tuning.
+static int env_int(const char * name) {
+    const char * e = std::getenv(name);
+    return e ? std::atoi(e) : 0;
+}
+
+static long long xve_count(sycl::queue & q) {
+    static const long long n = q.get_device().get_info<sycl::info::device::max_compute_units>();
+    return n;
+}
+
+int pick_split(sycl::queue & q, long long wgs, int KS) {
+    auto ok = [KS](int s) { return KS % (4 * s) == 0; };
+    static const int env = env_int("VLA_W2_SPLIT");
+    if (env > 0) {
+        int s = env >= 8 ? 8 : env >= 4 ? 4 : env >= 2 ? 2 : 1;
+        while (s > 1 && !ok(s)) s /= 2;
+        return s;
+    }
+    int s = KS >= 64 && ok(2) ? 2 : 1;
+    while (s < 8 && wgs * s < 2 * xve_count(q) && ok(s * 2)) s *= 2;
+    return s;
+}
+
+template <int NTT, int MTT, int EPI>
+void launch_s(sycl::queue & q, const W2Args & a) {
+    const int S = pick_split(q, (long long) (a.N / 16 / NTT) * ((a.M + MTT * 8 - 1) / (MTT * 8)), a.KS);
+    switch (S) {
+        case 8:  launch<8, NTT, MTT, EPI>(q, a); break;
+        case 4:  launch<4, NTT, MTT, EPI>(q, a); break;
+        case 2:  launch<2, NTT, MTT, EPI>(q, a); break;
+        default: launch<1, NTT, MTT, EPI>(q, a); break;
+    }
+}
+
+template <int NTT, int MTT, int EPI>
+void dispatch(sycl::queue & q, const W2Args & a) {
+    static const int env = env_int("VLA_W2_MTT");
+    const int mtt = env > 0 ? env : (xve_count(q) >= 64 ? 4 : MTT);
+    if (mtt == 2)      launch_s<NTT, 2, EPI>(q, a);
+    else if (mtt == 4) launch_s<NTT, 4, EPI>(q, a);
+    else               launch_s<NTT, MTT, EPI>(q, a);
+}
+
 }  // namespace
 
 namespace vla {
@@ -315,15 +368,8 @@ bool sycl_w2a8_linear(sycl::queue & q, const ggml_tensor * dst, const uint8_t * 
     a.res_type = res ? res->type : GGML_TYPE_F32;
     a.res_ld   = res ? (int) (res->nb[1] / ggml_type_size(res->type)) : 0;
     a.y_ld     = (int) (dst->nb[1] / ggml_type_size(dst->type));
-    // split K in two when a thread would otherwise walk 64+ k-steps (K >= 2048)
-    const bool split = K >= 2048 && (K / 32 / 2) % 2 == 0;
-    if (geglu) {
-        if (split) launch<2, 2, 7, EPI_GEGLU>(q, a);
-        else       launch<1, 2, 7, EPI_GEGLU>(q, a);
-    } else {
-        if (split) launch<2, 1, 8, EPI_NONE>(q, a);
-        else       launch<1, 1, 8, EPI_NONE>(q, a);
-    }
+    if (geglu) dispatch<2, 7, EPI_GEGLU>(q, a);
+    else       dispatch<1, 8, EPI_NONE>(q, a);
     return true;
 }
 
@@ -367,9 +413,7 @@ bool sycl_w2a8_ropekv(sycl::queue & q, const ggml_tensor * dst, const uint8_t * 
     a.kb = kb->data; a.vb = vb->data; a.nq = nq; a.nkv = nkv; a.hd = hd; a.row0 = (int) row0;
     a.kb_s1 = (int) (kb->nb[1] / 2); a.kb_s2 = (int) (kb->nb[2] / 2);
     a.vb_s1 = (int) (vb->nb[1] / 2); a.vb_s2 = (int) (vb->nb[2] / 2);
-    const bool split = K >= 2048 && (K / 32 / 2) % 2 == 0;
-    if (split) launch<2, 2, 7, EPI_ROPE>(q, a);
-    else       launch<1, 2, 7, EPI_ROPE>(q, a);
+    dispatch<2, 7, EPI_ROPE>(q, a);
     return true;
 }
 
