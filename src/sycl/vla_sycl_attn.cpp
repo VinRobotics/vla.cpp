@@ -339,9 +339,12 @@ bool sycl_flash_attn_ext(ggml_tensor * dst, sycl::queue & q) {
     const long long B = Q->ne[3];
     // Multi-query attention (one K/V head, as in Gemma) with Q rows (s, h) laid
     // out densely, as RoPE writes them, is single-head attention over S*H query
-    // rows, which tiles better than H short heads. dst [D, H, S] keeps the order.
+    // rows, which tiles better than H short heads for a long prefix. Not for a few
+    // rows: on an Arc B390, 10 tokens x 8 heads over 578 keys take 20 us as heads
+    // and 27-31 us flattened (50 tokens: 30 vs 32-50 us; 560 tokens: 245 vs 200 us).
+    // dst [D, H, S] keeps the order.
     static const bool no_flat = vla::env_flag("VLA_SYCL_SDPA_NO_MQA_FLAT");
-    if (!no_flat && Hkv == 1 && H > 1 && !M && key.dq.on() && key.dq.s2 == D && key.dq.s1 == H * D) {
+    if (!no_flat && Hkv == 1 && H > 1 && S * H > 512 && !M && key.dq.on() && key.dq.s2 == D && key.dq.s1 == H * D) {
         key.S  = S * H;
         key.H  = 1;
         key.dq = Direct{ D, S * H * D };
