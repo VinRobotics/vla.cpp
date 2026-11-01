@@ -187,6 +187,13 @@ inline void gemma_declare_fq_gateup(WeightLoader & L, GemmaLayerW & w, const FqM
     w.fq_up   = fq_declare_linear(L, fq, "gateup", false, gamma, eps, "%s.ffn_up",   p.c_str());
 }
 
+// FoldQuant o sites read the fused SDPA's F16 output directly; the SDPA rounds its
+// output to F16 either way, so the codes are the same. VLA_FQ_O_F32=1: F32 output.
+inline bool fq_o_f16() {
+    static const bool off = env_flag("VLA_FQ_O_F32");
+    return !off;
+}
+
 // One layer's K/V as F16 buffers [hd, n_kv, n_ctx] that the projections write
 // into in place (gemma_attn with a KvSlot; view-taking FA only). The prefix pass
 // writes rows [0, n_prefix), every expert step overwrites the rows after them,
@@ -458,6 +465,7 @@ inline ggml_tensor * gemma_attn(
                                                 nullptr, 1.f / std::sqrt((float) hd), 0.0f, 0.0f);
         ggml_prec_set_acc(fa, GGML_PREC_F32);
         add_dep(fa, q16);   // K/V are read through views of the pack: after this step's writes
+        if (w.fq_o && fq_o_f16()) retype(fa, GGML_TYPE_F16);
         return fq_linear(ctx, w.fq_o, ggml_reshape_2d(ctx, fa, qf, seq), fq_res, fq_gate);
     }
     if (w.rope_pack.magic == FQ_ROPE_PACK_MAGIC && w.fq_qkv && flash && !mask && !cached_K && !cached_V && nkv == 1 &&
@@ -473,6 +481,8 @@ inline ggml_tensor * gemma_attn(
         if (v_out) *v_out = E ? ggml_view_3d(ctx, pk, hd, kv, 1, rs, rs * kv, rs * (seq * nq + kv)) : V;
         ggml_tensor * fa = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, 1.f/std::sqrt((float) hd), 0.0f, 0.0f);
         ggml_prec_set_acc(fa, GGML_PREC_F32);
+        // F16 out: the o site's act reads it as is (no F16 -> F32 pass; same codes)
+        if (w.fq_o && fq_o_f16()) retype(fa, GGML_TYPE_F16);
         return fq_linear(ctx, w.fq_o, ggml_reshape_2d(ctx, fa, qf, seq), fq_res, fq_gate);
     }
 
