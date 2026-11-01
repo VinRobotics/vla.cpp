@@ -222,7 +222,7 @@ void act_kernel(const ActParams a, const sycl::nd_item<1> & it) {
 // of squares keeps the reference's lane-partial order (sub-group 0 runs the
 // per-row loop), so the codes are still bit-identical. The CUDA path's
 // act_row_kernel, ported.
-constexpr int MAXC = 16;   // chunks per sub-group: K <= RW * MAXC * 64, RW = 8 or 16 sub-groups
+constexpr int MAXC = 16;   // chunks per sub-group: K <= RW * MAXC * 64, RW = 4, 8 or 16 sub-groups
 // (16 for the LLM's down projection, K = 16384; the amax is a max and the
 // butterfly is per chunk, so how many sub-groups share a row changes no code).
 
@@ -369,6 +369,14 @@ void launch_act_row(sycl::queue & q, const ActParams & a) {
 
 template <int ABITS, int ROT>
 void launch_act_rot(sycl::queue & q, const ActParams & a) {
+    // Many rows (pi0.5's 560-token prefix), K <= 4096: 4 sub-groups per row, -0.35 ms per request on an Arc
+    // B390. A few rows (the expert's 10) need the 8 sub-groups to fill the GPU: 4 there is +3.2 ms. The codes
+    // do not depend on it (see act_row_kernel). VLA_FQ_ACT_RW=8 keeps 8 everywhere.
+    static const int rw_env = [] { const char * e = std::getenv("VLA_FQ_ACT_RW"); return e ? std::atoi(e) : 4; }();
+    if (rw_env == 4 && a.M >= 128 && a.K / CHUNK <= 4 * MAXC) {
+        launch_act_row<ABITS, ROT, 4>(q, a);
+        return;
+    }
     if (a.K / CHUNK <= 8 * MAXC) {
         launch_act_row<ABITS, ROT, 8>(q, a);
         return;
