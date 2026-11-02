@@ -342,6 +342,15 @@ bool accel_runs(FallbackCtx * fc, const ggml_tensor * t, const char ** why) {
         *why = "cannot run (NO_SUPPORT above 4 GB) a non-row";
         return false;
     }
+    if (fc->hexagon && t->op == GGML_OP_MUL_MAT &&
+        t->src[0]->ne[2] * t->src[0]->ne[3] == 1 && t->src[1]->ne[2] * t->src[1]->ne[3] > 1) {
+        // Claimed, but one 2D weight against a batch of activations comes out
+        // wrong. GR00T N1.6's SigLIP2 tower takes two views as
+        // [1152,256,2] x [1152,1152]: max|delta| 0.16 on the action chunk
+        // against the CPU F32 reference, 1.9e-3 with these on the CPU.
+        *why = "miscomputes a 2D weight against a batch in";
+        return false;
+    }
     return ggml_backend_supports_op(fc->accel, t);
 }
 
