@@ -3,14 +3,15 @@
 What running `vla.cpp` on Qualcomm's Hexagon NPU takes, and what it turned out
 to take once it ran.
 
-> **Status: running on Windows on Arm and on a Linux board (IQ-10).** vla.cpp
-> builds with `GGML_HEXAGON=ON` and runs eleven checkpoints on a Snapdragon X
-> laptop's v73 NPU and six on an IQ-10's v81 NPU under Linux, each checked
-> against a CPU reference. The laptop build, its measurements and the upstream
-> bugs found along the way are in [hexagon-windows.md](hexagon-windows.md); the
-> Linux board is in [Linux (IQ-10)](#linux-iq-10). What follows is the backend in
-> general: the parts that hold on any Snapdragon part, and the IQ-9 and
-> multi-NPU notes from before anything ran, which are still unverified.
+> **Status: running on Windows on Arm and on a Dragonwing IQ-10 under Linux.**
+> vla.cpp builds with `GGML_HEXAGON=ON` and runs eleven checkpoints on a
+> Snapdragon X laptop's v73 NPU and six on an IQ-10's v81 NPU under Linux, each
+> checked against a CPU reference. The laptop build, its measurements and the
+> upstream bugs found along the way are in
+> [hexagon-windows.md](hexagon-windows.md); the Linux board is in [Linux
+> (IQ-10)](#linux-iq-10). What follows is the backend in general: the parts that
+> hold on any Snapdragon part, and the IQ-9 and multi-NPU notes from before
+> anything ran, which are still unverified.
 >
 > The earlier version of this file was written without hardware and projected
 > 0.8-2.0 s per SmolVLA action chunk on a v79 part. On a v73 part it measured
@@ -220,8 +221,8 @@ SSH or ADB from the host:
 
 ## Linux (IQ-10)
 
-Run on an IQ-10 board under Linux (Ubuntu 24.04): Hexagon v81, four CDSP
-domains, llama.cpp `b11223`.
+Run on a Qualcomm Dragonwing IQ-10 board (IQX EVK, QCS8797) under Linux
+(Ubuntu 24.04): Hexagon v81, four CDSP domains, llama.cpp `b11223`.
 
 ### Building
 
@@ -229,14 +230,14 @@ The Hexagon SDK has no arm64 Linux build, so vla.cpp is cross-built on an
 x86-64 host, in the same toolchain container as llama.cpp above:
 
 ```bash
-scripts/build_linux_snapdragon.sh               # with vla-server
-scripts/build_linux_snapdragon.sh --no-server   # without it
+scripts/build_linux_hexagon.sh                 # with vla-server
+scripts/build_linux_hexagon.sh --no-server     # without it
 ```
 
 The package lands in `build-lnx-htp/pkg` (`bin/`, `lib/`). For the server the
 script installs Debian's arm64 protobuf and ZeroMQ dev packages in the
 container; the board needs the matching runtime libraries
-(`libprotobuf32t64`, `libzmq5`). See `scripts/build_linux_snapdragon.sh --help`
+(`libprotobuf32t64`, `libzmq5`). See `scripts/build_linux_hexagon.sh --help`
 for the options.
 
 ### Installing the skel
