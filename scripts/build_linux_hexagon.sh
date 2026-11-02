@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Cross-build vla.cpp with the Hexagon NPU for a Snapdragon Linux board (e.g.
-# IQ-10), in Qualcomm's Snapdragon Linux toolchain container. The Hexagon SDK
-# has no arm64 Linux build, so the HTP skels cannot be built on the board.
+# Cross-build vla.cpp with the Hexagon NPU for a Qualcomm Linux board such as
+# the Dragonwing IQ-10, in Qualcomm's toolchain container. The Hexagon SDK has
+# no arm64 Linux build, so the HTP skels cannot be built on the board.
 #
-#   scripts/build_linux_snapdragon.sh                   # with vla-server
-#   scripts/build_linux_snapdragon.sh --no-server       # without it
-#   scripts/build_linux_snapdragon.sh -- -DVLA_SPM=ON   # extra CMake arguments
+#   scripts/build_linux_hexagon.sh                  # with vla-server
+#   scripts/build_linux_hexagon.sh --no-server      # without it
+#   scripts/build_linux_hexagon.sh -- -DVLA_SPM=ON  # extra CMake arguments
 #
 # Needs Docker. The package lands in <build-dir>/pkg (bin/, lib/); copy it to
 # the board and install the HTP skel as docs/backend/hexagon.md describes.
@@ -31,18 +31,18 @@
 #   HTP_SKEL_POST     command run as "$HTP_SKEL_POST <in> <out>" on each
 #                     libggml-htp-v*.so, for boards that load only processed
 #                     skels. Unset, the skels are packaged as built.
-#   SNAPDRAGON_IMAGE  toolchain image (default below).
+#   TOOLCHAIN_IMAGE  toolchain image (default below).
 
 set -euo pipefail
 
-IMAGE="${SNAPDRAGON_IMAGE:-ghcr.io/snapdragon-toolchain/arm64-linux:v0.7}"
+IMAGE="${TOOLCHAIN_IMAGE:-ghcr.io/snapdragon-toolchain/arm64-linux:v0.7}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="build-lnx-htp"
 SERVER=1
 RECONFIGURE=0
 EXTRA=()
 
-usage() { sed -n '/^# Cross-build/,/^# *SNAPDRAGON_IMAGE/p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '/^# Cross-build/,/^# *TOOLCHAIN_IMAGE/p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while (($#)); do
     case "$1" in
