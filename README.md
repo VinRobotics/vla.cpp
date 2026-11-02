@@ -6,6 +6,7 @@
 [![Built on llama.cpp](https://img.shields.io/badge/built%20on-llama.cpp-lightgrey)](https://github.com/ggml-org/llama.cpp)
 [![Models on HF](https://img.shields.io/badge/%F0%9F%A4%97%20models-Hugging%20Face-yellow)](https://huggingface.co/vrfai)
 [![arXiv](https://img.shields.io/badge/arXiv-2606.08094-b31b1b.svg)](http://arxiv.org/abs/2606.08094)
+[![Website](https://img.shields.io/badge/website-vlacpp.github.io-green)](https://vlacpp.github.io/)
 
 A C++ inference engine for **Vision-Language-Action (VLA) models**, built on [`llama.cpp`](https://github.com/ggml-org/llama.cpp).
 It runs the open VLA policies under one runtime, each packaged as a single self-contained GGUF that needs no Python or
@@ -129,7 +130,6 @@ Installing, wiring and running the client are in the fork's
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) | ggml and its backends; CMake fetches it at a pinned tag (`b11223`) |
 | [LeRobot fork](https://github.com/khanhnd61-vr/lerobot/tree/vla-simd) | `lerobot-vla-cpp`, the client that runs a real robot against `vla-server` |
 | [ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) | Generates ggml C++ from a policy's PyTorch implementation and verifies it, for porting a new model to `vla.cpp` |
-| [Learn vla.cpp](https://fai-modelopt-tech.github.io/learn-vla-cpp/) | Walkthrough of the engine design and how each policy is implemented on ggml |
 
 ---
 
