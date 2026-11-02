@@ -491,6 +491,70 @@ EDITS = {
     }""",
         ),
     ],
+    # vla.cpp: an RMSNorm that cannot overflow f16, for the NPU.
+    "ggml/src/ggml-openvino/openvino/op/rms_norm.cpp": [
+        (
+            "#include <memory>\n",
+            "#include <cmath>\n#include <cstdlib>\n#include <cstring>\n#include <memory>\n#include <string>\n",
+            "#include <cmath>\n#include <cstdlib>\n",
+        ),
+        (
+            "#include <openvino/op/reduce_mean.hpp>\n",
+            "#include <openvino/op/abs.hpp>\n#include <openvino/op/maximum.hpp>\n#include <openvino/op/reduce_max.hpp>\n#include <openvino/op/reduce_mean.hpp>\n",
+            "#include <openvino/op/reduce_max.hpp>\n",
+        ),
+        (
+            """    auto square = std::make_shared<ov::op::v1::Multiply>(input_node, input_node);
+""",
+            """    // vla.cpp: AN RMSNORM THAT CANNOT OVERFLOW F16, FOR THE NPU.
+    //
+    // The NPU computes in f16 only. A 2048-wide sum of squares overflows 65504
+    // once activations reach |x| ~ 6, and GR00T's language models carry
+    // residual outliers of 1e4 and more, so the plain norm below returned NaN.
+    // Scale each row by its own maximum, a = max(|x|) floored at 1e-2:
+    //     x / sqrt(mean(x^2) + eps) ~= x / max(a * sqrt(mean((x/a)^2)), sqrt(eps))
+    // Every (x/a)^2 is <= 1, so nothing in the chain can overflow. Two NPU
+    // details shape the rest:
+    // - the epsilon is applied as max(., sqrt(eps)), not as eps/a^2 inside the
+    //   sqrt: eps/a^2 is ~1e-8, deep in f16's subnormals, and the NPU compiler
+    //   miscompiled that branch in some compiles (GR00T N1.6 came out all-NaN
+    //   from one compile and finite from another). The two forms differ only on
+    //   rows whose rms is near sqrt(eps), by at most sqrt(2);
+    // - both divisions are pre-scaled by 1/16: the NPU divides through an f16
+    //   reciprocal, and 1/d is flushed to 0 once d > 16384, which zeroed x/a
+    //   for GR00T N1.5's 1.8e4 outlier rows (LIBERO 0/100). 1/16 is exact.
+    // On by default when GGML_OPENVINO_DEVICE is the NPU; GGML_OPENVINO_RMS_SAFE
+    // =0/1 overrides for any device.
+    {
+        const char * rs_env = std::getenv("GGML_OPENVINO_RMS_SAFE");
+        const char * rs_dev = std::getenv("GGML_OPENVINO_DEVICE");
+        const bool   rms_safe = (rs_env && *rs_env) ? std::atoi(rs_env) != 0 :
+                                                      (rs_dev && std::string(rs_dev).rfind("NPU", 0) == 0);
+        if (rms_safe) {
+            float eps_s;
+            memcpy(&eps_s, context.get_output_op_params(), sizeof(float));
+            const auto et   = input_node.get_element_type();
+            auto       axis = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {-1});
+            auto       s16  = ov::op::v0::Constant::create(et, ov::Shape{1}, {1.0f / 16.0f});
+            auto       amax = std::make_shared<ov::op::v1::Maximum>(
+                std::make_shared<ov::op::v1::ReduceMax>(std::make_shared<ov::op::v0::Abs>(input_node), axis, true),
+                ov::op::v0::Constant::create(et, ov::Shape{1}, {1e-2f}));
+            auto x16   = std::make_shared<ov::op::v1::Multiply>(input_node, s16);
+            auto xs    = std::make_shared<ov::op::v1::Divide>(x16, std::make_shared<ov::op::v1::Multiply>(amax, s16));
+            auto ms    = std::make_shared<ov::op::v1::ReduceMean>(std::make_shared<ov::op::v1::Multiply>(xs, xs), axis, true);
+            auto denom = std::make_shared<ov::op::v1::Maximum>(
+                std::make_shared<ov::op::v1::Multiply>(amax, std::make_shared<ov::op::v0::Sqrt>(ms)),
+                ov::op::v0::Constant::create(et, ov::Shape{1}, {std::sqrt(eps_s)}));
+            auto res_s = std::make_shared<ov::op::v1::Divide>(x16, std::make_shared<ov::op::v1::Multiply>(denom, s16));
+            return rename_outputs_with_suffix({res_s}, context.get_name());
+        }
+    }
+
+    auto square = std::make_shared<ov::op::v1::Multiply>(input_node, input_node);
+""",
+            "// vla.cpp: AN RMSNORM THAT CANNOT OVERFLOW F16, FOR THE NPU.",
+        ),
+    ],
     "ggml/src/ggml-openvino/openvino/op/rope.cpp": [
         (
             """        if (context.get_input_size() == 3) {
