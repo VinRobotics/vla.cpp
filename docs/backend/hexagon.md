@@ -123,6 +123,16 @@ One more op is claimed and then refused at run time. On buffers mapped above
 `NO_SUPPORT`, and the host aborts on the first predict. The wrapper sends those
 concats to the CPU.
 
+Flash attention on the HMX (v81) keeps scores and probabilities in F16. That is
+a precision limit rather than a wrong op, but in GR00T N1.7's LM it moves the
+action chunk 5.4e-3 from the CPU reference. N1.7's LM therefore takes the
+explicit path unless `--flash-attn` is given: 2.0e-3, at the same latency.
+
+`MUL_MAT` with a 2D weight against a batch of activations (weight `ne[2..3]`
+of 1, activations above 1) is claimed and comes out wrong. GR00T N1.6's SigLIP2
+tower takes two camera views that way: its action chunk lands 0.16 from the CPU
+reference. The wrapper runs those matmuls on the CPU: 1.9e-3, and 25% faster.
+
 ## What changed in `vla.cpp`
 
 The shape of the diff was predicted correctly, apart from the scheduler:
@@ -167,7 +177,8 @@ found.
    detail).
 4. **Fidelity before latency.**
    - Compare `vla_predict_check` output against the same binary with
-     `VLA_DEVICE=cpu`, and against `--weight-dtype f32`.
+     `VLA_DEVICE=cpu`, and against `--weight-dtype f32`. Add `--flash-attn 0`
+     to the reference: a Hexagon build defaults to flash attention on the CPU too.
    - The bar is 2.9e-3.
    - A run with a wrong kernel still prints a latency, and it is usually a good
      one.
@@ -264,24 +275,48 @@ export LD_LIBRARY_PATH=$PWD/pkg/lib
 ./pkg/bin/vla-server --bind 'tcp://*:5555' smolvla-libero.gguf
 ```
 
-`vla-server` served SmolVLA to `eval/client/vla_cpp_client.py`.
-
 ### Fidelity
 
 `vla_predict_check` at the Hexagon defaults, against the same binary with
-`VLA_DEVICE=cpu --weight-dtype f32`:
+`VLA_DEVICE=cpu --weight-dtype f32 --flash-attn 0`. A Hexagon build turns flash
+attention on by default even on the CPU, so the reference asks for the explicit
+path that other builds run:
 
 | Model | max\|Δ\| |
 |---|--:|
 | SmolVLA | 7.2e-4 |
-| π0.5 | 3.6e-4 |
+| π0.5 | 2.7e-4 |
 | Evo-1 | 4.1e-4 |
 | GR00T N1.5 | 1.7e-3 |
-| GR00T N1.6 | 1.3e-3 |
-| GR00T N1.7 | 5.4e-3 |
+| GR00T N1.6 | 1.4e-3 |
+| GR00T N1.7 | 2.0e-3 |
 
-GR00T N1.7 is above the 2.9e-3 bar. The other archs have not been run on the
-board yet.
+GR00T N1.6 here takes one view; with two it is 1.9e-3. The other archs have
+not been run on the board yet.
+
+### Serving
+
+`vla-server` on the board, driven from the host by
+`eval/client/vla_cpp_client.py` and the adapters `run_sim_client_direct.py`
+uses, on one fixed LIBERO observation (two views, the task prompt, a fixed
+robot state) with fixed noise. The same request goes to a Hexagon server and to
+a CPU server with `--weight-dtype f32 --flash-attn 0`. Every model returns a
+finite chunk, the same chunk for a repeated request, an error reply to a
+malformed or an invalid request, and keeps serving afterwards.
+
+| Model | max\|Δ\| vs CPU F32 | CPU F16 vs CPU F32 |
+|---|--:|--:|
+| SmolVLA | 1.3e-3 | |
+| π0.5 | 4.3e-4 | |
+| Evo-1 | 4.3e-4 | |
+| GR00T N1.5 | 8.3e-3 | 4.3e-2 |
+| GR00T N1.6 | 1.3e-2 | 1.1e-2 |
+| GR00T N1.7 | 2.5e-3 | |
+
+GR00T N1.5 and N1.6 are above the bar on this input, by about what the CPU
+itself gives with F16 weights: they are sensitive to 16-bit precision rather
+than miscomputed. Running them with F32 weights on the NPU has not been tried
+yet.
 
 ## IQ-10, imagined
 
