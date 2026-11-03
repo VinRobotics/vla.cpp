@@ -253,6 +253,37 @@ episodes per suite, `n_action_steps` 10:
 The two are within the noise of 500 episodes on every suite; one step of
 inference took 35-43 ms in both.
 
+LIBERO success rate of the FoldQuant files and the bf16 GGUF on the same Arc B390
+at the latency table's build, same server and client, 10 tasks x 50 episodes per suite,
+environment seed 42, 10 denoise steps, `n_action_steps` 10. With openpi's prompt
+(`VLA_PI05_PROMPT=openpi`), the setting to use for the FoldQuant π0.5 files:
+
+| Suite | FoldQuant W4A4 | bf16, `--act-dtype bf16` |
+|---|--:|--:|
+| libero_object | 99.8% (499/500) | 99.4% (497/500) |
+| libero_spatial | 99.0% (495/500) | 98.8% (494/500) |
+| libero_goal | 99.0% (495/500) | 99.2% (496/500) |
+| libero_10 | 95.0% (475/500) | 93.8% (469/500) |
+| **Average** | **98.2%** | **97.8%** |
+
+With the client's default LeRobot prompt (`Task: <task>, State: <bins>;\nAction: `),
+which the opt-in table above also used, successes out of 500 per suite:
+
+| Checkpoint | libero_object | libero_spatial | libero_goal | libero_10 | Average |
+|---|--:|--:|--:|--:|--:|
+| bf16 | 493 | 489 | 490 | 461 | 96.7% |
+| bf16, `--act-dtype bf16` | 497 | 495 | 490 | 457 | 97.0% |
+| FoldQuant W4A4 | 495 | 486 | 471 | 458 | 95.5% |
+| FoldQuant W4A4, `VLA_PI05_W8A8=vit` | 496 | 491 | 474 | 450 | 95.6% |
+| FoldQuant W4A4, o/down INT8 | 492 | 495 | 484 | 471 | 97.1% |
+| FoldQuant W8A8 | 498 | 496 | 490 | 462 | 97.3% |
+
+These checkpoints come from openpi's π0.5 (`vrfai/pi05_libero_pytorch`), and
+FoldQuant calibrated the activation scales of its files on the plain task prompt.
+On the State prompt W4A4 loses 2.7 points, most of them on libero_goal (471
+against 495), and INT8 o/down and W8A8 win most of that back; `vit` gains nothing
+on success rate. The client's default prompt stays LeRobot's.
+
 The FoldQuant files are FoldQuantVLA quantized checkpoints converted with
 `scripts/convert_quantized_model_to_gguf.py`: W4A4 and W4A4 with INT8 o/down are
 [vrfai/pi05-libero-w4a4](https://huggingface.co/vrfai/pi05-libero-w4a4) and

@@ -237,6 +237,11 @@ load to symmetric per-output-channel INT8 (round-to-nearest, no calibration, no
 rotation) and its activations get per-token INT8 scales, through the W8A8 GEMMs
 of `src/layers/qlinear.h`. It is outside the file contract and off by default.
 
+FoldQuantVLA's π0.5 LIBERO files were calibrated on openpi's plain task prompt,
+so evaluate them with `VLA_PI05_PROMPT=openpi` on the LIBERO client: on the
+client's default State prompt W4A4 scores 2.7 points lower. See the LIBERO tables
+in [sycl.md](backend/sycl.md#the-fast-path-sycl-tla).
+
 ### Other backends
 
 Metal, Vulkan, Hexagon and OpenCL (and the OpenVINO NPU) have no
