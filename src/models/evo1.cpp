@@ -162,8 +162,12 @@ ggml_tensor * build_qwen2_layer(ggml_context * C, const Evo1ModelArch & m, const
     ggml_tensor * q_rope = ggml_rope_ext(C, ggml_reshape_3d(C, qp, hd, n_q,  seq), positions, nullptr, (int) hd, GGML_ROPE_TYPE_NEOX, 0, m.lm_rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
     ggml_tensor * k_rope = ggml_rope_ext(C, ggml_reshape_3d(C, kp, hd, n_kv, seq), positions, nullptr, (int) hd, GGML_ROPE_TYPE_NEOX, 0, m.lm_rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
     ggml_tensor * Q = ggml_cont(C, ggml_permute(C, q_rope, 0, 2, 1, 3));
-    ggml_tensor * K = ggml_cont(C, ggml_permute(C, k_rope, 0, 2, 1, 3));
-    ggml_tensor * V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, vp, hd, n_kv, seq), 1, 2, 0, 3));
+    // fa_kv: on Hexagon K and V go to F16, so both matmuls run on the HMX, which
+    // takes no batched F32 src0 (1 s of vector-unit time per chunk on the IQ-10).
+    // The scores still accumulate in F32 and the softmax stays F32: 4.3e-4 from
+    // the CPU F32 reference there. Other backends keep F32 K/V.
+    ggml_tensor * K = fa_kv(C, ggml_cont(C, ggml_permute(C, k_rope, 0, 2, 1, 3)));
+    ggml_tensor * V = fa_kv(C, ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, vp, hd, n_kv, seq), 1, 2, 0, 3)));
     ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
     ggml_tensor * aw = ggml_soft_max_ext(C, kq, mask, scale, 0.0f);
     ggml_tensor * kqv = ggml_mul_mat(C, V, aw);
