@@ -126,6 +126,14 @@ One more op is claimed and then refused at run time. On buffers mapped above
 `NO_SUPPORT`, and the host aborts on the first predict. The wrapper sends those
 concats to the CPU.
 
+The experts' KV concats (π0, π0.5, SmolVLA) were such concats: along the token
+dim of contiguous [head dim, heads, tokens] tensors, once per layer per denoise
+step. Appending along that dim appends whole rows, so on Hexagon
+`concat_dim2()` in `src/backend.h` does them as a dim-1 concat of the
+[head dim x heads, tokens] views, which writes the same bytes and stays on the
+NPU: π0.5 1379 to 1133 ms, SmolVLA 810 to 638 ms, outputs unchanged. π0 shares
+the code but has not been run on the board yet.
+
 Flash attention on the HMX (v81) keeps scores and probabilities in F16. That is
 a precision limit rather than a wrong op, but in GR00T N1.7's LM it moves the
 action chunk 5.4e-3 from the CPU reference. N1.7's LM therefore takes the
@@ -145,9 +153,11 @@ Hexagon builds:
 - **SigLIP-so400m's MLP is 4304 wide**: 440 ms of GR00T N1.5's 565 ms tower.
   The loader zero-pads fc1, its bias and fc2 to 4320 (`WeightLoader::pad`,
   `gemm_width()` in `src/backend.h`), which leaves the output unchanged.
-- **π0.5's SigLIP ran explicit attention** (head dim 72, F32 x F32), because
-  its flash attention was tied to SYCL's view-taking kernel. It now takes the
-  plain flash attention, as GR00T's tower does.
+- **π0.5's attention ran explicit scores** in SigLIP (head dim 72, F32 x F32),
+  the VLM and the action expert, because its flash attention was tied to SYCL's
+  view-taking kernel. The VLM's and the expert's single KV head also sent their
+  matmuls to the CPU (the batched `MUL_MAT` rule above). All three now take the
+  plain flash attention on Hexagon (`use_flash_attention()` in `pi05.cpp`).
 - **Evo-1's LM attention multiplied F32 K and V against 14 query heads.** K and
   V now go to F16 (`fa_kv()`); the scores still accumulate in F32.
 
@@ -308,7 +318,7 @@ path that other builds run:
 | Model | max\|Δ\| |
 |---|--:|
 | SmolVLA | 7.2e-4 |
-| π0.5 | 2.8e-4 |
+| π0.5 | 4.8e-4 |
 | Evo-1 | 5.0e-4 |
 | GR00T N1.5 | 2.4e-3 |
 | GR00T N1.6 | 1.4e-3 |
@@ -330,7 +340,7 @@ malformed or an invalid request, and keeps serving afterwards.
 | Model | max\|Δ\| vs CPU F32 | CPU F16 vs CPU F32 |
 |---|--:|--:|
 | SmolVLA | 1.3e-3 | |
-| π0.5 | 4.2e-4 | |
+| π0.5 | 3.5e-4 | |
 | Evo-1 | 1.1e-3 | |
 | GR00T N1.5 | 1.1e-2 | 4.3e-2 |
 | GR00T N1.6 | 1.3e-2 | 1.1e-2 |

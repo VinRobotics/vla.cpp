@@ -19,6 +19,9 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   MLP is zero-padded to 4320 at load, π0.5's SigLIP takes flash attention, and
   Evo-1's LM attention takes F16 K/V. GR00T N1.5, N1.6, π0.5 and Evo-1 run
   27-40% faster, within the bar on fixed inputs.
+  π0.5's VLM and action expert take flash attention too, and the experts' KV
+  concats run as row copies that stay on the NPU (π0.5, SmolVLA; π0 shares the
+  code, not yet run on the board).
   GR00T N1.5 and N1.6 are above the bar on a served LIBERO observation, as the
   CPU is at F16. See `docs/backend/hexagon.md` for the build, the skel install
   and the numbers.
