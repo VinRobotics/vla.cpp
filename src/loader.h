@@ -82,6 +82,10 @@ public:
     using FloatMaker = std::function<bool(std::vector<float> &)>;
     void as_float(const std::string & name, int64_t K, int64_t N, FloatMaker make);
 
+    // Declare 2D (or 1D) float tensor `name` as [ne0, ne1], at least its shape in
+    // the file, with the extra elements zero. Call before declaring it.
+    void pad(const std::string & name, int64_t ne0, int64_t ne1);
+
     // For helpers that inspect the file before declaring (foldquant.cpp).
     gguf_reader & reader() {
         return g_;
@@ -111,6 +115,7 @@ private:
         FloatMaker make;
     };
     std::map<std::string, AsFloat> as_float_;
+    std::map<std::string, std::pair<int64_t, int64_t>> pad_;
 
     const char *   arch_;
     gguf_reader &  g_;

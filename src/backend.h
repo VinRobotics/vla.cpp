@@ -192,6 +192,22 @@ inline ggml_tensor * fa_kv([[maybe_unused]] ggml_context * ctx, ggml_tensor * t)
 }
 
 /**
+ * @brief A GEMM's inner width as the compiled-in backend's matmul takes it.
+ *
+ * Hexagon's matrix unit (HMX) takes an F16 weight only when both of its dims
+ * are multiples of 32; anything else runs on the vector units. SigLIP's
+ * 4304-wide MLP spends 440 ms there per tower on the IQ-10, against about
+ * 0.5 ms a matmul on the HMX. Everywhere else this returns @p n.
+ */
+inline int64_t gemm_width(int64_t n) {
+#ifdef GGML_USE_HEXAGON
+    return (n + 31) / 32 * 32;
+#else
+    return n;
+#endif
+}
+
+/**
  * @brief `ggml_gelu` (the tanh form), in ops the compiled-in backend gets right.
  *
  * ggml-hexagon runs GELU as x*sigmoid(1.702x), which is GELU_QUICK, so the
