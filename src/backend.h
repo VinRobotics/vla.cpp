@@ -192,6 +192,28 @@ inline ggml_tensor * fa_kv([[maybe_unused]] ggml_context * ctx, ggml_tensor * t)
 }
 
 /**
+ * @brief `ggml_concat(a, b, 2)` of [d0, d1, n] tensors, as the compiled-in
+ * backend runs it.
+ *
+ * Hexagon runs a concat on the NPU only as a dim-1 copy of whole rows; any other
+ * goes to the CPU fallback (src/backend_fallback.cpp). For contiguous inputs a
+ * dim-2 concat appends whole d0*d1 rows, so it is done as a dim-1 concat of the
+ * [d0*d1, n] views, which writes the same bytes. Everywhere else, and for
+ * non-contiguous inputs, this is ggml_concat(a, b, 2).
+ */
+inline ggml_tensor * concat_dim2(ggml_context * ctx, ggml_tensor * a, ggml_tensor * b) {
+#ifdef GGML_USE_HEXAGON
+    if (ggml_is_contiguous(a) && ggml_is_contiguous(b) && a->ne[3] == 1 && b->ne[3] == 1 &&
+        a->ne[0] == b->ne[0] && a->ne[1] == b->ne[1]) {
+        ggml_tensor * rows = ggml_concat(ctx, ggml_reshape_2d(ctx, a, a->ne[0] * a->ne[1], a->ne[2]),
+                                         ggml_reshape_2d(ctx, b, b->ne[0] * b->ne[1], b->ne[2]), 1);
+        return ggml_reshape_3d(ctx, rows, a->ne[0], a->ne[1], a->ne[2] + b->ne[2]);
+    }
+#endif
+    return ggml_concat(ctx, a, b, 2);
+}
+
+/**
  * @brief A GEMM's inner width as the compiled-in backend's matmul takes it.
  *
  * Hexagon's matrix unit (HMX) takes an F16 weight only when both of its dims
