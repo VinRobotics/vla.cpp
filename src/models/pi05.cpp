@@ -544,7 +544,10 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
         std::printf("vla(pi05): expert weights INT4 (W4A8), %s\n",
                     aex_w4_group > 0 ? ("group " + std::to_string(aex_w4_group)).c_str() : "per channel");
     }
-    m->vis.vit.enc.cfg.flash_attn = use_fused_attention();
+    // On Hexagon (flash attention on by default) SigLIP takes the plain flash
+    // attention too: its explicit scores, head dim 72 against 256 keys, are an
+    // F32 x F32 matmul the HMX does not take, 266 ms of vector-unit time.
+    m->vis.vit.enc.cfg.flash_attn = use_fused_attention() || (vla::default_flash_attn() && vla::flash_attn_enabled());
     // Fused SigLIP blocks (modules/encoder.h, EncCfg::fused): SYCL, BF16, fused
     // attention. A FoldQuant GGUF takes them too: its integer sites are the LM's
     // and the expert's, and its vision tower is BF16 like any other checkpoint's.
