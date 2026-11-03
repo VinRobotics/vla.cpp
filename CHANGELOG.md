@@ -15,6 +15,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   space and matmuls of a 2D weight against a batch, which it computes wrong
   (GR00T N1.6 with two views), run on the CPU, and GR00T N1.7's LM leaves
   flash attention (F16 scores on the HMX) unless `--flash-attn` is given.
+  Three matmuls that the HMX does not take move onto it: SigLIP's 4304-wide
+  MLP is zero-padded to 4320 at load, π0.5's SigLIP takes flash attention, and
+  Evo-1's LM attention takes F16 K/V. GR00T N1.5, N1.6, π0.5 and Evo-1 run
+  27-40% faster, within the bar on fixed inputs.
   GR00T N1.5 and N1.6 are above the bar on a served LIBERO observation, as the
   CPU is at F16. See `docs/backend/hexagon.md` for the build, the skel install
   and the numbers.

@@ -12,7 +12,7 @@ AGX Orin row ran at `e6653e8`, on the bit-exact CUDA path
 ran at `d0e5d00`, PR #35 merged with main `f464653` (same llama.cpp pin), with
 fixed-input checks against the CPU build in
 [backend/rocm.md](../backend/rocm.md). The Qualcomm Dragonwing IQ-10 row ran at
-`e8dfa34` (PR #69, same llama.cpp pin). Each report
+`74e145d` (same llama.cpp pin). Each report
 lists the device, the build, each model's configuration, latency and peak memory
 at the defaults, and the fastest runtime flags for that device.
 
@@ -36,7 +36,7 @@ means the model does not fit or fails there; each report says which and why.
 | [Intel Arc B390 iGPU (OpenVINO)](core-ultra-x7-358h.md) | N/A | 35.6 | 152.4 | 232.6 | 145.5 | 225.1 | 230.8 | N/A | 499.8 | 795.8 | 581.5 | 1494.4 | 841.5 |
 | [Intel Arc A380 (SYCL)](arc-a380.md) | 60.5 | 103.5 | 355.9 | 408.9 | 472.0 | 646.0 | 615.3 | N/A | 734.5 | 921.9 | 945.6 | - | 1047.3 |
 | [Snapdragon X Hexagon NPU](snapdragon-x-hexagon.md) | 239.7 | 2280.8 | 821.0 | 4072.1 | 2755.7 | 2940.0 | 1400.2 | N/A | 1239.3 | 5730.0 | 9321.7 | - | 7208.6 |
-| [Qualcomm Dragonwing IQ-10 Hexagon NPU](qualcomm-iq10.md) | n/r | n/r | n/r | n/r | 1020.9 | 1110.3 | 747.5 | N/A | 810.3 | n/r | 2914.6 | n/r | 3519.4 |
+| [Qualcomm Dragonwing IQ-10 Hexagon NPU](qualcomm-iq10.md) | n/r | n/r | n/r | n/r | 613.6 | 706.9 | 746.5 | N/A | 811.5 | n/r | 1789.4 | n/r | 2589.2 |
 | [Intel AI Boost NPU (OpenVINO)](core-ultra-x7-358h.md) | N/A | 63.8 | - | 316.0 | - | - | - | N/A | 1656.5 | 836.6 | - | 468.7 | - |
 | [Intel Core i7-14700F (CPU)](core-i7-14700f.md) | 39.8 | 195.1 | 825.5 | 1140.6 | 1913.8 | 1627.9 | 1453.4 | N/A | 1689.2 | 6455.7 | 6068.1 | 9869.0 | 4159.6 |
 | [Intel Core i9-14900HX (CPU)](core-i9-14900hx.md) | 67.0 | 314.7 | 1227.2 | 1659.3 | 1935.4 | 1688.9 | 1505.5 | N/A | 1822.6 | 6182.1 | 5735.0 | 9126.4 | 4118.2 |

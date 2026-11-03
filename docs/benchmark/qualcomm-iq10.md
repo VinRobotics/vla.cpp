@@ -15,9 +15,9 @@ through vla.cpp's fallback wrapper.
 | Power | CPU governor `performance` |
 | OS | Ubuntu 24.04.4 LTS, kernel 6.6.110 |
 | Toolchain | `ghcr.io/snapdragon-toolchain/arm64-linux:v0.7`: clang 21.1.8, Hexagon SDK 6.6.0.0 (tools 19.0.07) |
-| Commit | `e8dfa34` (PR #69, on top of #68) |
+| Commit | `74e145d` (branch `hexagon-b11223-ops`, on top of #68 to #70) |
 | llama.cpp | `b11223` |
-| Date | 2026-11-02 11:02 to 11:48 (UTC+07) |
+| Date | 2026-11-03 10:43 to 11:02 (UTC+07) |
 | Build | `scripts/build_linux_hexagon.sh` (servers included); the HTP skel processed for the board and installed in `/vendor/dsp/cdsp0..3` |
 | Runtime flags | defaults; the fastest flags per model are in the second table |
 | Method | 3 warmups + 20 timed reps per process, 3 processes. The process with the lowest mean is reported, and memory is the peak over all three. |
@@ -65,12 +65,12 @@ vision stage separately.
 
 | Model | Views | Input | min ms | mean ms | p50 ms | p90 ms | vision ms | Peak RSS MiB | System RAM MiB |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| GR00T N1.7 | 1 | 256 | 747.5 | 754.7 | 753.0 | 762.7 | 196.1 | 191 | 5083 |
-| SmolVLA | 2 | 512 | 810.3 | 818.6 | 820.5 | 822.6 | 283.0 | 146 | 1187 |
-| GR00T N1.5 | 1 | 224 | 1020.9 | 1024.2 | 1024.2 | 1027.0 | 563.2 | 162 | 3650 |
-| GR00T N1.6 | 1 | 224 | 1110.3 | 1114.5 | 1113.6 | 1118.5 | 559.8 | 147 | 4687 |
-| π0.5 | 2 | 224 | 2914.6 | 2942.6 | 2934.4 | 2967.2 | 1429.6 | 285 | 5517 |
-| Evo-1 | 1 | 448 | 3519.4 | 3572.4 | 3576.7 | 3588.2 | 854.5 | 319 | 1579 |
+| GR00T N1.5 | 1 | 224 | 613.6 | 615.7 | 614.8 | 618.5 | 148.2 | 162 | 3644 |
+| GR00T N1.6 | 1 | 224 | 706.9 | 710.9 | 710.3 | 715.0 | 145.3 | 147 | 4688 |
+| GR00T N1.7 | 1 | 256 | 746.5 | 754.0 | 753.4 | 760.6 | 195.7 | 191 | 5047 |
+| SmolVLA | 2 | 512 | 811.5 | 816.3 | 815.9 | 820.2 | 283.1 | 146 | 1234 |
+| π0.5 | 2 | 224 | 1789.4 | 1820.3 | 1818.5 | 1850.2 | 296.7 | 285 | 5783 |
+| Evo-1 | 1 | 448 | 2589.2 | 2602.0 | 2598.8 | 2613.3 | 853.9 | 319 | 1588 |
 
 ### Fastest configuration
 
@@ -94,23 +94,23 @@ rates measured at the defaults therefore do not carry over to these rows.
 
 | Model | Fastest flags | min ms | mean ms | p50 ms | p90 ms | vision ms | Peak RSS MiB | System RAM MiB | vs defaults |
 |---|---|--:|--:|--:|--:|--:|--:|--:|--:|
-| GR00T N1.7 | *(defaults)* | 747.5 | 754.7 | 753.0 | 762.7 | 196.1 | 191 | 5083 | - |
-| SmolVLA | *(defaults)* | 810.3 | 818.6 | 820.5 | 822.6 | 283.0 | 146 | 1187 | - |
-| GR00T N1.5 | *(defaults)* | 1020.9 | 1024.2 | 1024.2 | 1027.0 | 563.2 | 162 | 3650 | - |
-| GR00T N1.6 | *(defaults)* | 1110.3 | 1114.5 | 1113.6 | 1118.5 | 559.8 | 147 | 4687 | - |
-| π0.5 | *(defaults)* | 2914.6 | 2942.6 | 2934.4 | 2967.2 | 1429.6 | 285 | 5517 | - |
-| Evo-1 | *(defaults)* | 3519.4 | 3572.4 | 3576.7 | 3588.2 | 854.5 | 319 | 1579 | - |
+| GR00T N1.5 | *(defaults)* | 613.6 | 615.7 | 614.8 | 618.5 | 148.2 | 162 | 3644 | - |
+| GR00T N1.6 | *(defaults)* | 706.9 | 710.9 | 710.3 | 715.0 | 145.3 | 147 | 4688 | - |
+| GR00T N1.7 | *(defaults)* | 746.5 | 754.0 | 753.4 | 760.6 | 195.7 | 191 | 5047 | - |
+| SmolVLA | *(defaults)* | 811.5 | 816.3 | 815.9 | 820.2 | 283.1 | 146 | 1234 | - |
+| π0.5 | *(defaults)* | 1789.4 | 1820.3 | 1818.5 | 1850.2 | 296.7 | 285 | 5783 | - |
+| Evo-1 | *(defaults)* | 2589.2 | 2602.0 | 2598.8 | 2613.3 | 853.9 | 319 | 1588 | - |
 
 <details><summary>Screen means (ms) per flag set</summary>
 
 | Model | defaults | `--flash-attn` | `--mm-prec default` | `--flash-attn --mm-prec default` | `--flash-attn 0` |
 |---|--:|--:|--:|--:|--:|
-| GR00T N1.7 | 768.7 | 748.5 | 761.3 | 744.5 | 1086.6 |
-| SmolVLA | 823.1 | 818.9 | 819.5 | 818.5 | 3018.8 |
-| GR00T N1.5 | 1026.1 | 1023.0 | 1025.3 | 1026.1 | 1501.2 |
-| GR00T N1.6 | 1114.4 | 1115.1 | 1114.4 | 1113.3 | 1290.3 |
-| π0.5 | 2939.0 | 2956.9 | 2959.0 | 2962.7 | 2959.6 |
-| Evo-1 | 3583.7 | 3593.9 | 3591.8 | 3582.6 | 5828.5 |
+| GR00T N1.5 | 616.1 | 615.0 | 619.5 | 615.9 | 1096.1 |
+| GR00T N1.6 | 716.2 | 698.0 | 700.7 | 696.3 | 873.4 |
+| GR00T N1.7 | 753.6 | 733.7 | 764.7 | 731.8 | 1070.6 |
+| SmolVLA | 828.8 | 818.5 | 812.5 | 822.8 | 3012.6 |
+| π0.5 | 1815.6 | 1816.9 | 11581.7 | 1822.6 | 2144.2 |
+| Evo-1 | 2614.6 | 2599.1 | 2606.5 | 2605.6 | 4870.0 |
 
 </details>
 
@@ -131,9 +131,12 @@ GR00T N1.6 runs one view here, as the configuration above fixes. With two views
 its SigLIP2 tower hits the batched `MUL_MAT` the wrapper sends to the CPU; see
 [backend/hexagon.md](../backend/hexagon.md#op-coverage-measured).
 
+In the screen, π0.5 with `--mm-prec default` took 11.6 s against 1.8 s at the
+defaults. That was not investigated.
+
 These rows time the defaults; they do not vouch for accuracy. On a served LIBERO
-observation, GR00T N1.5 and N1.6 land above the 2.9e-3 fidelity bar, about as
-far off as the CPU at F16; see
+observation, GR00T N1.5 and N1.6 land above the 2.9e-3 fidelity bar: N1.5
+closer to the reference than the CPU at F16, N1.6 slightly further; see
 [backend/hexagon.md](../backend/hexagon.md#serving).
 
 ## Reproducing

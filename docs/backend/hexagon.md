@@ -94,7 +94,10 @@ changed all three conclusions:
   it.
 - **`GELU_ERF` is still missing.** It now runs on the CPU (next point) in every
   DINOv2 and SigLIP-so400m tower, and costs what that implies: Evo-1 spends more
-  on copies than the NPU saves.
+  on copies than the NPU saves. An HTP kernel was written and checked on the
+  IQ-10 (b11223): more accurate than the CPU's (relative error 1.5e-6 against
+  5.1e-5), and Evo-1 7% faster. It was left out: GR00T N1.7 sits close to the
+  bar, and the kernel moved its fixed-input chunk from 2.0e-3 to 3.0e-3.
 - **Absent is no longer fatal.** `src/backend_fallback.cpp` wraps the NPU in a
   backend that runs whatever it rejects on the CPU, without touching an arch.
   That also covers ops refused for shape rather than type: softmax rows that are
@@ -132,6 +135,26 @@ explicit path unless `--flash-attn` is given: 2.0e-3, at the same latency.
 of 1, activations above 1) is claimed and comes out wrong. GR00T N1.6's SigLIP2
 tower takes two camera views that way: its action chunk lands 0.16 from the CPU
 reference. The wrapper runs those matmuls on the CPU: 1.9e-3, and 25% faster.
+
+The matrix unit (HMX) takes a matmul only when its inner dim K and its output
+dim N are multiples of 32, and with a batch only an F16 src0. Anything else runs
+on the vector units, at about 1/20 of the speed. `GGML_HEXAGON_PROFILE=1` on the
+IQ-10 showed three such matmuls dominating, and vla.cpp now avoids them in
+Hexagon builds:
+
+- **SigLIP-so400m's MLP is 4304 wide**: 440 ms of GR00T N1.5's 565 ms tower.
+  The loader zero-pads fc1, its bias and fc2 to 4320 (`WeightLoader::pad`,
+  `gemm_width()` in `src/backend.h`), which leaves the output unchanged.
+- **π0.5's SigLIP ran explicit attention** (head dim 72, F32 x F32), because
+  its flash attention was tied to SYCL's view-taking kernel. It now takes the
+  plain flash attention, as GR00T's tower does.
+- **Evo-1's LM attention multiplied F32 K and V against 14 query heads.** K and
+  V now go to F16 (`fa_kv()`); the scores still accumulate in F32.
+
+What is left on the vector units: GR00T's DiT attention (head dim 48) and Evo-1's
+DiT cross-attention (head dim 112, 1025 keys), whose shapes the HMX does not
+take, and Evo-1's InternViT attention, which stays on the CPU because F16 K/V
+there measured 3.9e-2.
 
 ## What changed in `vla.cpp`
 
@@ -285,9 +308,9 @@ path that other builds run:
 | Model | max\|Δ\| |
 |---|--:|
 | SmolVLA | 7.2e-4 |
-| π0.5 | 2.7e-4 |
-| Evo-1 | 4.1e-4 |
-| GR00T N1.5 | 1.7e-3 |
+| π0.5 | 2.8e-4 |
+| Evo-1 | 5.0e-4 |
+| GR00T N1.5 | 2.4e-3 |
 | GR00T N1.6 | 1.4e-3 |
 | GR00T N1.7 | 2.0e-3 |
 
@@ -307,15 +330,16 @@ malformed or an invalid request, and keeps serving afterwards.
 | Model | max\|Δ\| vs CPU F32 | CPU F16 vs CPU F32 |
 |---|--:|--:|
 | SmolVLA | 1.3e-3 | |
-| π0.5 | 4.3e-4 | |
-| Evo-1 | 4.3e-4 | |
-| GR00T N1.5 | 8.3e-3 | 4.3e-2 |
+| π0.5 | 4.2e-4 | |
+| Evo-1 | 1.1e-3 | |
+| GR00T N1.5 | 1.1e-2 | 4.3e-2 |
 | GR00T N1.6 | 1.3e-2 | 1.1e-2 |
 | GR00T N1.7 | 2.5e-3 | |
 
-GR00T N1.5 and N1.6 are above the bar on this input, by about what the CPU
-itself gives with F16 weights: they are sensitive to 16-bit precision rather
-than miscomputed. Running them with F32 weights on the NPU has not been tried
+GR00T N1.5 and N1.6 are above the bar on this input, and so is the CPU itself
+with F16 weights: N1.5 lands closer to the reference than the CPU at F16, N1.6
+slightly further (1.3e-2 against 1.1e-2). They are sensitive to 16-bit
+precision rather than miscomputed. Running them with F32 weights on the NPU has not been tried
 yet.
 
 ## IQ-10, imagined
