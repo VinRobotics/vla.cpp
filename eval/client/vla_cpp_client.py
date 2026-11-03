@@ -57,6 +57,8 @@ ARCH_PRESETS = {
         "max_length": 21,
     },
     "gr00t_n1_7": {"image_size": 256, "tokenizer": "nvidia/Cosmos-Reason2-2B", "max_state_dim": 132},
+    # 256x256 LIBERO frames upsampled to the ConvNeXt's 448, as its DINOv3 processor does.
+    "picovla":  {"image_size": 448, "tokenizer": "HuggingFaceTB/SmolVLM2-500M-Instruct", "max_state_dim": 32},
 
     "gr00t_n1_5": {"image_size": 224, "tokenizer": "lerobot/eagle2hg-processor-groot-n1p5",
                    "max_state_dim": 64, "trust_remote_code": True},
@@ -209,6 +211,15 @@ class VlaCppClient:
             raise ValueError(f"n_action_steps must be >= 1, got {n_action_steps}")
         self.n_action_steps = n_action_steps
         self._action_queue: deque = deque(maxlen=n_action_steps)
+
+        # PicoVLA keeps a one-frame memory on the server, cleared by the first
+        # request of each episode, and its reference server blends every chunk
+        # with the previous one (_picovla_blend).
+        self._picovla_prev = None
+        self._picovla_calls = 0
+        if arch == "picovla" and n_action_steps != 1:
+            print(f"vla-cpp-direct[arch=picovla]: n_action_steps={n_action_steps}, cross-chunk "
+                  "blending off (the reference re-plans every step)", flush=True)
 
         self._bitvla_proprio_norm = None
         self._bitvla_unnorm_key   = None
@@ -648,6 +659,8 @@ class VlaCppClient:
         self._action_queue.clear()
         self._episode += 1
         self._step = 0
+        self._picovla_prev = None
+        self._picovla_calls = 0
 
     def get_action(self, observations: dict[str, Any]) -> np.ndarray:
 
@@ -662,6 +675,8 @@ class VlaCppClient:
                 chunk = self._predict_chunk_octo(observations)
             else:
                 chunk = self._predict_chunk(observations)
+            if self.arch == "picovla":
+                chunk = self._picovla_blend(chunk)
             for row in chunk[: self.n_action_steps, : self.real_action_dim]:
                 self._action_queue.append(np.ascontiguousarray(row, dtype=np.float32))
         return self._action_queue.popleft()
@@ -676,7 +691,7 @@ class VlaCppClient:
             return self._predict_chunk_gr00t_n1_7(observations)
         if self.arch == "gr00t_n1_5":
             return self._predict_chunk_gr00t_n1_5(observations)
-        if self.arch == "gr00t_n1_6":
+        if self.arch == "gr00t_n1_6" and "observation.state" not in observations:
             return self._predict_chunk_gr00t_n1_6(observations)
         if self.arch == "pi05":
             return self._predict_chunk_pi05(observations)
@@ -709,11 +724,29 @@ class VlaCppClient:
         task = observations.get("task", "")
         if isinstance(task, bytes):
             task = task.decode()
-        if not task.endswith("\n"):
-            task = task + "\n"
-        toks = self.tok(task, padding=False, truncation=True,
-                        max_length=self.max_length, return_tensors="np")
-        lang = toks["input_ids"][0].astype(np.int32)
+        if self.arch == "gr00t_n1_6":
+            # Parsers provide CHW images, normalized state and formatted task
+            # text through the common observation schema. Keep the legacy
+            # video/state modality path above for existing callers.
+            tokens_per_view = (self.image_size // 28) ** 2
+            image_blocks = "".join(
+                f"<image {i + 1}><img>" + "<IMG_CONTEXT>" * tokens_per_view + "</img>"
+                for i in range(len(images_f32))
+            )
+            text = self.tok.apply_chat_template(
+                [{"role": "user", "content": task + image_blocks}],
+                tokenize=False, add_generation_prompt=False,
+            )
+            ids = self.tok(text, add_special_tokens=False)["input_ids"]
+            if ids.count(self._GR00T_N16_IMG_PAD_ID) != len(images_f32) * tokens_per_view:
+                raise ValueError("Tokenizer <IMG_CONTEXT> slots do not match the camera images")
+            lang = np.asarray(ids, dtype=np.int32)
+        else:
+            if not task.endswith("\n"):
+                task = task + "\n"
+            toks = self.tok(task, padding=False, truncation=True,
+                            max_length=self.max_length, return_tensors="np")
+            lang = toks["input_ids"][0].astype(np.int32)
 
         req = self.pb.PredictRequest()
         req.request_id = self._step
@@ -726,6 +759,8 @@ class VlaCppClient:
             ip.data   = img.tobytes()
         req.lang_tokens.extend(lang.tolist())
         req.state.extend(state_padded.tolist())
+        if self.arch == "picovla":
+            req.reset_memory = self._picovla_calls == 0
 
         self._maybe_add_fixed_noise(req)
         self.sock.send(req.SerializeToString())
@@ -739,6 +774,23 @@ class VlaCppClient:
 
         return (np.array(resp.action_chunk, dtype=np.float32)
                   .reshape(resp.chunk_size, resp.action_dim))
+
+    def _picovla_blend(self, chunk: np.ndarray) -> np.ndarray:
+        """PicoVLA's cross-chunk blending (service/server.py, utils/policy_utils.py
+        make_prev_action_chunk): from an episode's third call on, the new chunk
+        is mixed with the previous one shifted by the one step executed since,
+        w_h = arccos(1 - 2(H-h-1)/H) / pi, 0.84 on the first step down to 0 on
+        the last. The reference blends normalized actions; the un-normalization
+        is affine per dimension, so world units blend the same."""
+        if self._picovla_calls > 1 and self.n_action_steps == 1:
+            horizon = chunk.shape[0]
+            prev = np.zeros_like(chunk)
+            prev[:-1] = self._picovla_prev[1:]
+            w = (np.arccos(1.0 - 2.0 * (horizon - np.arange(horizon) - 1) / horizon) / np.pi)[:, None]
+            chunk = ((1.0 - w) * chunk + w * prev).astype(np.float32)
+        self._picovla_prev = chunk.copy()
+        self._picovla_calls += 1
+        return chunk
 
     def _predict_chunk_turbovla(self, observations: dict[str, Any]) -> np.ndarray:
         if self._turbovla_state_norm is None or self._turbovla_action_unnorm is None:
@@ -922,13 +974,7 @@ class VlaCppClient:
             task = task.decode()
         cleaned = task.strip().replace("_", " ").replace("\n", " ")
         state_str = " ".join(map(str, disc.tolist()))
-        if os.environ.get("VLA_PI05_PROMPT") == "openpi":
-            # openpi's pi05 prompt (discrete_state_input=False): BOS, the task and
-            # "\n", no state; the form openpi-trained checkpoints were tuned on.
-            prompt = f"{cleaned}\n"
-        else:
-            # LeRobot's state-in-prompt form.
-            prompt = f"Task: {cleaned}, State: {state_str};\nAction: "
+        prompt = f"Task: {cleaned}, State: {state_str};\nAction: "
         toks = self.tok(prompt, padding=False, truncation=True,
                         max_length=self.max_length, return_tensors="np")
         lang = toks["input_ids"][0].astype(np.int32)
@@ -963,7 +1009,7 @@ class VlaCppClient:
     _EVO1_MAX_TEXT_LENGTH   = 1024
     _FIXED_NOISE_ARCHS = {
         "smolvla", "pi0", "pi05", "evo1", "gr00t_n1_5", "gr00t_n1_6", "gr00t_n1_7",
-        "vla_jepa", "octo",
+        "vla_jepa", "octo", "picovla",
     }
 
     def _maybe_add_fixed_noise(self, req) -> None:
