@@ -351,6 +351,14 @@ bool accel_runs(FallbackCtx * fc, const ggml_tensor * t, const char ** why) {
         *why = "miscomputes a 2D weight against a batch in";
         return false;
     }
+    if (fc->hexagon && t->op == GGML_OP_CPY && is_weight(t->src[0])) {
+        // Claimed, but a copy that reads a weight is answered with NO_SUPPORT
+        // and the host aborts. VLA-Adapter casts its F16 action queries
+        // [896,64] to F32 in the graph; with the cast on the CPU it is within
+        // 4.2e-4 of the CPU F32 reference.
+        *why = "cannot run (NO_SUPPORT) a weight-reading";
+        return false;
+    }
     return ggml_backend_supports_op(fc->accel, t);
 }
 
