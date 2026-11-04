@@ -368,6 +368,15 @@ bool accel_runs(FallbackCtx * fc, const ggml_tensor * t, const char ** why) {
         *why = "can read stale data in a";
         return false;
     }
+    if (fc->hexagon && t->op == GGML_OP_CONT && t->src[0]->nb[0] != ggml_type_size(t->src[0]->type) &&
+        ggml_nelements(t) >= 256 * 1024) {
+        // Runs, but a large copy that transposes the innermost dim is a strided
+        // gather on the NPU: 18 ms for TurboVLA's fusion values [512,256,4], 32 ms
+        // for Evo-1's [1025,112,8], 48 ms for OpenVLA-OFT's [330,128,32]. Small
+        // ones take tens of microseconds there, less than a trip to the CPU.
+        *why = "is slow on a large transposing";
+        return false;
+    }
     return ggml_backend_supports_op(fc->accel, t);
 }
 
