@@ -37,7 +37,8 @@ namespace {
 void pad_mlp(WeightLoader & L, const std::string & fc1, const std::string & fc2) {
     const ggml_tensor * w1 = L.reader().meta((fc1 + ".weight").c_str());
     const ggml_tensor * w2 = L.reader().meta((fc2 + ".weight").c_str());
-    if (!w1 || !w2 || ggml_is_quantized(L.gemm_type()))
+    if (!w1 || !w2 || ggml_is_quantized(L.gemm_type()) || ggml_is_quantized(w1->type) ||
+        ggml_is_quantized(w2->type))
         return;
     const int64_t ff = w1->ne[1];
     const int64_t fp = gemm_width(ff);
