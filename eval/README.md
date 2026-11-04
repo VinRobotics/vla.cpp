@@ -1,6 +1,6 @@
 # Evaluation
 
-The eval scaffold drives `vla-server` against two simulators end-to-end over the ZeroMQ +
+The eval scaffold drives `vla-server` against simulators end-to-end over the ZeroMQ +
 protobuf protocol. The C++ server does all model inference on CPU/GPU; the Python client only runs
 the simulator and the per-arch normalisation, so it stays on CPU.
 
@@ -8,6 +8,7 @@ the simulator and the per-arch normalisation, so it stays on CPU.
 
 Each setup script bootstraps an isolated Python 3.10 [`uv`](https://github.com/astral-sh/uv) venv
 next to itself and clones the upstream sim. Requires `uv` on `PATH`.
+RoboCasa365 uses Python 3.11 and a separate MuJoCo 3.x stack.
 
 ### LIBERO
 
@@ -78,6 +79,12 @@ eval/sim/simpler/simpler_uv/.venv/bin/python eval/client/run_simpler_client_dire
 
 `$VLA_STATS_JSON` is the `statistics.json` beside the bridge GGUF. The default 224-px GGUF
 mis-localises on WidowX (≈20% success); the 252-px build is required.
+
+## RoboCasa365
+
+See the [RoboCasa setup and evaluation guide](sim/robocasa/README.md) for the
+isolated Python 3.11 simulator, SmolVLA GGUF smoke test, GR00T N1.6 PandaOmron
+client, and result collector.
 
 ## Running with Docker Compose
 
