@@ -359,6 +359,15 @@ bool accel_runs(FallbackCtx * fc, const ggml_tensor * t, const char ** why) {
         *why = "cannot run (NO_SUPPORT) a weight-reading";
         return false;
     }
+    if (fc->hexagon && t->op == GGML_OP_REPEAT && !is_weight(t->src[0])) {
+        // The NPU's REPEAT reads its source through the data cache, which is
+        // invalidated only between op batches, while the op that wrote the
+        // source used DMA, so within one batch it can read stale lines.
+        // TurboVLA repeats its ViT prefix [768,5] over two views: max|delta|
+        // 0.19 and different on every run, 3.1e-4 with the repeat on the CPU.
+        *why = "can read stale data in a";
+        return false;
+    }
     return ggml_backend_supports_op(fc->accel, t);
 }
 
