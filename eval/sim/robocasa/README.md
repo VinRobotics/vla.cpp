@@ -4,11 +4,7 @@ This guide sets up the RoboCasa simulator, starts a C++ inference server, and
 runs evaluation episodes with SmolVLA or GR00T N1.6. Use two terminals: keep the
 server running in one and launch the simulator client in the other.
 
-All commands below run from the **vla.cpp repository root**:
-
-```bash
-cd /home/chinhnv18/workspaces/vla_workspace/vla.cpp
-```
+All commands below run from the **vla.cpp repository root**.
 
 - [Set up the environment](#1-set-up-the-environment)
 - [Run SmolVLA](#2-run-smolvla)
@@ -118,17 +114,21 @@ outside `build/`.
 
 ## 2. Run SmolVLA
 
-Use the supplied checkpoint at `weights/smolvla_robocasa.gguf`. Setup installs
-the simulator; it does not download this GGUF.
+The server loads `weights/smolvla_robocasa.gguf` by default. Setup installs the
+simulator only; it does not download or convert this checkpoint.
 
-### Download and Convert Huggingface SmolVLA checkpoint to GGUF format
-Download the Huggingface SmolVLA checkpoint and convert it to GGUF format using the following commands:
+### Download and convert the SmolVLA checkpoint
+
+Download `lerobot/smolvla_robocasa` at the revision the client reads its
+metadata from, then convert it to GGUF:
 
 ```bash
-# Download the checkpoint from Huggingface
-huggingface-cli download lerobot/smolvla_robocasa --local-dir weights/smolvla_robocasa
+# Download the checkpoint from Hugging Face
+huggingface-cli download lerobot/smolvla_robocasa \
+    --revision f7af588d11e30b0069f200792fb285904b74c80b \
+    --local-dir weights/smolvla_robocasa
 
-# Convert to GGUF format
+# Convert to GGUF
 python scripts/convert_smolvla_to_gguf.py \
     --ckpt weights/smolvla_robocasa \
     --out weights/smolvla_robocasa.gguf
@@ -141,7 +141,7 @@ bash eval/run_robocasa_server.sh \
     -m smolvla \
     -c weights/smolvla_robocasa.gguf \
     -a tcp://127.0.0.1:5555 \
-    -o outputs/robocasa_smolvla/_server_logs \
+    -o outputs/robocasa/_server_logs \
     -B
 ```
 
@@ -193,7 +193,7 @@ For offline operation, add both options to the client command, using existing
 local files:
 
 ```text
---policy-path weights/smolvla --tokenizer /path/to/local/tokenizer
+--policy-path weights/smolvla_robocasa --tokenizer /path/to/local/tokenizer
 ```
 
 The policy directory must contain both metadata JSON files. Normalization
@@ -218,26 +218,30 @@ the selected prompt and records it in `episodes.csv`.
 
 ## 3. Run GR00T N1.6
 
-Prepare a RoboCasa-compatible N1.6 GGUF and the matching client artifacts:
+The server needs an N1.6 GGUF whose checkpoint includes the
+`robocasa_panda_omron` embodiment; the `nvidia/GR00T-N1.6-3B` base checkpoint
+does. The client reads three artifacts from `weights/GR00T-N1.6` by default
+(`--policy-path` changes the directory):
 
-- Eagle tokenizer directory, including special tokens and its chat template.
 - `statistics.json` containing the `robocasa_panda_omron` embodiment.
 - `processor_config.json` from the same checkpoint.
+- `tokenizer/`, the Eagle tokenizer with its special tokens and chat template.
 
-Setup does not download or convert GR00T weights. The checkpoint must support
-PandaOmron's RoboCasa modalities. Replace the placeholder paths below with your
-files. Stop the SmolVLA server with **Ctrl+C** before reusing port 5555.
+Setup does not download or convert GR00T weights. Stop the SmolVLA server with
+**Ctrl+C** before reusing port 5555.
 
-### Download and Convert GR00T N1.6 Checkpoint to GGUF
-Download the GR00T N1.6 checkpoint from Huggingface and convert it to GGUF format using the following commands:
+### Download and convert the GR00T N1.6 checkpoint
 
 ```bash
-# Download the checkpoint from Huggingface
-huggingface-cli download nvidia/GR00T-N1.6-3B --local-dir weights/gr00t_n1_6
+# Download the checkpoint from Hugging Face
+huggingface-cli download nvidia/GR00T-N1.6-3B --local-dir weights/GR00T-N1.6
 
-# Convert to GGUF format
-python python scripts/convert_gr00t_n1_6_to_gguf.py \
-    --ckpt weights/gr00t_n1_6 \
+# Fetch the Eagle tokenizer into weights/GR00T-N1.6/tokenizer (no weights)
+python3 eval/sim/robocasa/download_gr00t_tokenizer.py
+
+# Convert to GGUF
+python scripts/convert_gr00t_n1_6_to_gguf.py \
+    --ckpt weights/GR00T-N1.6 \
     --out weights/gr00tn1d6-robocasa.gguf
 ```
 
@@ -248,12 +252,13 @@ bash eval/run_robocasa_server.sh \
     -m gr00t_n1_6 \
     -c weights/gr00tn1d6-robocasa.gguf \
     -a tcp://127.0.0.1:5555 \
-    -o outputs/robocasa_gr00t/_server_logs \
+    -o outputs/robocasa/_server_logs \
     -B
 ```
 
-The script selects `VLA_GR00T_EMBODIMENT=robocasa_panda_omron` automatically.
-Wait for `ready` before starting the client.
+The script selects `VLA_GR00T_EMBODIMENT=robocasa_panda_omron` automatically and
+exits if the GGUF has no such embodiment. Wait for `ready` before starting the
+client.
 
 ### Terminal 2: run the GR00T client
 
@@ -289,16 +294,8 @@ in [`utils/sim_adapters/robocasa.py`](../../utils/sim_adapters/robocasa.py).
 
 ## 4. Read results
 
-Generate a report after evaluation:
-
-```bash
-python3 eval/collect_robocasa_results.py \
-    --sweep outputs/robocasa_smolvla \
-    --gguf weights/smolvla_robocasa.gguf
-```
-
-For GR00T, use `--sweep outputs/robocasa_gr00t` and its GGUF path. `--gguf`
-adds the checkpoint SHA256 and can be omitted when weights are on another host.
+Each task writes its results under `<output-dir>/<arch>/<task>/`; `summary.txt`
+holds the success rate and average step time.
 
 | Location under the output directory | Contents |
 |---|---|
@@ -308,18 +305,18 @@ adds the checkpoint SHA256 and can be omitted when weights are on another host.
 | `<arch>/<task>/episode_*.mp4` | Left, right, and wrist views side by side |
 | `_server_logs/<arch>.log` | Server model loading and inference timing logs |
 | `_server_logs/<arch>.mem.json` | Server memory samples |
-| `report.md` | Aggregated results written by the collector |
+
+The `_server_logs/` rows assume the server's `-o` is `<output-dir>/_server_logs`,
+as in the commands above.
 
 A completed episode with `success=0` means the task was not solved within its
 horizon; the client can still exit successfully. A simulator or inference error
 records an aborted attempt and exits with code 1. Aborted attempts count as
-failures, and partial runs are identified in the report.
+failures, and `summary.json` marks a partial run with `"complete": false`.
 
 Use a new output directory to preserve another run. Reusing paths replaces
-previous summaries and videos. Set server `-o` to `<output-root>/_server_logs`
-so the collector can find its metrics. Server metrics cover that server log's
-lifetime; restart with a new log directory for a separate evaluation run.
-Missing logs or memory samples appear as `n/a`.
+previous summaries and videos. Server metrics cover that server log's lifetime;
+restart with a new log directory for a separate evaluation run.
 
 Useful client options:
 
@@ -359,7 +356,7 @@ bash eval/run_robocasa_client.sh \
 The simulator host needs its own RoboCasa environment, assets, and tokenizer.
 For GR00T, also keep matching statistics and processor configuration there.
 GGUF weights stay on the server. Copy server logs and memory JSON into the
-client output root's `_server_logs/` directory to include them in its report.
+client output root's `_server_logs/` directory to keep a run's results together.
 
 ## 6. Valid task names
 
@@ -893,19 +890,7 @@ Inspect all CLI options:
 bash eval/sim/robocasa/setup_robocasa.sh --help
 bash eval/run_robocasa_server.sh -h
 bash eval/run_robocasa_client.sh --help
-python3 eval/collect_robocasa_results.py --help
 ```
 
 Press **Ctrl+C** in the server terminal when finished. The wrapper cleans up
 its inference process, log tail, and memory sampler.
-
-For development, run the focused contract tests inside the RoboCasa environment:
-
-```bash
-eval/sim/robocasa/robocasa_uv/.venv/bin/python -m pytest -q tests/py/test_robocasa.py
-```
-
-These tests use synthetic observations and protobuf responses; they do not need
-simulator assets, model weights, a GPU, or tokenizer downloads. For additional
-run details and historical evaluation results, see the
-[extended running tutorial](../../robocasa_run.md).

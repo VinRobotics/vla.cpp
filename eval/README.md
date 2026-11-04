@@ -84,7 +84,7 @@ mis-localises on WidowX (≈20% success); the 252-px build is required.
 
 See the [RoboCasa setup and evaluation guide](sim/robocasa/README.md) for the
 isolated Python 3.11 simulator, SmolVLA GGUF smoke test, GR00T N1.6 PandaOmron
-client, and result collector.
+client, and per-task result files.
 
 ## Running with Docker Compose
 
