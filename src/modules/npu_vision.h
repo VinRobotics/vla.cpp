@@ -24,16 +24,26 @@
 
 #pragma once
 
+#ifndef _WIN32
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#endif
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <vector>
 
 namespace vla {
 
+#ifdef _WIN32
+// No Unix-socket client on Windows: report failure, so the caller encodes the
+// view itself.
+inline bool npu_vision_roundtrip(const char *, const std::vector<float> &, float *, size_t) {
+    return false;
+}
+#else
 inline bool npu_vision_roundtrip(const char * sock_path, const std::vector<float> & chw, float * out,
                                  size_t out_floats) {
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
@@ -59,5 +69,6 @@ inline bool npu_vision_roundtrip(const char * sock_path, const std::vector<float
     ::close(fd);
     return ok;
 }
+#endif
 
 }  // namespace vla
