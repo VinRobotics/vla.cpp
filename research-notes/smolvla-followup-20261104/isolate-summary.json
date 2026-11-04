@@ -1,0 +1,38 @@
+{
+  "no-exact-gemm": {
+    "default": {
+      "bit_differences": 0,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    "unfused": {
+      "bit_differences": 350,
+      "max_abs": 0.0005458742380142212,
+      "rmse": 0.00010049711168250623
+    }
+  },
+  "no-exact-attn": {
+    "default": {
+      "bit_differences": 350,
+      "max_abs": 0.0011349022388458252,
+      "rmse": 0.000195887559953955
+    },
+    "unfused": {
+      "bit_differences": 350,
+      "max_abs": 0.0006968528032302856,
+      "rmse": 0.00011599645763902995
+    }
+  },
+  "no-exact-both": {
+    "default": {
+      "bit_differences": 350,
+      "max_abs": 0.0011349022388458252,
+      "rmse": 0.000195887559953955
+    },
+    "unfused": {
+      "bit_differences": 350,
+      "max_abs": 0.0006968528032302856,
+      "rmse": 0.00011599645763902995
+    }
+  }
+}

@@ -1,0 +1,288 @@
+[
+  {
+    "file": ".github/ISSUE_TEMPLATE/bug_report.md",
+    "lines": 26,
+    "missing_relative_targets": []
+  },
+  {
+    "file": ".github/ISSUE_TEMPLATE/model_request.md",
+    "lines": 20,
+    "missing_relative_targets": []
+  },
+  {
+    "file": ".github/pull_request_template.md",
+    "lines": 12,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "CHANGELOG.md",
+    "lines": 258,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "CONTRIBUTING.md",
+    "lines": 89,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "LICENSE.md",
+    "lines": 201,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "NOTES_SMOLVLA.md",
+    "lines": 444,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "PAPER_READING_SMOLVLA_CLP.md",
+    "lines": 21,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "PART3_OPTIMIZATION.md",
+    "lines": 59,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "README.md",
+    "lines": 203,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "REPORT_SMOLVLA.md",
+    "lines": 73,
+    "missing_relative_targets": [
+      "MENTOR_REVIEW.md"
+    ]
+  },
+  {
+    "file": "SECURITY.md",
+    "lines": 23,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "bindings/python/README.md",
+    "lines": 57,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "ci/README.md",
+    "lines": 132,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/ADOPTION.md",
+    "lines": 50,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/ARCHITECTURE.md",
+    "lines": 130,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/DOCKER.md",
+    "lines": 307,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/EVAL.md",
+    "lines": 91,
+    "missing_relative_targets": [
+      "../eval/sim/simpler/SimplerEnv"
+    ]
+  },
+  {
+    "file": "docs/KNOWN_ISSUES.md",
+    "lines": 9,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/MODELS.md",
+    "lines": 71,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/PREBUILT.md",
+    "lines": 52,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/QUANTIZATION.md",
+    "lines": 343,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/UPSTREAMING.md",
+    "lines": 86,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/USAGE.md",
+    "lines": 109,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/backend/cuda.md",
+    "lines": 191,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/backend/hexagon-windows.md",
+    "lines": 333,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/backend/hexagon.md",
+    "lines": 359,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/backend/metal.md",
+    "lines": 150,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/backend/ov-progress.md",
+    "lines": 194,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/backend/ov.md",
+    "lines": 411,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/backend/rocm.md",
+    "lines": 271,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/backend/sycl.md",
+    "lines": 417,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/backend/wsl.md",
+    "lines": 196,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/README.md",
+    "lines": 69,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/TEMPLATE.md",
+    "lines": 177,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/apple-m4.md",
+    "lines": 141,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/arc-a380.md",
+    "lines": 145,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/core-i5-12400f.md",
+    "lines": 141,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/core-i7-14700f.md",
+    "lines": 147,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/core-i9-14900hx.md",
+    "lines": 143,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/core-ultra-x7-358h.md",
+    "lines": 480,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/jetson-agx-orin.md",
+    "lines": 218,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/jetson-orin-nano.md",
+    "lines": 139,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/jetson-orin-nx.md",
+    "lines": 155,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/libero.md",
+    "lines": 61,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/qualcomm-iq10.md",
+    "lines": 148,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/rtx-3060.md",
+    "lines": 145,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/rtx-3090.md",
+    "lines": 137,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/rtx-5070-laptop.md",
+    "lines": 145,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/rtx-5090.md",
+    "lines": 123,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/rx-9060-xt.md",
+    "lines": 163,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/ryzen-5-5500.md",
+    "lines": 141,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "docs/benchmark/snapdragon-x-hexagon.md",
+    "lines": 221,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "eval/README.md",
+    "lines": 122,
+    "missing_relative_targets": [
+      "reports/"
+    ]
+  },
+  {
+    "file": "examples/chat/README.md",
+    "lines": 158,
+    "missing_relative_targets": []
+  },
+  {
+    "file": "research-notes/smolvla-followup-20261104/ARCHITECTURE_AND_PROFILE.md",
+    "lines": 118,
+    "missing_relative_targets": []
+  }
+]

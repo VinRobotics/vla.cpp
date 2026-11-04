@@ -1,0 +1,15 @@
+[
+  "/home/doris/projects/vla.cpp/build-cuda/vla-bench",
+  "--ckpt",
+  "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+  "--images",
+  "2",
+  "--size",
+  "512",
+  "--tokens",
+  "16",
+  "--warmup",
+  "3",
+  "--reps",
+  "20"
+]

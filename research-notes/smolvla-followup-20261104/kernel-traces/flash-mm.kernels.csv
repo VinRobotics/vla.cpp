@@ -1,0 +1,36 @@
+kernel,calls,summed_ms
+void cutlass::Kernel2<cutlass_80_wmma_tensorop_s161616gemm_bf16_32x32_128x2_tn_align8>(T1::Params),32000,308.177763
+"void flash_attn_ext_f16<(int)64, (int)64, (int)64, (int)1, (bool)0, (bool)0, (bool)0>(const char *, const char *, const char *, const char *, const char *, const int *, float *, float2 *, float, float, float, float, unsigned int, float, int, uint3, int, int, int, int, int, int, int, int, int, int, int, long, int, int, long, int, int, int, int, int, long)",7500,214.348223
+"void k_bin_bcast<&op_add, float, float, float, const float *>(const T2 *, const T3 *, T4 *, unsigned int, unsigned int, unsigned int, uint3, uint3, uint3, uint3, uint3, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, T5...)",19960,165.302269
+void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_256x128_32x3_tn_align8>(T1::Params),480,121.614369
+ampere_s1688gemm_bf16_64x128_sliced1x2_ldg8_tn,1920,117.349684
+"void convert_unary_cont_vec4<float, __nv_bfloat16>(const void *, T2 *, long)",45700,115.733686
+ampere_s16816gemm_bf16_128x128_ldg8_stages_32x5_tn,1240,96.10649
+ampere_s1688gemm_bf16_128x128_ldg8_stages_32x1_tn,480,92.811952
+ampere_s16816gemm_bf16_64x64_ldg8_stages_64x5_tn,6440,77.102792
+"void cpy_scalar<&cpy_1_scalar<float, float>>(const char *, char *, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long)",1520,65.469737
+ampere_s16816gemm_bf16_128x64_ldg8_stages_32x6_tn,1860,57.186579
+"void k_bin_bcast<&op_mul, float, float, float, const float *>(const T2 *, const T3 *, T4 *, unsigned int, unsigned int, unsigned int, uint3, uint3, uint3, uint3, uint3, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, T5...)",8020,40.132635
+"void rope_neox<(bool)1, (bool)0, float, float>(const T3 *, T4 *, int, int, int, int, int, int, int, int, int, int, int, const int *, float, float, float, rope_corr_dims, float, const float *, const long *, int, bool)",10860,39.604952
+"void unary_op_kernel<&op_gelu, float>(const T2 *, T2 *, int)",480,38.661808
+"void rms_norm_f32<(int)256, (bool)1, (bool)0, (bool)0>(const float *, float *, int, long, long, long, float, const float *, long, long, long, uint3, uint3, uint3, uint3, const float *, long, long, long, uint3, uint3, uint3, uint3, float)",14260,34.987532
+"void convert_unary_cont_vec4<float, __half>(const void *, T2 *, long)",8640,26.627031
+"void norm_f32<(int)32>(const float *, float *, int, long, long, long, float)",1000,23.47324
+"void flash_attn_stream_k_fixup_uniform<(int)64, (int)64, (int)1>(float *, const float2 *, int, int, int, int, int, int, uint3, uint3, uint3)",6400,18.629418
+"void concat_cont<unsigned int, (int)2>(const T1 *, const T1 *, T1 *, long, long, long, long, long, long)",6400,17.292441
+"void unary_op_kernel<&op_silu, float>(const T2 *, T2 *, int)",7220,16.127663
+ampere_s16816gemm_bf16_64x64_sliced1x2_ldg8_stages_64x5_tn,1280,15.464354
+"void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)",7640,13.220679
+void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_64x64_16x6_tn_align4>(T1::Params),840,7.064991
+void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_64x64_16x10_tn_align4>(T1::Params),200,2.494326
+ampere_h1688gemm_128x128_ldg8_stages_32x1_tn,40,1.600057
+"void cpy_scalar_contiguous<float, __half>(const char *, char *, long)",700,1.324956
+"void im2col_kernel<__half>(const float *, T1 *, long, long, long, long, long, long, long, long, long, long, long, long, long, int, int, int, int, int, int)",40,1.016158
+ampere_sgemm_64x32_sliced1x4_tn,200,0.953053
+"void cpy_scalar_transpose<float>(const char *, char *, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long)",40,0.841981
+ampere_sgemm_32x32_sliced1x4_tn,200,0.702172
+"void concat_cont<unsigned int, (int)0>(const T1 *, const T1 *, T1 *, long, long, long, long, long, long)",200,0.558527
+"void convert_unary_cont_vec4<__half, float>(const void *, T2 *, long)",40,0.517151
+"scale_f32(const float *, float *, float, float, long)",240,0.337662
+"void concat_cont<unsigned int, (int)1>(const T1 *, const T1 *, T1 *, long, long, long, long, long, long)",40,0.27542
+"void mul_mat_vec_f<float, float, (int)1, (int)32, (bool)1, (bool)0>(const T1 *, const float *, const int *, ggml_cuda_mm_fusion_args_device, float *, int, uint3, int, int, int, uint3, int, int, int, uint3, int, int, int, int)",20,0.073056

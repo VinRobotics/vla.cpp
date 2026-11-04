@@ -1,0 +1,16 @@
+{
+  "fused-1-repeat": {
+    "count": 1600,
+    "finite": true,
+    "bit_differences": 0,
+    "max_abs": 0.0,
+    "rmse": 0.0
+  },
+  "fused-0": {
+    "count": 1600,
+    "finite": true,
+    "bit_differences": 350,
+    "max_abs": 0.0005458742380142212,
+    "rmse": 0.00010049711168250623
+  }
+}

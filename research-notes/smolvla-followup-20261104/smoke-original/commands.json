@@ -1,0 +1,34 @@
+{
+  "server": [
+    "/home/doris/projects/vla.cpp/build-cuda/vla-server",
+    "--bind",
+    "tcp://127.0.0.1:15556",
+    "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf"
+  ],
+  "client": [
+    "/home/doris/projects/vla.cpp/eval/sim/libero/libero_uv/.venv/bin/python",
+    "/home/doris/projects/vla.cpp/eval/client/run_sim_client_direct.py",
+    "--arch",
+    "smolvla",
+    "--vla-addr",
+    "tcp://127.0.0.1:15556",
+    "--task",
+    "libero_object",
+    "--task-id",
+    "0",
+    "--n-episodes",
+    "2",
+    "--n-action-steps",
+    "1",
+    "--seed",
+    "42",
+    "--output-dir",
+    "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/smoke-original/outputs"
+  ],
+  "env": {
+    "MUJOCO_GL": "egl",
+    "CUDA_VISIBLE_DEVICES": "0",
+    "LIBERO_CONFIG_PATH": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/libero-config"
+  },
+  "classification": "smoke only; not screening or official SR"
+}

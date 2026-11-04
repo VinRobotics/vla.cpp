@@ -1,0 +1,214 @@
+[
+  {
+    "name": "defaults",
+    "model": "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+    "command": [
+      "/home/doris/projects/vla.cpp/build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2"
+    ],
+    "exit": 0,
+    "status": "cuda_predict_ok",
+    "shape": [
+      50,
+      32
+    ],
+    "max_abs_real7": 0.0,
+    "rmse_real7": 0.0,
+    "changed_real7": 0
+  },
+  {
+    "name": "flash-mm",
+    "model": "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+    "command": [
+      "/home/doris/projects/vla.cpp/build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2",
+      "--flash-attn",
+      "--mm-prec",
+      "default"
+    ],
+    "exit": 0,
+    "status": "cuda_predict_ok",
+    "shape": [
+      50,
+      32
+    ],
+    "max_abs_real7": 0.0027671456336975098,
+    "rmse_real7": 0.0006144198053008273,
+    "changed_real7": 350
+  },
+  {
+    "name": "smolvla-coupled-tail-30",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-coupled-tail-30.gguf",
+    "command": [
+      "/home/doris/projects/vla.cpp/build-cuda/tests/vla_predict_check",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-coupled-tail-30.gguf",
+      "",
+      "2"
+    ],
+    "exit": 0,
+    "status": "cuda_predict_ok",
+    "shape": [
+      50,
+      32
+    ],
+    "max_abs_real7": 0.063353531062603,
+    "rmse_real7": 0.02246576012054003,
+    "changed_real7": 350
+  },
+  {
+    "name": "smolvla-q4_0-lm",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q4_0-lm.gguf",
+    "command": [
+      "/home/doris/projects/vla.cpp/build-cuda/tests/vla_predict_check",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q4_0-lm.gguf",
+      "",
+      "2"
+    ],
+    "exit": 0,
+    "status": "cuda_predict_ok",
+    "shape": [
+      50,
+      32
+    ],
+    "max_abs_real7": 0.08243826031684875,
+    "rmse_real7": 0.02542538503214637,
+    "changed_real7": 350
+  },
+  {
+    "name": "smolvla-q4_0-vision",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q4_0-vision.gguf",
+    "command": [
+      "/home/doris/projects/vla.cpp/build-cuda/tests/vla_predict_check",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q4_0-vision.gguf",
+      "",
+      "2"
+    ],
+    "exit": 0,
+    "status": "cuda_predict_ok",
+    "shape": [
+      50,
+      32
+    ],
+    "max_abs_real7": 0.17617321014404297,
+    "rmse_real7": 0.050421202602250734,
+    "changed_real7": 350
+  },
+  {
+    "name": "smolvla-q5_0-lm",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q5_0-lm.gguf",
+    "command": [
+      "/home/doris/projects/vla.cpp/build-cuda/tests/vla_predict_check",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q5_0-lm.gguf",
+      "",
+      "2"
+    ],
+    "exit": 0,
+    "status": "cuda_predict_ok",
+    "shape": [
+      50,
+      32
+    ],
+    "max_abs_real7": 0.033897966146469116,
+    "rmse_real7": 0.008955568154993855,
+    "changed_real7": 350
+  },
+  {
+    "name": "smolvla-q5_0-vision",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q5_0-vision.gguf",
+    "command": [
+      "/home/doris/projects/vla.cpp/build-cuda/tests/vla_predict_check",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q5_0-vision.gguf",
+      "",
+      "2"
+    ],
+    "exit": 0,
+    "status": "cuda_predict_ok",
+    "shape": [
+      50,
+      32
+    ],
+    "max_abs_real7": 0.1002122163772583,
+    "rmse_real7": 0.029256381601376395,
+    "changed_real7": 350
+  },
+  {
+    "name": "smolvla-q8_0-lm",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q8_0-lm.gguf",
+    "command": [
+      "/home/doris/projects/vla.cpp/build-cuda/tests/vla_predict_check",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q8_0-lm.gguf",
+      "",
+      "2"
+    ],
+    "exit": 0,
+    "status": "cuda_predict_ok",
+    "shape": [
+      50,
+      32
+    ],
+    "max_abs_real7": 0.008421391248703003,
+    "rmse_real7": 0.0021052691273129235,
+    "changed_real7": 350
+  },
+  {
+    "name": "smolvla-q8_0-vision",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q8_0-vision.gguf",
+    "command": [
+      "/home/doris/projects/vla.cpp/build-cuda/tests/vla_predict_check",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q8_0-vision.gguf",
+      "",
+      "2"
+    ],
+    "exit": 0,
+    "status": "cuda_predict_ok",
+    "shape": [
+      50,
+      32
+    ],
+    "max_abs_real7": 0.0412522554397583,
+    "rmse_real7": 0.01115082934177754,
+    "changed_real7": 350
+  },
+  {
+    "name": "smolvla-vision-spaced-10",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-spaced-10.gguf",
+    "command": [
+      "/home/doris/projects/vla.cpp/build-cuda/tests/vla_predict_check",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-spaced-10.gguf",
+      "",
+      "2"
+    ],
+    "exit": 0,
+    "status": "cuda_predict_ok",
+    "shape": [
+      50,
+      32
+    ],
+    "max_abs_real7": 0.0949648842215538,
+    "rmse_real7": 0.04167182272408045,
+    "changed_real7": 350
+  },
+  {
+    "name": "smolvla-vision-tail-10",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-tail-10.gguf",
+    "command": [
+      "/home/doris/projects/vla.cpp/build-cuda/tests/vla_predict_check",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-tail-10.gguf",
+      "",
+      "2"
+    ],
+    "exit": 0,
+    "status": "cuda_predict_ok",
+    "shape": [
+      50,
+      32
+    ],
+    "max_abs_real7": 1.756510078907013,
+    "rmse_real7": 0.5190063762719732,
+    "changed_real7": 350
+  }
+]

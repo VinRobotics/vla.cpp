@@ -1,0 +1,46 @@
+{
+  "trace": "research-notes/smolvla-followup-20261104/kernel-traces/defaults.sqlite",
+  "kernel_events": 160020,
+  "summed_kernel_ms": 2260.227312,
+  "groups": {
+    "other_unclassified": {
+      "calls": 72800,
+      "summed_ms": 326.800355,
+      "fraction_of_summed_kernel_time": 0.14458738431526394
+    },
+    "GEMM_or_matmul_including_attention_products": {
+      "calls": 48160,
+      "summed_ms": 1317.748686,
+      "fraction_of_summed_kernel_time": 0.5830159997641865
+    },
+    "softmax_or_RoPE_not_all_attention": {
+      "calls": 11340,
+      "summed_ms": 446.447784,
+      "fraction_of_summed_kernel_time": 0.19752340024816054
+    },
+    "norm_or_fused_norm": {
+      "calls": 14300,
+      "summed_ms": 39.28837,
+      "fraction_of_summed_kernel_time": 0.017382486173585357
+    },
+    "attention_named_kernels_including_layout": {
+      "calls": 13420,
+      "summed_ms": 129.942117,
+      "fraction_of_summed_kernel_time": 0.057490729498803614
+    }
+  },
+  "gpu_activity_span_ms": 2541.98674,
+  "gpu_activity_union_ms": 2274.032569,
+  "gap_ms": 267.954171,
+  "gap_fraction": 0.10541131736981445,
+  "max_gap_ms": 16.748886,
+  "gaps_over_100us": 199,
+  "scope": "target process activities only: first to last GPU activity within captured 20 predictions; excludes edge gaps and other processes",
+  "limitations": [
+    "summed kernel durations may overlap; use union for busy fraction",
+    "name-based categories are not exact module attribution",
+    "GEMM includes attention matmuls",
+    "node tracing overhead affects timings",
+    "gaps do not prove whole-GPU idle or a CPU bottleneck"
+  ]
+}

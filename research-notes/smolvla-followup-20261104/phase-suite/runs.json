@@ -1,0 +1,812 @@
+[
+  {
+    "case": "defaults",
+    "trial": 0,
+    "summary": {
+      "ms_total": {
+        "mean": 192.79270629882814,
+        "p50": 179.9854278564453,
+        "p90": 222.22034454345703
+      },
+      "ms_vision": {
+        "mean": 56.26585311889649,
+        "p50": 56.3024787902832,
+        "p90": 56.77064208984375
+      },
+      "ms_inference": {
+        "mean": 92.84028129577636,
+        "p50": 78.17393112182617,
+        "p90": 123.92371978759766
+      },
+      "ms_prefill": {
+        "mean": 18.013407135009764,
+        "p50": 16.273371696472168,
+        "p90": 22.274781036376954
+      },
+      "ms_denoise": {
+        "mean": 74.82687416076661,
+        "p50": 61.7000675201416,
+        "p90": 101.8896453857422
+      },
+      "python_wall_ms": {
+        "mean": 201.55763064904022,
+        "p50": 189.0623114995833,
+        "p90": 230.35011269676033
+      },
+      "unaccounted_ms": {
+        "mean": 43.68657188415527,
+        "p50": 44.493703842163086,
+        "p90": 45.211494827270506
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/defaults-0/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--variant",
+      "defaults",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/defaults-0"
+    ]
+  },
+  {
+    "case": "flash-mm",
+    "trial": 0,
+    "summary": {
+      "ms_total": {
+        "mean": 176.34183197021486,
+        "p50": 172.2167739868164,
+        "p90": 203.4770751953125
+      },
+      "ms_vision": {
+        "mean": 43.32298622131348,
+        "p50": 43.263580322265625,
+        "p90": 43.79155349731445
+      },
+      "ms_inference": {
+        "mean": 91.44555740356445,
+        "p50": 85.57626342773438,
+        "p90": 119.01305160522462
+      },
+      "ms_prefill": {
+        "mean": 15.236043071746826,
+        "p50": 15.36190414428711,
+        "p90": 17.379378700256346
+      },
+      "ms_denoise": {
+        "mean": 76.20951461791992,
+        "p50": 71.17625617980957,
+        "p90": 101.20046844482422
+      },
+      "python_wall_ms": {
+        "mean": 186.27877844919567,
+        "p50": 180.5855375023384,
+        "p90": 216.39033269893844
+      },
+      "unaccounted_ms": {
+        "mean": 41.57328834533691,
+        "p50": 42.01483154296875,
+        "p90": 43.207939529418944
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/flash-mm-0/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--variant",
+      "flash-mm",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/flash-mm-0"
+    ]
+  },
+  {
+    "case": "smolvla-vision-tail-10",
+    "trial": 0,
+    "summary": {
+      "ms_total": {
+        "mean": 408.64782562255857,
+        "p50": 269.7924346923828,
+        "p90": 825.899774169922
+      },
+      "ms_vision": {
+        "mean": 55.6652286529541,
+        "p50": 50.27404594421387,
+        "p90": 65.92081985473635
+      },
+      "ms_inference": {
+        "mean": 286.96124000549315,
+        "p50": 132.9216079711914,
+        "p90": 715.2429077148439
+      },
+      "ms_prefill": {
+        "mean": 30.202434873580934,
+        "p50": 16.1915283203125,
+        "p90": 74.29519805908204
+      },
+      "ms_denoise": {
+        "mean": 256.75880851745603,
+        "p50": 116.8082504272461,
+        "p90": 691.8401489257814
+      },
+      "python_wall_ms": {
+        "mean": 420.04435950002517,
+        "p50": 278.5134875011863,
+        "p90": 835.9761067018554
+      },
+      "unaccounted_ms": {
+        "mean": 66.02135696411133,
+        "p50": 61.20589065551758,
+        "p90": 102.28081207275392
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-vision-tail-10-0/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-tail-10.gguf",
+      "--variant",
+      "defaults",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-vision-tail-10-0"
+    ]
+  },
+  {
+    "case": "smolvla-vision-spaced-10",
+    "trial": 0,
+    "summary": {
+      "ms_total": {
+        "mean": 314.5371513366699,
+        "p50": 257.01529693603516,
+        "p90": 663.7212341308594
+      },
+      "ms_vision": {
+        "mean": 53.27492828369141,
+        "p50": 49.77595329284668,
+        "p90": 61.04959716796876
+      },
+      "ms_inference": {
+        "mean": 202.23012313842773,
+        "p50": 125.17410659790039,
+        "p90": 561.4740661621095
+      },
+      "ms_prefill": {
+        "mean": 27.57581157684326,
+        "p50": 16.44295024871826,
+        "p90": 58.145643997192415
+      },
+      "ms_denoise": {
+        "mean": 174.65431175231933,
+        "p50": 105.43682479858398,
+        "p90": 500.0009002685547
+      },
+      "python_wall_ms": {
+        "mean": 327.0983370995964,
+        "p50": 265.5648214968096,
+        "p90": 709.3178987008288
+      },
+      "unaccounted_ms": {
+        "mean": 59.032099914550784,
+        "p50": 48.240142822265625,
+        "p90": 95.78443183898926
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-vision-spaced-10-0/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-spaced-10.gguf",
+      "--variant",
+      "defaults",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-vision-spaced-10-0"
+    ]
+  },
+  {
+    "case": "smolvla-coupled-tail-30",
+    "trial": 0,
+    "summary": {
+      "ms_total": {
+        "mean": 460.3435913085938,
+        "p50": 304.4586181640625,
+        "p90": 965.1585327148438
+      },
+      "ms_vision": {
+        "mean": 69.27630252838135,
+        "p50": 67.17243576049805,
+        "p90": 84.24921417236328
+      },
+      "ms_inference": {
+        "mean": 325.8762805938721,
+        "p50": 142.40532684326172,
+        "p90": 855.692938232422
+      },
+      "ms_prefill": {
+        "mean": 29.851236629486085,
+        "p50": 15.134940147399902,
+        "p90": 67.92643432617189
+      },
+      "ms_denoise": {
+        "mean": 296.0250421524048,
+        "p50": 127.36608123779297,
+        "p90": 792.9957336425781
+      },
+      "python_wall_ms": {
+        "mean": 472.949735551083,
+        "p50": 313.6831345036626,
+        "p90": 983.865199302818
+      },
+      "unaccounted_ms": {
+        "mean": 65.19100818634033,
+        "p50": 62.75878143310547,
+        "p90": 93.46273269653321
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-coupled-tail-30-0/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-coupled-tail-30.gguf",
+      "--variant",
+      "defaults",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-coupled-tail-30-0"
+    ]
+  },
+  {
+    "case": "defaults",
+    "trial": 1,
+    "summary": {
+      "ms_total": {
+        "mean": 307.69104766845703,
+        "p50": 211.49630737304688,
+        "p90": 421.2276672363289
+      },
+      "ms_vision": {
+        "mean": 59.218062019348146,
+        "p50": 56.97178268432617,
+        "p90": 63.354295730590835
+      },
+      "ms_inference": {
+        "mean": 193.06717529296876,
+        "p50": 103.90436172485352,
+        "p90": 231.95351104736417
+      },
+      "ms_prefill": {
+        "mean": 26.049598979949952,
+        "p50": 16.3259916305542,
+        "p90": 32.690157890319895
+      },
+      "ms_denoise": {
+        "mean": 167.01757335662842,
+        "p50": 85.27276992797852,
+        "p90": 200.79040527343824
+      },
+      "python_wall_ms": {
+        "mean": 317.76835739983653,
+        "p50": 223.78875800131937,
+        "p90": 430.0372188990885
+      },
+      "unaccounted_ms": {
+        "mean": 55.40581035614014,
+        "p50": 45.93301963806152,
+        "p90": 78.65244102478032
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/defaults-1/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--variant",
+      "defaults",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/defaults-1"
+    ]
+  },
+  {
+    "case": "flash-mm",
+    "trial": 1,
+    "summary": {
+      "ms_total": {
+        "mean": 197.84240646362304,
+        "p50": 180.08023834228516,
+        "p90": 243.523063659668
+      },
+      "ms_vision": {
+        "mean": 44.6690896987915,
+        "p50": 44.21794128417969,
+        "p90": 45.910111618041995
+      },
+      "ms_inference": {
+        "mean": 106.14618873596191,
+        "p50": 88.3702621459961,
+        "p90": 159.0099548339844
+      },
+      "ms_prefill": {
+        "mean": 14.974100732803345,
+        "p50": 13.567079544067383,
+        "p90": 18.340353202819824
+      },
+      "ms_denoise": {
+        "mean": 91.17208728790283,
+        "p50": 74.99328994750977,
+        "p90": 139.7728927612305
+      },
+      "python_wall_ms": {
+        "mean": 205.92557020063396,
+        "p50": 188.05198750123964,
+        "p90": 252.01126719694005
+      },
+      "unaccounted_ms": {
+        "mean": 47.027128028869626,
+        "p50": 44.048728942871094,
+        "p90": 51.286102294921875
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/flash-mm-1/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--variant",
+      "flash-mm",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/flash-mm-1"
+    ]
+  },
+  {
+    "case": "smolvla-vision-tail-10",
+    "trial": 1,
+    "summary": {
+      "ms_total": {
+        "mean": 236.1594268798828,
+        "p50": 191.75680541992188,
+        "p90": 295.26515197753906
+      },
+      "ms_vision": {
+        "mean": 49.57133598327637,
+        "p50": 48.77040481567383,
+        "p90": 52.6554458618164
+      },
+      "ms_inference": {
+        "mean": 136.70896759033204,
+        "p50": 94.39774322509766,
+        "p90": 196.80062866210938
+      },
+      "ms_prefill": {
+        "mean": 19.48301362991333,
+        "p50": 16.63279151916504,
+        "p90": 24.765533828735354
+      },
+      "ms_denoise": {
+        "mean": 117.22595291137695,
+        "p50": 77.76495361328125,
+        "p90": 168.64657135009767
+      },
+      "python_wall_ms": {
+        "mean": 246.34037064861332,
+        "p50": 200.67884199670516,
+        "p90": 307.24532649837784
+      },
+      "unaccounted_ms": {
+        "mean": 49.879123306274415,
+        "p50": 49.34851837158203,
+        "p90": 53.8610824584961
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-vision-tail-10-1/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-tail-10.gguf",
+      "--variant",
+      "defaults",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-vision-tail-10-1"
+    ]
+  },
+  {
+    "case": "smolvla-vision-spaced-10",
+    "trial": 1,
+    "summary": {
+      "ms_total": {
+        "mean": 218.16784057617187,
+        "p50": 177.98946380615234,
+        "p90": 229.110517883301
+      },
+      "ms_vision": {
+        "mean": 47.90030651092529,
+        "p50": 47.628604888916016,
+        "p90": 48.579232406616214
+      },
+      "ms_inference": {
+        "mean": 123.94145584106445,
+        "p50": 86.72179412841797,
+        "p90": 134.81079559326187
+      },
+      "ms_prefill": {
+        "mean": 18.375818824768068,
+        "p50": 16.48774242401123,
+        "p90": 22.85281162261963
+      },
+      "ms_denoise": {
+        "mean": 105.56563701629639,
+        "p50": 70.5018196105957,
+        "p90": 112.70945510864274
+      },
+      "python_wall_ms": {
+        "mean": 227.86578685045242,
+        "p50": 188.23186750159948,
+        "p90": 238.82112939827513
+      },
+      "unaccounted_ms": {
+        "mean": 46.326078224182126,
+        "p50": 45.108863830566406,
+        "p90": 46.80350112915039
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-vision-spaced-10-1/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-spaced-10.gguf",
+      "--variant",
+      "defaults",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-vision-spaced-10-1"
+    ]
+  },
+  {
+    "case": "smolvla-coupled-tail-30",
+    "trial": 1,
+    "summary": {
+      "ms_total": {
+        "mean": 204.36658935546876,
+        "p50": 187.91641998291016,
+        "p90": 247.79611968994143
+      },
+      "ms_vision": {
+        "mean": 57.847220993041994,
+        "p50": 57.40733337402344,
+        "p90": 59.21621398925781
+      },
+      "ms_inference": {
+        "mean": 100.94633598327637,
+        "p50": 80.12095260620117,
+        "p90": 150.32962799072268
+      },
+      "ms_prefill": {
+        "mean": 17.457737016677857,
+        "p50": 15.45159101486206,
+        "p90": 21.38697395324707
+      },
+      "ms_denoise": {
+        "mean": 83.48859786987305,
+        "p50": 64.74691390991211,
+        "p90": 129.0531234741211
+      },
+      "python_wall_ms": {
+        "mean": 213.2858546498028,
+        "p50": 196.7767245041614,
+        "p90": 257.12423029981437
+      },
+      "unaccounted_ms": {
+        "mean": 45.57303237915039,
+        "p50": 44.47385215759277,
+        "p90": 48.79889869689942
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-coupled-tail-30-1/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-coupled-tail-30.gguf",
+      "--variant",
+      "defaults",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-coupled-tail-30-1"
+    ]
+  },
+  {
+    "case": "defaults",
+    "trial": 2,
+    "summary": {
+      "ms_total": {
+        "mean": 206.56150817871094,
+        "p50": 188.0936279296875,
+        "p90": 241.8193542480469
+      },
+      "ms_vision": {
+        "mean": 57.120327949523926,
+        "p50": 56.52168083190918,
+        "p90": 58.106621551513676
+      },
+      "ms_inference": {
+        "mean": 102.00659408569337,
+        "p50": 83.92877197265625,
+        "p90": 142.78570251464845
+      },
+      "ms_prefill": {
+        "mean": 18.610507678985595,
+        "p50": 16.616416931152344,
+        "p90": 22.933093643188478
+      },
+      "ms_denoise": {
+        "mean": 83.39608592987061,
+        "p50": 67.35287475585938,
+        "p90": 120.73292465209961
+      },
+      "python_wall_ms": {
+        "mean": 216.129533349158,
+        "p50": 198.2262894998712,
+        "p90": 251.1685661993397
+      },
+      "unaccounted_ms": {
+        "mean": 47.434586143493654,
+        "p50": 45.22848129272461,
+        "p90": 46.53462257385254
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/defaults-2/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--variant",
+      "defaults",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/defaults-2"
+    ]
+  },
+  {
+    "case": "flash-mm",
+    "trial": 2,
+    "summary": {
+      "ms_total": {
+        "mean": 188.8474548339844,
+        "p50": 185.7264175415039,
+        "p90": 220.47743072509766
+      },
+      "ms_vision": {
+        "mean": 43.962426567077635,
+        "p50": 43.92499542236328,
+        "p90": 44.65533294677734
+      },
+      "ms_inference": {
+        "mean": 101.55436248779297,
+        "p50": 97.60980987548828,
+        "p90": 135.9319595336914
+      },
+      "ms_prefill": {
+        "mean": 15.18272261619568,
+        "p50": 13.649877071380615,
+        "p90": 18.22822322845459
+      },
+      "ms_denoise": {
+        "mean": 86.37164077758788,
+        "p50": 84.04396438598633,
+        "p90": 118.55479965209962
+      },
+      "python_wall_ms": {
+        "mean": 198.17562860080216,
+        "p50": 195.80859550114837,
+        "p90": 228.14565590524583
+      },
+      "unaccounted_ms": {
+        "mean": 43.33066577911377,
+        "p50": 43.42909049987793,
+        "p90": 44.75079689025879
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/flash-mm-2/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--variant",
+      "flash-mm",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/flash-mm-2"
+    ]
+  },
+  {
+    "case": "smolvla-vision-tail-10",
+    "trial": 2,
+    "summary": {
+      "ms_total": {
+        "mean": 211.71208572387695,
+        "p50": 211.519287109375,
+        "p90": 233.0502639770508
+      },
+      "ms_vision": {
+        "mean": 48.11498165130615,
+        "p50": 47.86747932434082,
+        "p90": 50.02820243835449
+      },
+      "ms_inference": {
+        "mean": 117.15619430541992,
+        "p50": 115.09978485107422,
+        "p90": 141.0999969482422
+      },
+      "ms_prefill": {
+        "mean": 19.303139019012452,
+        "p50": 16.57790756225586,
+        "p90": 26.363703918457034
+      },
+      "ms_denoise": {
+        "mean": 97.85305480957031,
+        "p50": 98.6042366027832,
+        "p90": 116.9623374938965
+      },
+      "python_wall_ms": {
+        "mean": 220.4076925496338,
+        "p50": 219.28509599820245,
+        "p90": 242.2616225012462
+      },
+      "unaccounted_ms": {
+        "mean": 46.44090976715088,
+        "p50": 45.74987602233887,
+        "p90": 49.53059463500977
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-vision-tail-10-2/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-tail-10.gguf",
+      "--variant",
+      "defaults",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-vision-tail-10-2"
+    ]
+  },
+  {
+    "case": "smolvla-vision-spaced-10",
+    "trial": 2,
+    "summary": {
+      "ms_total": {
+        "mean": 205.51678085327148,
+        "p50": 206.66168975830078,
+        "p90": 224.88829345703124
+      },
+      "ms_vision": {
+        "mean": 47.43936824798584,
+        "p50": 47.31147766113281,
+        "p90": 48.47801971435547
+      },
+      "ms_inference": {
+        "mean": 112.74204368591309,
+        "p50": 113.21129989624023,
+        "p90": 127.12765731811524
+      },
+      "ms_prefill": {
+        "mean": 18.481701564788818,
+        "p50": 16.52949333190918,
+        "p90": 23.41423091888428
+      },
+      "ms_denoise": {
+        "mean": 94.26034164428711,
+        "p50": 95.31908416748047,
+        "p90": 108.8864128112793
+      },
+      "python_wall_ms": {
+        "mean": 215.6211785000778,
+        "p50": 214.2401985001925,
+        "p90": 233.4613947023172
+      },
+      "unaccounted_ms": {
+        "mean": 45.335368919372556,
+        "p50": 45.369651794433594,
+        "p90": 48.66199951171875
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-vision-spaced-10-2/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-spaced-10.gguf",
+      "--variant",
+      "defaults",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-vision-spaced-10-2"
+    ]
+  },
+  {
+    "case": "smolvla-coupled-tail-30",
+    "trial": 2,
+    "summary": {
+      "ms_total": {
+        "mean": 203.09700241088868,
+        "p50": 205.99285125732422,
+        "p90": 216.01177673339845
+      },
+      "ms_vision": {
+        "mean": 56.27224979400635,
+        "p50": 56.25221633911133,
+        "p90": 56.95235939025879
+      },
+      "ms_inference": {
+        "mean": 104.16214447021484,
+        "p50": 109.90493774414062,
+        "p90": 114.88839874267579
+      },
+      "ms_prefill": {
+        "mean": 16.814357614517213,
+        "p50": 15.676112651824951,
+        "p90": 19.121876525878907
+      },
+      "ms_denoise": {
+        "mean": 87.3477861404419,
+        "p50": 91.46648788452148,
+        "p90": 99.4395233154297
+      },
+      "python_wall_ms": {
+        "mean": 210.51242890134745,
+        "p50": 213.6601794991293,
+        "p90": 223.85247250640532
+      },
+      "unaccounted_ms": {
+        "mean": 42.66260814666748,
+        "p50": 42.720746994018555,
+        "p90": 44.069151687622075
+      }
+    },
+    "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-coupled-tail-30-2/result.json",
+    "command": [
+      "/home/doris/projects/vla.cpp/.venv/bin/python",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/profile_phase.py",
+      "--model",
+      "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-coupled-tail-30.gguf",
+      "--variant",
+      "defaults",
+      "--mode",
+      "phase",
+      "--output",
+      "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/phase-suite/smolvla-coupled-tail-30-2"
+    ]
+  }
+]

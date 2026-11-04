@@ -1,0 +1,12 @@
+[
+  "nsys",
+  "profile",
+  "--trace=cuda",
+  "--cuda-memory-usage=true",
+  "--cuda-trace-all-apis=true",
+  "--sample=none",
+  "--cpuctxsw=none",
+  "--output=/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/memory-all/all-models",
+  "python3",
+  "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/memory_children.py"
+]

@@ -1,0 +1,31 @@
+{
+  "server": [
+    "/home/doris/projects/vla.cpp/build-cuda/vla-server",
+    "--bind",
+    "tcp://127.0.0.1:15558",
+    "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-spaced-10.gguf"
+  ],
+  "client": [
+    "/home/doris/projects/vla.cpp/eval/sim/libero/libero_uv/.venv/bin/python",
+    "/home/doris/projects/vla.cpp/eval/client/run_sim_client_direct.py",
+    "--arch",
+    "smolvla",
+    "--vla-addr",
+    "tcp://127.0.0.1:15558",
+    "--task",
+    "libero_object",
+    "--task-id",
+    "0",
+    "--n-episodes",
+    "2",
+    "--n-action-steps",
+    "1",
+    "--seed",
+    "42",
+    "--output-dir",
+    "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/candidate-smokes/smolvla-vision-spaced-10/outputs"
+  ],
+  "classification": "smoke only",
+  "noise": "repo defaults, random server RNG",
+  "tokenizer": "same cached HF tokenizer, offline to freeze cached assets"
+}

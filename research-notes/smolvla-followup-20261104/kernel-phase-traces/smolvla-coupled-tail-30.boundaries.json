@@ -1,0 +1,547 @@
+{
+  "trace": "research-notes/smolvla-followup-20261104/kernel-phase-traces/smolvla-coupled-tail-30.sqlite",
+  "workload": "research-notes/smolvla-followup-20261104/kernel-phase-traces/smolvla-coupled-tail-30-workload/result.json",
+  "reps": 20,
+  "prefix_tokens": 145,
+  "kv_copy_bytes": 185600,
+  "kv_copies_per_predict": 60,
+  "matched_kernel_count": 150780,
+  "summary": {
+    "vision_plus_connector": {
+      "gpu_active_kernel_ms": {
+        "mean": 52.7215519,
+        "p50": 52.5654765,
+        "p90": 53.148875499999995
+      },
+      "gpu_kernel_span_ms": {
+        "mean": 52.98235915,
+        "p50": 52.823974500000006,
+        "p90": 53.4164998
+      },
+      "kernel_count": {
+        "mean": 460,
+        "p50": 460.0,
+        "p90": 460.0
+      },
+      "direct_kernel_count": {
+        "mean": 0,
+        "p50": 0.0,
+        "p90": 0.0
+      }
+    },
+    "kv_prefill": {
+      "gpu_active_kernel_ms": {
+        "mean": 14.09515935,
+        "p50": 14.0652865,
+        "p90": 14.2580375
+      },
+      "gpu_kernel_span_ms": {
+        "mean": 14.96514045,
+        "p50": 15.223264499999999,
+        "p90": 15.6021448
+      },
+      "kernel_count": {
+        "mean": 677,
+        "p50": 677.0,
+        "p90": 677.0
+      },
+      "direct_kernel_count": {
+        "mean": 440.05,
+        "p50": 677.0,
+        "p90": 677.0
+      }
+    },
+    "denoise_with_cross_kv": {
+      "gpu_active_kernel_ms": {
+        "mean": 34.5306574,
+        "p50": 34.557175,
+        "p90": 35.286926099999995
+      },
+      "gpu_kernel_span_ms": {
+        "mean": 51.68980115,
+        "p50": 58.2645385,
+        "p90": 62.732523300000004
+      },
+      "kernel_count": {
+        "mean": 6402,
+        "p50": 6402.0,
+        "p90": 6402.0
+      },
+      "direct_kernel_count": {
+        "mean": 4161.3,
+        "p50": 6402.0,
+        "p90": 6402.0
+      }
+    }
+  },
+  "samples": [
+    {
+      "prediction": 0,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 2.672377,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.555509,
+        "gpu_kernel_span_ms": 52.883928,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.19047,
+        "gpu_kernel_span_ms": 15.38005,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 35.200463,
+        "gpu_kernel_span_ms": 59.644216,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 1,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.748017,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.424691,
+        "gpu_kernel_span_ms": 52.70767,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.002598,
+        "gpu_kernel_span_ms": 14.189127,
+        "direct_kernel_count": 0
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 33.868151,
+        "gpu_kernel_span_ms": 35.681747,
+        "direct_kernel_count": 0
+      }
+    },
+    {
+      "prediction": 2,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.55483,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.60338,
+        "gpu_kernel_span_ms": 52.833335000000005,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.209932,
+        "gpu_kernel_span_ms": 15.39029,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 34.718658,
+        "gpu_kernel_span_ms": 55.996373,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 3,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.357293,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.463345,
+        "gpu_kernel_span_ms": 52.693461,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.093802,
+        "gpu_kernel_span_ms": 15.259249,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 34.616967,
+        "gpu_kernel_span_ms": 58.125609,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 4,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.358156,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 53.077114,
+        "gpu_kernel_span_ms": 53.313147,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 13.99415,
+        "gpu_kernel_span_ms": 14.180135,
+        "direct_kernel_count": 0
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 33.760032,
+        "gpu_kernel_span_ms": 35.563699,
+        "direct_kernel_count": 0
+      }
+    },
+    {
+      "prediction": 5,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.229484,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.575444,
+        "gpu_kernel_span_ms": 52.814614,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.341805,
+        "gpu_kernel_span_ms": 15.646997,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 35.284659,
+        "gpu_kernel_span_ms": 59.120755,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 6,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.237836,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.360848,
+        "gpu_kernel_span_ms": 52.587029,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.221478,
+        "gpu_kernel_span_ms": 15.597876,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 35.30733,
+        "gpu_kernel_span_ms": 58.403468,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 7,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.456014,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.504244,
+        "gpu_kernel_span_ms": 52.742455,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.041191,
+        "gpu_kernel_span_ms": 14.225832,
+        "direct_kernel_count": 0
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 33.922978,
+        "gpu_kernel_span_ms": 35.828085,
+        "direct_kernel_count": 0
+      }
+    },
+    {
+      "prediction": 8,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.506478,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.648436,
+        "gpu_kernel_span_ms": 52.926839,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.148329,
+        "gpu_kernel_span_ms": 15.310226,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 35.555241,
+        "gpu_kernel_span_ms": 55.562033,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 9,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 2.074452,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.525744,
+        "gpu_kernel_span_ms": 52.76511,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 13.943203,
+        "gpu_kernel_span_ms": 15.081999,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 35.232352,
+        "gpu_kernel_span_ms": 60.404446,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 10,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.581039,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.960089,
+        "gpu_kernel_span_ms": 53.26089,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 13.962691,
+        "gpu_kernel_span_ms": 14.149862,
+        "direct_kernel_count": 0
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 33.911188,
+        "gpu_kernel_span_ms": 35.73893,
+        "direct_kernel_count": 0
+      }
+    },
+    {
+      "prediction": 11,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.340173,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 53.049689,
+        "gpu_kernel_span_ms": 53.303289,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.416327,
+        "gpu_kernel_span_ms": 15.640564,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 34.644665,
+        "gpu_kernel_span_ms": 61.870379,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 12,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.406765,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.485555,
+        "gpu_kernel_span_ms": 52.805685,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.216262,
+        "gpu_kernel_span_ms": 15.58786,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 35.141487,
+        "gpu_kernel_span_ms": 60.136474,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 13,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 2.113716,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.493042,
+        "gpu_kernel_span_ms": 52.736531,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.03722,
+        "gpu_kernel_span_ms": 14.230535,
+        "direct_kernel_count": 0
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 33.798229,
+        "gpu_kernel_span_ms": 35.609681,
+        "direct_kernel_count": 0
+      }
+    },
+    {
+      "prediction": 14,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.338476,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 53.552538,
+        "gpu_kernel_span_ms": 53.792061000000004,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.24873,
+        "gpu_kernel_span_ms": 15.560019,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 34.497383,
+        "gpu_kernel_span_ms": 68.043748,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 15,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.490446,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 53.310331,
+        "gpu_kernel_span_ms": 53.580315999999996,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.089382,
+        "gpu_kernel_span_ms": 15.477235,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 34.77062,
+        "gpu_kernel_span_ms": 65.221674,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 16,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 2.656441,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.472819,
+        "gpu_kernel_span_ms": 52.789013,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 13.798437,
+        "gpu_kernel_span_ms": 13.992517,
+        "direct_kernel_count": 0
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 33.820698,
+        "gpu_kernel_span_ms": 35.628434,
+        "direct_kernel_count": 0
+      }
+    },
+    {
+      "prediction": 17,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.261388,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 53.130936,
+        "gpu_kernel_span_ms": 53.398298,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.017989,
+        "gpu_kernel_span_ms": 15.134063,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 34.352935,
+        "gpu_kernel_span_ms": 59.059951,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 18,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.393389,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.957942,
+        "gpu_kernel_span_ms": 53.203672,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 14.030468,
+        "gpu_kernel_span_ms": 15.18728,
+        "direct_kernel_count": 677
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 34.373723,
+        "gpu_kernel_span_ms": 62.455951,
+        "direct_kernel_count": 6402
+      }
+    },
+    {
+      "prediction": 19,
+      "kv_copy_count": 60,
+      "kv_copy_span_ms": 1.433677,
+      "vision_plus_connector": {
+        "kernel_count": 460,
+        "gpu_active_kernel_ms": 52.279342,
+        "gpu_kernel_span_ms": 52.50984,
+        "direct_kernel_count": 0
+      },
+      "kv_prefill": {
+        "kernel_count": 677,
+        "gpu_active_kernel_ms": 13.898723,
+        "gpu_kernel_span_ms": 14.081093,
+        "direct_kernel_count": 0
+      },
+      "denoise_with_cross_kv": {
+        "kernel_count": 6402,
+        "gpu_active_kernel_ms": 33.835389,
+        "gpu_kernel_span_ms": 35.70037,
+        "direct_kernel_count": 0
+      }
+    }
+  ],
+  "attribution": "source phase K/V tensor-copy boundary, validated byte size/count and full kernel coverage",
+  "limitations": [
+    "GPU active time excludes host setup, inter-kernel/phase gaps and transfer cost",
+    "GPU span can include CPU launch gaps for direct kernels",
+    "vision excludes preprocessing/inter-view transfers",
+    "prefill is cache-producing graph; denoise includes cross-KV reprojection",
+    "phase graph/padding differ from normal throughput; node tracing overhead"
+  ]
+}

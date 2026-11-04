@@ -1,0 +1,161 @@
+{
+  "mode": "none",
+  "predictions": 20,
+  "graph_launches": 60,
+  "summary": {
+    "vision_plus_connector_gpu_span_ms": {
+      "mean": 40.9407104,
+      "p50": 40.9438935,
+      "p90": 41.184246
+    },
+    "vision_kernel_sum_ms": {
+      "mean": 40.79204285,
+      "p50": 40.7885505,
+      "p90": 41.0373841
+    },
+    "combined_inference_gpu_span_ms": {
+      "mean": 48.1044852,
+      "p50": 48.070679999999996,
+      "p90": 48.4821957
+    },
+    "combined_inference_kernel_sum_ms": {
+      "mean": 45.8671975,
+      "p50": 45.8500475,
+      "p90": 46.0795343
+    }
+  },
+  "samples": [
+    {
+      "vision_plus_connector_gpu_span_ms": 40.351895999999996,
+      "vision_kernel_sum_ms": 40.219672,
+      "combined_inference_gpu_span_ms": 48.637974,
+      "combined_inference_kernel_sum_ms": 46.434142
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 41.200662,
+      "vision_kernel_sum_ms": 41.043577,
+      "combined_inference_gpu_span_ms": 48.233336,
+      "combined_inference_kernel_sum_ms": 46.056162
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 40.917846,
+      "vision_kernel_sum_ms": 40.774746,
+      "combined_inference_gpu_span_ms": 47.468443,
+      "combined_inference_kernel_sum_ms": 45.328739
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 40.927575000000004,
+      "vision_kernel_sum_ms": 40.775063,
+      "combined_inference_gpu_span_ms": 48.137112,
+      "combined_inference_kernel_sum_ms": 45.959838
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 41.352180000000004,
+      "vision_kernel_sum_ms": 41.208661,
+      "combined_inference_gpu_span_ms": 48.100152,
+      "combined_inference_kernel_sum_ms": 45.930786
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 40.904374,
+      "vision_kernel_sum_ms": 40.75119,
+      "combined_inference_gpu_span_ms": 48.464887,
+      "combined_inference_kernel_sum_ms": 46.289885
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 41.017783,
+      "vision_kernel_sum_ms": 40.871511,
+      "combined_inference_gpu_span_ms": 48.296408,
+      "combined_inference_kernel_sum_ms": 45.954756
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 40.97935,
+      "vision_kernel_sum_ms": 40.82412,
+      "combined_inference_gpu_span_ms": 48.227192,
+      "combined_inference_kernel_sum_ms": 46.031713
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 41.182422,
+      "vision_kernel_sum_ms": 41.036696,
+      "combined_inference_gpu_span_ms": 48.193656,
+      "combined_inference_kernel_sum_ms": 46.016515
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 40.984791,
+      "vision_kernel_sum_ms": 40.830297,
+      "combined_inference_gpu_span_ms": 48.041208,
+      "combined_inference_kernel_sum_ms": 45.827457
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 40.823159000000004,
+      "vision_kernel_sum_ms": 40.686394,
+      "combined_inference_gpu_span_ms": 47.453148,
+      "combined_inference_kernel_sum_ms": 45.285473
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 40.899287,
+      "vision_kernel_sum_ms": 40.751222999999996,
+      "combined_inference_gpu_span_ms": 48.030329,
+      "combined_inference_kernel_sum_ms": 45.850625
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 40.672534999999996,
+      "vision_kernel_sum_ms": 40.533462,
+      "combined_inference_gpu_span_ms": 47.946361,
+      "combined_inference_kernel_sum_ms": 45.762081
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 41.035799,
+      "vision_kernel_sum_ms": 40.887321,
+      "combined_inference_gpu_span_ms": 49.041652,
+      "combined_inference_kernel_sum_ms": 45.84947
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 40.644248,
+      "vision_kernel_sum_ms": 40.500728,
+      "combined_inference_gpu_span_ms": 48.007065,
+      "combined_inference_kernel_sum_ms": 45.835554
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 40.945493,
+      "vision_kernel_sum_ms": 40.802037999999996,
+      "combined_inference_gpu_span_ms": 47.907065,
+      "combined_inference_kernel_sum_ms": 45.738368
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 41.089398,
+      "vision_kernel_sum_ms": 40.937430000000006,
+      "combined_inference_gpu_span_ms": 47.854105,
+      "combined_inference_kernel_sum_ms": 45.696514
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 41.023926,
+      "vision_kernel_sum_ms": 40.890904,
+      "combined_inference_gpu_span_ms": 48.200952,
+      "combined_inference_kernel_sum_ms": 46.016065
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 40.91919,
+      "vision_kernel_sum_ms": 40.774967000000004,
+      "combined_inference_gpu_span_ms": 47.944186,
+      "combined_inference_kernel_sum_ms": 45.75213
+    },
+    {
+      "vision_plus_connector_gpu_span_ms": 40.942294000000004,
+      "vision_kernel_sum_ms": 40.740857,
+      "combined_inference_gpu_span_ms": 47.904473,
+      "combined_inference_kernel_sum_ms": 45.727677
+    }
+  ],
+  "extra_non_graph_kernels": {
+    "count": 0,
+    "summed_ms": 0.0
+  },
+  "attribution": "source predict_impl order, guarded by launch cardinality and paired vision graph IDs",
+  "limitations": [
+    "GPU first-to-last kernel spans, not full CPU+GPU phase wall time",
+    "vision sums two graph launches; excludes preprocessing and inter-view copies/gaps",
+    "KV prefill is cache-producing graph, not arbitrary standalone full VLM",
+    "denoise includes cross-KV reprojection and action projections",
+    "PHASE graph/padding differ from default throughput graph"
+  ]
+}

@@ -1,0 +1,3 @@
+
+# CSV exports use standard CRLF record endings.
+research-notes/**/*.csv whitespace=cr-at-eol

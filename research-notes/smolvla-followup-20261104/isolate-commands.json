@@ -1,0 +1,42 @@
+[
+  {
+    "name": "no-exact-gemm",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2"
+    ],
+    "env": {
+      "VLA_IMG_SIZE": "512",
+      "VLA_GEMM_EXACT": "0"
+    }
+  },
+  {
+    "name": "no-exact-attn",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2"
+    ],
+    "env": {
+      "VLA_IMG_SIZE": "512",
+      "VLA_ATTN_EXACT": "0"
+    }
+  },
+  {
+    "name": "no-exact-both",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2"
+    ],
+    "env": {
+      "VLA_IMG_SIZE": "512",
+      "VLA_GEMM_EXACT": "0",
+      "VLA_ATTN_EXACT": "0"
+    }
+  }
+]

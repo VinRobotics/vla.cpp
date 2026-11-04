@@ -1,0 +1,7 @@
+{
+  "benchmark_root": "/home/doris/projects/vla.cpp/eval/sim/libero/LIBERO/libero/libero",
+  "bddl_files": "/home/doris/projects/vla.cpp/eval/sim/libero/LIBERO/libero/libero/bddl_files",
+  "init_states": "/home/doris/projects/vla.cpp/eval/sim/libero/LIBERO/libero/libero/init_files",
+  "datasets": "/home/doris/projects/vla.cpp/eval/sim/libero/LIBERO/libero/datasets",
+  "assets": "/home/doris/projects/vla.cpp/eval/sim/libero/LIBERO/libero/libero/assets"
+}

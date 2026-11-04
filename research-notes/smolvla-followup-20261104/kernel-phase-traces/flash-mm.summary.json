@@ -1,0 +1,46 @@
+{
+  "trace": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/kernel-phase-traces/flash-mm.sqlite",
+  "kernel_events": 195340,
+  "summed_kernel_ms": 1720.318543,
+  "groups": {
+    "other_unclassified": {
+      "calls": 108120,
+      "summed_ms": 519.365967,
+      "fraction_of_summed_kernel_time": 0.30190104566000714
+    },
+    "GEMM_or_matmul_including_attention_products": {
+      "calls": 47200,
+      "summed_ms": 880.824389,
+      "fraction_of_summed_kernel_time": 0.5120123785121579
+    },
+    "norm_or_fused_norm": {
+      "calls": 15260,
+      "summed_ms": 58.284205,
+      "fraction_of_summed_kernel_time": 0.03387989116152892
+    },
+    "attention_named_kernels_including_layout": {
+      "calls": 13900,
+      "summed_ms": 224.850067,
+      "fraction_of_summed_kernel_time": 0.13070257709824615
+    },
+    "softmax_or_RoPE_not_all_attention": {
+      "calls": 10860,
+      "summed_ms": 36.993915,
+      "fraction_of_summed_kernel_time": 0.021504107568059854
+    }
+  },
+  "gpu_activity_span_ms": 10541.717151,
+  "gpu_activity_union_ms": 1731.985158,
+  "gap_ms": 8809.731993,
+  "gap_fraction": 0.8357017995084699,
+  "max_gap_ms": 1433.585862,
+  "gaps_over_100us": 399,
+  "scope": "target process activities only: first to last GPU activity within captured 20 predictions; excludes edge gaps and other processes",
+  "limitations": [
+    "summed kernel durations may overlap; use union for busy fraction",
+    "name-based categories are not exact module attribution",
+    "GEMM includes attention matmuls",
+    "node tracing overhead affects timings",
+    "gaps do not prove whole-GPU idle or a CPU bottleneck"
+  ]
+}

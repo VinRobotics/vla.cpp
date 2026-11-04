@@ -1,0 +1,179 @@
+[
+  {
+    "trace": "flash-mm-1.sqlite",
+    "metric": "peak traced CUDA allocations (Device + Device Static), not NVML resident VRAM",
+    "process_device_groups": [
+      {
+        "globalPid": 282873793871872,
+        "deviceId": 0,
+        "peak_bytes": 1090800460,
+        "peak_MiB": 1040.268383026123,
+        "live_at_trace_end_bytes": 295244
+      }
+    ],
+    "counts": {
+      "allocations": 145,
+      "deallocations": 10
+    },
+    "vmm_events": [
+      {
+        "api": "cuMemSetAccess",
+        "start": 9781615607,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemSetAccess",
+        "start": 9783791667,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemSetAccess",
+        "start": 10046099329,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 13134637752,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 13134839267,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 13135007157,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      }
+    ],
+    "unmatched_frees": 0,
+    "negative_live_events": 0,
+    "lost_or_dropped_diagnostics": [],
+    "allocations_still_live_at_trace_end": 135
+  },
+  {
+    "trace": "flash-mm-2.sqlite",
+    "metric": "peak traced CUDA allocations (Device + Device Static), not NVML resident VRAM",
+    "process_device_groups": [
+      {
+        "globalPid": 282876109127680,
+        "deviceId": 0,
+        "peak_bytes": 1090800460,
+        "peak_MiB": 1040.268383026123,
+        "live_at_trace_end_bytes": 295244
+      }
+    ],
+    "counts": {
+      "allocations": 145,
+      "deallocations": 10
+    },
+    "vmm_events": [
+      {
+        "api": "cuMemSetAccess",
+        "start": 1474802085,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemSetAccess",
+        "start": 1475895117,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemSetAccess",
+        "start": 1615388455,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 4061402178,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 4061587595,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 4061747526,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      }
+    ],
+    "unmatched_frees": 0,
+    "negative_live_events": 0,
+    "lost_or_dropped_diagnostics": [],
+    "allocations_still_live_at_trace_end": 135
+  },
+  {
+    "trace": "flash-mm-3.sqlite",
+    "metric": "peak traced CUDA allocations (Device + Device Static), not NVML resident VRAM",
+    "process_device_groups": [
+      {
+        "globalPid": 282877853958144,
+        "deviceId": 0,
+        "peak_bytes": 1090800460,
+        "peak_MiB": 1040.268383026123,
+        "live_at_trace_end_bytes": 295244
+      }
+    ],
+    "counts": {
+      "allocations": 145,
+      "deallocations": 10
+    },
+    "vmm_events": [
+      {
+        "api": "cuMemSetAccess",
+        "start": 1423935023,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemSetAccess",
+        "start": 1425129876,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemSetAccess",
+        "start": 1582142546,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 4014090133,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 4014270054,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 4014430349,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      }
+    ],
+    "unmatched_frees": 0,
+    "negative_live_events": 0,
+    "lost_or_dropped_diagnostics": [],
+    "allocations_still_live_at_trace_end": 135
+  }
+]

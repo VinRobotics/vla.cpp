@@ -1,0 +1,7 @@
+{
+  "source": "existing user on.txt/off.txt, files read only; exit codes not independently saved",
+  "count": 1600,
+  "max_abs": 0.0005458742380142212,
+  "rmse_all32": 0.00010049711168250623,
+  "bit_differences": 350
+}

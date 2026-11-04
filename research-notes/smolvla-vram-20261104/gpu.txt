@@ -1,0 +1,2 @@
+name, memory.total [MiB], driver_version
+NVIDIA GeForce RTX 3060 Laptop GPU, 6144 MiB, 610.62

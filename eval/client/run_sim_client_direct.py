@@ -75,7 +75,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-length", type=int, default=None,
         help="prompt token budget; default = arch preset's max_length (pi05=200) or 48.")
     parser.add_argument("--recv-timeout-ms", type=int, default=120_000,
-        help="ZMQ receive timeout. π0 CPU inference is slow (~5–10 s/step with 2 views).")
+        help="ZMQ receive timeout in ms; -1 waits indefinitely (supports process pauses).")
     parser.add_argument(
         "--n-action-steps", type=int, default=1,
         help="How many actions to replay from each predicted chunk before "
@@ -187,6 +187,12 @@ if __name__ == "__main__":
             skipped += 1
         episodes.append((episode, 0 if episode_aborted else int(bool(info.get("is_success", 0))),
                          step_id, int(episode_aborted)))
+        # Preserve completed episodes even if a later request or rollout fails.
+        checkpoint = output_dir / "episodes.csv.tmp"
+        with checkpoint.open("w") as f:
+            f.write("episode,success,steps,aborted\n")
+            f.writelines(f"{e},{s},{n},{a}\n" for e, s, n, a in episodes)
+        checkpoint.replace(output_dir / "episodes.csv")
 
     env.close()
     counted = max(1, args.n_episodes - skipped)

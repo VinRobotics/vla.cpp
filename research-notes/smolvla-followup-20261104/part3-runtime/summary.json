@@ -1,0 +1,327 @@
+{
+  "bf16": {
+    "peak_MiB": 1134.3444557189941,
+    "runs": [
+      {
+        "name": "bf16",
+        "trial": 0,
+        "pid": 228045,
+        "device": 0,
+        "peak_bytes": 1189446372,
+        "peak_MiB": 1134.3444557189941,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "bf16",
+        "trial": 1,
+        "pid": 228575,
+        "device": 0,
+        "peak_bytes": 1189446372,
+        "peak_MiB": 1134.3444557189941,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "bf16",
+        "trial": 2,
+        "pid": 229023,
+        "device": 0,
+        "peak_bytes": 1189446372,
+        "peak_MiB": 1134.3444557189941,
+        "live_at_trace_end_bytes": 70681904
+      }
+    ]
+  },
+  "bf16-flash": {
+    "peak_MiB": 1044.268352508545,
+    "runs": [
+      {
+        "name": "bf16-flash",
+        "trial": 0,
+        "pid": 228096,
+        "device": 0,
+        "peak_bytes": 1094994732,
+        "peak_MiB": 1044.268352508545,
+        "live_at_trace_end_bytes": 295212
+      },
+      {
+        "name": "bf16-flash",
+        "trial": 1,
+        "pid": 228497,
+        "device": 0,
+        "peak_bytes": 1094994732,
+        "peak_MiB": 1044.268352508545,
+        "live_at_trace_end_bytes": 295212
+      },
+      {
+        "name": "bf16-flash",
+        "trial": 2,
+        "pid": 229074,
+        "device": 0,
+        "peak_bytes": 1094994732,
+        "peak_MiB": 1044.268352508545,
+        "live_at_trace_end_bytes": 295212
+      }
+    ]
+  },
+  "defaults": {
+    "peak_MiB": 1912.4694557189941,
+    "runs": [
+      {
+        "name": "defaults",
+        "trial": 0,
+        "pid": 227706,
+        "device": 0,
+        "peak_bytes": 2005369572,
+        "peak_MiB": 1912.4694557189941,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "defaults",
+        "trial": 1,
+        "pid": 228768,
+        "device": 0,
+        "peak_bytes": 2005369572,
+        "peak_MiB": 1912.4694557189941,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "defaults",
+        "trial": 2,
+        "pid": 228820,
+        "device": 0,
+        "peak_bytes": 2005369572,
+        "peak_MiB": 1912.4694557189941,
+        "live_at_trace_end_bytes": 70681904
+      }
+    ]
+  },
+  "f16": {
+    "peak_MiB": 1119.3942985534668,
+    "runs": [
+      {
+        "name": "f16",
+        "trial": 0,
+        "pid": 228141,
+        "device": 0,
+        "peak_bytes": 1173769996,
+        "peak_MiB": 1119.3942985534668,
+        "live_at_trace_end_bytes": 66487564
+      },
+      {
+        "name": "f16",
+        "trial": 1,
+        "pid": 228447,
+        "device": 0,
+        "peak_bytes": 1173769996,
+        "peak_MiB": 1119.3942985534668,
+        "live_at_trace_end_bytes": 66487564
+      },
+      {
+        "name": "f16",
+        "trial": 2,
+        "pid": 229110,
+        "device": 0,
+        "peak_bytes": 1173769996,
+        "peak_MiB": 1119.3942985534668,
+        "live_at_trace_end_bytes": 66487564
+      }
+    ]
+  },
+  "f16-flash": {
+    "peak_MiB": 1044.2683219909668,
+    "runs": [
+      {
+        "name": "f16-flash",
+        "trial": 0,
+        "pid": 228186,
+        "device": 0,
+        "peak_bytes": 1094994700,
+        "peak_MiB": 1044.2683219909668,
+        "live_at_trace_end_bytes": 295180
+      },
+      {
+        "name": "f16-flash",
+        "trial": 1,
+        "pid": 228401,
+        "device": 0,
+        "peak_bytes": 1094994700,
+        "peak_MiB": 1044.2683219909668,
+        "live_at_trace_end_bytes": 295180
+      },
+      {
+        "name": "f16-flash",
+        "trial": 2,
+        "pid": 229170,
+        "device": 0,
+        "peak_bytes": 1094994700,
+        "peak_MiB": 1044.2683219909668,
+        "live_at_trace_end_bytes": 295180
+      }
+    ]
+  },
+  "flash": {
+    "peak_MiB": 1818.393352508545,
+    "runs": [
+      {
+        "name": "flash",
+        "trial": 0,
+        "pid": 227847,
+        "device": 0,
+        "peak_bytes": 1906723628,
+        "peak_MiB": 1818.393352508545,
+        "live_at_trace_end_bytes": 295212
+      },
+      {
+        "name": "flash",
+        "trial": 1,
+        "pid": 228726,
+        "device": 0,
+        "peak_bytes": 1906723628,
+        "peak_MiB": 1818.393352508545,
+        "live_at_trace_end_bytes": 295212
+      },
+      {
+        "name": "flash",
+        "trial": 2,
+        "pid": 228865,
+        "device": 0,
+        "peak_bytes": 1906723628,
+        "peak_MiB": 1818.393352508545,
+        "live_at_trace_end_bytes": 295212
+      }
+    ]
+  },
+  "flash-mm": {
+    "peak_MiB": 1040.268383026123,
+    "runs": [
+      {
+        "name": "flash-mm",
+        "trial": 0,
+        "pid": 227988,
+        "device": 0,
+        "peak_bytes": 1090800460,
+        "peak_MiB": 1040.268383026123,
+        "live_at_trace_end_bytes": 295244
+      },
+      {
+        "name": "flash-mm",
+        "trial": 1,
+        "pid": 228629,
+        "device": 0,
+        "peak_bytes": 1090800460,
+        "peak_MiB": 1040.268383026123,
+        "live_at_trace_end_bytes": 295244
+      },
+      {
+        "name": "flash-mm",
+        "trial": 2,
+        "pid": 228991,
+        "device": 0,
+        "peak_bytes": 1090800460,
+        "peak_MiB": 1040.268383026123,
+        "live_at_trace_end_bytes": 295244
+      }
+    ]
+  },
+  "mm-default": {
+    "peak_MiB": 1134.3444557189941,
+    "runs": [
+      {
+        "name": "mm-default",
+        "trial": 0,
+        "pid": 227897,
+        "device": 0,
+        "peak_bytes": 1189446372,
+        "peak_MiB": 1134.3444557189941,
+        "live_at_trace_end_bytes": 70681936
+      },
+      {
+        "name": "mm-default",
+        "trial": 1,
+        "pid": 228672,
+        "device": 0,
+        "peak_bytes": 1189446372,
+        "peak_MiB": 1134.3444557189941,
+        "live_at_trace_end_bytes": 70681936
+      },
+      {
+        "name": "mm-default",
+        "trial": 2,
+        "pid": 228931,
+        "device": 0,
+        "peak_bytes": 1189446372,
+        "peak_MiB": 1134.3444557189941,
+        "live_at_trace_end_bytes": 70681936
+      }
+    ]
+  },
+  "steps-3": {
+    "peak_MiB": 1911.8285865783691,
+    "runs": [
+      {
+        "name": "steps-3",
+        "trial": 0,
+        "pid": 228281,
+        "device": 0,
+        "peak_bytes": 2004697572,
+        "peak_MiB": 1911.8285865783691,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "steps-3",
+        "trial": 1,
+        "pid": 228325,
+        "device": 0,
+        "peak_bytes": 2004697572,
+        "peak_MiB": 1911.8285865783691,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "steps-3",
+        "trial": 2,
+        "pid": 229249,
+        "device": 0,
+        "peak_bytes": 2004697572,
+        "peak_MiB": 1911.8285865783691,
+        "live_at_trace_end_bytes": 70681904
+      }
+    ]
+  },
+  "steps-5": {
+    "peak_MiB": 1912.0116920471191,
+    "runs": [
+      {
+        "name": "steps-5",
+        "trial": 0,
+        "pid": 228236,
+        "device": 0,
+        "peak_bytes": 2004889572,
+        "peak_MiB": 1912.0116920471191,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "steps-5",
+        "trial": 1,
+        "pid": 228364,
+        "device": 0,
+        "peak_bytes": 2004889572,
+        "peak_MiB": 1912.0116920471191,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "steps-5",
+        "trial": 2,
+        "pid": 229206,
+        "device": 0,
+        "peak_bytes": 2004889572,
+        "peak_MiB": 1912.0116920471191,
+        "live_at_trace_end_bytes": 70681904
+      }
+    ]
+  },
+  "_control_comparison": {
+    "previous_defaults_peak_MiB": 1912.4694557189941,
+    "current_defaults_peak_MiB": 1912.4694557189941,
+    "difference_MiB": 0.0
+  }
+}

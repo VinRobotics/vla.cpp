@@ -1,0 +1,8 @@
+# Local binaries, environments, downloaded packages and large measurement artifacts
+tools/
+*.nsys-rep
+*.sqlite
+*.sqlite-*
+*.qdstrm
+*.mp4
+*.npy

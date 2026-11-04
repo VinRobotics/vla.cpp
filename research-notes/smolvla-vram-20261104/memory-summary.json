@@ -1,0 +1,143 @@
+[
+  {
+    "trace": "baseline-memory-1.sqlite",
+    "metric": "peak traced CUDA allocations (Device + Device Static), not NVML resident VRAM",
+    "process_device_groups": [
+      {
+        "globalPid": 282102830465024,
+        "deviceId": 0,
+        "peak_bytes": 2005369572,
+        "peak_MiB": 1912.4694557189941,
+        "live_at_trace_end_bytes": 70681904
+      }
+    ],
+    "counts": {
+      "allocations": 173,
+      "deallocations": 32
+    },
+    "vmm_events": [
+      {
+        "api": "cuMemSetAccess",
+        "start": 6882027325,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemSetAccess",
+        "start": 6886125989,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 13868038481,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 13868374065,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      }
+    ],
+    "unmatched_frees": 0,
+    "negative_live_events": 0,
+    "lost_or_dropped_diagnostics": [],
+    "allocations_still_live_at_trace_end": 141
+  },
+  {
+    "trace": "baseline-memory-2.sqlite",
+    "metric": "peak traced CUDA allocations (Device + Device Static), not NVML resident VRAM",
+    "process_device_groups": [
+      {
+        "globalPid": 282111672057856,
+        "deviceId": 0,
+        "peak_bytes": 2005369572,
+        "peak_MiB": 1912.4694557189941,
+        "live_at_trace_end_bytes": 70681904
+      }
+    ],
+    "counts": {
+      "allocations": 173,
+      "deallocations": 32
+    },
+    "vmm_events": [
+      {
+        "api": "cuMemSetAccess",
+        "start": 2535946746,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemSetAccess",
+        "start": 2538197503,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 6086926944,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 6087195833,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      }
+    ],
+    "unmatched_frees": 0,
+    "negative_live_events": 0,
+    "lost_or_dropped_diagnostics": [],
+    "allocations_still_live_at_trace_end": 141
+  },
+  {
+    "trace": "baseline-memory-3.sqlite",
+    "metric": "peak traced CUDA allocations (Device + Device Static), not NVML resident VRAM",
+    "process_device_groups": [
+      {
+        "globalPid": 282113601437696,
+        "deviceId": 0,
+        "peak_bytes": 2005369572,
+        "peak_MiB": 1912.4694557189941,
+        "live_at_trace_end_bytes": 70681904
+      }
+    ],
+    "counts": {
+      "allocations": 173,
+      "deallocations": 32
+    },
+    "vmm_events": [
+      {
+        "api": "cuMemSetAccess",
+        "start": 1730839593,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemSetAccess",
+        "start": 1732005018,
+        "bytes": 2097152,
+        "memoryOperationType": 0
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 5060036638,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      },
+      {
+        "api": "cuMemUnmap",
+        "start": 5060241465,
+        "bytes": 2097152,
+        "memoryOperationType": 1
+      }
+    ],
+    "unmatched_frees": 0,
+    "negative_live_events": 0,
+    "lost_or_dropped_diagnostics": [],
+    "allocations_still_live_at_trace_end": 141
+  }
+]

@@ -1,0 +1,10 @@
+Using Python 3.10.22 environment at: eval/sim/libero/libero_uv/.venv
+Checked 170 packages in 1ms
+Found 7 incompatibilities
+The package `pettingzoo` requires `gymnasium>=1.0.0`, but `0.29.1` is installed
+The package `datasets` requires `pyarrow>=21.0.0`, but `12.0.1` is installed
+The package `opencv-python-headless` requires `numpy>=2,<2.3.0 ; python_full_version >= '3.9'`, but `1.26.4` is installed
+The package `lerobot` requires `torchvision>=0.21.0,<0.23.0`, but `0.20.1+cpu` is installed
+The package `lerobot` requires `gymnasium>=1.1.1,<2.0.0`, but `0.29.1` is installed
+The package `rerun-sdk` requires `numpy>=2`, but `1.26.4` is installed
+The package `rerun-sdk` requires `pyarrow>=18.0.0`, but `12.0.1` is installed

@@ -1,0 +1,322 @@
+[
+  {
+    "name": "defaults",
+    "command": [
+      "./build-cuda/vla-bench",
+      "--ckpt",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--images",
+      "2",
+      "--size",
+      "512",
+      "--tokens",
+      "16",
+      "--warmup",
+      "2",
+      "--reps",
+      "5"
+    ]
+  },
+  {
+    "name": "defaults-output",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2"
+    ],
+    "VLA_IMG_SIZE": "512"
+  },
+  {
+    "name": "flash",
+    "command": [
+      "./build-cuda/vla-bench",
+      "--ckpt",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--images",
+      "2",
+      "--size",
+      "512",
+      "--tokens",
+      "16",
+      "--warmup",
+      "2",
+      "--reps",
+      "5",
+      "--flash-attn"
+    ]
+  },
+  {
+    "name": "flash-output",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2",
+      "--flash-attn"
+    ],
+    "VLA_IMG_SIZE": "512"
+  },
+  {
+    "name": "mm-default",
+    "command": [
+      "./build-cuda/vla-bench",
+      "--ckpt",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--images",
+      "2",
+      "--size",
+      "512",
+      "--tokens",
+      "16",
+      "--warmup",
+      "2",
+      "--reps",
+      "5",
+      "--mm-prec",
+      "default"
+    ]
+  },
+  {
+    "name": "mm-default-output",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2",
+      "--mm-prec",
+      "default"
+    ],
+    "VLA_IMG_SIZE": "512"
+  },
+  {
+    "name": "flash-mm",
+    "command": [
+      "./build-cuda/vla-bench",
+      "--ckpt",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--images",
+      "2",
+      "--size",
+      "512",
+      "--tokens",
+      "16",
+      "--warmup",
+      "2",
+      "--reps",
+      "5",
+      "--flash-attn",
+      "--mm-prec",
+      "default"
+    ]
+  },
+  {
+    "name": "flash-mm-output",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2",
+      "--flash-attn",
+      "--mm-prec",
+      "default"
+    ],
+    "VLA_IMG_SIZE": "512"
+  },
+  {
+    "name": "bf16",
+    "command": [
+      "./build-cuda/vla-bench",
+      "--ckpt",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--images",
+      "2",
+      "--size",
+      "512",
+      "--tokens",
+      "16",
+      "--warmup",
+      "2",
+      "--reps",
+      "5",
+      "--weight-dtype",
+      "bf16"
+    ]
+  },
+  {
+    "name": "bf16-output",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2",
+      "--weight-dtype",
+      "bf16"
+    ],
+    "VLA_IMG_SIZE": "512"
+  },
+  {
+    "name": "bf16-flash",
+    "command": [
+      "./build-cuda/vla-bench",
+      "--ckpt",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--images",
+      "2",
+      "--size",
+      "512",
+      "--tokens",
+      "16",
+      "--warmup",
+      "2",
+      "--reps",
+      "5",
+      "--weight-dtype",
+      "bf16",
+      "--flash-attn"
+    ]
+  },
+  {
+    "name": "bf16-flash-output",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2",
+      "--weight-dtype",
+      "bf16",
+      "--flash-attn"
+    ],
+    "VLA_IMG_SIZE": "512"
+  },
+  {
+    "name": "f16",
+    "command": [
+      "./build-cuda/vla-bench",
+      "--ckpt",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--images",
+      "2",
+      "--size",
+      "512",
+      "--tokens",
+      "16",
+      "--warmup",
+      "2",
+      "--reps",
+      "5",
+      "--weight-dtype",
+      "f16"
+    ]
+  },
+  {
+    "name": "f16-output",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2",
+      "--weight-dtype",
+      "f16"
+    ],
+    "VLA_IMG_SIZE": "512"
+  },
+  {
+    "name": "f16-flash",
+    "command": [
+      "./build-cuda/vla-bench",
+      "--ckpt",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--images",
+      "2",
+      "--size",
+      "512",
+      "--tokens",
+      "16",
+      "--warmup",
+      "2",
+      "--reps",
+      "5",
+      "--weight-dtype",
+      "f16",
+      "--flash-attn"
+    ]
+  },
+  {
+    "name": "f16-flash-output",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2",
+      "--weight-dtype",
+      "f16",
+      "--flash-attn"
+    ],
+    "VLA_IMG_SIZE": "512"
+  },
+  {
+    "name": "steps-5",
+    "command": [
+      "./build-cuda/vla-bench",
+      "--ckpt",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--images",
+      "2",
+      "--size",
+      "512",
+      "--tokens",
+      "16",
+      "--warmup",
+      "2",
+      "--reps",
+      "5",
+      "--num-steps",
+      "5"
+    ]
+  },
+  {
+    "name": "steps-5-output",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2",
+      "--num-steps",
+      "5"
+    ],
+    "VLA_IMG_SIZE": "512"
+  },
+  {
+    "name": "steps-3",
+    "command": [
+      "./build-cuda/vla-bench",
+      "--ckpt",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "--images",
+      "2",
+      "--size",
+      "512",
+      "--tokens",
+      "16",
+      "--warmup",
+      "2",
+      "--reps",
+      "5",
+      "--num-steps",
+      "3"
+    ]
+  },
+  {
+    "name": "steps-3-output",
+    "command": [
+      "./build-cuda/tests/vla_predict_check",
+      "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+      "",
+      "2",
+      "--num-steps",
+      "3"
+    ],
+    "VLA_IMG_SIZE": "512"
+  }
+]

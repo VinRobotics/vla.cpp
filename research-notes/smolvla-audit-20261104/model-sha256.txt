@@ -1,0 +1,1 @@
+6fb2d475c98b4c2cef3e27c4eff4e67b483740cbf983fff320a3b8a5e5f74fe8  /home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf

@@ -1,0 +1,85 @@
+Test project /home/doris/projects/vla.cpp/build-cuda
+      Start  1: vision_common
+ 1/15 Test  #1: vision_common ....................   Passed    0.00 sec
+      Start  2: rope_conventions
+ 2/15 Test  #2: rope_conventions .................   Passed    0.01 sec
+      Start  3: c_api
+ 3/15 Test  #3: c_api ............................   Passed    1.08 sec
+      Start  4: dit_common
+ 4/15 Test  #4: dit_common .......................   Passed    0.00 sec
+      Start  5: graph_names
+ 5/15 Test  #5: graph_names ......................   Passed    0.00 sec
+      Start  6: qwen3vl_vit
+ 6/15 Test  #6: qwen3vl_vit ......................   Passed    0.00 sec
+      Start  7: config_guard
+ 7/15 Test  #7: config_guard .....................   Passed    0.08 sec
+      Start  8: prompt
+ 8/15 Test  #8: prompt ...........................   Passed    0.07 sec
+      Start  9: foldquant_cpu_op
+ 9/15 Test  #9: foldquant_cpu_op .................   Passed    0.08 sec
+      Start 10: foldquant_dequant
+10/15 Test #10: foldquant_dequant ................   Passed    0.06 sec
+      Start 11: foldquant_cuda_op
+11/15 Test #11: foldquant_cuda_op ................***Failed    0.71 sec
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 6143 MiB):
+  Device 0: NVIDIA GeForce RTX 3060 Laptop GPU, compute capability 8.6, VMM: yes, VRAM: 6143 MiB
+FAIL: w8a8_rot64_bias K=128 N=64 T=5: y[5] = -3.4419589 vs CPU -3.44195867
+
+      Start 12: foldquant_cuda_op_ref
+12/15 Test #12: foldquant_cuda_op_ref ............   Passed   18.03 sec
+      Start 13: fused_cuda_ops
+13/15 Test #13: fused_cuda_ops ...................***Failed    0.81 sec
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 6143 MiB):
+  Device 0: NVIDIA GeForce RTX 3060 Laptop GPU, compute capability 8.6, VMM: yes, VRAM: 6143 MiB
+vla(test): fused CUDA ops on (VLA_FUSED_OPS=0 to disable)
+ln_affine/768          FAIL (1671 of 59136 values differ)
+ln_affine/1152         FAIL (2085 of 88704 values differ)
+ln_modulate            FAIL (4814 of 62976 values differ)
+rms_mul/896            FAIL (7908 of 47488 values differ)
+rms_mul/1024           bit-identical
+rms_mul/2048           bit-identical
+rms_modulate           bit-identical
+bias_res               bit-identical
+bias_gelu              bit-identical
+bias_gelu_erf          bit-identical
+bias_gate_res          bit-identical
+gate_res               bit-identical
+silu_mul               bit-identical
+gelu_mul               bit-identical
+mm_exact               bit-identical
+ln_bf16_mm_exact       FAIL (3441 of 294912 values differ)
+qkv_heads_attn/hd64    FAIL (1243 of 263168 values differ)
+qkv_heads_attn/hd72    FAIL (808 of 296064 values differ)
+heads_rope_gqa_mask    FAIL (63 of 107520 values differ)
+glu_act/gelu_mul_A8_K16384_rot64 bit-identical
+glu_act/gelu_mul_A4_K16384_rot64 bit-identical
+glu_act/gelu_mul_A8_K4096_rot64_pre bit-identical
+glu_act/gelu_mul_A4_K4096_rot64_post bit-identical
+glu_act/gelu_mul_A8_K1024_rot32_pre bit-identical
+glu_act/gelu_mul_A8_K2048_rot1 bit-identical
+glu_act/silu_mul_A8_K6144_rot64 bit-identical
+glu_act/silu_mul_A4_K6144_rot64 bit-identical
+glu_act/gelu_A8_K6144_rot64_pre bit-identical
+glu_act/gelu_A4_K6144_rot64_pre bit-identical
+norm_act/ln_modulate_A4_K1536_rot64_pre FAIL (5 of 8036 values differ)
+norm_act/ln_modulate_A8_K1536_rot64_post FAIL (3 of 15908 values differ)
+norm_act/ln_A4_K1536_rot64_pre FAIL (4 of 8036 values differ)
+norm_act/ln_A8_K2048_rot32 bit-identical
+norm_act/rms_modulate_A4_K1024_rot64_pre bit-identical
+norm_act/rms_modulate_A8_K1024_rot64_post bit-identical
+norm_act/rms_modulate_A4_K3072_rot16 FAIL (1 of 5044 values differ)
+FAIL
+
+      Start 14: bf16_cuda_ops
+14/15 Test #14: bf16_cuda_ops ....................   Passed    0.45 sec
+      Start 15: bf16_cuda_ops_flat
+15/15 Test #15: bf16_cuda_ops_flat ...............   Passed    0.36 sec
+
+87% tests passed, 2 tests failed out of 15
+
+Total Test time (real) =  21.76 sec
+
+The following tests FAILED:
+	 11 - foldquant_cuda_op (Failed)
+	 13 - fused_cuda_ops (Failed)
+Errors while running CTest

@@ -1,0 +1,23 @@
+[
+  {
+    "name": "smolvla-vision-tail-10",
+    "bytes": 1097967488,
+    "retained_tensors": 759,
+    "removed_tensors": 32,
+    "inference_validated": false
+  },
+  {
+    "name": "smolvla-vision-spaced-10",
+    "bytes": 1097967488,
+    "retained_tensors": 759,
+    "removed_tensors": 32,
+    "inference_validated": false
+  },
+  {
+    "name": "smolvla-coupled-tail-30",
+    "bytes": 1074532544,
+    "retained_tensors": 755,
+    "removed_tensors": 36,
+    "inference_validated": false
+  }
+]

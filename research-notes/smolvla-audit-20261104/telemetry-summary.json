@@ -1,0 +1,53 @@
+[
+  {
+    "trial": 1,
+    "samples": 8,
+    "temp_C_min_max": [
+      47.0,
+      59.0
+    ],
+    "power_W_min_max": [
+      10.02,
+      95.55
+    ],
+    "sm_MHz_min_max": [
+      210,
+      2017
+    ],
+    "whole_GPU_peak_MiB": 3944
+  },
+  {
+    "trial": 2,
+    "samples": 8,
+    "temp_C_min_max": [
+      53.0,
+      61.0
+    ],
+    "power_W_min_max": [
+      28.59,
+      94.56
+    ],
+    "sm_MHz_min_max": [
+      1717,
+      2002
+    ],
+    "whole_GPU_peak_MiB": 3944
+  },
+  {
+    "trial": 3,
+    "samples": 7,
+    "temp_C_min_max": [
+      54.0,
+      62.0
+    ],
+    "power_W_min_max": [
+      22.35,
+      112.83
+    ],
+    "sm_MHz_min_max": [
+      1425,
+      2002
+    ],
+    "whole_GPU_peak_MiB": 3944
+  }
+]

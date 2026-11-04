@@ -1,0 +1,130 @@
+{
+  "state": "complete",
+  "completed_tasks": 10,
+  "completed_episodes": 40,
+  "successes": 38,
+  "expected_episodes": 40,
+  "tasks": [
+    {
+      "task_id": 0,
+      "episodes": 4,
+      "successes": 4,
+      "steps": [
+        198,
+        175,
+        188,
+        174
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-defaults/outputs/smolvla/libero_object/task_0/episodes.csv"
+    },
+    {
+      "task_id": 1,
+      "episodes": 4,
+      "successes": 4,
+      "steps": [
+        127,
+        157,
+        138,
+        148
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-defaults/outputs/smolvla/libero_object/task_1/episodes.csv"
+    },
+    {
+      "task_id": 2,
+      "episodes": 4,
+      "successes": 4,
+      "steps": [
+        128,
+        125,
+        147,
+        120
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-defaults/outputs/smolvla/libero_object/task_2/episodes.csv"
+    },
+    {
+      "task_id": 3,
+      "episodes": 4,
+      "successes": 3,
+      "steps": [
+        500,
+        143,
+        138,
+        128
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-defaults/outputs/smolvla/libero_object/task_3/episodes.csv"
+    },
+    {
+      "task_id": 4,
+      "episodes": 4,
+      "successes": 4,
+      "steps": [
+        156,
+        157,
+        168,
+        156
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-defaults/outputs/smolvla/libero_object/task_4/episodes.csv"
+    },
+    {
+      "task_id": 5,
+      "episodes": 4,
+      "successes": 3,
+      "steps": [
+        220,
+        500,
+        222,
+        142
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-defaults/outputs/smolvla/libero_object/task_5/episodes.csv"
+    },
+    {
+      "task_id": 6,
+      "episodes": 4,
+      "successes": 4,
+      "steps": [
+        163,
+        161,
+        156,
+        145
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-defaults/outputs/smolvla/libero_object/task_6/episodes.csv"
+    },
+    {
+      "task_id": 7,
+      "episodes": 4,
+      "successes": 4,
+      "steps": [
+        133,
+        153,
+        146,
+        156
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-defaults/outputs/smolvla/libero_object/task_7/episodes.csv"
+    },
+    {
+      "task_id": 8,
+      "episodes": 4,
+      "successes": 4,
+      "steps": [
+        184,
+        159,
+        173,
+        162
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-defaults/outputs/smolvla/libero_object/task_8/episodes.csv"
+    },
+    {
+      "task_id": 9,
+      "episodes": 4,
+      "successes": 4,
+      "steps": [
+        133,
+        127,
+        142,
+        136
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-defaults/outputs/smolvla/libero_object/task_9/episodes.csv"
+    }
+  ],
+  "screening_sr": 0.95
+}

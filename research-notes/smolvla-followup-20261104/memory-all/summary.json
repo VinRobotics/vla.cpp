@@ -1,0 +1,327 @@
+{
+  "defaults": {
+    "peak_MiB": 1912.4694557189941,
+    "runs": [
+      {
+        "name": "defaults",
+        "trial": 0,
+        "pid": 89914,
+        "device": 0,
+        "peak_bytes": 2005369572,
+        "peak_MiB": 1912.4694557189941,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "defaults",
+        "trial": 1,
+        "pid": 90727,
+        "device": 0,
+        "peak_bytes": 2005369572,
+        "peak_MiB": 1912.4694557189941,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "defaults",
+        "trial": 2,
+        "pid": 91332,
+        "device": 0,
+        "peak_bytes": 2005369572,
+        "peak_MiB": 1912.4694557189941,
+        "live_at_trace_end_bytes": 70681904
+      }
+    ]
+  },
+  "smolvla-coupled-tail-30": {
+    "peak_MiB": 1814.4006080627441,
+    "runs": [
+      {
+        "name": "smolvla-coupled-tail-30",
+        "trial": 0,
+        "pid": 90057,
+        "device": 0,
+        "peak_bytes": 1902536932,
+        "peak_MiB": 1814.4006080627441,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "smolvla-coupled-tail-30",
+        "trial": 1,
+        "pid": 90771,
+        "device": 0,
+        "peak_bytes": 1902536932,
+        "peak_MiB": 1814.4006080627441,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "smolvla-coupled-tail-30",
+        "trial": 2,
+        "pid": 91417,
+        "device": 0,
+        "peak_bytes": 1902536932,
+        "peak_MiB": 1814.4006080627441,
+        "live_at_trace_end_bytes": 70681904
+      }
+    ]
+  },
+  "smolvla-q4_0-lm": {
+    "peak_MiB": 865.0710182189941,
+    "runs": [
+      {
+        "name": "smolvla-q4_0-lm",
+        "trial": 0,
+        "pid": 90170,
+        "device": 0,
+        "peak_bytes": 907092708,
+        "peak_MiB": 865.0710182189941,
+        "live_at_trace_end_bytes": 70736150
+      },
+      {
+        "name": "smolvla-q4_0-lm",
+        "trial": 1,
+        "pid": 90816,
+        "device": 0,
+        "peak_bytes": 907092708,
+        "peak_MiB": 865.0710182189941,
+        "live_at_trace_end_bytes": 70736150
+      },
+      {
+        "name": "smolvla-q4_0-lm",
+        "trial": 2,
+        "pid": 91473,
+        "device": 0,
+        "peak_bytes": 907092708,
+        "peak_MiB": 865.0710182189941,
+        "live_at_trace_end_bytes": 70736150
+      }
+    ]
+  },
+  "smolvla-q4_0-vision": {
+    "peak_MiB": 729.7497425079346,
+    "runs": [
+      {
+        "name": "smolvla-q4_0-vision",
+        "trial": 0,
+        "pid": 90263,
+        "device": 0,
+        "peak_bytes": 765198066,
+        "peak_MiB": 729.7497425079346,
+        "live_at_trace_end_bytes": 66541810
+      },
+      {
+        "name": "smolvla-q4_0-vision",
+        "trial": 1,
+        "pid": 90871,
+        "device": 0,
+        "peak_bytes": 765198066,
+        "peak_MiB": 729.7497425079346,
+        "live_at_trace_end_bytes": 66541810
+      },
+      {
+        "name": "smolvla-q4_0-vision",
+        "trial": 2,
+        "pid": 91517,
+        "device": 0,
+        "peak_bytes": 765198066,
+        "peak_MiB": 729.7497425079346,
+        "live_at_trace_end_bytes": 66541810
+      }
+    ]
+  },
+  "smolvla-q5_0-lm": {
+    "peak_MiB": 903.9772682189941,
+    "runs": [
+      {
+        "name": "smolvla-q5_0-lm",
+        "trial": 0,
+        "pid": 90314,
+        "device": 0,
+        "peak_bytes": 947888868,
+        "peak_MiB": 903.9772682189941,
+        "live_at_trace_end_bytes": 70736150
+      },
+      {
+        "name": "smolvla-q5_0-lm",
+        "trial": 1,
+        "pid": 90920,
+        "device": 0,
+        "peak_bytes": 947888868,
+        "peak_MiB": 903.9772682189941,
+        "live_at_trace_end_bytes": 70736150
+      },
+      {
+        "name": "smolvla-q5_0-lm",
+        "trial": 2,
+        "pid": 91555,
+        "device": 0,
+        "peak_bytes": 947888868,
+        "peak_MiB": 903.9772682189941,
+        "live_at_trace_end_bytes": 70736150
+      }
+    ]
+  },
+  "smolvla-q5_0-vision": {
+    "peak_MiB": 778.7809925079346,
+    "runs": [
+      {
+        "name": "smolvla-q5_0-vision",
+        "trial": 0,
+        "pid": 90381,
+        "device": 0,
+        "peak_bytes": 816611058,
+        "peak_MiB": 778.7809925079346,
+        "live_at_trace_end_bytes": 66541810
+      },
+      {
+        "name": "smolvla-q5_0-vision",
+        "trial": 1,
+        "pid": 90966,
+        "device": 0,
+        "peak_bytes": 816611058,
+        "peak_MiB": 778.7809925079346,
+        "live_at_trace_end_bytes": 66541810
+      },
+      {
+        "name": "smolvla-q5_0-vision",
+        "trial": 2,
+        "pid": 91621,
+        "device": 0,
+        "peak_bytes": 816611058,
+        "peak_MiB": 778.7809925079346,
+        "live_at_trace_end_bytes": 66541810
+      }
+    ]
+  },
+  "smolvla-q8_0-lm": {
+    "peak_MiB": 1020.6960182189941,
+    "runs": [
+      {
+        "name": "smolvla-q8_0-lm",
+        "trial": 0,
+        "pid": 90425,
+        "device": 0,
+        "peak_bytes": 1070277348,
+        "peak_MiB": 1020.6960182189941,
+        "live_at_trace_end_bytes": 70736150
+      },
+      {
+        "name": "smolvla-q8_0-lm",
+        "trial": 1,
+        "pid": 91035,
+        "device": 0,
+        "peak_bytes": 1070277348,
+        "peak_MiB": 1020.6960182189941,
+        "live_at_trace_end_bytes": 70736150
+      },
+      {
+        "name": "smolvla-q8_0-lm",
+        "trial": 2,
+        "pid": 91665,
+        "device": 0,
+        "peak_bytes": 1070277348,
+        "peak_MiB": 1020.6960182189941,
+        "live_at_trace_end_bytes": 70736150
+      }
+    ]
+  },
+  "smolvla-q8_0-vision": {
+    "peak_MiB": 925.8820667266846,
+    "runs": [
+      {
+        "name": "smolvla-q8_0-vision",
+        "trial": 0,
+        "pid": 90506,
+        "device": 0,
+        "peak_bytes": 970857714,
+        "peak_MiB": 925.8820667266846,
+        "live_at_trace_end_bytes": 66541810
+      },
+      {
+        "name": "smolvla-q8_0-vision",
+        "trial": 1,
+        "pid": 91123,
+        "device": 0,
+        "peak_bytes": 970857714,
+        "peak_MiB": 925.8820667266846,
+        "live_at_trace_end_bytes": 66541810
+      },
+      {
+        "name": "smolvla-q8_0-vision",
+        "trial": 2,
+        "pid": 91754,
+        "device": 0,
+        "peak_bytes": 970857714,
+        "peak_MiB": 925.8820667266846,
+        "live_at_trace_end_bytes": 66541810
+      }
+    ]
+  },
+  "smolvla-vision-spaced-10": {
+    "peak_MiB": 1885.3932838439941,
+    "runs": [
+      {
+        "name": "smolvla-vision-spaced-10",
+        "trial": 0,
+        "pid": 90571,
+        "device": 0,
+        "peak_bytes": 1976978148,
+        "peak_MiB": 1885.3932838439941,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "smolvla-vision-spaced-10",
+        "trial": 1,
+        "pid": 91177,
+        "device": 0,
+        "peak_bytes": 1976978148,
+        "peak_MiB": 1885.3932838439941,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "smolvla-vision-spaced-10",
+        "trial": 2,
+        "pid": 91805,
+        "device": 0,
+        "peak_bytes": 1976978148,
+        "peak_MiB": 1885.3932838439941,
+        "live_at_trace_end_bytes": 70681904
+      }
+    ]
+  },
+  "smolvla-vision-tail-10": {
+    "peak_MiB": 1885.3932838439941,
+    "runs": [
+      {
+        "name": "smolvla-vision-tail-10",
+        "trial": 0,
+        "pid": 90662,
+        "device": 0,
+        "peak_bytes": 1976978148,
+        "peak_MiB": 1885.3932838439941,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "smolvla-vision-tail-10",
+        "trial": 1,
+        "pid": 91273,
+        "device": 0,
+        "peak_bytes": 1976978148,
+        "peak_MiB": 1885.3932838439941,
+        "live_at_trace_end_bytes": 70681904
+      },
+      {
+        "name": "smolvla-vision-tail-10",
+        "trial": 2,
+        "pid": 91876,
+        "device": 0,
+        "peak_bytes": 1976978148,
+        "peak_MiB": 1885.3932838439941,
+        "live_at_trace_end_bytes": 70681904
+      }
+    ]
+  },
+  "_control_comparison": {
+    "previous_defaults_peak_MiB": 1912.4694557189941,
+    "current_defaults_peak_MiB": 1912.4694557189941,
+    "difference_MiB": 0.0
+  }
+}

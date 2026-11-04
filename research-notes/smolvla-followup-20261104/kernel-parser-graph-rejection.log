@@ -1,0 +1,2 @@
+Expected rejection of graph-only trace; exit=1
+Whole-graph aggregate events found: use --cuda-graph-trace=node before kernel attribution

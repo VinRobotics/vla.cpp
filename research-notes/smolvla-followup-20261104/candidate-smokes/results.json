@@ -1,0 +1,146 @@
+[
+  {
+    "name": "flash-mm",
+    "model": "/home/doris/.cache/vla/vrfai/smolvla-libero-gguf/smolvla-libero.gguf",
+    "flags": [
+      "--flash-attn",
+      "--mm-prec",
+      "default"
+    ],
+    "expected_episodes": 2,
+    "status": "complete",
+    "client_exit": 0,
+    "completed_episodes": 2,
+    "successes": 1,
+    "steps": [
+      155,
+      500
+    ]
+  },
+  {
+    "name": "smolvla-coupled-tail-30",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-coupled-tail-30.gguf",
+    "flags": [],
+    "expected_episodes": 2,
+    "status": "complete",
+    "client_exit": 0,
+    "completed_episodes": 2,
+    "successes": 0,
+    "steps": [
+      500,
+      500
+    ]
+  },
+  {
+    "name": "smolvla-q4_0-lm",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q4_0-lm.gguf",
+    "flags": [],
+    "expected_episodes": 2,
+    "status": "complete",
+    "client_exit": 0,
+    "completed_episodes": 2,
+    "successes": 1,
+    "steps": [
+      148,
+      500
+    ]
+  },
+  {
+    "name": "smolvla-q4_0-vision",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q4_0-vision.gguf",
+    "flags": [],
+    "expected_episodes": 2,
+    "status": "complete",
+    "client_exit": 0,
+    "completed_episodes": 2,
+    "successes": 0,
+    "steps": [
+      500,
+      500
+    ]
+  },
+  {
+    "name": "smolvla-q5_0-lm",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q5_0-lm.gguf",
+    "flags": [],
+    "expected_episodes": 2,
+    "status": "complete",
+    "client_exit": 0,
+    "completed_episodes": 2,
+    "successes": 1,
+    "steps": [
+      159,
+      500
+    ]
+  },
+  {
+    "name": "smolvla-q5_0-vision",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q5_0-vision.gguf",
+    "flags": [],
+    "expected_episodes": 2,
+    "status": "complete",
+    "client_exit": 0,
+    "completed_episodes": 2,
+    "successes": 0,
+    "steps": [
+      500,
+      500
+    ]
+  },
+  {
+    "name": "smolvla-q8_0-lm",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q8_0-lm.gguf",
+    "flags": [],
+    "expected_episodes": 2,
+    "status": "complete",
+    "client_exit": 0,
+    "completed_episodes": 2,
+    "successes": 2,
+    "steps": [
+      193,
+      147
+    ]
+  },
+  {
+    "name": "smolvla-q8_0-vision",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-q8_0-vision.gguf",
+    "flags": [],
+    "expected_episodes": 2,
+    "status": "complete",
+    "client_exit": 0,
+    "completed_episodes": 2,
+    "successes": 2,
+    "steps": [
+      146,
+      236
+    ]
+  },
+  {
+    "name": "smolvla-vision-spaced-10",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-spaced-10.gguf",
+    "flags": [],
+    "expected_episodes": 2,
+    "status": "complete",
+    "client_exit": 0,
+    "completed_episodes": 2,
+    "successes": 0,
+    "steps": [
+      500,
+      500
+    ]
+  },
+  {
+    "name": "smolvla-vision-tail-10",
+    "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-vision-tail-10.gguf",
+    "flags": [],
+    "expected_episodes": 2,
+    "status": "complete",
+    "client_exit": 0,
+    "completed_episodes": 2,
+    "successes": 0,
+    "steps": [
+      500,
+      500
+    ]
+  }
+]
