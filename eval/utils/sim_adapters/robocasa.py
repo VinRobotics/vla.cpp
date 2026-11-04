@@ -343,6 +343,8 @@ class RoboCasaSimAdapter(BasePipelineAdapter):
 
     def get_action(self, obs):
         parsed_obs = self._parser.parse_observation(obs)
+        before = self._client._step
         action = self._client.get_action(parsed_obs)
-        self._parser.validate_response(self._client._last_response)
+        if self._client._step != before:  # Replayed steps reuse an already checked chunk.
+            self._parser.validate_response(self._client._last_response)
         return self._parser.parse_action(action)

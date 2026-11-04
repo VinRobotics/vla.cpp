@@ -154,7 +154,7 @@ def run_episodes(env, client, args, output_dir):
             "inference_seconds": sum(e["inference_seconds"] for e in episodes),
             "inference_calls": sum(e["inference_calls"] for e in episodes),
             "call_seconds": sum(e["call_seconds"] for e in episodes),
-            "tokenizer": args.tokenizer or "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+            "tokenizer": args.tokenizer,
             "stats_json": str(args.stats_json) if args.stats_json else None,
             "processor_config": str(args.processor_config) if args.processor_config else None,
         }
@@ -212,6 +212,7 @@ def main(argv=None):
 
     if args.arch == "smolvla":
         config, processors = load_smolvla_metadata(args.policy_path)
+        args.tokenizer = args.tokenizer or processors["tokenizer_processor"]["tokenizer_name"]
         client = VlaCppClient(args.vla_addr, **smolvla_client_options(
             config, processors, tokenizer=args.tokenizer, n_action_steps=args.n_action_steps,
             recv_timeout_ms=args.recv_timeout_ms))
