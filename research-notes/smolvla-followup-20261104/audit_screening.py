@@ -18,7 +18,7 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def audit(name, directory):
+def audit(name, directory, episodes_per_task=4, sr_key='screening_sr'):
     result = read(directory / 'result.json')
     require(result['state'] == 'complete', f'{name}: unfinished result')
     tasks = result['tasks']
@@ -31,8 +31,8 @@ def audit(name, directory):
             path = ROOT / path
         with path.open(newline='') as handle:
             rows = list(csv.DictReader(handle))
-        require(len(rows) == task['episodes'] == 4, f'{name}: task episode count')
-        require(sorted(int(r['episode']) for r in rows) == list(range(4)), f'{name}: episode IDs')
+        require(len(rows) == task['episodes'] == episodes_per_task, f'{name}: task episode count')
+        require(sorted(int(r['episode']) for r in rows) == list(range(episodes_per_task)), f'{name}: episode IDs')
         require(all(r['success'] in ('0', '1') and r['aborted'] in ('0', '1') for r in rows), f'{name}: flags')
         count = sum(int(r['success']) for r in rows)
         skips = sum(int(r['aborted']) for r in rows)
@@ -46,10 +46,10 @@ def audit(name, directory):
                         'aborted': skips, 'csv': str(path.relative_to(ROOT)),
                         'csv_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
                         'episode_records': [{key: int(row[key]) for key in ('episode', 'success', 'steps', 'aborted')} for row in rows]})
-    require(episodes == result['completed_episodes'] == result['expected_episodes'] == 40, f'{name}: total episodes')
+    require(episodes == result['completed_episodes'] == result['expected_episodes'] == 10 * episodes_per_task, f'{name}: total episodes')
     require(result['completed_tasks'] == 10, f'{name}: total tasks')
     require(successes == result['successes'] and aborted == 0, f'{name}: final totals')
-    require(abs(result['screening_sr'] - successes / episodes) < 1e-12, f'{name}: SR')
+    require(abs(result[sr_key] - successes / episodes) < 1e-12, f'{name}: SR')
     return {'episodes': episodes, 'successes': successes, 'aborted': aborted,
             'screening_sr': successes / episodes, 'tasks': records}
 

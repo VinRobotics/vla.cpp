@@ -22,3 +22,29 @@ Cập nhật ngày 05/11/2026 (UTC+07). Tài liệu chính: [REPORT_SMOLVLA.md](
 ## Dữ liệu và trạng thái đánh giá
 
 Kết quả và script tái lập được lưu trong nhánh này. Screening đã hoàn tất 120/120 episode: flash-mm 35/40, Q8-lm 36/40, Q8-vision 36/40, so với defaults 38/40. Official biến thể và repeated-seed chưa chạy; chưa kết luận giữ SR. Kết quả đã đối chiếu CSV bằng `research-notes/smolvla-followup-20261104/audit_screening.py`.
+
+## Rà soát phần thiếu và tiêu chí hoàn tất
+
+“Đủ sáu phần trong báo cáo” chỉ nói về phạm vi trình bày. Đối chiếu yêu cầu mentor ban đầu, phần 1, 2, 4, 5 và 6 còn các tiêu chí thực nghiệm chưa đạt đầy đủ. Phần 3 có đủ bảng đo yêu cầu, nhưng chưa chứng minh cấu hình tối ưu giữ chất lượng.
+
+| Phần | Phần đã bổ sung hoặc xác minh trong lượt rà soát | Điều kiện còn thiếu để đạt trọn yêu cầu |
+|---|---|---|
+| 1. Cài đặt | Thống nhất trạng thái 13/15 giữa checklist và báo cáo | Sửa hai test CUDA, chạy lại theo hợp đồng hiện tại; chưa thực hiện vì đang tạm hoãn |
+| 2. Baseline | Giữ rõ allocation và resident VRAM; công bố điều kiện đo và giới hạn telemetry | Đo process resident memory trên môi trường hỗ trợ nếu yêu cầu đúng chỉ số này |
+| 3. Tối ưu | Đã có bảng bốn chỉ tiêu, control riêng và tính speedup cùng batch | Kiểm tra chất lượng cho cấu hình định chọn; không suy SR từ synthetic delta |
+| 4. LIBERO | Audit cả official và screening; thêm bảng thành công từng task | Official cho cấu hình được chọn chưa có; không chạy thêm trong đợt chốt này |
+| 5. Profile | Phân biệt module GPU-active, phase wall và default path | Connector riêng, attention riêng và phân tích nguyên nhân gap chưa hoàn tất |
+| 6. Pruning | Có ba depth ablation và kết quả âm; phân biệt rõ với CLP | Nếu yêu cầu tái hiện phương pháp paper: cần activation calibration, CKA, mapping hợp lệ và quy trình finetuning/đánh giá tương ứng |
+
+## Kiểm tra dữ liệu có thể chạy lại
+
+Từ thư mục gốc repo, không cần GPU hoặc simulator:
+
+```bash
+python3 research-notes/smolvla-followup-20261104/audit_submission.py
+python3 research-notes/smolvla-followup-20261104/complete_calculations.py
+```
+
+Lệnh đầu đối chiếu 50 CSV của 360 episode với manifest cuối: task/episode ID, số bước, success, aborted và SR; lưu hash từng CSV trong [submission-audit.json](research-notes/smolvla-followup-20261104/submission-audit.json), sinh [bảng từng task](research-notes/smolvla-followup-20261104/TASK_RESULTS.md). Chỉ dùng task 9 official từ đường dẫn recovery đã được chọn, không cộng lượt dở. Lệnh thứ hai sinh lại phụ lục tính toán. Cần có các CSV cục bộ theo đường dẫn manifest; lệnh không tự tải model, tạo môi trường hoặc sinh episode thiếu.
+
+Audit này không xác nhận video, đúng nội dung instruction, kernel correctness hoặc môi trường portable. Cùng seed môi trường và episode ID chưa bảo đảm cùng noise; bảng từng task chỉ mô tả kết quả quan sát, chưa xác định nguyên nhân thất bại hay chứng minh non-inferiority.

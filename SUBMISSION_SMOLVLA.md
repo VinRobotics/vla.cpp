@@ -23,6 +23,7 @@ Batch đã hoàn tất 120/120 episode, cả ba cấu hình exit 0. Official200 
 
 ## Tài liệu chi tiết
 
+- [Kết quả theo task và kiểm tra 360 episode](research-notes/smolvla-followup-20261104/TASK_RESULTS.md) — đối chiếu CSV với manifest cuối, gồm official task 9 recovery.
 - [Phụ lục tính toán đủ 6 task](CALCULATIONS_SMOLVLA.md) — speedup, allocation, Wilson SR, dự toán official và pruning.
 - [Báo cáo tổng thể](REPORT_SMOLVLA.md)
 - [Bảng tối ưu không train](PART3_OPTIMIZATION.md)

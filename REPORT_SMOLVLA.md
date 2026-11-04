@@ -67,6 +67,7 @@ Sai lệch output dùng input harness6token và noise cố định; benchmark d�
 
 ## Tài liệu và bằng chứng
 
+- [Bảng kết quả theo task](research-notes/smolvla-followup-20261104/TASK_RESULTS.md) và [audit 360 episode](research-notes/smolvla-followup-20261104/submission-audit.json): kiểm tra lại 200 official + 160 screening từ CSV, có hash và loại lượt task 9 bị gián đoạn. Chạy lại bằng `python3 research-notes/smolvla-followup-20261104/audit_submission.py`; không cần inference mới.
 - [Nhật ký](NOTES_SMOLVLA.md) là lịch sử, không dùng các dòng trạng thái cũ làm hiện trạng.
 - [Report lịch sử](research-notes/review-20261104/REPORT_HISTORY.md) giữ nguyên snapshot cũ, có nội dung đã hết hiệu lực.
 - [Review Markdown](MENTOR_REVIEW.md) liệt kê các vấn đề tài liệu và phương pháp.

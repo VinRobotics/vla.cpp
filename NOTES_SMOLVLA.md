@@ -1,17 +1,19 @@
 # SmolVLA — nhật ký thực nghiệm
 
-Ngày: 2026-11-04 (UTC+07). Chặng này: kiểm kê, xác minh toolchain/inference và baseline latency. Không commit/push; không sửa source hoặc nới tiêu chuẩn test.
+Cập nhật trạng thái ngày 05/11/2026 (UTC+07). Các mục phía sau là nhật ký theo thời điểm; những dòng “chưa đo/chưa cài” cũ không đại diện cho hiện trạng. Phạm vi và kết luận hiện tại ở [REPORT_SMOLVLA.md](REPORT_SMOLVLA.md).
 
-## Checklist 6 yêu cầu (trạng thái thực tế)
+## Checklist 6 yêu cầu (trạng thái hiện tại)
 
-| Mục | Trạng thái | Bằng chứng / phần thiếu |
+| Mục | Đã hoàn thành | Giới hạn còn mở |
 |---|---|---|
-| 1. Cài đặt và chạy thử | Đã build và chạy đủ 5 công cụ; chưa đạt toàn bộ test | Incremental build exit 0; ctest 13/15; CLI CUDA trả action; binding và server khớp bit với predict_check. Hai test fail cần khoanh vùng tiếp. |
-| 2. Baseline | Đã đo latency và peak allocation CUDA riêng process bằng nsys; NVML resident VRAM vẫn N/A | Latency theo protocol gốc; memory tracing riêng đủ 3 process: peak 1912.47 MiB (Device + Device Static, không bao hết context/driver). Xem bổ sung bên dưới. |
-| 3. Runtime flags / quantization | Chưa đo | Đã đọc USAGE.md, cuda.md, MODELS.md. Chưa tạo GGUF mới; chưa có bảng so sánh. |
-| 4. LIBERO SR | Chưa sẵn sàng | Python yêu cầu không tồn tại, uv không có trên PATH; LIBERO chỉ có .git và HEAD chưa resolve. Chưa có episode hoặc SR. |
-| 5. Architecture / profile | Mới kiểm tra timing source và công cụ | nsys 2026.1.3 đã dùng trace CUDA memory; chưa đọc paper, chưa đo phase hoặc phân tích GEMM/attention/GPU idle. Phase thay đổi cách dựng graph, cần đo riêng baseline throughput. |
-| 6. Pruning | Chưa thực hiện | Chưa đọc paper/chọn phương pháp/implement, chưa có speedup module. |
+| 1. Cài đặt và chạy thử | CUDA arch86; CLI/server/binding/predict_check hoạt động | Tests 13/15; hai lỗi bit-exact tạm hoãn |
+| 2. Baseline | Mean/p50/p90; nsys peak allocation 1912,47 MiB | Process resident VRAM N/A; allocation không bao hết context/driver |
+| 3. Runtime flags / quantization | 10 cấu hình runtime; Q8/Q5/Q4 có/không vision; file, latency, allocation, output delta | Chưa xác nhận giữ SR; chỉ ba ứng viên có screening |
+| 4. LIBERO SR | Defaults official 177/200; screening defaults 38/40, flash-mm 35/40, hai Q8 36/40 | Official biến thể và repeated-seed chưa chạy, ngoài phạm vi chốt đợt này |
+| 5. Architecture / profile | Metadata checkpoint, sơ đồ, phase và nsys node traces | Connector/attention chưa tách riêng; GPU-active khác wall time |
+| 6. Pruning | Ba GGUF depth ablation, kiểm tra output, latency module và smoke | Cả ba smoke 0/2; chưa implement CLP/CKA hoặc finetuning |
+
+Kiểm tra lại CSV cho đủ 360 episode và bảng theo task: [TASK_RESULTS.md](research-notes/smolvla-followup-20261104/TASK_RESULTS.md). Phần còn thiếu và tiêu chí hoàn tất: [MENTOR_REVIEW.md](MENTOR_REVIEW.md).
 
 ## Nguyên văn mentor
 
@@ -486,3 +488,8 @@ Batch ba biến thể đã complete, 120/120 episode, cả ba exit 0: flash-mm 3
 Thêm audit_screening.py: đối chiếu result.json với 40 CSV của defaults và ba biến thể (160 episode), kiểm tra ID episode/task, steps, success, aborted, SR và exit batch. Kết quả khớp: defaults 38/40; flash-mm 35/40; Q8-lm 36/40; Q8-vision 36/40; tất cả aborted=0. screening-final-audit.json lưu số đo từng episode và SHA256 CSV; không kiểm tra video. submission-progress.json được cập nhật từ result cuối.
 
 Kiểm tra: audit_screening.py pass; complete_calculations.py sinh lại phụ lục giống nhau; sáu tài liệu không có local link mất target hoặc trạng thái Q8-vision cũ; hai script parse thành công; git diff --check sạch. Không chạy lại benchmark hoặc CUDA tests trong lượt chốt tài liệu này. Hai CUDA tests vẫn fail theo log đã có; official biến thể, repeated-seed, CKA/finetuning, connector/attention riêng, lock sạch và resident VRAM vẫn mở. Giữ nguyên on.txt/off.txt và dữ liệu thí nghiệm.
+
+
+## Bổ sung rà soát tính hoàn chỉnh — 05/11/2026
+
+Đã thay checklist đầu nhật ký đã lỗi thời bằng trạng thái cuối, bổ sung bảng theo task và audit tái lập cho cả official lẫn screening. `audit_submission.py` kiểm tra 360 episode từ manifest cuối, gồm task 9 recovery; lưu SHA256 từng CSV. Đây là xác minh dữ liệu đã có, không phải chạy thêm rollout. Các giới hạn thực nghiệm vẫn giữ nguyên theo phạm vi chốt báo cáo.
