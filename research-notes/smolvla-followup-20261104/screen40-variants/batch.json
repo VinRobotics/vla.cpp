@@ -1,6 +1,6 @@
 {
-  "state": "running",
-  "current": "q8-lm",
+  "state": "complete",
+  "current": null,
   "expected_configurations": 3,
   "expected_episodes": 120,
   "results": [
@@ -8,6 +8,16 @@
       "name": "flash-mm",
       "exit": 0,
       "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/screen40-variants/flash-mm/result.json"
+    },
+    {
+      "name": "q8-lm",
+      "exit": 0,
+      "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/screen40-variants/q8-lm/result.json"
+    },
+    {
+      "name": "q8-vision",
+      "exit": 0,
+      "result": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/screen40-variants/q8-vision/result.json"
     }
   ]
 }

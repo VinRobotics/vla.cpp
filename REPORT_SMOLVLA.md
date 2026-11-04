@@ -1,6 +1,6 @@
 # Báo cáo thực nghiệm SmolVLA
 
-Bản tổng hợp đủ nội dung 6 task, bổ sung tính toán theo yêu cầu người dùng ngày 04/11/2026. Các thí nghiệm chưa chạy vẫn được ghi rõ. Repo gốc tại commit `4a542ed3bfb8f330388aceb8926294a951156172`; các kết quả là số đo cục bộ trên RTX 3060 Laptop 6 GiB qua WSL2. Snapshot screening có thể cũ hơn tiến trình đang chạy; phần dự toán không phải số đo.
+Bản tổng hợp đủ nội dung 6 task, bổ sung tính toán theo yêu cầu người dùng ngày 04/11/2026. Các thí nghiệm chưa chạy vẫn được ghi rõ. Repo gốc tại commit `4a542ed3bfb8f330388aceb8926294a951156172`; các kết quả là số đo cục bộ trên RTX 3060 Laptop 6 GiB qua WSL2. Cập nhật ngày 05/11/2026 (UTC+07): screening ba biến thể đã hoàn tất 120/120 episode; phần dự toán không phải số đo.
 
 ## Trạng thái sáu phần
 
@@ -9,7 +9,7 @@ Bản tổng hợp đủ nội dung 6 task, bổ sung tính toán theo yêu cầ
 | 1. Cài đặt | CUDA arch86; CLI, server, binding, predict_check đã chạy | Tests13/15; hai lỗi bit-exact còn mở |
 | 2. Baseline | Có p50/p90, traced allocation và điều kiện đo | Không đo được toàn bộ resident VRAM riêng process trên WSL |
 | 3. Không train | 10 runtime configs và Q8/Q5/Q4 có/không vision; đủ4chỉ tiêu | Chưa kết luận giữ chất lượng điều khiển |
-| 4. LIBERO | Baseline screening38/40; official177/200 | Flash-mm35/40, Q8-lm36/40; Q8-vision đang chạy; official biến thể là dự toán riêng |
+| 4. LIBERO | Baseline screening38/40; official177/200 | Flash-mm35/40, Q8-lm36/40; Q8-vision36/40; official biến thể chưa đo |
 | 5. Profile | Kiến trúc, phase, nsys kernel/module traces | Chưa chọn bản tốt nhất theo SR; chưa tách connector khỏi vision |
 | 6. Pruning | 3depth ablations; module latency và smoke | Smoke cả3bản0/2; chưa implement CKA/finetuning |
 
@@ -42,15 +42,15 @@ Ba batch latency phải đọc riêng: baseline ban đầu mean112,0ms; runtime-
 
 Sai lệch output dùng input harness6token và noise cố định; benchmark dùng16token. Metric lấy50×7 action thực, loại padding. Không suy ra SR từ sai số synthetic.
 
-## Screening biến thể — snapshot
+## Screening biến thể — kết quả hoàn tất
 
 | Cấu hình | Episode đã chốt | Thành công | Trạng thái |
 |---|---:|---:|---|
-| flash-mm | 40/40 | 35 | complete |
+| flash-mm | 40/40 | 35 | complete: 87,5% |
 | q8-lm | 40/40 | 36 | complete: 90% |
-| q8-vision | 4/40 | 4 | snapshot đang chạy; chưa phải SR40 |
+| q8-vision | 40/40 | 36 | complete: 90% |
 
-Đếm theo task đã hoàn tất. Chạy tuần tự flash+mm → Q8 không vision → Q8 có vision, tổng120episode. Raw progress: `research-notes/smolvla-followup-20261104/screen40-variants/`. Snapshot không phải kết quả cuối nếu batch còn running.
+Đã chạy tuần tự flash+mm → Q8 không vision → Q8 có vision, tổng 120/120 episode; cả ba runner exit 0, batch complete. Kết quả cuối và CSV từng task: `research-notes/smolvla-followup-20261104/screen40-variants/`. Đối chiếu CSV bằng `audit_screening.py` trong cùng thư mục cha; báo cáo kiểm tra: `screening-final-audit.json`. Screening defaults 38/40, flash-mm 35/40 và hai bản Q8 36/40 chưa đủ để kết luận giữ SR hoặc xếp hạng chất lượng.
 
 ## Profile và pruning
 
@@ -102,8 +102,25 @@ Telemetry runtime bổ sung ghi nhận53–72°C trong120mẫu, không phủ to�
 ## Đọc đủ Task 3–6 và phần chưa có số liệu
 
 - Task3: [bảng đầy đủ runtime và sáu quantization](PART3_OPTIMIZATION.md), kèm input, sai lệch real7 và giới hạn memory.
-- Task4: baseline official177/200; screening defaults38/40, flash-mm35/40, Q8-lm36/40. [Phụ lục tính toán](CALCULATIONS_SMOLVLA.md#task-4--sr-độ-bất-định-và-dự-toán-official) có Wilson95% và dự toán flash-mm175/200, Q8-lm180/200, giả định SR không đổi. Hai dự toán này chưa được chạy/xác nhận; Q8-vision chưa có point estimate đáng tin.
+- Task4: baseline official177/200; screening defaults38/40, flash-mm35/40, Q8-lm36/40, Q8-vision36/40. [Phụ lục tính toán](CALCULATIONS_SMOLVLA.md#task-4--sr-độ-bất-định-và-dự-toán-official) có Wilson95% và dự toán flash-mm175/200, Q8-lm180/200 và Q8-vision180/200, giả định SR không đổi. Các dự toán này chưa được chạy/xác nhận.
 - Task5: [sơ đồ, phase timing và nsys](research-notes/smolvla-followup-20261104/ARCHITECTURE_AND_PROFILE.md); [tính tỷ trọng và dự báo theo depth](CALCULATIONS_SMOLVLA.md#task-5--phân-bổ-gpu-và-mô-hình-dự-báo). Flash-mm là ứng viên latency đã profile; chưa chốt best theo officialSR.
 - Task6: [bảng ba pruning với file, allocation, p50/p90, sai lệch và smoke](CALCULATIONS_SMOLVLA.md#task-6--ba-pruning-đã-implement-và-kiểm-tra), implementation [prune_depth.py](research-notes/smolvla-followup-20261104/prune_depth.py). Đây là kết quả âm về chất lượng của depth pruning chưa finetune; chưa gọi là tái hiện CLP.
 
-Tài liệu đã điền đủ phần giải thích, bằng chứng và tính toán cho6task; không đồng nghĩa mọi tiêu chí thực nghiệm đều đạt. Chưa thể thay bằng tính toán: hai testfail, residentVRAM, SRofficialbiến thể, attention/connector timing riêng, CKA/finetuning và repeated-seed. Đề xuất giữ defaults làm bản chất lượng đã được đo chính thức; ưu tiên Q8-lm cho đánh giá memory và flash-mm cho latency, không chọn pruning0/2 để triển khai.
+Tài liệu đã điền đủ phần giải thích, bằng chứng và tính toán cho6task; không đồng nghĩa mọi tiêu chí thực nghiệm đều đạt. Chưa thể thay bằng tính toán: hai testfail, residentVRAM, SRofficialbiến thể, attention/connector timing riêng, CKA/finetuning và repeated-seed. Đề xuất giữ defaults làm bản chất lượng đã được đo chính thức; ưu tiên đánh giá Q8-lm/Q8-vision cho memory và flash-mm cho latency, không chọn pruning0/2 để triển khai.
+
+
+## Kết luận sau screening và phần thực nghiệm còn lại
+
+Screening hoàn tất ngày 05/11/2026. Defaults vẫn là mốc chất lượng chính thức 177/200. Flash-mm là ứng viên latency với mean 85,5 ms so với control 104,0 ms cùng batch. Q8-vision dùng allocation 925,88 MiB so với Q8-lm 1020,70 MiB và control quantization 1912,47 MiB; cả hai Q8 đạt 36/40. Chưa có kết quả cấu hình kết hợp quantization + flash-mm, nên không cộng các mức cải thiện.
+
+| Hạng mục còn lại | Điều kiện để đóng |
+|---|---|
+| Hai lỗi CUDA bit-exact | Xác định nguyên nhân, sửa và chạy lại tests với hợp đồng hiện tại; không nới tolerance để đổi trạng thái |
+| Chất lượng biến thể chính thức | Chạy đủ 200 episode/biến thể theo protocol đã công bố, lưu CSV và policy recovery; tối đa 600 episode cho ba biến thể |
+| Độ ổn định theo seed | Định nghĩa noise/seed protocol và chạy lặp; không chọn layer hoặc chỉnh cấu hình trên episode đánh giá |
+| Profile connector/attention | Thêm instrumentation tách module và đo lại, giữ rõ GPU-active và wall time |
+| CLP/CKA | Calibration riêng, activation/CKA, chọn layer hợp lệ, finetuning và đánh giá mới; ba depth ablation hiện tại chưa đạt chất lượng |
+| Môi trường tái lập | Giải quyết bảy dependency conflicts và tạo lock đã kiểm tra trên môi trường sạch |
+| Resident VRAM | Đo trên backend hỗ trợ process memory; WSL hiện trả N/A nên chỉ báo traced allocation |
+
+Bản tài liệu đã tổng hợp kết quả hiện có; các tiêu chí trên vẫn mở và cần thực nghiệm mới. Không dùng phép ngoại suy SR hoặc mô hình depth để đánh dấu hoàn tất.

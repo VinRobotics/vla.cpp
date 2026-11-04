@@ -20,7 +20,7 @@ def table(headers, rows):
     return '\n'.join(['| ' + ' | '.join(headers) + ' |', '| ' + ' | '.join(['---']*len(headers)) + ' |'] + ['| '+' | '.join(map(str,r))+' |' for r in rows])
 
 out = ['# Phụ lục tính toán cho đủ 6 task',
-'''Các bảng dưới đây là **tính toán từ số đo đã có** hoặc **dự toán có giả định**, không phải benchmark mới. Chạy lại bằng `python3 research-notes/smolvla-followup-20261104/complete_calculations.py` tại gốc repo. Snapshot screening đọc từ result/progress tại lúc sinh tài liệu.
+'''Các bảng dưới đây là **tính toán từ số đo đã có** hoặc **dự toán có giả định**, không phải benchmark mới. Chạy lại bằng `python3 research-notes/smolvla-followup-20261104/complete_calculations.py` tại gốc repo. Kết quả screening đọc từ result.json hoàn tất, được đối chiếu CSV bằng audit_screening.py.
 
 ## Task 1 — tỷ lệ kiểm thử
 
@@ -49,20 +49,20 @@ for name,d in bench.items():
     if 'q' not in name: continue
     rows.append([name,f'{100*(1-d["mean_ms"]/bench["defaults"]["mean_ms"]):.2f}%',f'{100*(1-mem[name]["peak_MiB"]/mem["defaults"]["peak_MiB"]):.2f}%'])
 out.append(table(['Quantization','Giảm mean so 113,7 ms','Giảm allocation'],rows))
-out.append('''Q8-lm là ứng viên ưu tiên khi cần giảm bộ nhớ và giữ chất lượng; flash-mm là ứng viên ưu tiên latency. Đây là lựa chọn để đánh giá tiếp, chưa phải winner official200. Không cộng speedup quantization với flash-mm khi chưa đo cấu hình kết hợp.
+out.append('''Q8-lm và Q8-vision là ứng viên để đánh giá giảm bộ nhớ; flash-mm là ứng viên ưu tiên latency. Chưa xác nhận giữ chất lượng. Đây là lựa chọn để đánh giá tiếp, chưa phải winner official200. Không cộng speedup quantization với flash-mm khi chưa đo cấu hình kết hợp.
 
 ## Task 4 — SR, độ bất định và dự toán official
 
 Wilson 95% dùng z=1,959964, p=k/n; tâm=(p+z²/2n)/(1+z²/n), nửa rộng=z√(p(1−p)/n+z²/4n²)/(1+z²/n). Interval giả sử episode Bernoulli độc lập; tương quan giữa episode cùng task và chỉ một seed làm độ bất định thực tế có thể lớn hơn. Không dùng interval này để khẳng định non-inferiority.''')
 rows=[]
-for label,path in [('Defaults screening','screen40-defaults/result.json'),('Flash-mm screening','screen40-variants/flash-mm/result.json'),('Q8-lm screening','screen40-variants/q8-lm/result.json')]:
+for label,path in [('Defaults screening','screen40-defaults/result.json'),('Flash-mm screening','screen40-variants/flash-mm/result.json'),('Q8-lm screening','screen40-variants/q8-lm/result.json'),('Q8-vision screening','screen40-variants/q8-vision/result.json')]:
     d=read(path); n=d['completed_episodes']; k=d['successes']; assert n==40
     lo,hi=wilson(k,n)
     rows.append([label,f'{k}/{n}',f'{100*k/n:.1f}%',f'{100*lo:.1f}–{100*hi:.1f}%',f'{200*k/n:.0f}/200 (dự toán)'])
 lo,hi=wilson(177,200)
 rows.append(['Defaults official','177/200','88,5%',f'{100*lo:.1f}–{100*hi:.1f}%','đã đo'])
 out.append(table(['Cấu hình','Thành công','SR đo','Wilson 95% tính','Quy đổi tuyến tính'],rows))
-out.append('''Dự toán 175/200 cho flash-mm và 180/200 cho Q8-lm chỉ là 200×SR screening, giả định cùng phân phối; không được đưa vào cột official đo thật. Defaults screening dự toán 190/200 nhưng official thực tế 177/200 cho thấy phép ngoại suy có thể lệch đáng kể. Q8-vision chưa đủ screening: không thể suy SR từ RMSE hoặc 2/2 smoke; khoảng có thể về mặt logic là 0–100%, không có point estimate được dữ liệu hỗ trợ. Official của các biến thể vẫn chưa đo. Với 3 biến thể tối đa, ngân sách còn 600 episode; chọn 2 biến thể thì 400 episode. Thời gian chạy không thể tính chỉ từ engine latency vì số bước/task và simulator thay đổi.
+out.append('''Dự toán 175/200 cho flash-mm và 180/200 cho Q8-lm và Q8-vision chỉ là 200×SR screening, giả định cùng phân phối; không được đưa vào cột official đo thật. Defaults screening dự toán 190/200 nhưng official thực tế 177/200 cho thấy phép ngoại suy có thể lệch đáng kể. Q8-vision đã hoàn tất 36/40 = 90%; không suy SR từ RMSE hoặc smoke. Hai bản Q8 cùng số thành công nhưng không chứng minh tương đương chất lượng. Official của các biến thể vẫn chưa đo. Với 3 biến thể tối đa, ngân sách còn 600 episode; chọn 2 biến thể thì 400 episode. Thời gian chạy không thể tính chỉ từ engine latency vì số bước/task và simulator thay đổi.
 
 ## Task 5 — phân bổ GPU và mô hình dự báo
 

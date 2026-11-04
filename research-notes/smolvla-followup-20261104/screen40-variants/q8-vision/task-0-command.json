@@ -1,0 +1,22 @@
+[
+  "/home/doris/projects/vla.cpp/eval/sim/libero/libero_uv/.venv/bin/python",
+  "/home/doris/projects/vla.cpp/eval/client/run_sim_client_direct.py",
+  "--arch",
+  "smolvla",
+  "--vla-addr",
+  "tcp://127.0.0.1:15560",
+  "--task",
+  "libero_object",
+  "--task-id",
+  "0",
+  "--recv-timeout-ms",
+  "-1",
+  "--n-episodes",
+  "4",
+  "--n-action-steps",
+  "1",
+  "--seed",
+  "42",
+  "--output-dir",
+  "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/screen40-variants/q8-vision/outputs"
+]

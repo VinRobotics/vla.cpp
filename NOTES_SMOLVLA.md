@@ -460,3 +460,29 @@ Screen40 q8-vision: task 0 hoàn tất 4/4; tổng tạm thời 4/4. Log screen4
 Người dùng cho phép bổ sung tính toán ở phần thiếu và commit/push GitHub. Đã tạo CALCULATIONS_SMOLVLA.md và script complete_calculations.py; cập nhật REPORT/SUBMISSION/PART3. Q8-lm result mới xác nhận36/40, thay snapshot34/36. Q8-vision đang chạy, không dừng hoặc can thiệp runner. Số liệu dự toán official flash-mm175/200 và Q8-lm180/200 chỉ là200×SRscreening, không phải episode đã chạy. Không suy residentVRAM, SR từ synthetic error hoặc tự ghi testpass. Lệnh tái lập: python3 research-notes/smolvla-followup-20261104/complete_calculations.py. Lệnh `python` không có trên PATH, dùng `python3` thành công. Giữ nguyên on.txt/off.txt và dữ liệu runner đang ghi; chỉ stage tài liệu/script và snapshot result Q8-lm hoàn tất.
 
 Screen40 q8-vision: task 1 hoàn tất 4/4; tổng tạm thời 8/8. Log screen40-variants/q8-vision/task-1.log; chưa phải official SR.
+
+Screen40 q8-vision: task 2 hoàn tất 4/4; tổng tạm thời 12/12. Log screen40-variants/q8-vision/task-2.log; chưa phải official SR.
+
+Screen40 q8-vision: task 3 hoàn tất 4/4; tổng tạm thời 16/16. Log screen40-variants/q8-vision/task-3.log; chưa phải official SR.
+
+Screen40 q8-vision: task 4 hoàn tất 3/4; tổng tạm thời 19/20. Log screen40-variants/q8-vision/task-4.log; chưa phải official SR.
+
+Screen40 q8-vision: task 5 hoàn tất 3/4; tổng tạm thời 22/24. Log screen40-variants/q8-vision/task-5.log; chưa phải official SR.
+
+Screen40 q8-vision: task 6 hoàn tất 4/4; tổng tạm thời 26/28. Log screen40-variants/q8-vision/task-6.log; chưa phải official SR.
+
+Screen40 q8-vision: task 7 hoàn tất 3/4; tổng tạm thời 29/32. Log screen40-variants/q8-vision/task-7.log; chưa phải official SR.
+
+Screen40 q8-vision: task 8 hoàn tất 3/4; tổng tạm thời 32/36. Log screen40-variants/q8-vision/task-8.log; chưa phải official SR.
+
+Screen40 q8-vision: task 9 hoàn tất 4/4; tổng tạm thời 36/40. Log screen40-variants/q8-vision/task-9.log; chưa phải official SR.
+
+## Chốt tài liệu sau screening — 05/11/2026 (UTC+07)
+
+Batch ba biến thể đã complete, 120/120 episode, cả ba exit 0: flash-mm 35/40, Q8-lm 36/40, Q8-vision 36/40. Q8-vision task 9 đạt 4/4, không skip. Trạng thái chạy trong các dòng nhật ký trước là lịch sử.
+
+Đã cập nhật REPORT_SMOLVLA.md, SUBMISSION_SMOLVLA.md, PART3_OPTIMIZATION.md, CALCULATIONS_SMOLVLA.md, MENTOR_REVIEW.md và PAPER_READING_SMOLVLA_CLP.md. Phụ lục có thêm Q8-vision, Wilson 95% 76,9–96,0%; 180/200 vẫn chỉ là ngoại suy, chưa phải official. Báo cáo có bảng tiêu chí đóng các thực nghiệm còn mở.
+
+Thêm audit_screening.py: đối chiếu result.json với 40 CSV của defaults và ba biến thể (160 episode), kiểm tra ID episode/task, steps, success, aborted, SR và exit batch. Kết quả khớp: defaults 38/40; flash-mm 35/40; Q8-lm 36/40; Q8-vision 36/40; tất cả aborted=0. screening-final-audit.json lưu số đo từng episode và SHA256 CSV; không kiểm tra video. submission-progress.json được cập nhật từ result cuối.
+
+Kiểm tra: audit_screening.py pass; complete_calculations.py sinh lại phụ lục giống nhau; sáu tài liệu không có local link mất target hoặc trạng thái Q8-vision cũ; hai script parse thành công; git diff --check sạch. Không chạy lại benchmark hoặc CUDA tests trong lượt chốt tài liệu này. Hai CUDA tests vẫn fail theo log đã có; official biến thể, repeated-seed, CKA/finetuning, connector/attention riêng, lock sạch và resident VRAM vẫn mở. Giữ nguyên on.txt/off.txt và dữ liệu thí nghiệm.

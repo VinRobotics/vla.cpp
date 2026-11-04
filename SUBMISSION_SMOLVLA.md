@@ -1,6 +1,15 @@
 # Báo cáo tiến độ SmolVLA — bản gửi review
 
-Tổng hợp đủ 6 task và bổ sung phép tính theo yêu cầu ngày 04/11/2026. Số đo thật, dự toán và tiêu chí chưa đạt được tách rõ.
+Tổng hợp đủ 6 task; cập nhật kết quả screening cuối ngày 05/11/2026. Số đo thật, dự toán và tiêu chí chưa đạt được tách rõ.
+
+## Cách review nhanh
+
+1. Đọc file này để nắm kết luận và giới hạn trong khoảng 3 phút.
+2. Mở [các câu hỏi cần góp ý](MENTOR_REVIEW.md) để tập trung vào 10 quyết định phương pháp còn mở.
+3. Dùng [báo cáo tổng thể](REPORT_SMOLVLA.md) để kiểm tra protocol, số liệu và trạng thái từng task.
+4. Khi cần đối chiếu phép tính, chạy `python3 research-notes/smolvla-followup-20261104/complete_calculations.py`; khi cần đối chiếu screening, chạy `python3 research-notes/smolvla-followup-20261104/audit_screening.py`.
+
+Các file `REPORT_HISTORY.md` và những dòng trạng thái cũ trong `NOTES_SMOLVLA.md` chỉ là lịch sử. Kết luận hiện tại nằm trong file này và `REPORT_SMOLVLA.md`.
 
 ## Kết quả đã hoàn tất
 
@@ -9,15 +18,15 @@ Tổng hợp đủ 6 task và bổ sung phép tính theo yêu cầu ngày 04/11/
 - Phần3:10cấu hình runtime,6GGUF Q8/Q5/Q4 có/không vision; có bảng kích thước, latency, peak allocation và sai lệch action.
 - Flash+mm screening: **35/40 = 87,5%**. Baseline screening đối chứng:38/40. Chưa kết luận khác biệt có ý nghĩa thống kê.
 
-## Đánh giá đang tiếp tục
+## Screening đã hoàn tất
 
 | Cấu hình | Episode đã chốt | Thành công | Trạng thái |
 |---|---:|---:|---|
-| flash-mm | 40/40 | 35 | complete |
+| flash-mm | 40/40 | 35 | complete: 87,5% |
 | q8-lm | 40/40 | 36 | complete: 90% |
-| q8-vision | 4/40 | 4 | snapshot đang chạy; chưa phải SR40 |
+| q8-vision | 40/40 | 36 | complete: 90% |
 
-Kết quả Q8-vision chưa đầy đủ, không trình bày tỷ lệ tạm thời như SR của cả40episode. Official200 cho biến thể chưa chạy. Không chọn cấu hình cuối cùng khi chưa tổng hợp đánh giá.
+Batch đã hoàn tất 120/120 episode, cả ba cấu hình exit 0. Official200 cho biến thể chưa chạy; screening chưa đủ để kết luận giữ chất lượng. Q8-vision giảm allocation còn 925,88 MiB, thấp hơn Q8-lm 1020,70 MiB; cả hai đạt 36/40 nhưng chưa chứng minh tương đương. Flash-mm ưu tiên latency; defaults vẫn là bản có SR official đã đo.
 
 ## Tài liệu chi tiết
 
@@ -32,4 +41,4 @@ Kết quả Q8-vision chưa đầy đủ, không trình bày tỷ lệ tạm th�
 
 VRAM là peak traced allocation, chưa phải toàn bộ resident VRAM riêng process trên WSL. Latency chỉ so với control cùng batch. Output-check dùng input synthetic khác benchmark và không thay được SR. Server noise chưa cố định. Pruning hiện là depth ablation, chưa tái hiện CLP; cả3bản smoke0/2. Các chi tiết test fail, môi trường và recovery được công bố trong báo cáo tổng thể.
 
-Dự toán, chưa đo: flash-mm175/200, Q8-lm180/200 bằng200×SRscreening; không dùng làm kết quả official. Kết quả âm pruning vẫn được báo đầy đủ: ba bản giảm depth đều smoke0/2. Mục tiêu triển khai giữSR chưa đạt; defaults177/200 vẫn là mốc chính thức.
+Dự toán, chưa đo: flash-mm175/200, Q8-lm180/200 và Q8-vision180/200 bằng200×SRscreening; không dùng làm kết quả official. Kết quả âm pruning vẫn được báo đầy đủ: ba bản giảm depth đều smoke0/2. Mục tiêu triển khai giữSR chưa đạt; defaults177/200 vẫn là mốc chính thức.

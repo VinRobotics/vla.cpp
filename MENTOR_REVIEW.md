@@ -1,6 +1,6 @@
 # Các điểm nhờ mentor review
 
-Cập nhật ngày 04/11/2026 (UTC+07). Tài liệu chính: [REPORT_SMOLVLA.md](REPORT_SMOLVLA.md), [bảng phần3](PART3_OPTIMIZATION.md).
+Cập nhật ngày 05/11/2026 (UTC+07). Tài liệu chính: [REPORT_SMOLVLA.md](REPORT_SMOLVLA.md), [bảng phần3](PART3_OPTIMIZATION.md).
 
 ## Các vấn đề thực nghiệm còn mở
 
@@ -19,4 +19,4 @@ Cập nhật ngày 04/11/2026 (UTC+07). Tài liệu chính: [REPORT_SMOLVLA.md](
 
 ## Dữ liệu và trạng thái đánh giá
 
-Kết quả và script tái lập được lưu trong nhánh này. Screening các cấu hình tối ưu đang tiếp tục; kết quả hiện tại là tạm thời, chưa dùng để chọn cấu hình đánh giá chính thức.
+Kết quả và script tái lập được lưu trong nhánh này. Screening đã hoàn tất 120/120 episode: flash-mm 35/40, Q8-lm 36/40, Q8-vision 36/40, so với defaults 38/40. Official biến thể và repeated-seed chưa chạy; chưa kết luận giữ SR. Kết quả đã đối chiếu CSV bằng `research-notes/smolvla-followup-20261104/audit_screening.py`.

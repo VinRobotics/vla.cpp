@@ -18,4 +18,4 @@ Các bản tail/spaced hiện có là đối chứng depth ablation, chưa phả
 
 Cần ghi rõ bản không finetune là adaptation training-free của ý tưởng, không gán kết quả paper cho checkpoint này. So sánh với tail/spaced cùng số layer bị bỏ, chạy smoke rồi screening40. Đánh giá latency module bằng cả benchmark và nsys; official200 chỉ dành cấu hình được chọn. Không sử dụng dữ liệu episode đánh giá làm calibration.
 
-Paper mô tả kiến trúc tổng quát; bảng số layer/hidden size phải lấy metadata checkpoint đang dùng. Kết quả đang chạy trên GPU không bị thay đổi bởi việc đọc tài liệu này.
+Paper mô tả kiến trúc tổng quát; bảng số layer/hidden size phải lấy metadata checkpoint đang dùng. Screening ba biến thể đã hoàn tất; phần đọc paper không thay thế đánh giá CKA/finetuning còn thiếu.

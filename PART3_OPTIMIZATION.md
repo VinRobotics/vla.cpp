@@ -60,4 +60,4 @@ Telemetry bổ sung: 120 mẫu, nhiệt độ ghi nhận 53–72°C; không ph�
 
 ## Phép tính bổ sung và liên hệ 6 task
 
-[Bảng tính tái lập](CALCULATIONS_SMOLVLA.md#task-3--mức-giảm-so-control-cùng-batch) bổ sung phần trăm giảm latency/allocation và speedup cho từng cấu hình. Flash-mm giảm mean17,79%, speedup1,216× và giảm allocation45,61% so control runtime104,0ms/1912,47MiB. Q8-lm screening đã hoàn tất36/40; official của biến thể chưa đo. Xem [báo cáo đủ6task](REPORT_SMOLVLA.md) và [pruning](CALCULATIONS_SMOLVLA.md#task-6--ba-pruning-đã-implement-và-kiểm-tra).
+[Bảng tính tái lập](CALCULATIONS_SMOLVLA.md#task-3--mức-giảm-so-control-cùng-batch) bổ sung phần trăm giảm latency/allocation và speedup cho từng cấu hình. Flash-mm giảm mean17,79%, speedup1,216× và giảm allocation45,61% so control runtime104,0ms/1912,47MiB. Q8-lm và Q8-vision screening đều đã hoàn tất 36/40; official của biến thể chưa đo. Q8-vision giảm allocation 51,59% so với control quantization, Q8-lm giảm 46,63%; screening bằng nhau chưa chứng minh tương đương chất lượng. Xem [báo cáo đủ6task](REPORT_SMOLVLA.md) và [pruning](CALCULATIONS_SMOLVLA.md#task-6--ba-pruning-đã-implement-và-kiểm-tra).
