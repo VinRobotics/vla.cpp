@@ -9,22 +9,23 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 - **Hexagon NPU on the Qualcomm Dragonwing IQ-10 (Linux).**
   `scripts/build_linux_hexagon.sh` cross-builds vla.cpp with `GGML_HEXAGON=ON`
   in Qualcomm's toolchain container, `vla-server` included. On the IQ-10 (v81,
-  llama.cpp `b11223`) SmolVLA, π0.5, Evo-1 and GR00T N1.5 / N1.6 / N1.7 run
-  within 2.9e-3 of the CPU build on fixed inputs and serve through
-  `eval/client`. Concats the NPU refuses on buffers above 4 GB of DSP address
-  space and matmuls of a 2D weight against a batch, which it computes wrong
-  (GR00T N1.6 with two views), run on the CPU, and GR00T N1.7's LM leaves
-  flash attention (F16 scores on the HMX) unless `--flash-attn` is given.
-  Three matmuls that the HMX does not take move onto it: SigLIP's 4304-wide
-  MLP is zero-padded to 4320 at load, π0.5's SigLIP takes flash attention, and
-  Evo-1's LM attention takes F16 K/V. GR00T N1.5, N1.6, π0.5 and Evo-1 run
-  27-40% faster, within the bar on fixed inputs.
-  π0.5's VLM and action expert take flash attention too, and the experts' KV
-  concats run as row copies that stay on the NPU (π0.5, SmolVLA; π0 shares the
-  code, not yet run on the board).
-  GR00T N1.5 and N1.6 are above the bar on a served LIBERO observation, as the
-  CPU is at F16. See `docs/backend/hexagon.md` for the build, the skel install
-  and the numbers.
+  llama.cpp `b11223`) SmolVLA, π0, π0.5, Evo-1, GR00T N1.5 / N1.6 / N1.7,
+  VLA-JEPA, VLA-Adapter, OpenVLA-OFT, Octo-Small and TurboVLA run within 2.9e-3
+  of the CPU build on fixed inputs and serve through `eval/client`. Concats the
+  NPU refuses on buffers above 4 GB of DSP address space, copies that read a
+  weight (also answered `NO_SUPPORT`; VLA-Adapter), matmuls of a 2D weight
+  against a batch, which it computes wrong (GR00T N1.6 with two views), and
+  repeats of a computed tensor, which can read stale cache lines (TurboVLA), run
+  on the CPU, and GR00T N1.7's LM leaves flash attention (F16 scores on the
+  HMX) unless `--flash-attn` is given. Three matmuls that the HMX does not take
+  move onto it: SigLIP's 4304-wide MLP is zero-padded to 4320 at load, π0.5's
+  SigLIP takes flash attention, and Evo-1's LM attention takes F16 K/V. GR00T N1.5, N1.6,
+  π0.5 and Evo-1 run 27-40% faster, within the bar on fixed inputs. π0.5's VLM
+  and action expert take flash attention too, and the experts' KV concats run as
+  row copies that stay on the NPU (π0, π0.5, SmolVLA). GR00T N1.5, N1.6 and
+  VLA-JEPA are above the bar on a served LIBERO observation, as the CPU is at
+  F16. See `docs/backend/hexagon.md` for the build, the skel install and the
+  numbers.
 - **ROCm/HIP backend for VLA inference.** `-DGGML_HIP=ON` selects ggml's HIP
   backend without compiling vla.cpp's CUDA-only kernels. On Linux `gfx1200`
   (Radeon RX 9060 XT) with ROCm 7.14 and llama.cpp `b11223`, every arch except

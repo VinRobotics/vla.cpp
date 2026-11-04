@@ -112,6 +112,7 @@ these, and they compute something else:
 | `ADD`/`MUL`/... | `src1` broadcast over one dim but not a higher one | Refused, runs on the CPU |
 | `IM2COL` | Wrong unless kernel = stride > 1 and no padding | Refused, runs on the CPU |
 | `CPY` F32→F16 | Reads back wrong on the host | Copies feeding a CPU op run on the CPU |
+| `REPEAT` | Reads stale cache lines of a source written by DMA earlier in the same op batch | Refused unless the source is a weight, runs on the CPU |
 | fused `MUL_MAT+ADD`, `RMS_NORM+MUL` | ~10x the error of the unfused ops | `GGML_HEXAGON_OPFUSION=0` by default |
 
 Each one flips the gripper channel, or comes close, on some checkpoint. The
@@ -120,19 +121,21 @@ was right: a missing op fails at load, and these only show in the actions.
 [hexagon-windows.md](hexagon-windows.md#hexagon-issues-found-and-worked-around)
 has the numbers and how each was bisected. They belong upstream.
 
-One more op is claimed and then refused at run time. On buffers mapped above
+Two more ops are claimed and then refused at run time. On buffers mapped above
 4 GB of DSP address space, which the IQ-10 under Linux hands out, the NPU runs
 `CONCAT` only as the dim-1 contiguous DMA copy and answers any other concat with
 `NO_SUPPORT`, and the host aborts on the first predict. The wrapper sends those
-concats to the CPU.
+concats to the CPU. A `CPY` that reads a weight gets the same answer
+(VLA-Adapter casts its F16 action queries to F32 in the graph), and also runs on
+the CPU.
 
 The experts' KV concats (π0, π0.5, SmolVLA) were such concats: along the token
 dim of contiguous [head dim, heads, tokens] tensors, once per layer per denoise
 step. Appending along that dim appends whole rows, so on Hexagon
 `concat_dim2()` in `src/backend.h` does them as a dim-1 concat of the
 [head dim x heads, tokens] views, which writes the same bytes and stays on the
-NPU: π0.5 1379 to 1133 ms, SmolVLA 810 to 638 ms, outputs unchanged. π0 shares
-the code but has not been run on the board yet.
+NPU: π0.5 1379 to 1133 ms, SmolVLA 810 to 638 ms, outputs unchanged. π0 takes
+the same path.
 
 Flash attention on the HMX (v81) keeps scores and probabilities in F16. That is
 a precision limit rather than a wrong op, but in GR00T N1.7's LM it moves the
@@ -313,29 +316,36 @@ export LD_LIBRARY_PATH=$PWD/pkg/lib
 `vla_predict_check` at the Hexagon defaults, against the same binary with
 `VLA_DEVICE=cpu --weight-dtype f32 --flash-attn 0`. A Hexagon build turns flash
 attention on by default even on the CPU, so the reference asks for the explicit
-path that other builds run:
+path that other builds run. Views are the ones the LIBERO client sends, so they
+differ from the benchmark's for VLA-JEPA, VLA-Adapter, OpenVLA-OFT and Octo:
 
-| Model | max\|Δ\| |
-|---|--:|
-| SmolVLA | 7.2e-4 |
-| π0.5 | 4.8e-4 |
-| Evo-1 | 5.0e-4 |
-| GR00T N1.5 | 2.4e-3 |
-| GR00T N1.6 | 1.4e-3 |
-| GR00T N1.7 | 2.0e-3 |
+| Model | Views | max\|Δ\| |
+|---|--:|--:|
+| SmolVLA | 2 | 7.2e-4 |
+| π0 | 2 | 1.2e-3 |
+| π0.5 | 2 | 4.8e-4 |
+| Evo-1 | 1 | 5.5e-4 |
+| GR00T N1.5 | 1 | 2.4e-3 |
+| GR00T N1.6 | 1 | 1.4e-3 |
+| GR00T N1.7 | 1 | 2.0e-3 |
+| VLA-JEPA | 2 | 2.8e-3 |
+| VLA-Adapter | 2 | 4.2e-4 |
+| OpenVLA-OFT | 2 | 3.5e-4 |
+| Octo-Small | 1 | 4.1e-4 |
+| TurboVLA | 2 | 3.1e-4 |
 
-GR00T N1.6 here takes one view; with two it is 1.9e-3. The other archs have
-not been run on the board yet.
+GR00T N1.6 with two views is 1.9e-3. At the benchmark's single view VLA-JEPA is
+1.9e-3, VLA-Adapter 4.8e-4 and OpenVLA-OFT 2.2e-4.
 
 ### Serving
 
 `vla-server` on the board, driven from the host by
 `eval/client/vla_cpp_client.py` and the adapters `run_sim_client_direct.py`
-uses, on one fixed LIBERO observation (two views, the task prompt, a fixed
-robot state) with fixed noise. The same request goes to a Hexagon server and to
-a CPU server with `--weight-dtype f32 --flash-attn 0`. Every model returns a
-finite chunk, the same chunk for a repeated request, an error reply to a
-malformed or an invalid request, and keeps serving afterwards.
+uses, on one fixed LIBERO observation (two views, the task prompt, a fixed robot
+state), with fixed noise for the archs that draw it. The same request goes to a
+Hexagon server and to a CPU server with `--weight-dtype f32 --flash-attn 0`.
+Every model returns a finite chunk, the same chunk for a repeated request, an
+error reply to a malformed or an invalid request, and keeps serving afterwards.
 
 | Model | max\|Δ\| vs CPU F32 | CPU F16 vs CPU F32 |
 |---|--:|--:|
@@ -345,12 +355,18 @@ malformed or an invalid request, and keeps serving afterwards.
 | GR00T N1.5 | 1.1e-2 | 4.3e-2 |
 | GR00T N1.6 | 1.3e-2 | 1.1e-2 |
 | GR00T N1.7 | 2.5e-3 | |
+| π0 | 5.8e-4 | |
+| VLA-JEPA | 6.7e-3 | 2.1e-2 |
+| VLA-Adapter | 4.5e-4 | |
+| OpenVLA-OFT | 5.0e-4 | |
+| Octo-Small | 9.3e-5 | |
+| TurboVLA | 2.2e-4 | |
 
-GR00T N1.5 and N1.6 are above the bar on this input, and so is the CPU itself
-with F16 weights: N1.5 lands closer to the reference than the CPU at F16, N1.6
-slightly further (1.3e-2 against 1.1e-2). They are sensitive to 16-bit
-precision rather than miscomputed. Running them with F32 weights on the NPU has not been tried
-yet.
+GR00T N1.5, N1.6 and VLA-JEPA are above the bar on this input, and so is the CPU
+itself with F16 weights: N1.5 and VLA-JEPA land closer to the reference than the
+CPU at F16, N1.6 slightly further (1.3e-2 against 1.1e-2). They are sensitive to
+16-bit precision rather than miscomputed. Running them with F32 weights on the
+NPU has not been tried yet.
 
 ## IQ-10, imagined
 
