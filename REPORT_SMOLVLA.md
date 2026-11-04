@@ -1,6 +1,6 @@
 # Báo cáo thực nghiệm SmolVLA
 
-Snapshot để mentor review, ngày 04/11/2026 (UTC+07). Repo gốc tại commit `4a542ed3bfb8f330388aceb8926294a951156172`; các kết quả là số đo cục bộ trên RTX 3060 Laptop 6 GiB qua WSL2. Snapshot screening có thể cũ hơn tiến trình đang chạy.
+Bản báo cáo tạm thời, cập nhật 04/11/2026 23:41 UTC+07. Repo gốc tại commit `4a542ed3bfb8f330388aceb8926294a951156172`; các kết quả là số đo cục bộ trên RTX 3060 Laptop 6 GiB qua WSL2. Snapshot screening có thể cũ hơn tiến trình đang chạy.
 
 ## Trạng thái sáu phần
 
@@ -47,8 +47,8 @@ Sai lệch output dùng input harness6token và noise cố định; benchmark d�
 | Cấu hình | Episode đã chốt | Thành công | Trạng thái |
 |---|---:|---:|---|
 | flash-mm | 40/40 | 35 | complete |
-| q8-lm | 16/40 | 15 | running task 4 |
-| q8-vision | 0/40 | 0 | chưa bắt đầu |
+| q8-lm | 36/40 | 34 | running task 9 |
+| q8-vision | 0/40 | — | chưa bắt đầu; chưa có số đo |
 
 Đếm theo task đã hoàn tất. Chạy tuần tự flash+mm → Q8 không vision → Q8 có vision, tổng120episode. Raw progress: `research-notes/smolvla-followup-20261104/screen40-variants/`. Snapshot không phải kết quả cuối nếu batch còn running.
 
