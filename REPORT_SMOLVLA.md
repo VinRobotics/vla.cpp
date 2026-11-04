@@ -8,7 +8,7 @@ Bản tổng hợp đủ nội dung 6 task, bổ sung tính toán theo yêu cầ
 |---|---|---|
 | 1. Cài đặt | CUDA arch86; CLI, server, binding, predict_check đã chạy | Tests13/15; hai lỗi bit-exact còn mở |
 | 2. Baseline | Có p50/p90, traced allocation và điều kiện đo | Không đo được toàn bộ resident VRAM riêng process trên WSL |
-| 3. Không train | 10 runtime configs và Q8/Q5/Q4 có/không vision; đủ4chỉ tiêu | Chưa kết luận giữ chất lượng điều khiển |
+| 3. Không train | 10 runtime configs và Q8/Q5/Q4 có/không vision; đủ4chỉ tiêu | Flash-mm và hai bản Q8 vẫn thực hiện được tác vụ; SR screening thấp hơn defaults, chưa xác nhận giữ nguyên chất lượng |
 | 4. LIBERO | Baseline screening38/40; official177/200 | Flash-mm35/40, Q8-lm36/40; Q8-vision36/40; official biến thể chưa đo |
 | 5. Profile | Kiến trúc, phase, nsys kernel/module traces | Chưa chọn bản tốt nhất theo SR; chưa tách connector khỏi vision |
 | 6. Pruning | 3depth ablations; module latency và smoke | Smoke cả3bản0/2; chưa implement CKA/finetuning |
@@ -110,6 +110,8 @@ Tài liệu đã điền đủ phần giải thích, bằng chứng và tính to
 
 
 ## Kết luận và giới hạn của đợt báo cáo
+
+Các cấu hình flash-mm, Q8-lm và Q8-vision vẫn thực hiện được tác vụ điều khiển trong screening, nhưng tỷ lệ thành công quan sát thấp hơn defaults: flash-mm 35/40 (87,5%), hai bản Q8 cùng 36/40 (90%), so với defaults 38/40 (95%). Mức giảm quan sát tương ứng là 7,5 và 5 điểm phần trăm. Vì vậy, chưa xác nhận cấu hình nào giữ nguyên chất lượng điều khiển. Hai bản Q8 có kết quả screening cao hơn flash-mm, nhưng mẫu 40 episode chưa đủ để khẳng định khác biệt chất lượng. Kết luận này chỉ áp dụng cho ba cấu hình đã screening, không mở rộng sang các cấu hình runtime hoặc quantization khác chỉ có kiểm tra output synthetic.
 
 Đợt báo cáo này chốt theo dữ liệu đã có: baseline official 200 episode và screening 40 episode cho mỗi cấu hình. Theo phạm vi đã thống nhất, không chạy thêm official cho biến thể hoặc thí nghiệm mới; tạm bỏ qua xử lý hai lỗi CUDA. Trạng thái kiểm thử vẫn là 13/15 pass, hai lỗi chưa sửa.
 
