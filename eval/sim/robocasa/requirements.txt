@@ -1,0 +1,23 @@
+# RoboCasa 1.0.1 numerical stack; LIBERO's MuJoCo 2.x must stay in its own venv.
+numpy==2.2.5
+numba==0.61.2
+scipy==1.15.3
+mujoco==3.3.1
+gymnasium==0.29.1
+torch==2.6.0
+transformers==4.51.3
+pyzmq>=25
+protobuf>=4.21,<6
+Pillow>=10
+opencv-python>=4.8
+imageio>=2.34
+imageio-ffmpeg>=0.5
+pygame
+pyyaml
+pynput
+tqdm
+termcolor
+h5py
+lxml
+hidapi
+pytest>=8

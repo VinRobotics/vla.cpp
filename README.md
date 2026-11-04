@@ -201,3 +201,4 @@ Built on:
 - [`llama.cpp`](https://github.com/ggml-org/llama.cpp) - LLM inference engine in C/C++.
 - [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO) - benchmark suite for the success-rate sweeps.
 - [SimplerEnv](https://github.com/simpler-env/SimplerEnv) - the second simulator in the eval scaffold.
+- [RoboCasa](https://github.com/robocasa/robocasa) - RoboCasa365 kitchen simulator for the SmolVLA and GR00T N1.6 evals.
