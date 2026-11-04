@@ -22,6 +22,17 @@
 namespace vla {
 
 inline ggml_tensor * linear(ggml_context * C, ggml_tensor * W, ggml_tensor * b, ggml_tensor * x) {
+#ifdef GGML_USE_HEXAGON
+    // Hexagon computes a 2D weight against a batch of activations wrong, and the
+    // fallback wrapper runs that on the CPU; the same rows as one 2D matmul stay
+    // on the NPU.
+    if (W->ne[2] * W->ne[3] == 1 && x->ne[2] * x->ne[3] > 1 && ggml_is_contiguous(x)) {
+        ggml_tensor * y = ggml_mul_mat(C, W, ggml_reshape_2d(C, x, x->ne[0], x->ne[1] * x->ne[2] * x->ne[3]));
+        if (b)
+            y = ggml_add(C, y, b);
+        return ggml_reshape_4d(C, y, W->ne[1], x->ne[1], x->ne[2], x->ne[3]);
+    }
+#endif
     ggml_tensor * y = ggml_mul_mat(C, W, x);
     return b ? ggml_add(C, y, b) : y;
 }
