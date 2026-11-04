@@ -26,6 +26,7 @@
 
 #ifndef _WIN32
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 #endif
@@ -48,13 +49,28 @@ inline bool npu_vision_roundtrip(const char * sock_path, const std::vector<float
                                  size_t out_floats) {
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return false;
+    // A worker that died must not take this process with it (SIGPIPE on the
+    // write), and one that stalls must not hold the request: either way the
+    // caller encodes the view itself. A view takes ~0.1 s on the NPU.
+#ifdef MSG_NOSIGNAL
+    const int send_flags = MSG_NOSIGNAL;
+#else
+    const int send_flags = 0;
+#endif
+#ifdef SO_NOSIGPIPE
+    const int one = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+    const timeval tv{2, 0};
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sock_path);
     auto io_all = [&](bool wr, void * p, size_t n) {
         char * c = static_cast<char *>(p);
         while (n) {
-            const ssize_t k = wr ? ::write(fd, c, n) : ::read(fd, c, n);
+            const ssize_t k = wr ? ::send(fd, c, n, send_flags) : ::read(fd, c, n);
             if (k <= 0) return false;
             c += k;
             n -= (size_t) k;

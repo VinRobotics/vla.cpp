@@ -1733,12 +1733,12 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
         if (npu_sock && *npu_sock && n_views >= 2) {
             const int last = n_views - 1;
             std::vector<float> npu_chw;
-            vok = preprocess_image_chw("smolvla", in.images[last], m->vit_image, npu_chw);
+            const bool npu_in = preprocess_image_chw("smolvla", in.images[last], m->vit_image, npu_chw);
             float * npu_out = img_emb_pre.data() + size_t(last) * per_view_n;
-            std::future<bool> npu_job = std::async(std::launch::async, [&] {
-                return vok && npu_vision_roundtrip(npu_sock, npu_chw, npu_out, per_view_n);
+            std::future<bool> npu_job = std::async(std::launch::async, [&, npu_in] {
+                return npu_in && npu_vision_roundtrip(npu_sock, npu_chw, npu_out, per_view_n);
             });
-            vok = encode(0, last) && vok;
+            vok = encode(0, last) && npu_in;
             if (!npu_job.get()) {
                 std::fprintf(stderr, "vla(smolvla): NPU view failed, encoding it on the GPU\n");
                 vok = vok && encode(last, 1);
