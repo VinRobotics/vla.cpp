@@ -136,6 +136,11 @@ for ((i=0; i<READY_TIMEOUT; i++)); do
     sleep 1
 done
 [[ "$ready" == 1 ]] || { echo "ERROR: server readiness timed out; see $LOG" >&2; exit 1; }
+# An unknown tag only warns and falls back to the GGUF's default embodiment.
+if [[ "$MODEL" == gr00t_n1_6 ]] && grep -qF "not in the GGUF embodiment mapping" "$LOG"; then
+    echo "ERROR: $CHECKPOINT has no $VLA_GR00T_EMBODIMENT embodiment; see $LOG" >&2
+    exit 1
+fi
 echo "[server] ready; run bash eval/run_robocasa_client.sh --arch $MODEL --vla-addr tcp://<server-host>:${BIND_ADDR##*:}"
 tail -n +1 -f "$LOG" &
 TAIL_PID=$!
