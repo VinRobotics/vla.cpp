@@ -2,15 +2,6 @@
 
 Tổng hợp đủ 6 task; cập nhật kết quả screening cuối ngày 05/11/2026. Số đo thật, dự toán và tiêu chí chưa đạt được tách rõ.
 
-## Cách review nhanh
-
-1. Đọc file này để nắm kết luận và giới hạn trong khoảng 3 phút.
-2. Mở [các câu hỏi cần góp ý](MENTOR_REVIEW.md) để tập trung vào 10 quyết định phương pháp còn mở.
-3. Dùng [báo cáo tổng thể](REPORT_SMOLVLA.md) để kiểm tra protocol, số liệu và trạng thái từng task.
-4. Khi cần đối chiếu phép tính, chạy `python3 research-notes/smolvla-followup-20261104/complete_calculations.py`; khi cần đối chiếu screening, chạy `python3 research-notes/smolvla-followup-20261104/audit_screening.py`.
-
-Các file `REPORT_HISTORY.md` và những dòng trạng thái cũ trong `NOTES_SMOLVLA.md` chỉ là lịch sử. Kết luận hiện tại nằm trong file này và `REPORT_SMOLVLA.md`.
-
 ## Kết quả đã hoàn tất
 
 - CUDA build arch86; các giao diện CLI/server/binding/predict_check hoạt động. Tests 13/15 pass, hai lỗi còn mở.
