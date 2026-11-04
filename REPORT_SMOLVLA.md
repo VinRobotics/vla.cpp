@@ -109,11 +109,15 @@ Telemetry runtime bổ sung ghi nhận53–72°C trong120mẫu, không phủ to�
 Tài liệu đã điền đủ phần giải thích, bằng chứng và tính toán cho6task; không đồng nghĩa mọi tiêu chí thực nghiệm đều đạt. Chưa thể thay bằng tính toán: hai testfail, residentVRAM, SRofficialbiến thể, attention/connector timing riêng, CKA/finetuning và repeated-seed. Đề xuất giữ defaults làm bản chất lượng đã được đo chính thức; ưu tiên đánh giá Q8-lm/Q8-vision cho memory và flash-mm cho latency, không chọn pruning0/2 để triển khai.
 
 
-## Kết luận sau screening và phần thực nghiệm còn lại
+## Kết luận và giới hạn của đợt báo cáo
+
+Đợt báo cáo này chốt theo dữ liệu đã có: baseline official 200 episode và screening 40 episode cho mỗi cấu hình. Theo phạm vi đã thống nhất, không chạy thêm official cho biến thể hoặc thí nghiệm mới; tạm bỏ qua xử lý hai lỗi CUDA. Trạng thái kiểm thử vẫn là 13/15 pass, hai lỗi chưa sửa.
 
 Screening hoàn tất ngày 05/11/2026. Defaults vẫn là mốc chất lượng chính thức 177/200. Flash-mm là ứng viên latency với mean 85,5 ms so với control 104,0 ms cùng batch. Q8-vision dùng allocation 925,88 MiB so với Q8-lm 1020,70 MiB và control quantization 1912,47 MiB; cả hai Q8 đạt 36/40. Chưa có kết quả cấu hình kết hợp quantization + flash-mm, nên không cộng các mức cải thiện.
 
-| Hạng mục còn lại | Điều kiện để đóng |
+Các mục dưới đây là giới hạn và hướng nghiên cứu tiếp theo, không phải công việc đang chạy trong đợt báo cáo này.
+
+| Hạng mục chưa xác minh | Thực nghiệm cần có nếu mở rộng nghiên cứu |
 |---|---|
 | Hai lỗi CUDA bit-exact | Xác định nguyên nhân, sửa và chạy lại tests với hợp đồng hiện tại; không nới tolerance để đổi trạng thái |
 | Chất lượng biến thể chính thức | Chạy đủ 200 episode/biến thể theo protocol đã công bố, lưu CSV và policy recovery; tối đa 600 episode cho ba biến thể |
@@ -123,4 +127,4 @@ Screening hoàn tất ngày 05/11/2026. Defaults vẫn là mốc chất lượng
 | Môi trường tái lập | Giải quyết bảy dependency conflicts và tạo lock đã kiểm tra trên môi trường sạch |
 | Resident VRAM | Đo trên backend hỗ trợ process memory; WSL hiện trả N/A nên chỉ báo traced allocation |
 
-Bản tài liệu đã tổng hợp kết quả hiện có; các tiêu chí trên vẫn mở và cần thực nghiệm mới. Không dùng phép ngoại suy SR hoặc mô hình depth để đánh dấu hoàn tất.
+Bản báo cáo hoàn tất trong phạm vi dữ liệu hiện có. Chưa xác nhận giữ SR cho biến thể hoặc hiệu quả CLP/CKA; phép ngoại suy SR và mô hình depth chỉ là tính toán có giả định.

@@ -4,9 +4,11 @@ Cập nhật ngày 05/11/2026 (UTC+07). Tài liệu chính: [REPORT_SMOLVLA.md](
 
 ## Các vấn đề thực nghiệm còn mở
 
+Đợt báo cáo chốt theo dữ liệu hiện có; không chạy thêm official cho biến thể hoặc thí nghiệm mới. Hai lỗi CUDA tạm hoãn xử lý, vẫn ghi nhận 13/15 tests pass. Các câu hỏi dưới đây phục vụ nhận xét kết quả và định hướng nghiên cứu sau đợt này.
+
 | Vấn đề | Bằng chứng / giới hạn | Câu hỏi review |
 |---|---|---|
-| Hai CUDA tests fail | ctest-build-cuda.log: foldquant_cuda_op, fused_cuda_ops; 13/15 pass | Có cần sửa/đổi baseline trước khi dùng SR để kết luận không? |
+| Hai CUDA tests fail | ctest-build-cuda.log: foldquant_cuda_op, fused_cuda_ops; 13/15 pass; tạm hoãn xử lý | Giới hạn này ảnh hưởng thế nào đến phạm vi kết luận từ kết quả đã đo? |
 | Fused/unfused lệch | max abs 0,000545874 trên harness cố định; chưa xác định nguyên nhân | Mức kiểm tra numerics nào cần thêm? |
 | VRAM trên WSL | NVML process N/A; trace ledger peak không bao hết driver/context | Có chấp nhận báo peak traced allocation cùng giới hạn không? |
 | Noise | Seed 42 cho môi trường, server random RNG | Có cần repeated seeds hoặc protocol fixed noise riêng cho final? |

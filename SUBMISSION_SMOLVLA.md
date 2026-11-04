@@ -2,6 +2,8 @@
 
 Tổng hợp đủ 6 task; cập nhật kết quả screening cuối ngày 05/11/2026. Số đo thật, dự toán và tiêu chí chưa đạt được tách rõ.
 
+Phạm vi chốt báo cáo: sử dụng kết quả đã đo, không chạy thêm official cho biến thể hoặc thí nghiệm mới trong đợt này. Hai lỗi CUDA được giữ nguyên và công bố với trạng thái 13/15 tests pass.
+
 ## Kết quả đã hoàn tất
 
 - CUDA build arch86; các giao diện CLI/server/binding/predict_check hoạt động. Tests 13/15 pass, hai lỗi còn mở.
