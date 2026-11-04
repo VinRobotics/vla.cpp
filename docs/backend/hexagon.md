@@ -145,7 +145,18 @@ explicit path unless `--flash-attn` is given: 2.0e-3, at the same latency.
 `MUL_MAT` with a 2D weight against a batch of activations (weight `ne[2..3]`
 of 1, activations above 1) is claimed and comes out wrong. GR00T N1.6's SigLIP2
 tower takes two camera views that way: its action chunk lands 0.16 from the CPU
-reference. The wrapper runs those matmuls on the CPU: 1.9e-3, and 25% faster.
+reference. The wrapper runs those matmuls on the CPU. On Hexagon `linear()` in
+`src/layers/linear.h` multiplies a contiguous batch as one 2D matrix of rows
+instead, the same product, so most of them never reach the rule: GR00T N1.6
+with two views lands 8.8e-4 from the reference, and the matmuls of TurboVLA's
+DINOv3, which takes its two views as a batch, run on the NPU.
+
+A copy that transposes the innermost dim, such as the `CONT` of a permuted V
+for explicit attention, is a strided gather on the NPU: 48 ms for OpenVLA-OFT's
+[330,128,32], 32 ms for Evo-1's [1025,112,8], 18 ms for TurboVLA's
+[512,256,4]. The wrapper runs those of 256K elements or more on the CPU, which
+writes the same bytes; the smaller ones take tens of microseconds on the NPU,
+less than the trip to the CPU.
 
 The matrix unit (HMX) takes a matmul only when its inner dim K and its output
 dim N are multiples of 32, and with a batch only an F16 src0. Anything else runs
@@ -154,13 +165,18 @@ IQ-10 showed three such matmuls dominating, and vla.cpp now avoids them in
 Hexagon builds:
 
 - **SigLIP-so400m's MLP is 4304 wide**: 440 ms of GR00T N1.5's 565 ms tower.
-  The loader zero-pads fc1, its bias and fc2 to 4320 (`WeightLoader::pad`,
-  `gemm_width()` in `src/backend.h`), which leaves the output unchanged.
+  The loader zero-pads fc1, its bias and fc2 to 4320
+  (`WeightLoader::pad_mlp`, `gemm_width()` in `src/backend.h`), which leaves
+  the output unchanged. VLA-Adapter's and OpenVLA-OFT's SigLIP
+  (`src/modules/dual_tower.h`) take the same padding.
 - **π0.5's attention ran explicit scores** in SigLIP (head dim 72, F32 x F32),
   the VLM and the action expert, because its flash attention was tied to SYCL's
   view-taking kernel. The VLM's and the expert's single KV head also sent their
   matmuls to the CPU (the batched `MUL_MAT` rule above). All three now take the
   plain flash attention on Hexagon (`use_flash_attention()` in `pi05.cpp`).
+  VLA-Adapter's and OpenVLA-OFT's DINOv2 and SigLIP towers did the same and now
+  take flash attention on Hexagon too: their vision stage goes from 790 to
+  311 ms.
 - **Evo-1's LM attention multiplied F32 K and V against 14 query heads.** K and
   V now go to F16 (`fa_kv()`); the scores still accumulate in F32.
 
@@ -329,13 +345,13 @@ differ from the benchmark's for VLA-JEPA, VLA-Adapter, OpenVLA-OFT and Octo:
 | GR00T N1.6 | 1 | 1.4e-3 |
 | GR00T N1.7 | 1 | 2.0e-3 |
 | VLA-JEPA | 2 | 2.8e-3 |
-| VLA-Adapter | 2 | 4.2e-4 |
-| OpenVLA-OFT | 2 | 3.5e-4 |
+| VLA-Adapter | 2 | 5.6e-4 |
+| OpenVLA-OFT | 2 | 2.9e-4 |
 | Octo-Small | 1 | 4.1e-4 |
-| TurboVLA | 2 | 3.1e-4 |
+| TurboVLA | 2 | 3.7e-4 |
 
-GR00T N1.6 with two views is 1.9e-3. At the benchmark's single view VLA-JEPA is
-1.9e-3, VLA-Adapter 4.8e-4 and OpenVLA-OFT 2.2e-4.
+GR00T N1.6 with two views is 8.8e-4. At the benchmark's single view VLA-JEPA is
+1.9e-3, VLA-Adapter 4.8e-4 and OpenVLA-OFT 1.9e-4.
 
 ### Serving
 
@@ -357,10 +373,10 @@ error reply to a malformed or an invalid request, and keeps serving afterwards.
 | GR00T N1.7 | 2.5e-3 | |
 | π0 | 5.8e-4 | |
 | VLA-JEPA | 6.7e-3 | 2.1e-2 |
-| VLA-Adapter | 4.5e-4 | |
-| OpenVLA-OFT | 5.0e-4 | |
+| VLA-Adapter | 6.1e-4 | |
+| OpenVLA-OFT | 5.2e-4 | |
 | Octo-Small | 9.3e-5 | |
-| TurboVLA | 2.2e-4 | |
+| TurboVLA | 8.5e-4 | |
 
 GR00T N1.5, N1.6 and VLA-JEPA are above the bar on this input, and so is the CPU
 itself with F16 weights: N1.5 and VLA-JEPA land closer to the reference than the

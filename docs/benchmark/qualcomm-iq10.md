@@ -15,9 +15,9 @@ through vla.cpp's fallback wrapper.
 | Power | CPU governor `performance` |
 | OS | Ubuntu 24.04.4 LTS, kernel 6.6.110 |
 | Toolchain | `ghcr.io/snapdragon-toolchain/arm64-linux:v0.7`: clang 21.1.8, Hexagon SDK 6.6.0.0 (tools 19.0.07) |
-| Commit | `1cab1c3` |
+| Commit | `f7b0e68` |
 | llama.cpp | `b11223` |
-| Date | 2026-11-04 11:52 to 12:30 (UTC+07) |
+| Date | 2026-11-04 15:48 to 16:23 (UTC+07) |
 | Build | `scripts/build_linux_hexagon.sh` (servers included); the HTP skel processed for the board and installed in `/vendor/dsp/cdsp0..3` |
 | Runtime flags | defaults; the fastest flags per model are in the second table |
 | Method | 3 warmups + 20 timed reps per process, 3 processes. The process with the lowest mean is reported, and memory is the peak over all three. |
@@ -65,18 +65,18 @@ vision stage separately.
 
 | Model | Views | Input | min ms | mean ms | p50 ms | p90 ms | vision ms | Peak RSS MiB | System RAM MiB |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| Octo-Small | 2 | 256 + 128 | 121.6 | 123.0 | 122.3 | 125.8 | 20.5 | 253 | 804 |
-| TurboVLA | 2 | 256 | 428.1 | 433.0 | 431.6 | 436.8 | - | 438 | 1327 |
-| VLA-JEPA | 1 | 256 | 440.2 | 446.3 | 444.7 | 450.2 | 195.2 | 185 | 3971 |
-| GR00T N1.5 | 1 | 224 | 613.7 | 615.7 | 615.7 | 618.0 | 148.3 | 162 | 3636 |
-| SmolVLA | 2 | 512 | 631.0 | 632.4 | 631.7 | 634.6 | 281.8 | 146 | 1190 |
-| GR00T N1.6 | 1 | 224 | 705.8 | 708.5 | 708.0 | 710.7 | 145.0 | 146 | 4869 |
-| GR00T N1.7 | 1 | 256 | 747.0 | 756.0 | 755.0 | 764.5 | 197.2 | 191 | 5090 |
-| π0.5 | 2 | 224 | 1117.4 | 1121.0 | 1120.8 | 1123.3 | 292.5 | 285 | 5790 |
-| π0 | 2 | 224 | 1124.4 | 1128.7 | 1128.6 | 1130.5 | 293.0 | 285 | 5534 |
-| VLA-Adapter | 1 | 224 | 1733.6 | 1752.3 | 1749.5 | 1765.6 | 1187.2 | 872 | 3566 |
-| Evo-1 | 1 | 448 | 2579.1 | 2595.5 | 2592.1 | 2611.9 | 854.0 | 319 | 1551 |
-| OpenVLA-OFT | 1 | 224 | 4097.7 | 4107.8 | 4107.8 | 4114.2 | 1187.3 | 844 | 15327 |
+| Octo-Small | 2 | 256 + 128 | 121.3 | 124.0 | 122.8 | 128.5 | 20.4 | 253 | 731 |
+| TurboVLA | 2 | 256 | 186.8 | 190.6 | 189.6 | 194.9 | - | 249 | 1009 |
+| VLA-JEPA | 1 | 256 | 448.1 | 452.9 | 451.0 | 458.7 | 197.0 | 185 | 3971 |
+| SmolVLA | 2 | 512 | 583.6 | 584.3 | 584.2 | 584.9 | 230.0 | 146 | 1197 |
+| GR00T N1.5 | 1 | 224 | 597.1 | 599.1 | 598.6 | 600.0 | 138.9 | 162 | 3645 |
+| GR00T N1.6 | 1 | 224 | 704.6 | 707.6 | 706.3 | 711.0 | 145.9 | 147 | 4765 |
+| GR00T N1.7 | 1 | 256 | 756.6 | 762.6 | 761.2 | 769.1 | 195.5 | 191 | 5084 |
+| VLA-Adapter | 1 | 224 | 837.8 | 853.7 | 852.5 | 863.3 | 296.0 | 872 | 3581 |
+| π0.5 | 2 | 224 | 1109.9 | 1111.9 | 1112.0 | 1112.7 | 277.1 | 285 | 5839 |
+| π0 | 2 | 224 | 1116.8 | 1120.5 | 1120.1 | 1123.1 | 277.6 | 285 | 5535 |
+| OpenVLA-OFT | 1 | 224 | 1761.5 | 1768.2 | 1768.8 | 1772.7 | 298.5 | 844 | 15461 |
+| Evo-1 | 1 | 448 | 2329.8 | 2346.0 | 2341.9 | 2360.7 | 819.2 | 319 | 1594 |
 
 ### Fastest configuration
 
@@ -100,35 +100,35 @@ rates measured at the defaults therefore do not carry over to these rows.
 
 | Model | Fastest flags | min ms | mean ms | p50 ms | p90 ms | vision ms | Peak RSS MiB | System RAM MiB | vs defaults |
 |---|---|--:|--:|--:|--:|--:|--:|--:|--:|
-| Octo-Small | *(defaults)* | 121.6 | 123.0 | 122.3 | 125.8 | 20.5 | 253 | 804 | - |
-| TurboVLA | *(defaults)* | 428.1 | 433.0 | 431.6 | 436.8 | - | 438 | 1327 | - |
-| VLA-JEPA | *(defaults)* | 440.2 | 446.3 | 444.7 | 450.2 | 195.2 | 185 | 3971 | - |
-| GR00T N1.5 | *(defaults)* | 613.7 | 615.7 | 615.7 | 618.0 | 148.3 | 162 | 3636 | - |
-| SmolVLA | *(defaults)* | 631.0 | 632.4 | 631.7 | 634.6 | 281.8 | 146 | 1190 | - |
-| GR00T N1.6 | *(defaults)* | 705.8 | 708.5 | 708.0 | 710.7 | 145.0 | 146 | 4869 | - |
-| GR00T N1.7 | *(defaults)* | 747.0 | 756.0 | 755.0 | 764.5 | 197.2 | 191 | 5090 | - |
-| π0.5 | *(defaults)* | 1117.4 | 1121.0 | 1120.8 | 1123.3 | 292.5 | 285 | 5790 | - |
-| π0 | *(defaults)* | 1124.4 | 1128.7 | 1128.6 | 1130.5 | 293.0 | 285 | 5534 | - |
-| VLA-Adapter | *(defaults)* | 1733.6 | 1752.3 | 1749.5 | 1765.6 | 1187.2 | 872 | 3566 | - |
-| Evo-1 | *(defaults)* | 2579.1 | 2595.5 | 2592.1 | 2611.9 | 854.0 | 319 | 1551 | - |
-| OpenVLA-OFT | *(defaults)* | 4097.7 | 4107.8 | 4107.8 | 4114.2 | 1187.3 | 844 | 15327 | - |
+| Octo-Small | *(defaults)* | 121.3 | 124.0 | 122.8 | 128.5 | 20.4 | 253 | 731 | - |
+| TurboVLA | *(defaults)* | 186.8 | 190.6 | 189.6 | 194.9 | - | 249 | 1009 | - |
+| VLA-JEPA | *(defaults)* | 448.1 | 452.9 | 451.0 | 458.7 | 197.0 | 185 | 3971 | - |
+| SmolVLA | *(defaults)* | 583.6 | 584.3 | 584.2 | 584.9 | 230.0 | 146 | 1197 | - |
+| GR00T N1.5 | *(defaults)* | 597.1 | 599.1 | 598.6 | 600.0 | 138.9 | 162 | 3645 | - |
+| GR00T N1.6 | *(defaults)* | 704.6 | 707.6 | 706.3 | 711.0 | 145.9 | 147 | 4765 | - |
+| GR00T N1.7 | `--flash-attn` | 733.3 | 739.1 | 736.8 | 747.5 | 195.3 | 191 | 5059 | -3.1% |
+| VLA-Adapter | *(defaults)* | 837.8 | 853.7 | 852.5 | 863.3 | 296.0 | 872 | 3581 | - |
+| π0.5 | *(defaults)* | 1109.9 | 1111.9 | 1112.0 | 1112.7 | 277.1 | 285 | 5839 | - |
+| π0 | *(defaults)* | 1116.8 | 1120.5 | 1120.1 | 1123.1 | 277.6 | 285 | 5535 | - |
+| OpenVLA-OFT | *(defaults)* | 1761.5 | 1768.2 | 1768.8 | 1772.7 | 298.5 | 844 | 15461 | - |
+| Evo-1 | *(defaults)* | 2329.8 | 2346.0 | 2341.9 | 2360.7 | 819.2 | 319 | 1594 | - |
 
 <details><summary>Screen means (ms) per flag set</summary>
 
 | Model | defaults | `--flash-attn` | `--mm-prec default` | `--flash-attn --mm-prec default` | `--flash-attn 0` |
 |---|--:|--:|--:|--:|--:|
-| Octo-Small | 125.3 | 128.8 | 124.4 | 123.5 | 124.6 |
-| TurboVLA | 438.8 | 436.5 | 439.3 | 438.2 | 535.1 |
-| VLA-JEPA | 446.7 | 445.8 | 444.8 | 445.2 | 817.8 |
-| GR00T N1.5 | 615.8 | 619.3 | 615.3 | 618.4 | 1096.5 |
-| SmolVLA | 632.1 | 633.0 | 632.5 | 632.6 | 2834.8 |
-| GR00T N1.6 | 714.2 | 712.1 | 718.7 | 714.9 | 885.7 |
-| GR00T N1.7 | 765.2 | 742.0 | 761.5 | 743.6 | 1081.0 |
-| π0.5 | 1121.1 | 1121.9 | 1120.5 | 1121.4 | 2062.9 |
-| π0 | 1129.8 | 1128.8 | 1131.8 | 1128.5 | 2090.5 |
-| VLA-Adapter | 1766.1 | 1760.1 | 1756.1 | 1757.2 | 1767.1 |
-| Evo-1 | 2613.0 | 2613.7 | 2617.3 | 2617.9 | 4840.1 |
-| OpenVLA-OFT | 4110.3 | 4101.9 | 4101.7 | 4108.2 | 4107.9 |
+| Octo-Small | 124.3 | 128.9 | 129.6 | 127.7 | 124.7 |
+| TurboVLA | 194.6 | 192.5 | 188.6 | 194.3 | 251.9 |
+| VLA-JEPA | 453.3 | 454.5 | 453.3 | 451.9 | 605.5 |
+| SmolVLA | 586.3 | 586.9 | 584.4 | 586.0 | 2147.5 |
+| GR00T N1.5 | 601.3 | 600.7 | 601.7 | 600.4 | 877.5 |
+| GR00T N1.6 | 708.6 | 708.4 | 706.5 | 707.5 | 876.8 |
+| GR00T N1.7 | 763.3 | 737.3 | 765.2 | 741.6 | 869.0 |
+| VLA-Adapter | 854.5 | 859.7 | 870.9 | 878.5 | 1151.2 |
+| π0.5 | 1113.6 | 1112.9 | 1113.4 | 1113.5 | 2047.2 |
+| π0 | 1141.2 | 1140.3 | 1141.9 | 1140.9 | 2044.7 |
+| OpenVLA-OFT | 1776.1 | 1775.6 | 1770.0 | 1765.2 | 2045.9 |
+| Evo-1 | 2339.7 | 2350.8 | 2340.9 | 2352.5 | 3868.0 |
 
 </details>
 
@@ -144,7 +144,7 @@ The HTP skel has to be processed for this board and installed in
 [backend/hexagon.md](../backend/hexagon.md#linux-iq-10).
 
 GR00T N1.6 runs one view here, as the configuration above fixes. With two views
-its SigLIP2 tower hits the batched `MUL_MAT` the wrapper sends to the CPU; see
+one batched `MUL_MAT` of its SigLIP2 tower still runs on the CPU; see
 [backend/hexagon.md](../backend/hexagon.md#op-coverage-measured).
 
 These rows time the defaults; they do not vouch for accuracy. On a served LIBERO
