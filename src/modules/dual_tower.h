@@ -73,6 +73,8 @@ struct DualTower {
             v.resize(n);
             for (int64_t i=0; i<n; ++i) {
                 ViTLayerW & w = v[i];
+                const std::string b = std::string(pre) + ".blk." + std::to_string(i) + ".";
+                L.pad_mlp(b + "fc1", b + "fc2");
                 w.n1w   = L.f32 ("%s.blk.%lld.ln1.weight",  pre, (long long)i);
                 w.n1b   = L.f32 ("%s.blk.%lld.ln1.bias",    pre, (long long)i);
                 w.n2w   = L.f32 ("%s.blk.%lld.ln2.weight",  pre, (long long)i);

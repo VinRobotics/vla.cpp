@@ -14,7 +14,6 @@
 
 #include "modules/encoder.h"
 
-#include "backend.h"
 #include "layers/attn.h"
 #include "layers/ffn.h"
 #include "layers/fused_ops.h"
@@ -29,27 +28,6 @@
 #include <string>
 
 namespace vla {
-
-namespace {
-
-// Widens the MLP to gemm_width() with zeros. The extra fc1 rows and bias are 0,
-// GELU(0) is 0 and the extra fc2 columns are 0, so the block's output is the same.
-void pad_mlp(WeightLoader & L, const std::string & fc1, const std::string & fc2) {
-    const ggml_tensor * w1 = L.reader().meta((fc1 + ".weight").c_str());
-    const ggml_tensor * w2 = L.reader().meta((fc2 + ".weight").c_str());
-    if (!w1 || !w2 || ggml_is_quantized(L.gemm_type()) || ggml_is_quantized(w1->type) ||
-        ggml_is_quantized(w2->type))
-        return;
-    const int64_t ff = w1->ne[1];
-    const int64_t fp = gemm_width(ff);
-    if (fp == ff || w2->ne[0] != ff)
-        return;
-    L.pad(fc1 + ".weight", w1->ne[0], fp);
-    L.pad(fc1 + ".bias", fp, 1);
-    L.pad(fc2 + ".weight", fp, w2->ne[1]);
-}
-
-}
 
 void EncStack::declare(WeightLoader & L, const char * prefix, int64_t layers, const EncNames & n) {
     blk.resize(layers);
@@ -85,7 +63,7 @@ void EncStack::declare(WeightLoader & L, const char * prefix, int64_t layers, co
             w.q_fc2 = L.quant_i8(b + n.fc2 + ".q8", {b + n.fc2 + ".weight"});
         } else {
             const std::string b = std::string(prefix) + "." + std::to_string(i) + ".";
-            pad_mlp(L, b + n.fc1, b + n.fc2);
+            L.pad_mlp(b + n.fc1, b + n.fc2);
             w.Wo   = L.gemm("%s.%lld.attn_o.weight",  prefix, (long long)i);
             w.Wfc1 = L.gemm("%s.%lld.%s.weight",      prefix, (long long)i, n.fc1);
             w.Wfc2 = L.gemm("%s.%lld.%s.weight",      prefix, (long long)i, n.fc2);

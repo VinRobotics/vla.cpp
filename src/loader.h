@@ -86,6 +86,12 @@ public:
     // the file, with the extra elements zero. Call before declaring it.
     void pad(const std::string & name, int64_t ne0, int64_t ne1);
 
+    // Widens the MLP fc1 -> GELU -> fc2 (`fc1`/`fc2` without ".weight") to
+    // gemm_width() with zeros: the extra fc1 rows and bias are 0, GELU(0) is 0 and
+    // the extra fc2 columns are 0, so the output is the same. Weights quantized in
+    // the file or by the loader stay as they are. Call before declaring them.
+    void pad_mlp(const std::string & fc1, const std::string & fc2);
+
     // For helpers that inspect the file before declaring (foldquant.cpp).
     gguf_reader & reader() {
         return g_;

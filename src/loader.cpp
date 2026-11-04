@@ -44,6 +44,20 @@ void WeightLoader::pad(const std::string & name, int64_t ne0, int64_t ne1) {
     pad_[name] = {ne0, ne1};
 }
 
+void WeightLoader::pad_mlp(const std::string & fc1, const std::string & fc2) {
+    const ggml_tensor * w1 = g_.meta((fc1 + ".weight").c_str());
+    const ggml_tensor * w2 = g_.meta((fc2 + ".weight").c_str());
+    if (!w1 || !w2 || ggml_is_quantized(gemm_) || ggml_is_quantized(w1->type) || ggml_is_quantized(w2->type))
+        return;
+    const int64_t ff = w1->ne[1];
+    const int64_t fp = gemm_width(ff);
+    if (fp == ff || w2->ne[0] != ff)
+        return;
+    pad(fc1 + ".weight", w1->ne[0], fp);
+    pad(fc1 + ".bias", fp, 1);
+    pad(fc2 + ".weight", fp, w2->ne[1]);
+}
+
 bool WeightLoader::read_resident(const std::string & name, ggml_type type, bool gemma_norm, std::vector<uint8_t> & out) {
     const auto it = as_float_.find(name);
     if (it == as_float_.end()) {
