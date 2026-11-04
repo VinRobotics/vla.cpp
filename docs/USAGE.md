@@ -100,6 +100,12 @@ names and defaults. The engine prints the values in use at load time:
 | `max_guidance_weight` | 10.0 | clamp of `gw(t)` |
 | `prefix_attention_schedule` | `LINEAR` | `ZEROS`, `ONES`, `LINEAR` or `EXP` |
 
+Set `execution_horizon` at least as large as your `inference_delay`: the rows between
+the horizon and the delay have already run when the new chunk arrives, and with a
+smaller horizon nothing constrains them (offline on recorded SO-101 episodes the
+jump at the chunk switch was cut by about 70 % with a horizon of 25 at delays of 8,
+12 and 20 rows, and by 37 % and 18 % at delays of 12 and 20 with the default 10).
+
 SmolVLA only. Any other architecture refuses the input instead of ignoring it:
 `VLA_ERR_UNSUPPORTED` from `vla_predict`, `NotImplementedError` in Python, an error
 response from `vla-server`.
