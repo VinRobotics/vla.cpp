@@ -170,6 +170,25 @@ void fq_act_cpu(ggml_tensor * dst, int ith, int nth, void * userdata) {
 
     const int64_t K   = s.K;
     const int64_t T   = dst->ne[1];
+    // An F16 input (an o site reading the attention output, layers/fq_linear.h):
+    // widened to F32 first, exactly, so the codes are those of its F32 copy.
+    std::vector<float> x32;
+    ggml_tensor        xw;
+    if (x->type == GGML_TYPE_F16) {
+        x32.resize((size_t) (T * K));
+        for (int64_t t = 0; t < T; ++t) {
+            const ggml_fp16_t * r = (const ggml_fp16_t *) ((const char *) x->data + t * x->nb[1]);
+            for (int64_t k = 0; k < K; ++k) x32[(size_t) (t * K + k)] = ggml_fp16_to_fp32(r[k]);
+        }
+        xw       = *x;
+        xw.type  = GGML_TYPE_F32;
+        xw.data  = x32.data();
+        xw.nb[0] = sizeof(float);
+        xw.nb[1] = (size_t) K * sizeof(float);
+        xw.nb[2] = xw.nb[1] * (size_t) x->ne[1];
+        xw.nb[3] = xw.nb[2] * (size_t) x->ne[2];
+        x = &xw;
+    }
     const int64_t rb  = fq_act_row_bytes(K, fq_act_store_bits(s));
     const int64_t kp  = fq_act_kpack(K, fq_act_store_bits(s));
     const int64_t per = (T + nth - 1) / nth;

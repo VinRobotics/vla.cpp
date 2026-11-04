@@ -67,7 +67,11 @@ public:
     struct QWeight {
         ggml_tensor * w = nullptr, * s = nullptr;
         int           bits = 8;
-        int64_t       group = 0;  // INT4: K-elements per scale (0: per channel)
+        int64_t       group = 0;  // INT4: K-elements per scale (0: per channel); W2P: the shift group (64)
+        int64_t       k     = 0;  // W2P: K (the blob's shape does not say)
+        int           pairs = 0;      // W2P tile order: 1 = (gate j, up j) for the GeGLU epilogue;
+                                      // 2 = per head of `hd` columns, (tile i, tile i + hd/32) for the RoPE epilogue
+        int           hd    = 0;
         explicit operator bool() const { return w != nullptr; }
     };
     QWeight quant_i8(const std::string & out_name, const std::vector<std::string> & srcs);
@@ -75,6 +79,14 @@ public:
     // first: I8 [K/2, N]) with one F32 scale per `group` K-elements and output
     // channel (F32 [N, K/group], scale[g * N + n]); group 0 = one per channel.
     QWeight quant_i4(const std::string & out_name, const std::vector<std::string> & srcs, int64_t group);
+    // The same as 2-bit codes with an integer unit per group of 64 and one F32
+    // scale per output channel ("W2P", src/sycl/vla_sycl_w2a8.cpp): w[n][k] =
+    // (2 q - 3) * u[n][k / 64], q in 0..3, u in 1..42, times scale[n]. The blob
+    // is I8 [tile bytes, N/16]; quantized at upload (per group the unit with the
+    // least squared error, scale = max|row| / 126). pairs: srcs are {gate, up}
+    // of equal N and the 16-column tiles are packed (gate j, up j) interleaved,
+    // for the fused GeGLU epilogue.
+    QWeight quant_w2p(const std::string & out_name, const std::vector<std::string> & srcs, int pairs = 0, int hd = 0);
 
     // A tensor of another type in the file (a FoldQuant site's INT codes) that
     // gemm/opt_gemm/fuse_gemm declare as a float [K, N] weight in the resident

@@ -395,7 +395,7 @@ if(GGML_SYCL AND NOT GGML_CUDA)
     # elementwise nodes and the W8A8 linear. oneDNN ships with oneAPI.
     find_package(DNNL REQUIRED)
     add_library(vla_sycl_ops STATIC src/sycl/vla_sycl_ext.cpp src/sycl/vla_sycl_bf16.cpp src/sycl/vla_sycl_attn.cpp
-                src/sycl/vla_sycl_fused.cpp)
+                src/sycl/vla_sycl_fused.cpp src/sycl/vla_sycl_w2a8.cpp)
     target_include_directories(vla_sycl_ops PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${llama_SOURCE_DIR}/ggml/include

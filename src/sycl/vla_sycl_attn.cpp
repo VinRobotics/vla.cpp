@@ -207,7 +207,8 @@ Plan build(const Key & key, sycl::queue & q, Ctx & c) {
         return p;
     }
     p.d_scale = sycl::malloc_device<float>(1, q);
-    q.memcpy(p.d_scale, &key.scale, sizeof(float)).wait();
+    // Through a queue of its own: a wait on the compute queue is illegal while it records a SYCL graph.
+    sycl::queue(q.get_context(), q.get_device()).memcpy(p.d_scale, &key.scale, sizeof(float)).wait();
     p.ok = true;
     return p;
 }
@@ -219,10 +220,8 @@ half * scratch(sycl::queue & q, int slot, size_t elems) {
     static size_t     cap[4] = {0, 0, 0, 0};
     std::lock_guard<std::mutex> lock(mu);
     if (elems > cap[slot]) {
-        if (buf[slot]) {
-            q.wait();
-            sycl::free(buf[slot], q);
-        }
+        // The old block is not freed: that needs a wait on the compute queue, which is illegal while
+        // it records a SYCL graph. It grows a few times per process at most.
         buf[slot] = sycl::malloc_device<half>(elems, q);
         cap[slot] = elems;
     }
@@ -301,7 +300,7 @@ bool sycl_flash_attn_ext_supported(const ggml_tensor * dst) {
     if (!float_type(Q->type) || !float_type(K->type) || !float_type(V->type)) return false;
     // I8: a q8 blob (layers/fused_ew.h) of the S rows of H*D, for an INT8 GEMM.
     const bool blob = dst->type == GGML_TYPE_I8;
-    if (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_BF16 && !blob) return false;
+    if (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_BF16 && dst->type != GGML_TYPE_F16 && !blob) return false;
     if (blob && (dst->ne[0] != Q->ne[1] * (Q->ne[0] * Q->ne[2] + 4) || Q->ne[3] != 1 ||
                  (Q->ne[0] * Q->ne[2]) % 8)) return false;
     // A batch (ne[3] > 1) only on the in-place BF16 path: every operand BF16 with
@@ -340,9 +339,12 @@ bool sycl_flash_attn_ext(ggml_tensor * dst, sycl::queue & q) {
     const long long B = Q->ne[3];
     // Multi-query attention (one K/V head, as in Gemma) with Q rows (s, h) laid
     // out densely, as RoPE writes them, is single-head attention over S*H query
-    // rows, which tiles better than H short heads. dst [D, H, S] keeps the order.
+    // rows, which tiles better than H short heads for a long prefix. Not for a few
+    // rows: on an Arc B390, 10 tokens x 8 heads over 578 keys take 20 us as heads
+    // and 27-31 us flattened (50 tokens: 30 vs 32-50 us; 560 tokens: 245 vs 200 us).
+    // dst [D, H, S] keeps the order.
     static const bool no_flat = vla::env_flag("VLA_SYCL_SDPA_NO_MQA_FLAT");
-    if (!no_flat && Hkv == 1 && H > 1 && !M && key.dq.on() && key.dq.s2 == D && key.dq.s1 == H * D) {
+    if (!no_flat && Hkv == 1 && H > 1 && S * H > 512 && !M && key.dq.on() && key.dq.s2 == D && key.dq.s1 == H * D) {
         key.S  = S * H;
         key.H  = 1;
         key.dq = Direct{ D, S * H * D };
@@ -385,7 +387,9 @@ bool sycl_flash_attn_ext(ggml_tensor * dst, sycl::queue & q) {
     if (!p->ok) return false;
 
     // A BF16 plan writes dst itself.
-    half * o16 = p->q.get_data_type() == gdt::bf16 ? static_cast<half *>(dst->data) : scratch(q, 3, (size_t) (D * S * H));
+    // A BF16 plan writes dst itself; an F16 dst takes the F16 result directly.
+    half * o16 = p->q.get_data_type() == gdt::bf16 || dst->type == GGML_TYPE_F16 ? static_cast<half *>(dst->data)
+                                                                                   : scratch(q, 3, (size_t) (D * S * H));
     half * q16 = p->conv_q ? scratch(q, 0, (size_t) (D * S * H)) : static_cast<half *>(Q->data);
     half * k16 = p->conv_k ? scratch(q, 1, (size_t) (D * Skv * Hkv)) : static_cast<half *>(K->data);
     half * v16 = p->conv_v ? scratch(q, 2, (size_t) (D * Skv * Hkv)) : static_cast<half *>(V->data);
@@ -408,7 +412,7 @@ bool sycl_flash_attn_ext(ggml_tensor * dst, sycl::queue & q) {
         return false;
     }
 
-    if (p->q.get_data_type() == gdt::bf16) return true;
+    if (p->q.get_data_type() == gdt::bf16 || dst->type == GGML_TYPE_F16) return true;
     if (dst->type == GGML_TYPE_I8) {
         // Rows of H*D (one token each) straight to INT8 codes + row scales.
         const long long R = H * D;

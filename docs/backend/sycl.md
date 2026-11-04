@@ -253,6 +253,120 @@ episodes per suite, `n_action_steps` 10:
 The two are within the noise of 500 episodes on every suite; one step of
 inference took 35-43 ms in both.
 
+### 2-bit expert weights: `VLA_PI05_W2=expert` (W2A8, on top of `VLA_PI05_W8A8`)
+
+The action expert's seven projections (q|k|v, o, gate|up, down) on 2-bit
+weights with INT8 per-token activations, on an ESIMD XMX kernel
+(`src/sycl/vla_sycl_w2a8.cpp`). It needs `VLA_PI05_W8A8` with `expert` (or
+`all`) and replaces `VLA_PI05_W4` for the expert. Measured on a Core Ultra 7
+356H (Panther Lake, Xe3 iGPU with 4 Xe cores, LPDDR5X), oneAPI 2026.0, oneDNN
+3.11, two 224 px views, 10 flow steps.
+
+- **Format ("W2P").** `w = (2q - 3) * u * s_n`: a 2-bit code `q` per weight, an
+  integer unit `u` in 1..42 per group of 64 (one byte) and one float scale per
+  output channel (`s_n = max|row| / 126`), so every weight is an exact INT8
+  value and the kernel unpacks the codes in registers into plain s8 x s8 DPAS
+  with int32 accumulation, applying the two scales once at the end: 2.25 bits
+  per weight, 3.6x fewer bytes than INT8, no per-group folding. The weights are
+  quantized at load (~1 s, 16 threads; no new GGUF) with the per-group clip
+  search of `scripts/fakequant_expert_2bit.py` (`fake_quant_pow2`, 100/100 on
+  LIBERO-object on the BF16 path), each group's unit rounded onto the integer
+  grid (weight rel-error 0.350 vs 0.351 for that search; `VLA_PI05_W2_QUANT=0`
+  picks the least-squared-error unit instead: 0.320, but a larger action error).
+- **Fusions.** The gate|up GEMM's epilogue is the GeGLU (weights packed as
+  gate/up tile pairs, F16 [4096, M] out, the down GEMM quantizes it on the way
+  in), and the gated residual adds after o and down are the GEMMs' epilogues.
+  The q|k|v GEMM's epilogue applies RoPE and writes K and V into the cache
+  (weights packed as (i, i + hd/2) tile pairs per head, a cos/sin table on the
+  device, q out in F16), and the attention node is typed F16 so oneDNN's SDPA
+  writes the o GEMM's input directly. Nine kernel launches per expert layer
+  step. `VLA_PI05_W2_NO_GEGLU=1`, `VLA_PI05_W2_NO_ROPE=1` and
+  `VLA_PI05_W2_O_BF16=1` revert the fusions one by one (A/B runs; the GeGLU
+  epilogue agrees with the separate pass to F16 rounding, max action delta
+  0.0037).
+- **Kernel.** Standalone, M = 50: 2.6-2.9x faster than oneDNN INT8 on every
+  expert shape (gate|up 46 vs 128 us, down 19 vs 73, q|k|v 21 vs 38, o 12 vs
+  30); 72 GB/s at M = 1.
+- **Latency.** `vla-bench` p50 (2 views, 224 px, `--act-dtype bf16`, three
+  interleaved rounds): BF16 329 ms, W8A8 189 ms, W8A8 + INT4 expert 180 ms,
+  W8A8 + W2 expert 169 ms without and **161 ms** with the fused GeGLU (the RoPE
+  epilogue -1.1 ms and the F16 attention output -0.6 ms on top). The expert
+  goes from 6.8 to ~3.9 ms per flow step (~218 us per layer step: the four W2
+  GEMMs ~95 us, attention ~20-40, six small kernels ~45, ~50 us of inter-kernel
+  gaps).
+- **Action error** (`tests/vla_predict_check`, 2 views, max / mean over 1600
+  values) vs plain W8A8: 0.083 / 5.6e-3 (the per-group fake-quant GGUF on W8A8:
+  0.090 / 5.3e-3; W8A8 vs BF16 is 0.008 / 3.3e-4); vs that fake-quant GGUF
+  0.018 / 1.4e-3.
+- **LIBERO**, 10 tasks x 10 episodes, W8A8 + W2: object **94/100** (Wilson
+  87-97%; W8A8 94, W8A8 + INT4 93), spatial **86/100** (78-92%; W8A8 on the
+  same build 88/100, 80-93%; task 4 is 1/10 for both).
+
+| Variable | Effect |
+|---|---|
+| `VLA_PI05_W2=expert` | 2-bit expert weights (integer unit per group of 64) on the ESIMD W2A8 kernel (overrides `VLA_PI05_W4`) |
+| `VLA_PI05_W2_NO_GEGLU=1`, `VLA_PI05_W2_NO_ROPE=1`, `VLA_PI05_W2_O_BF16=1` | W2: separate GeGLU pass; separate RoPE/K-V pass; F16 -> BF16 before the o GEMM |
+| `VLA_PI05_W2_QUANT=0\|1\|2` | W2: the unit search (1 = default, the per-group clip search; 0 = least-squared-error unit; 2 = narrow window) |
+
+### FoldQuant prefix + W2A8 expert, and the Arc B390 tuning
+
+The fastest π0.5 configuration on an Arc B390 (Core Ultra X7 358H, 12 Xe3
+cores, LPDDR5X; oneAPI 2026.2, oneDNN 3.11, sycl-tla via `VLA_SYCL_TLA_DIR`)
+combines FoldQuant's W4A4 prefix with the 2-bit W2A8 expert. The FoldQuant GGUF
+keeps its prefix sites and gets the float expert weights of the same base
+checkpoint back:
+
+```bash
+python scripts/make_pi05_fq_hybrid.py --fq pi05-libero-w4a4.gguf \
+    --float pi05-openpi-bf16.gguf --out pi05-libero-w4a4-aexf.gguf
+VLA_PI05_W8A8=all VLA_PI05_W2=expert VLA_PI05_PROMPT=openpi \
+    vla-server --act-dtype bf16 pi05-libero-w4a4-aexf.gguf
+```
+
+`pi05.cpp` recognizes such a file (FoldQuant sites in the prefix, float `aex.*`
+weights) and runs the expert on the load-time W8A8 / W2A8 weights, with its K/V
+slots as views of the FoldQuant prefix pack. It needs SYCL with sycl-tla;
+elsewhere it refuses to load. `VLA_PI05_W8A8=vlm` is ignored there (the prefix
+is FoldQuant's).
+
+Kernel changes for the 12-Xe-core part, all measured on it:
+
+| Change | Effect at 10 flow steps | Numerics | Switch |
+|---|---|---|---|
+| W2A8 work split: 32-row blocks and split-K to ~2 threads per XVE on parts with >= 64 XVEs | openpi W8A8 + W2: 75.6 -> 72.7 ms | bit-identical | `VLA_W2_SPLIT`, `VLA_W2_MTT` (tuning) |
+| oneDNN SDPA folds the MQA heads into rows only when S x H > 512 (not for the expert) | -1.5 to -1.9 ms | accumulation order (max action delta 0.005-0.02) | `VLA_SYCL_SDPA_NO_MQA_FLAT=1` (never fold) |
+| FoldQuant o sites read the attention's F16 output (no F16 -> F32 pass) | -0.4 to -0.9 ms | bit-identical | `VLA_FQ_O_F32=1` |
+| FoldQuant act quantizer: 4 sub-groups per row for >= 128 rows, K <= 4096 | -0.3 ms | bit-identical | `VLA_FQ_ACT_RW=8` |
+
+On parts with fewer than 64 XVEs (e.g. the 4-Xe-core Core Ultra 7 356H) the W2A8
+split is the previous one; the other three were not re-measured there.
+
+`vla-bench` p50, chunk-10 checkpoints, 2 x 224 px views, 48 tokens,
+`--act-dtype bf16`, warmup 3, 30 reps, three interleaved rounds:
+
+| Checkpoint | Flow steps | Before | After |
+|---|--:|--:|--:|
+| FoldQuant W4A4, `VLA_PI05_W8A8=vit` | 10 | 73.0 ms | 70.3 ms |
+| openpi bf16, `VLA_PI05_W8A8=all VLA_PI05_W2=expert` | 10 | 76.6 ms | 72.2 ms |
+| FoldQuant W4A4 prefix + W2A8 expert | 10 | - | **59.8 ms** |
+| FoldQuant W4A4 prefix + W2A8 expert | 5 | - | **51.2 ms** |
+| FoldQuant W4A4 prefix + W2A8 expert | 3 | - | **48.0 ms** |
+
+LIBERO success rate of the hybrid (OpenPI prompt, 10 tasks x 10 episodes per
+suite, `n_action_steps` 10). The 10- and 5-step runs used a build without the
+SDPA and FoldQuant changes above, the 3-step run one without the act-quantizer
+change; the current build's actions are bit-identical to the 3-step build's
+and differ from the other by the SDPA accumulation order only (max 0.011):
+
+| Flow steps | libero_object | libero_spatial | libero_goal | libero_10 | Average |
+|--:|--:|--:|--:|--:|--:|
+| 10 | 100 | 98 | 99 | 94 | **97.75%** |
+| 5 | 99 | 99 | 99 | 92 | **97.25%** |
+| 3 | 99 | 98 | 99 | 94 | **97.5%** |
+
+For reference, OpenPI's published π0.5 LIBERO table (its README) averages 96.85%
+on the same four suites.
+
 LIBERO success rate of the FoldQuant files and the bf16 GGUF on the same Arc B390
 at the latency table's build, same server and client, 10 tasks x 50 episodes per suite,
 environment seed 42, 10 denoise steps, `n_action_steps` 10. With openpi's prompt

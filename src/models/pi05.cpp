@@ -97,6 +97,13 @@ struct Pi05ModelArch : public ModelArchBase {
     // (layers/fq_rope_attn.h), the expert's adaRMS in its act nodes and the
     // prefix K/V read in place as F16 (layers/fmha_kv.h).
     bool                  fq_fast     = false;
+    // A FoldQuant GGUF whose action expert is float again
+    // (scripts/make_pi05_fq_hybrid.py): FoldQuant prefix, and the expert on the
+    // load-time W8A8 / W2A8 weights over K/V slots that are views of the prefix
+    // pack (fq_rope_pack with the expert's rows left free). act_type_ex: the
+    // expert's GEMM activation type (the FoldQuant prefix takes F32).
+    bool                  fq_aex_float = false;
+    ggml_type             act_type_ex  = GGML_TYPE_F32;
 
     struct MainKey {
         int64_t n_img=-1, n_lang=-1, nsteps=-1;
@@ -452,7 +459,18 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
         // Fused elementwise nodes on SYCL, the backend that claims them.
         // VLA_PI05_NO_FUSE=1 keeps the per-op graph.
         // Off when the backend declines them (VLA_SYCL_NO_FUSED=1).
-        if (b.is_sycl && !fq.present && !env_flag("VLA_PI05_NO_FUSE")) {
+        m->fq_aex_float = m->fq_fast && cfg.n_kv_heads == 1 && cfg.head_dim == 256 &&
+                          gguf_find_tensor(g.gctx, "aex.blk.0.attn_q.wscale") < 0 &&
+                          gguf_find_tensor(g.gctx, "aex.blk.0.attn_q.weight") >= 0 &&
+                          !env_flag("VLA_FQ_SYCL_GEMM") && !env_flag("VLA_FQ_NO_ROPE_PACK");
+        if (fq.present && !m->fq_aex_float && gguf_find_tensor(g.gctx, "aex.blk.0.attn_q.wscale") < 0) {
+            std::fprintf(stderr, "vla(pi05): FoldQuant GGUF with a float expert needs SYCL with the sycl-tla "
+                                 "prefix pack (VLA_SYCL_TLA_DIR)\n");
+            return nullptr;
+        }
+        if (m->fq_aex_float)
+            std::printf("vla(pi05): FoldQuant prefix, float action expert (K/V slots in the prefix pack)\n");
+        if (b.is_sycl && (!fq.present || m->fq_aex_float) && !env_flag("VLA_PI05_NO_FUSE")) {
             sycl_register_fused_ops();
             m->fused_ew        = fused_ew_registered();
             m->adarms_spec.eps = cfg.rms_eps;
@@ -481,6 +499,10 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
                 cuda_register_bf16_ops();
                 sycl_register_bf16_ops();
                 std::printf("vla(pi05): activations = BF16 (expert residual stream F32)\n");
+            } else if (m->fq_aex_float && m->matmul_type == GGML_TYPE_BF16) {
+                m->act_type_ex = GGML_TYPE_BF16;
+                sycl_register_bf16_ops();
+                std::printf("vla(pi05): expert activations = BF16 (FoldQuant prefix F32, residual stream F32)\n");
             } else {
                 std::fprintf(stderr, "vla(pi05): --act-dtype bf16 ignored - needs CUDA or SYCL, BF16 weights "
                                      "and no FoldQuant\n");
@@ -489,6 +511,8 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
         // CUDA, F32 activations: the bit-exact fused nodes (layers/fused_ops.h).
         if (m->act_type == GGML_TYPE_F32)
             m->fused_ops = enable_fused_ops("pi05", b.is_cuda);
+        if (!m->fq_aex_float)
+            m->act_type_ex = m->act_type;
     }
 
     // The SigLIP tower is now bundled in the ckpt GGUF; mmproj_path is ignored.
@@ -506,7 +530,11 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     }
     WeightLoader L("pi05", g, m->ctx_weights, m->matmul_type);
 
-    m->kv_inplace = use_fused_attention() && !fq.present && !env_flag("VLA_PI05_NO_KV_INPLACE");
+    m->kv_inplace = use_fused_attention() && (!fq.present || m->fq_aex_float) && !env_flag("VLA_PI05_NO_KV_INPLACE");
+    if (m->fq_aex_float && !m->kv_inplace) {
+        std::fprintf(stderr, "vla(pi05): a float expert in a FoldQuant GGUF needs SYCL's fused attention\n");
+        return nullptr;
+    }
     if (m->kv_inplace)
         std::printf("vla(pi05): K/V in place in F16, fused q|k|v and gate|up GEMMs (VLA_PI05_NO_KV_INPLACE=1 to disable)\n");
     // W8A8 GEMMs (layers/qlinear.h) on the in-place SYCL graph: VLA_PI05_W8A8 =
@@ -518,7 +546,14 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
         q8_vlm = has("vlm");
         q8_aex = has("expert");
         q8_vit = has("vit");
-        if (fq.present && is_sycl) {
+        if (m->fq_aex_float && m->fused_ew) {
+            // FoldQuant prefix, float expert: the expert (and SigLIP) take them.
+            if (q8_vlm)
+                std::fprintf(stderr, "vla(pi05): VLA_PI05_W8A8 vlm ignored - the FoldQuant prefix sites are used\n");
+            q8_vlm = false;
+            std::printf("vla(pi05): W8A8 GEMMs (per-token INT8 activations): %s%s\n", q8_vit ? "SigLIP " : "",
+                        q8_aex ? "expert" : "");
+        } else if (fq.present && is_sycl) {
             // A FoldQuant checkpoint brings its own LM and expert sites; only
             // SigLIP, BF16 in the file, can take the W8A8 GEMMs (fused blocks).
             if (q8_vlm || q8_aex)
@@ -543,6 +578,15 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
         if (aex_w4_group == 0) aex_w4_group = -1;  // per channel: quant_i4 takes K
         std::printf("vla(pi05): expert weights INT4 (W4A8), %s\n",
                     aex_w4_group > 0 ? ("group " + std::to_string(aex_w4_group)).c_str() : "per channel");
+    }
+    // 2-bit expert weights with power-of-two group shifts on top of W8A8 (W2A8):
+    // VLA_PI05_W2=expert (src/sycl/vla_sycl_w2a8.cpp; quantized at load with the
+    // search of scripts/fakequant_expert_2bit.py, group 64).
+    bool aex_w2 = false;
+    if (const char * e = std::getenv("VLA_PI05_W2"); q8_aex && e && std::string(e) == "expert") {
+        aex_w2       = true;
+        aex_w4_group = 0;
+        std::printf("vla(pi05): expert weights 2-bit, pow2 group shifts, group 64 (W2A8)\n");
     }
     m->vis.vit.enc.cfg.flash_attn = use_fused_attention();
     // Fused SigLIP blocks (modules/encoder.h, EncCfg::fused): SYCL, BF16, fused
@@ -584,7 +628,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
     for (int64_t i=0; i<cfg.n_layers; ++i) {
         GemmaLayerW & w = m->ex_layers[i];
         const long long ii = (long long) i;
-        if (fq.present) {
+        if (fq.present && !m->fq_aex_float) {
             // FoldQuant sites (action recipe): the adaRMS output is quantized per
             // site group with the shipped SmoothQuant vector (ascale), no gamma.
             const FqModuleSpec & a = fq.action;
@@ -597,7 +641,8 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
             if (!w.fq_q != !w.fq_k || !w.fq_q != !w.fq_v || !w.fq_gate != !w.fq_up)
                 L.fail("FoldQuant: an expert layer's q/k/v (and gate/up) must all be INT or all float");
         }
-        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), m->kv_inplace, q8_aex, aex_w4_group);
+        gemma_declare_float(L, w, "aex.blk." + std::to_string(ii), m->kv_inplace, q8_aex, aex_w4_group, aex_w2,
+                            (int) cfg.head_dim);
         if (m->fq_fast && w.fq_qkv) {
             // q/k/v GEMM, RoPE and the cached-KV attention as one node (gemma_attn).
             // VLA_FQ_NO_ROPE_ATTN=1 keeps them apart (A/B runs).
@@ -647,6 +692,15 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
             if (!big)
                 std::printf("vla(pi05): expert K/V in the prefix pack, fused attention (VLA_FQ_NO_KV_SDPA=1 to disable)\n");
         }
+    }
+
+    if (m->fq_aex_float) {
+        for (GemmaLayerW & w : m->pl.blk)
+            if (w.rope_pack.magic != FQ_ROPE_PACK_MAGIC) {
+                std::fprintf(stderr, "vla(pi05): float expert: a prefix layer has no fq_rope_pack\n");
+                return nullptr;
+            }
+        for (GemmaLayerW & w : m->pl.blk) w.rope_pack.extra = (int) cfg.n_suffix;
     }
 
     m->W_ain  = L.f32("action_in_proj.weight");   m->b_ain  = L.f32("action_in_proj.bias");
@@ -822,6 +876,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     std::vector<ggml_tensor *> cK(n_layers), cV(n_layers);
     std::vector<KvSlot>        kv(kv_inplace ? n_layers : 0);
     for (KvSlot & sl : kv) {
+        if (fq_aex_float) break;   // views of the prefix pack, below
         // Leaves the allocator places up front; output-flagged so it never
         // frees or reuses them while the steps still read them.
         sl.k = ggml_new_tensor_3d(C, GGML_TYPE_F16, cfg.head_dim, cfg.n_kv_heads, n_prefix_g + n_suf);
@@ -832,19 +887,33 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
     {
         ggml_tensor * h = prefix_embs;
         for (int64_t i=0; i<n_layers; ++i) {
-            if (kv_inplace && pl.blk[i].q_qkv && !env_flag("VLA_PI05_NO_Q8_FUSE"))
+            if (kv_inplace && !fq_aex_float && pl.blk[i].q_qkv && !env_flag("VLA_PI05_NO_Q8_FUSE"))
                 h = gemma_layer_q8(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix_g, kv[i], t_prefix_mask, act_type,
                                    pl.rms_spec);
             else
                 h = gemma_layer(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix_g,
                                 nullptr, nullptr, t_prefix_mask, &cK[i], &cV[i], act_type, use_fused_attention(),
-                                kv_inplace ? &kv[i] : nullptr);
+                                kv_inplace && !fq_aex_float ? &kv[i] : nullptr);
         }
         (void) h;
     }
+    if (fq_aex_float) {
+        // fq_rope_pack's K and V: F16 [hd, n_prefix + n_suf] with the expert's rows
+        // free after the prefix's. As [hd, 1 head, rows] they are the expert's
+        // KvSlot; k_pre / v_pre (the prefix rows) order its reads after the pack.
+        GGML_ASSERT(!padded && cfg.n_kv_heads == 1);
+        for (int64_t i=0; i<n_layers; ++i) {
+            GGML_ASSERT(cK[i] && cK[i]->type == GGML_TYPE_F16 && cK[i]->ne[1] == n_prefix_g + n_suf);
+            const size_t rs = cK[i]->nb[1];
+            kv[i].k     = ggml_view_3d(C, cK[i], cfg.head_dim, 1, n_prefix_g + n_suf, rs, rs, 0);
+            kv[i].v     = ggml_view_3d(C, cV[i], cfg.head_dim, 1, n_prefix_g + n_suf, rs, rs, 0);
+            kv[i].k_pre = ggml_view_3d(C, cK[i], cfg.head_dim, 1, n_prefix_g, rs, rs, 0);
+            kv[i].v_pre = ggml_view_3d(C, cV[i], cfg.head_dim, 1, n_prefix_g, rs, rs, 0);
+        }
+    }
     // fq_fast: the expert reads the prefix K/V as F16, cast here once per layer
     // (or packed so already by fq_rope_pack), not concatenated every step.
-    const bool kv16 = fq_fast && use_fused_attention() && !padded;
+    const bool kv16 = fq_fast && !fq_aex_float && use_fused_attention() && !padded;
     std::vector<ggml_tensor *> cK16(n_layers, nullptr), cV16(n_layers, nullptr);
     if (kv16)
         for (int64_t i=0; i<n_layers; ++i) {
@@ -871,7 +940,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
                 fqx = { ada_scale1[k], ada_shift[k], ada_scale1[k+1], ada_shift[k+1], cK16[i], cV16[i] };
             }
             h = build_expert_layer(C, ex_layers[i], h, t_suffix_pos, mod(2*i), mod(2*i+1), cfg, n_suf,
-                                   cK[i], cV[i], t_suffix_mask, act_type,
+                                   cK[i], cV[i], t_suffix_mask, act_type_ex,
                                    fused_ew ? &adarms_spec : nullptr, fused_ew ? &gateres_spec : nullptr,
                                    kv_inplace ? &kv[i] : nullptr, kv16 ? &fqx : nullptr);
         }

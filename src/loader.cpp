@@ -17,7 +17,11 @@
 #include "backend.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <thread>
 #include <cstdint>
 #include <cstdio>
 
@@ -225,6 +229,100 @@ WeightLoader::QWeight WeightLoader::quant_i4(const std::string & out_name, const
     return quant(out_name, srcs, 4, group);
 }
 
+// W2P tile bytes for K (layers/qlinear.h and src/sycl/vla_sycl_w2a8.cpp agree).
+static int64_t w2p_tile_bytes(int64_t K) {
+    return (K / 32) * 128 + ((K / 64) * 16 + 63) / 64 * 64;
+}
+
+WeightLoader::QWeight WeightLoader::quant_w2p(const std::string & out_name, const std::vector<std::string> & srcs,
+                                              int pairs, int hd) {
+    QWeight q = quant(out_name, srcs, 2, 64);
+    if (!q.w) return q;
+    if (pairs == 1 && srcs.size() != 2) pairs = 0;
+    if (pairs == 2 && (hd % 32 || (q.w->ne[1] * 16) % hd)) pairs = 0;
+    q.pairs = pairs;
+    q.hd    = hd;
+    quant_.back().q = q;
+    return q;
+}
+
+// One row of K floats to 2-bit codes with an integer unit per group of 64:
+// w ~ (2 q - 3) * u * s, s = max|row| / 126 (so |(2q-3) u| <= 126 fits INT8 with
+// u <= 42), per group the u in 1..42 with the least squared error over the
+// codes rint((w / (s u) + 3) / 2) clipped to 0..3. The same search as
+// fake_quant_pow2 in scripts/fakequant_expert_2bit.py but over integer units
+// instead of 0.55..1 x 2^e, which both covers that grid's range and resolves
+// it finer where the weights are large (lower weight error on every tensor).
+// Codes of one group of 64 for unit `unit`; returns the squared error.
+static double w2p_group_codes(const float * wg, float unit, uint8_t * cq) {
+    double err = 0.0;
+    for (int k = 0; k < 64; ++k) {
+        float qf = std::rint((wg[k] / unit + 3.0f) / 2.0f);
+        qf       = std::min(3.0f, std::max(0.0f, qf));
+        cq[k]    = (uint8_t) qf;
+        const float d = (2.0f * qf - 3.0f) * unit - wg[k];
+        err += (double) d * d;
+    }
+    return err;
+}
+
+// VLA_PI05_W2_QUANT selects the unit search (all give u in 1..42, s = max|row| / 126):
+//   0: per group the u with the least squared error among 0.5..1 x the covering unit
+//   1 (default): fake_quant_pow2 of scripts/fakequant_expert_2bit.py mapped onto the integer
+//      units: for each clip a in 0.55..1 (10 values) the group's unit is a * max|row| / 48 * 2^e
+//      with the smallest shift e in 0..4 that covers the group's max, rounded to the nearest
+//      integer multiple of s; the a with the least squared error wins per group.
+//   2: as 0 with the window 0.55..1 x the covering unit
+static int w2p_quant_mode() {
+    static const int mode = [] {
+        const char * e = std::getenv("VLA_PI05_W2_QUANT");
+        return e && *e ? std::atoi(e) : 1;
+    }();
+    return mode;
+}
+
+static void w2p_quant_row(const float * w, int64_t K, uint8_t * q, uint8_t * un, float * scale) {
+    const int64_t NG = K / 64;
+    const int     mode = w2p_quant_mode();
+    float rmax = 0.0f;
+    for (int64_t k = 0; k < K; ++k) rmax = std::max(rmax, std::fabs(w[k]));
+    rmax = std::max(rmax, 1e-12f);
+    const float s = rmax / 126.0f;
+    *scale = s;
+    for (int64_t g = 0; g < NG; ++g) {
+        const float * wg = w + g * 64;
+        float gmax = 0.0f;
+        for (int k = 0; k < 64; ++k) gmax = std::max(gmax, std::fabs(wg[k]));
+        double  best   = -1.0;
+        int     best_u = 1;
+        uint8_t bq[64], cq[64];
+        auto try_u = [&](int u) {
+            const double err = w2p_group_codes(wg, s * (float) u, cq);
+            if (best < 0.0 || err < best) {
+                best   = err;
+                best_u = u;
+                std::memcpy(bq, cq, 64);
+            }
+        };
+        if (mode == 1) {
+            for (int ai = 0; ai < 10; ++ai) {
+                const float a     = 0.55f + 0.05f * (float) ai;
+                const float row_s = a * rmax / 48.0f;
+                int         e     = (int) std::ceil(std::log2(std::max(a * gmax / (3.0f * row_s), 1e-12f)));
+                e                 = std::min(4, std::max(0, e));
+                const float unit  = row_s * (float) (1 << e);
+                try_u(std::min(42, std::max(1, (int) std::lrint(unit / s))));
+            }
+        } else {
+            const int u_cover = std::min(42, std::max(1, (int) std::ceil(gmax / (3.0f * s))));
+            const int u_lo    = std::max(1, mode == 2 ? (int) std::ceil(0.55f * (float) u_cover) : u_cover / 2);
+            for (int u = u_lo; u <= u_cover; ++u) try_u(u);
+        }
+        un[g] = (uint8_t) best_u;
+        std::memcpy(q + g * 64, bq, 64);
+    }
+}
+
 WeightLoader::QWeight WeightLoader::quant(const std::string & out_name, const std::vector<std::string> & srcs,
                                           int bits, int64_t group) {
     int64_t K = -1, N = 0;
@@ -241,7 +339,27 @@ WeightLoader::QWeight WeightLoader::quant(const std::string & out_name, const st
     }
     QWeight q;
     q.bits  = bits;
-    q.group = bits == 4 ? (group > 0 ? group : K) : 0;
+    q.group = bits == 4 ? (group > 0 ? group : K) : bits == 2 ? 64 : 0;
+    q.k     = K;
+    if (bits == 2) {
+        if (K % 128 || N % 16) {
+            std::fprintf(stderr, "vla(%s): %s: W2P needs K %% 128 == 0 and N %% 16 == 0 (K %lld, N %lld)\n", arch_,
+                         out_name.c_str(), (long long) K, (long long) N);
+            ok_ = false;
+            return {};
+        }
+        q.w = ggml_new_tensor_2d(ctx_, GGML_TYPE_I8, w2p_tile_bytes(K), N / 16);
+        q.s = ggml_new_tensor_1d(ctx_, GGML_TYPE_F32, N);
+        if (!q.w || !q.s) {
+            std::fprintf(stderr, "vla(%s): ggml_new_tensor failed for %s\n", arch_, out_name.c_str());
+            ok_ = false;
+            return {};
+        }
+        ggml_set_name(q.w, out_name.c_str());
+        ggml_set_name(q.s, (out_name + ".scale").c_str());
+        quant_.push_back(Quant{q, K, srcs});
+        return q;
+    }
     if (bits == 4 && (K % 2 || K % q.group)) {
         std::fprintf(stderr, "vla(%s): %s: K %lld not a multiple of the INT4 group %lld\n", arch_, out_name.c_str(),
                      (long long) K, (long long) q.group);
@@ -315,6 +433,71 @@ bool WeightLoader::upload(ggml_backend_t backend, ggml_backend_buffer_t * out_bu
 
     for (const Quant & f : quant_) {
         const int64_t K = f.K;
+        if (f.q.bits == 2) {
+            // W2P: per row the 2-bit codes, the group units and the scale; then
+            // packed per 16-column tile as src/sycl/vla_sycl_w2a8.cpp reads it
+            // (pairs: tile order gate 0, up 0, gate 1, up 1, ...).
+            const int64_t KS = K / 32, NG = K / 64, N = f.q.w->ne[1] * 16, TS = w2p_tile_bytes(K), NT = N / 16;
+            std::vector<uint8_t> codes((size_t) N * K), units((size_t) N * NG), blob((size_t) NT * TS, 0);
+            std::vector<float>   scales((size_t) N), st((size_t) N);
+            int64_t              n0 = 0;
+            for (const std::string & s : f.srcs) {
+                std::vector<uint8_t> b;
+                if (!read_resident(s, GGML_TYPE_F32, false, b) || b.size() % (K * sizeof(float))) {
+                    std::fprintf(stderr, "vla(%s): W2P fill: read %s failed\n", arch_, s.c_str());
+                    return false;
+                }
+                const float * w = (const float *) b.data();
+                const int64_t n = (int64_t) (b.size() / (K * sizeof(float)));
+                if (n0 + n > N) {
+                    std::fprintf(stderr, "vla(%s): W2P fill: %s has too many rows\n", arch_, ggml_get_name(f.q.w));
+                    return false;
+                }
+                {   // rows in parallel (the search is ~10 passes over every weight)
+                    std::atomic<int64_t>     next{ 0 };
+                    std::vector<std::thread> pool;
+                    const unsigned           nth = std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+                    for (unsigned t = 0; t < nth; ++t)
+                        pool.emplace_back([&] {
+                            for (int64_t r; (r = next.fetch_add(8)) < n;)
+                                for (int64_t rr = r; rr < std::min(n, r + 8); ++rr)
+                                    w2p_quant_row(w + rr * K, K, codes.data() + (n0 + rr) * K,
+                                                  units.data() + (n0 + rr) * NG, &scales[(size_t) (n0 + rr)]);
+                        });
+                    for (auto & t : pool) t.join();
+                }
+                n0 += n;
+            }
+            if (n0 != N || (f.q.pairs == 1 && (NT % 2))) {
+                std::fprintf(stderr, "vla(%s): W2P fill: %s rows %lld vs %lld\n", arch_, ggml_get_name(f.q.w),
+                             (long long) n0, (long long) N);
+                return false;
+            }
+            for (int64_t nt = 0; nt < NT; ++nt) {
+                // source tile of packed tile nt
+                int64_t src = nt;
+                if (f.q.pairs == 1) src = nt % 2 ? NT / 2 + nt / 2 : nt / 2;
+                if (f.q.pairs == 2) {   // per head: pair c = (tile c, tile c + hd/32)
+                    const int64_t tph = f.q.hd / 16, head = nt / tph, p = nt % tph;
+                    src = head * tph + (p / 2) + (p % 2) * (tph / 2);
+                }
+                uint32_t * cw = (uint32_t *) (blob.data() + nt * TS);
+                for (int64_t s = 0; s < KS; ++s)
+                    for (int j = 0; j < 32; ++j)
+                        for (int t = 0; t < 4; ++t)
+                            for (int b = 0; b < 4; ++b) {
+                                const int64_t n = src * 16 + j % 16, k = s * 32 + 4 * (j / 16 + 2 * t) + b;
+                                cw[s * 32 + j] |= (uint32_t) codes[(size_t) n * K + k] << (8 * b + 2 * t);
+                            }
+                uint8_t * ux = blob.data() + nt * TS + KS * 128;
+                for (int64_t g = 0; g < NG; ++g)
+                    for (int n = 0; n < 16; ++n) ux[g * 16 + n] = units[(size_t) (src * 16 + n) * NG + g];
+                for (int n = 0; n < 16; ++n) st[(size_t) (nt * 16 + n)] = scales[(size_t) (src * 16 + n)];
+            }
+            ggml_backend_tensor_set(f.q.w, blob.data(), 0, blob.size());
+            ggml_backend_tensor_set(f.q.s, st.data(), 0, st.size() * sizeof(float));
+            continue;
+        }
         const int64_t g = f.q.bits == 4 ? f.q.group : K;
         const float   qmax = f.q.bits == 4 ? 7.0f : 127.0f;
         std::vector<int8_t> codes;   // INT8: one per byte; INT4: packed below
