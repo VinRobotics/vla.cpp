@@ -1,6 +1,6 @@
 # Báo cáo tiến độ SmolVLA — bản gửi review
 
-Cập nhật 04/11/2026 23:41 UTC+07. Đây là báo cáo giữa kỳ; các giá trị còn thiếu được ghi rõ, không phải kết quả cuối của toàn bộ bài.
+Tổng hợp đủ 6 task và bổ sung phép tính theo yêu cầu ngày 04/11/2026. Số đo thật, dự toán và tiêu chí chưa đạt được tách rõ.
 
 ## Kết quả đã hoàn tất
 
@@ -14,13 +14,14 @@ Cập nhật 04/11/2026 23:41 UTC+07. Đây là báo cáo giữa kỳ; các giá
 | Cấu hình | Episode đã chốt | Thành công | Trạng thái |
 |---|---:|---:|---|
 | flash-mm | 40/40 | 35 | complete |
-| q8-lm | 36/40 | 34 | running task 9 |
-| q8-vision | 0/40 | — | chưa bắt đầu; chưa có số đo |
+| q8-lm | 40/40 | 36 | complete: 90% |
+| q8-vision | 4/40 | 4 | snapshot đang chạy; chưa phải SR40 |
 
-Kết quả Q8 chưa đầy đủ, không trình bày tỷ lệ tạm thời như SR của cả40episode. Official200 cho biến thể chưa chạy. Không chọn cấu hình cuối cùng khi chưa tổng hợp đánh giá.
+Kết quả Q8-vision chưa đầy đủ, không trình bày tỷ lệ tạm thời như SR của cả40episode. Official200 cho biến thể chưa chạy. Không chọn cấu hình cuối cùng khi chưa tổng hợp đánh giá.
 
 ## Tài liệu chi tiết
 
+- [Phụ lục tính toán đủ 6 task](CALCULATIONS_SMOLVLA.md) — speedup, allocation, Wilson SR, dự toán official và pruning.
 - [Báo cáo tổng thể](REPORT_SMOLVLA.md)
 - [Bảng tối ưu không train](PART3_OPTIMIZATION.md)
 - [Kiến trúc và profiling](research-notes/smolvla-followup-20261104/ARCHITECTURE_AND_PROFILE.md)
@@ -30,3 +31,5 @@ Kết quả Q8 chưa đầy đủ, không trình bày tỷ lệ tạm thời nh�
 ## Giới hạn cần đọc cùng kết quả
 
 VRAM là peak traced allocation, chưa phải toàn bộ resident VRAM riêng process trên WSL. Latency chỉ so với control cùng batch. Output-check dùng input synthetic khác benchmark và không thay được SR. Server noise chưa cố định. Pruning hiện là depth ablation, chưa tái hiện CLP; cả3bản smoke0/2. Các chi tiết test fail, môi trường và recovery được công bố trong báo cáo tổng thể.
+
+Dự toán, chưa đo: flash-mm175/200, Q8-lm180/200 bằng200×SRscreening; không dùng làm kết quả official. Kết quả âm pruning vẫn được báo đầy đủ: ba bản giảm depth đều smoke0/2. Mục tiêu triển khai giữSR chưa đạt; defaults177/200 vẫn là mốc chính thức.

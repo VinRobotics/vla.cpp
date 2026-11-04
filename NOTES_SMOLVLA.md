@@ -442,3 +442,21 @@ Screen40 q8-lm: task 2 hoàn tất 3/4; tổng tạm thời 11/12. Log screen40-
 Screen40 q8-lm: task 3 hoàn tất 4/4; tổng tạm thời 15/16. Log screen40-variants/q8-lm/task-3.log; chưa phải official SR.
 
 Screen40 q8-lm: task 4 hoàn tất 4/4; tổng tạm thời 19/20. Log screen40-variants/q8-lm/task-4.log; chưa phải official SR.
+
+Screen40 q8-lm: task 5 hoàn tất 3/4; tổng tạm thời 22/24. Log screen40-variants/q8-lm/task-5.log; chưa phải official SR.
+
+Screen40 q8-lm: task 6 hoàn tất 4/4; tổng tạm thời 26/28. Log screen40-variants/q8-lm/task-6.log; chưa phải official SR.
+
+Screen40 q8-lm: task 7 hoàn tất 4/4; tổng tạm thời 30/32. Log screen40-variants/q8-lm/task-7.log; chưa phải official SR.
+
+Screen40 q8-lm: task 8 hoàn tất 4/4; tổng tạm thời 34/36. Log screen40-variants/q8-lm/task-8.log; chưa phải official SR.
+
+Screen40 q8-lm: task 9 hoàn tất 2/4; tổng tạm thời 36/40. Log screen40-variants/q8-lm/task-9.log; chưa phải official SR.
+
+Screen40 q8-vision: task 0 hoàn tất 4/4; tổng tạm thời 4/4. Log screen40-variants/q8-vision/task-0.log; chưa phải official SR.
+
+## Bổ sung theo yêu cầu điền đủ6task và commit/push
+
+Người dùng cho phép bổ sung tính toán ở phần thiếu và commit/push GitHub. Đã tạo CALCULATIONS_SMOLVLA.md và script complete_calculations.py; cập nhật REPORT/SUBMISSION/PART3. Q8-lm result mới xác nhận36/40, thay snapshot34/36. Q8-vision đang chạy, không dừng hoặc can thiệp runner. Số liệu dự toán official flash-mm175/200 và Q8-lm180/200 chỉ là200×SRscreening, không phải episode đã chạy. Không suy residentVRAM, SR từ synthetic error hoặc tự ghi testpass. Lệnh tái lập: python3 research-notes/smolvla-followup-20261104/complete_calculations.py. Lệnh `python` không có trên PATH, dùng `python3` thành công. Giữ nguyên on.txt/off.txt và dữ liệu runner đang ghi; chỉ stage tài liệu/script và snapshot result Q8-lm hoàn tất.
+
+Screen40 q8-vision: task 1 hoàn tất 4/4; tổng tạm thời 8/8. Log screen40-variants/q8-vision/task-1.log; chưa phải official SR.

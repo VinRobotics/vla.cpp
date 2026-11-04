@@ -57,3 +57,7 @@ Hai CUDA tests bit-exact còn fail; baseline giữ defaults theo lựa chọn ng
 - Output synthetic không chứng minh giữ khả năng điều khiển. Phần3 hoàn tất phép đo, chưa chốt cấu hình triển khai theo SR.
 
 Telemetry bổ sung: 120 mẫu, nhiệt độ ghi nhận 53–72°C; không phủ toàn bộ batch và không đủ để kết luận có/không throttle. Raw: `part3-runtime/telemetry.jsonl`.
+
+## Phép tính bổ sung và liên hệ 6 task
+
+[Bảng tính tái lập](CALCULATIONS_SMOLVLA.md#task-3--mức-giảm-so-control-cùng-batch) bổ sung phần trăm giảm latency/allocation và speedup cho từng cấu hình. Flash-mm giảm mean17,79%, speedup1,216× và giảm allocation45,61% so control runtime104,0ms/1912,47MiB. Q8-lm screening đã hoàn tất36/40; official của biến thể chưa đo. Xem [báo cáo đủ6task](REPORT_SMOLVLA.md) và [pruning](CALCULATIONS_SMOLVLA.md#task-6--ba-pruning-đã-implement-và-kiểm-tra).

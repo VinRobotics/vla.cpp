@@ -1,8 +1,8 @@
 {
-  "state": "running task 5",
-  "completed_tasks": 5,
-  "completed_episodes": 20,
-  "successes": 19,
+  "state": "complete",
+  "completed_tasks": 10,
+  "completed_episodes": 40,
+  "successes": 36,
   "expected_episodes": 40,
   "tasks": [
     {
@@ -64,6 +64,66 @@
         155
       ],
       "csv": "research-notes/smolvla-followup-20261104/screen40-variants/q8-lm/outputs/smolvla/libero_object/task_4/episodes.csv"
+    },
+    {
+      "task_id": 5,
+      "episodes": 4,
+      "successes": 3,
+      "steps": [
+        207,
+        500,
+        182,
+        243
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-variants/q8-lm/outputs/smolvla/libero_object/task_5/episodes.csv"
+    },
+    {
+      "task_id": 6,
+      "episodes": 4,
+      "successes": 4,
+      "steps": [
+        153,
+        178,
+        185,
+        180
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-variants/q8-lm/outputs/smolvla/libero_object/task_6/episodes.csv"
+    },
+    {
+      "task_id": 7,
+      "episodes": 4,
+      "successes": 4,
+      "steps": [
+        135,
+        166,
+        118,
+        141
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-variants/q8-lm/outputs/smolvla/libero_object/task_7/episodes.csv"
+    },
+    {
+      "task_id": 8,
+      "episodes": 4,
+      "successes": 4,
+      "steps": [
+        156,
+        150,
+        168,
+        172
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-variants/q8-lm/outputs/smolvla/libero_object/task_8/episodes.csv"
+    },
+    {
+      "task_id": 9,
+      "episodes": 4,
+      "successes": 2,
+      "steps": [
+        133,
+        500,
+        128,
+        500
+      ],
+      "csv": "research-notes/smolvla-followup-20261104/screen40-variants/q8-lm/outputs/smolvla/libero_object/task_9/episodes.csv"
     }
   ]
 }
