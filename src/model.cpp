@@ -353,6 +353,10 @@ const Stats& last_stats(const Model* m) {
     return m->impl->stats;
 }
 
+bool supports_prefix_cond(const Model* m) {
+    return m && m->impl && m->impl->supports_prefix_cond();
+}
+
 std::vector<float> predict(Model* m, const Inputs& in) {
     if (!m || !m->impl) return {};
     set_flash_attn(m->fa);

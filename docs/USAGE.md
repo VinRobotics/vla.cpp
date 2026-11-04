@@ -72,18 +72,35 @@ of jumping. Off by default; without it the output is bit-identical.
 
 | field | where | meaning |
 |---|---|---|
-| `prev_actions` | `PredictRequest` field 9, `vla_inputs.prev_actions` / `n_prev`, Python `predict(prev_actions=...)` | the not-yet-executed rest of the previous chunk, robot units (same as the output), whole rows of `max_action_dim`, at most `chunk_size` rows |
+| `prev_actions` | `PredictRequest` field 9, `vla_inputs.prev_actions` / `n_prev_actions`, Python `predict(prev_actions=...)` | the not-yet-executed rest of the previous chunk, robot units (same as the output), whole rows of `max_action_dim`, at most `chunk_size` rows |
 | `inference_delay` | `PredictRequest` field 10, `vla_inputs.inference_delay`, Python `predict(inference_delay=...)` | actions that run while this chunk is computed (d) |
 
 At every Euler step the predicted clean chunk is pulled onto `prev_actions`:
-`x1 = x_t - t v`, `v <- v - W (Y - x1) / t`, with `Y` the rows normalised like the
-output and `W` RTC's prefix weights (1 on the first d rows, exponential decay to
-0 at the last row of `prev_actions`). It is gradient-free: not RTC's
-vector-Jacobian guidance, which would need backward passes through the action
-expert (about 2.5x the per-step cost in the RTC paper, 1.9x per chunk for a
-PyTorch SmolVLA on a Jetson Orin NX) and backward rules ggml lacks for flash
-attention and `concat`. It adds a few elementwise ops per step. SmolVLA only; other architectures ignore the fields. Smoothness at
-the chunk switch has been measured offline; task success on hardware has not.
+`x1 = x_t - t v`, `v <- v - gw(t) W (Y - x1)`, with `Y` the rows normalised like the
+output (zero past the last row), and `W` and `gw(t)` LeRobot's `RTCProcessor` prefix
+weights and guidance weight (`gw` clamped by `max_guidance_weight`). It is
+gradient-free: the error is used directly, the default of huggingface/lerobot#4945,
+instead of the vector-Jacobian product, which would need backward passes through
+the action expert and backward rules ggml lacks for flash attention and `concat`.
+It adds a few elementwise ops per step. The behaviour is checked against LeRobot's
+code in `tests/test_prefix_cond.cpp`; smoothness at the chunk switch on recorded
+episodes and task success on hardware are not measured for this version.
+
+Alignment: row `i` of `prev_actions` is the action for the same timestep as row `i`
+of the new chunk (LeRobot's `prev_chunk_left_over`), `inference_delay` is how many
+of those rows will already have run when the new chunk arrives. The weights are
+never sent per request. They are load-time options, the `rtc_config` object of the
+model's `config.json`, with LeRobot's `RTCConfig` names and defaults:
+
+| `rtc_config` key | default | meaning |
+|---|---|---|
+| `execution_horizon` | 10 | rows over which the weights decay; cut to the length of `prev_actions` |
+| `max_guidance_weight` | 10.0 | clamp of `gw(t)` |
+| `prefix_attention_schedule` | `LINEAR` | `ZEROS`, `ONES`, `LINEAR` or `EXP` |
+
+SmolVLA only. Any other architecture refuses the input instead of ignoring it:
+`VLA_ERR_UNSUPPORTED` from `vla_predict`, `NotImplementedError` in Python, an error
+response from `vla-server`.
 
 ## Runtime flags
 

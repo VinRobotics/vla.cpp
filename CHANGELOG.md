@@ -6,16 +6,18 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 
-- **Prefix conditioning across chunks for SmolVLA** (gradient-free RTC, "prefix
-  overwrite"). `prev_actions` (the not-yet-executed rest of the previous chunk,
-  robot units) and `inference_delay` in `vla::Inputs`, `vla_inputs`
-  (`VLA_ABI_VERSION` 2), the Python bindings and `PredictRequest` (fields 9, 10).
-  At every denoise step the predicted clean chunk is pulled onto it with RTC's
-  prefix weights; no autograd, so it costs a few elementwise ops per step
-  (+0.4 ms on a Jetson Orin NX). Without `prev_actions` the output is unchanged
-  (bit-identical). On recorded SO-101 episodes it cuts the median jump at chunk
-  boundaries by 71-73 % and the first `inference_delay` rows match the previous
-  chunk exactly.
+- **Real-time chunking inputs for SmolVLA** (gradient-free). `prev_actions` (the
+  not-yet-executed rest of the previous chunk, denormalised like the output),
+  `n_prev_actions` and `inference_delay` in `vla::Inputs`, `vla_inputs`
+  (`VLA_ABI_VERSION` 2, new status `VLA_ERR_UNSUPPORTED`), the Python bindings and
+  `PredictRequest` (fields 9, 10). At every denoise step the predicted clean chunk is
+  pulled onto it with LeRobot's `RTCProcessor` prefix weights and clamped guidance
+  weight, no autograd (the error is used directly). The load-time options are the
+  `rtc_config` object of the model's `config.json` (`execution_horizon` 10,
+  `max_guidance_weight` 10.0, `prefix_attention_schedule` `LINEAR`, LeRobot's
+  `RTCConfig` defaults). Architectures other than SmolVLA refuse the input. Without
+  `prev_actions` the output is unchanged (bit-identical). Pinned against LeRobot's
+  code by `tests/test_prefix_cond.cpp`.
 - **New model: ACT** (LeRobot `policies/act`). `scripts/convert_act_to_gguf.py`
   converts a LeRobot `pretrained_model` directory, folding the ResNet's frozen
   batch norms and dropping the training-only VAE encoder. No language input, so

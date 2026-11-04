@@ -43,6 +43,7 @@ typedef enum {
     VLA_ERR_ARG        = -1,  ///< Null handle or malformed vla_inputs.
     VLA_ERR_PREDICT    = -2,  ///< The engine returned no actions.
     VLA_ERR_EXCEPTION  = -3,  ///< A C++ exception was caught at the boundary.
+    VLA_ERR_UNSUPPORTED = -4, ///< The loaded architecture does not support a requested input (prev_actions).
 } vla_status;
 
 typedef enum {
@@ -125,12 +126,16 @@ typedef struct {
 
     int32_t           timing_detail;  ///< A vla_timing_detail value.
 
-    /// Optional prefix conditioning, SmolVLA only: the not-yet-executed rest of
-    /// the previous chunk in robot units, n_prev rows of max_action_dim. NULL
-    /// disables it.
+    /// Optional real-time chunking (SmolVLA): the not-yet-executed rest of the
+    /// previous chunk, row-major, n_prev_actions rows of max_action_dim, in the
+    /// denormalised space vla_predict returns (the engine normalises and pads).
+    /// Row i is the action for the same timestep as row i of the new chunk.
+    /// NULL disables it. Archs without support return VLA_ERR_UNSUPPORTED when
+    /// it is set. The weights come from inference_delay and the model's
+    /// rtc_config (load-time, LeRobot's RTCConfig defaults), never per request.
     const float *     prev_actions;
-    int32_t           n_prev;
-    int32_t           inference_delay;  ///< Steps that run before this chunk starts.
+    int32_t           n_prev_actions;
+    int32_t           inference_delay;  ///< How many rows of prev_actions will have run when this chunk arrives.
 } vla_inputs;
 
 /// Milliseconds. Phase fields are zero unless timing_detail was VLA_TIMING_PHASE.

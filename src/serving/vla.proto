@@ -32,7 +32,7 @@ message PredictRequest {
 
   repeated uint32 attention_mask = 8;
 
-  // Optional prefix conditioning (SmolVLA): the not-yet-executed rest of the
+  // Optional real-time chunking (SmolVLA): the not-yet-executed rest of the
   // previous chunk in robot units, whole rows of action_dim, at most chunk_size
   // rows; empty disables it. inference_delay: steps that run before this chunk.
   repeated float prev_actions    = 9;

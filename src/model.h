@@ -45,7 +45,19 @@ struct Options;
  * @c [num_steps, max_action_dim] in row-major order; only the first
  * @c real_action_dim columns are valid, the rest are zero padding.
  */
+/// Real-time chunking schedule of the prefix weights (LeRobot's RTCAttentionSchedule).
+enum class RtcSchedule { ZEROS, ONES, LINEAR, EXP };
+
+/// Load-time RTC options, read from the model's config.json key `rtc_config` (LeRobot's
+/// RTCConfig names and defaults): execution_horizon 10, max_guidance_weight 10.0, LINEAR.
+struct RtcConfig {
+    int         execution_horizon   = 10;
+    float       max_guidance_weight = 10.0f;
+    RtcSchedule schedule            = RtcSchedule::LINEAR;
+};
+
 struct Config {
+    RtcConfig rtc;            ///< Real-time chunking options (see @ref RtcConfig).
     int64_t n_img;            ///< Image-token count fed to the LM.
     int64_t n_lang;           ///< Language-token capacity.
 
@@ -152,14 +164,14 @@ struct Inputs {
 
     TimingDetail     timing_detail    = TimingDetail::NONE;
 
-    /// Optional prefix conditioning across chunks (SmolVLA only; other
-    /// architectures ignore it): the not-yet-executed rest of the previous
-    /// chunk, robot units, @ref n_prev rows of @c max_action_dim. At every
-    /// denoise step the predicted clean chunk is pulled onto it with RTC's
-    /// prefix weights (1 on the first @ref inference_delay rows, exponential
-    /// decay to 0 at row @ref n_prev), without gradients. nullptr disables it.
+    /// Optional real-time chunking across chunks (SmolVLA only; the engine rejects
+    /// it for other architectures, see @ref supports_prefix_cond): the not-yet-executed
+    /// rest of the previous chunk, robot units, @ref n_prev_actions rows of
+    /// @c max_action_dim. At every denoise step the predicted clean chunk is pulled
+    /// onto it with LeRobot's RTC prefix weights and guidance weight (@ref RtcConfig),
+    /// without gradients (the error is used directly). nullptr disables it.
     const float*     prev_actions     = nullptr;
-    int              n_prev           = 0;
+    int              n_prev_actions   = 0;
     int              inference_delay  = 0; ///< Steps that run before this chunk starts.
 };
 
@@ -212,6 +224,9 @@ const Config& model_config(const Model* m);
  *         row-major order (first @c real_action_dim columns valid).
  */
 std::vector<float> predict(Model* m, const Inputs& in);
+
+/// True when the loaded architecture honours Inputs::prev_actions (false for a null model).
+bool supports_prefix_cond(const Model* m);
 
 /**
  * @brief Wall-clock timings of the most recent @ref predict call.

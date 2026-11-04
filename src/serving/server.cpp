@@ -449,6 +449,10 @@ int main(int argc, char ** argv) {
         }
 
         const int n_prev_vals = req.prev_actions_size();
+        if (n_prev_vals > 0 && !vla::supports_prefix_cond(model)) {
+            send_reply(make_error_response(rid, "this architecture does not support prev_actions (real-time chunking)"));
+            continue;
+        }
         if (n_prev_vals % int(cfg.max_action_dim) != 0 || n_prev_vals > expected_noise_n) {
             char buf[160]; std::snprintf(buf, sizeof(buf),
                 "prev_actions length %d is not whole rows of %lld (at most %d values)",
@@ -575,7 +579,7 @@ int main(int argc, char ** argv) {
         in.attention_mask_n = static_cast<int>(attn_mask_vec.size());
         in.timing_detail    = timing_detail;
         in.prev_actions     = prev_vec.empty() ? nullptr : prev_vec.data();
-        in.n_prev           = static_cast<int>(prev_vec.size()/size_t(cfg.max_action_dim));
+        in.n_prev_actions   = static_cast<int>(prev_vec.size()/size_t(cfg.max_action_dim));
         in.inference_delay  = static_cast<int>(req.inference_delay());
 
         std::vector<float> action_chunk = vla::predict(model, in);

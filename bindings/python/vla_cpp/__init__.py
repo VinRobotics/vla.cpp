@@ -86,7 +86,7 @@ class Model:
 
         images: one HWC array, or a sequence of them for multi-view. uint8 RGB by
         default; pass pixel_format=PIXEL_F32_RGB_01 for float RGB in [0, 1].
-        prev_actions: optional (n_prev, max_action_dim) rest of the previous chunk
+        prev_actions: optional (n_prev_actions, max_action_dim) rest of the previous chunk
         in robot units (SmolVLA prefix conditioning); inference_delay: steps that
         run before this chunk starts.
         """
@@ -145,7 +145,7 @@ class Model:
             prev_ptr, prev_keep = _as_f32_array(flat, len(flat), "prev_actions")
             keep.append(prev_keep)
             cin.prev_actions = ctypes.cast(prev_ptr, POINTER(c_float))
-            cin.n_prev = len(flat) // cols
+            cin.n_prev_actions = len(flat) // cols
             cin.inference_delay = int(inference_delay)
 
         out = POINTER(c_float)()
@@ -154,6 +154,8 @@ class Model:
             if self._h is None:
                 raise RuntimeError("model is closed")
             rc = self._lib.vla_predict(self._h, ctypes.byref(cin), ctypes.byref(out), ctypes.byref(n))
+            if rc == _ffi.ERR_UNSUPPORTED:
+                raise NotImplementedError("this architecture does not support prev_actions (real-time chunking)")
             if rc != _ffi.OK:
                 raise RuntimeError(f"vla_predict failed ({rc})")
             try:

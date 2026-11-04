@@ -21,6 +21,7 @@ OK = 0
 ERR_ARG = -1
 ERR_PREDICT = -2
 ERR_EXCEPTION = -3
+ERR_UNSUPPORTED = -4
 
 PIXEL_U8 = 0
 PIXEL_F32_RGB_01 = 1
@@ -87,7 +88,7 @@ class Inputs(ctypes.Structure):
         ("attention_mask_n", c_int32),
         ("timing_detail", c_int32),
         ("prev_actions", POINTER(c_float)),
-        ("n_prev", c_int32),
+        ("n_prev_actions", c_int32),
         ("inference_delay", c_int32),
     ]
 

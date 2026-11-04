@@ -103,6 +103,10 @@ public:
      *         @c cfg.num_steps*cfg.real_action_dim.
      */
     virtual std::vector<float> predict(const Inputs& in) = 0;
+
+    /// True when predict() honours Inputs::prev_actions (real-time chunking). The
+    /// engine refuses the input for archs that return false instead of ignoring it.
+    virtual bool supports_prefix_cond() const { return false; }
 };
 
 /**

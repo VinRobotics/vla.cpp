@@ -45,6 +45,7 @@
 #include <map>
 #include <memory>
 #include <random>
+#include <cctype>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -241,6 +242,7 @@ struct SmolVLAModelArch : public ModelArchBase {
     ~SmolVLAModelArch() override;
 
     std::vector<float> predict(const Inputs& in) override;
+    bool supports_prefix_cond() const override { return true; }
 
     // In-tree SigLIP-B/16 vision tower (was llama.cpp clip.cpp mmproj).
     int64_t vit_hidden = 768, vit_layers = 12, vit_heads = 12, vit_inter = 3072;
@@ -362,6 +364,37 @@ bool load_config_from_json(const std::string & path, Config & cfg) {
     for (const char * k : {"adapt_to_pi_aloha", "add_image_special_tokens"}) {
         if (j.contains(k) && j[k].is_boolean() && j[k].get<bool>()) {
             std::fprintf(stderr, "vla(smolvla): %s=true in %s is not supported\n", k, path.c_str());
+            return false;
+        }
+    }
+
+    // Real-time chunking options, LeRobot's RTCConfig names and defaults (execution_horizon 10,
+    // max_guidance_weight 10.0, prefix_attention_schedule LINEAR); `enabled` / `mode` / `debug` are ignored.
+    if (j.contains("rtc_config") && j["rtc_config"].is_object()) {
+        const json & r = j["rtc_config"];
+        try {
+            if (r.contains("execution_horizon") && !r["execution_horizon"].is_null())
+                cfg.rtc.execution_horizon = r["execution_horizon"].get<int>();
+            if (r.contains("max_guidance_weight") && !r["max_guidance_weight"].is_null())
+                cfg.rtc.max_guidance_weight = r["max_guidance_weight"].get<float>();
+            if (r.contains("prefix_attention_schedule") && !r["prefix_attention_schedule"].is_null()) {
+                std::string s = r["prefix_attention_schedule"].get<std::string>();
+                for (char & c : s) c = char(std::toupper((unsigned char) c));
+                if      (s == "ZEROS")  cfg.rtc.schedule = RtcSchedule::ZEROS;
+                else if (s == "ONES")   cfg.rtc.schedule = RtcSchedule::ONES;
+                else if (s == "LINEAR") cfg.rtc.schedule = RtcSchedule::LINEAR;
+                else if (s == "EXP")    cfg.rtc.schedule = RtcSchedule::EXP;
+                else {
+                    std::fprintf(stderr, "vla(smolvla): unknown rtc_config.prefix_attention_schedule '%s' in %s\n", s.c_str(), path.c_str());
+                    return false;
+                }
+            }
+        } catch (const json::exception & e) {
+            std::fprintf(stderr, "vla(smolvla): bad rtc_config in %s: %s\n", path.c_str(), e.what());
+            return false;
+        }
+        if (cfg.rtc.execution_horizon <= 0 || !(cfg.rtc.max_guidance_weight > 0.f)) {
+            std::fprintf(stderr, "vla(smolvla): rtc_config needs execution_horizon > 0 and max_guidance_weight > 0 (%s)\n", path.c_str());
             return false;
         }
     }
@@ -1286,9 +1319,11 @@ void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::Mai
             }
         }
         ggml_tensor * v_t = linear(ctx, m->W_aout, m->b_aout, rms_norm(ctx, h, m->Wnorm_expert, cfg.rms_eps));
-        // Prefix conditioning (gradient-free RTC, layers/prefix_cond.h). W = 0
-        // leaves v_t unchanged.
-        v_t = prefix_cond_velocity(ctx, x_t, v_t, io.prefix_y, io.prefix_w, 1.f+float(step)*dt);
+        // Real-time chunking (gradient-free, layers/prefix_cond.h; LeRobot's guidance weight
+        // clamped by rtc_config.max_guidance_weight). W = 0 leaves v_t unchanged.
+        const float t_flow = 1.f+float(step)*dt;
+        v_t = prefix_cond_velocity(ctx, x_t, v_t, io.prefix_y, io.prefix_w, t_flow,
+                                   guidance_weight(t_flow, cfg.rtc.max_guidance_weight));
         x_t = ggml_add(ctx, x_t, ggml_scale(ctx, v_t, dt));
     }
 
@@ -1466,8 +1501,8 @@ std::vector<float> predict_impl(SmolVLAModelArch* m, const Inputs& in) {
     // Prefix conditioning: rows of the previous chunk not yet executed, in model
     // space, with RTC's prefix weights (layers/prefix_cond.h).
     std::vector<float> prefix_w_host, prefix_y_host;
-    prefix_cond_inputs(in.prev_actions, in.n_prev, in.inference_delay, cfg.n_suffix, cfg.max_action_dim,
-                       cfg.real_action_dim, m->action_mean.data(), m->action_std.data(), cfg.norm_eps,
+    prefix_cond_inputs(in.prev_actions, in.n_prev_actions, in.inference_delay, cfg.n_suffix, cfg.max_action_dim,
+                       cfg.real_action_dim, m->action_mean.data(), m->action_std.data(), cfg.norm_eps, cfg.rtc,
                        prefix_w_host, prefix_y_host);
 
     std::vector<int32_t> lang_host(n_lang, 0);

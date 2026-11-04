@@ -38,6 +38,7 @@ add_test(NAME dit_common COMMAND test_dit_common)
 
 add_executable(test_prefix_cond test_prefix_cond.cpp)
 target_include_directories(test_prefix_cond PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(test_prefix_cond PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(test_prefix_cond PRIVATE ggml)
 target_compile_options(test_prefix_cond PRIVATE -Wall -Wextra)
 add_test(NAME prefix_cond COMMAND test_prefix_cond)
