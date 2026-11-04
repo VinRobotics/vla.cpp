@@ -5,9 +5,9 @@ to take once it ran.
 
 > **Status: running on Windows on Arm and on a Dragonwing IQ-10 under Linux.**
 > vla.cpp builds with `GGML_HEXAGON=ON` and runs eleven checkpoints on a
-> Snapdragon X laptop's v73 NPU and six on an IQ-10's v81 NPU under Linux, each
-> checked against a CPU reference. The laptop build, its measurements and the
-> upstream bugs found along the way are in
+> Snapdragon X laptop's v73 NPU and twelve on an IQ-10's v81 NPU under Linux,
+> each checked against a CPU reference. The laptop build, its measurements and
+> the upstream bugs found along the way are in
 > [hexagon-windows.md](hexagon-windows.md); the Linux board is in [Linux
 > (IQ-10)](#linux-iq-10). What follows is the backend in general: the parts that
 > hold on any Snapdragon part, and the IQ-9 and multi-NPU notes from before
