@@ -89,8 +89,10 @@ episodes and task success on hardware are not measured for this version.
 Alignment: row `i` of `prev_actions` is the action for the same timestep as row `i`
 of the new chunk (LeRobot's `prev_chunk_left_over`), `inference_delay` is how many
 of those rows will already have run when the new chunk arrives. The weights are
-never sent per request. They are load-time options, the `rtc_config` object of the
-model's `config.json`, with LeRobot's `RTCConfig` names and defaults:
+never sent per request. They are load-time options, the `rtc_config` object of a
+`config.json` (the model directory's for safetensors; for a GGUF, which carries its
+own config, the file given as `--config` / `config_path`), with LeRobot's `RTCConfig`
+names and defaults. The engine prints the values in use at load time:
 
 | `rtc_config` key | default | meaning |
 |---|---|---|

@@ -13,7 +13,8 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   `PredictRequest` (fields 9, 10). At every denoise step the predicted clean chunk is
   pulled onto it with LeRobot's `RTCProcessor` prefix weights and clamped guidance
   weight, no autograd (the error is used directly). The load-time options are the
-  `rtc_config` object of the model's `config.json` (`execution_horizon` 10,
+  `rtc_config` object of a `config.json` (the model directory's, or the `--config` /
+  `config_path` file for a GGUF; `execution_horizon` 10,
   `max_guidance_weight` 10.0, `prefix_attention_schedule` `LINEAR`, LeRobot's
   `RTCConfig` defaults). Architectures other than SmolVLA refuse the input. Without
   `prev_actions` the output is unchanged (bit-identical). Pinned against LeRobot's

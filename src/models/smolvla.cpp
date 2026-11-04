@@ -348,6 +348,57 @@ void set_derived_config(Config & cfg) {
     cfg.rope_n_dims = static_cast<int>(cfg.head_dim);
 }
 
+// Real-time chunking options, LeRobot's RTCConfig names and defaults (execution_horizon 10,
+// max_guidance_weight 10.0, prefix_attention_schedule LINEAR); `enabled` / `mode` / `debug` are ignored.
+// Read from the `rtc_config` object of a config.json; absent or null keeps the defaults.
+bool parse_rtc_config(const json & j, const std::string & path, Config & cfg) {
+    if (!j.contains("rtc_config") || !j["rtc_config"].is_object()) return true;
+    const json & r = j["rtc_config"];
+    try {
+        if (r.contains("execution_horizon") && !r["execution_horizon"].is_null())
+            cfg.rtc.execution_horizon = r["execution_horizon"].get<int>();
+        if (r.contains("max_guidance_weight") && !r["max_guidance_weight"].is_null())
+            cfg.rtc.max_guidance_weight = r["max_guidance_weight"].get<float>();
+        if (r.contains("prefix_attention_schedule") && !r["prefix_attention_schedule"].is_null()) {
+            std::string s = r["prefix_attention_schedule"].get<std::string>();
+            for (char & c : s) c = char(std::toupper((unsigned char) c));
+            if      (s == "ZEROS")  cfg.rtc.schedule = RtcSchedule::ZEROS;
+            else if (s == "ONES")   cfg.rtc.schedule = RtcSchedule::ONES;
+            else if (s == "LINEAR") cfg.rtc.schedule = RtcSchedule::LINEAR;
+            else if (s == "EXP")    cfg.rtc.schedule = RtcSchedule::EXP;
+            else {
+                std::fprintf(stderr, "vla(smolvla): unknown rtc_config.prefix_attention_schedule '%s' in %s\n", s.c_str(), path.c_str());
+                return false;
+            }
+        }
+    } catch (const json::exception & e) {
+        std::fprintf(stderr, "vla(smolvla): bad rtc_config in %s: %s\n", path.c_str(), e.what());
+        return false;
+    }
+    if (cfg.rtc.execution_horizon <= 0 || !(cfg.rtc.max_guidance_weight > 0.f)) {
+        std::fprintf(stderr, "vla(smolvla): rtc_config needs execution_horizon > 0 and max_guidance_weight > 0 (%s)\n", path.c_str());
+        return false;
+    }
+    return true;
+}
+
+// A GGUF checkpoint carries its own config; an explicit config path then supplies only the rtc_config.
+bool load_rtc_override(const std::string & path, Config & cfg) {
+    std::ifstream f(path);
+    if (!f) {
+        std::fprintf(stderr, "vla: cannot open config %s\n", path.c_str());
+        return false;
+    }
+    json j;
+    try {
+        f >> j;
+    } catch (const json::exception & e) {
+        std::fprintf(stderr, "vla: failed to parse %s: %s\n", path.c_str(), e.what());
+        return false;
+    }
+    return parse_rtc_config(j, path, cfg);
+}
+
 bool load_config_from_json(const std::string & path, Config & cfg) {
     std::ifstream f(path);
     if (!f) {
@@ -368,36 +419,8 @@ bool load_config_from_json(const std::string & path, Config & cfg) {
         }
     }
 
-    // Real-time chunking options, LeRobot's RTCConfig names and defaults (execution_horizon 10,
-    // max_guidance_weight 10.0, prefix_attention_schedule LINEAR); `enabled` / `mode` / `debug` are ignored.
-    if (j.contains("rtc_config") && j["rtc_config"].is_object()) {
-        const json & r = j["rtc_config"];
-        try {
-            if (r.contains("execution_horizon") && !r["execution_horizon"].is_null())
-                cfg.rtc.execution_horizon = r["execution_horizon"].get<int>();
-            if (r.contains("max_guidance_weight") && !r["max_guidance_weight"].is_null())
-                cfg.rtc.max_guidance_weight = r["max_guidance_weight"].get<float>();
-            if (r.contains("prefix_attention_schedule") && !r["prefix_attention_schedule"].is_null()) {
-                std::string s = r["prefix_attention_schedule"].get<std::string>();
-                for (char & c : s) c = char(std::toupper((unsigned char) c));
-                if      (s == "ZEROS")  cfg.rtc.schedule = RtcSchedule::ZEROS;
-                else if (s == "ONES")   cfg.rtc.schedule = RtcSchedule::ONES;
-                else if (s == "LINEAR") cfg.rtc.schedule = RtcSchedule::LINEAR;
-                else if (s == "EXP")    cfg.rtc.schedule = RtcSchedule::EXP;
-                else {
-                    std::fprintf(stderr, "vla(smolvla): unknown rtc_config.prefix_attention_schedule '%s' in %s\n", s.c_str(), path.c_str());
-                    return false;
-                }
-            }
-        } catch (const json::exception & e) {
-            std::fprintf(stderr, "vla(smolvla): bad rtc_config in %s: %s\n", path.c_str(), e.what());
-            return false;
-        }
-        if (cfg.rtc.execution_horizon <= 0 || !(cfg.rtc.max_guidance_weight > 0.f)) {
-            std::fprintf(stderr, "vla(smolvla): rtc_config needs execution_horizon > 0 and max_guidance_weight > 0 (%s)\n", path.c_str());
-            return false;
-        }
-    }
+    if (!parse_rtc_config(j, path, cfg))
+        return false;
 
     cfg.hidden        = 960;
     cfg.n_q_heads     = 15;
@@ -835,11 +858,20 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
         if (!gst.open(ckpt_path) || !load_config_from_gguf(gst, m->cfg))
             return nullptr;
         std::printf("vla: config = %s (gguf KV)\n", ckpt_path.c_str());
+        if (!config_path.empty()) {
+            if (!load_rtc_override(config_path, m->cfg))
+                return nullptr;
+            std::printf("vla: rtc_config read from %s\n", config_path.c_str());
+        }
     } else {
         if (!load_config_from_json(cfg_path, m->cfg))
             return nullptr;
         std::printf("vla: config = %s\n", cfg_path.c_str());
     }
+    std::printf("vla(smolvla): rtc execution_horizon=%d max_guidance_weight=%g schedule=%s\n", m->cfg.rtc.execution_horizon,
+                (double) m->cfg.rtc.max_guidance_weight,
+                m->cfg.rtc.schedule == RtcSchedule::ZEROS ? "ZEROS" : m->cfg.rtc.schedule == RtcSchedule::ONES ? "ONES"
+                : m->cfg.rtc.schedule == RtcSchedule::EXP ? "EXP" : "LINEAR");
     if (!resolve_num_steps("smolvla", opts, m->cfg.num_steps))
         return nullptr;
 
