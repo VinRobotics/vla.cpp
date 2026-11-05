@@ -676,7 +676,7 @@ class VlaCppClient:
             return self._predict_chunk_gr00t_n1_7(observations)
         if self.arch == "gr00t_n1_5":
             return self._predict_chunk_gr00t_n1_5(observations)
-        if self.arch == "gr00t_n1_6":
+        if self.arch == "gr00t_n1_6" and "observation.state" not in observations:
             return self._predict_chunk_gr00t_n1_6(observations)
         if self.arch == "pi05":
             return self._predict_chunk_pi05(observations)
@@ -709,11 +709,29 @@ class VlaCppClient:
         task = observations.get("task", "")
         if isinstance(task, bytes):
             task = task.decode()
-        if not task.endswith("\n"):
-            task = task + "\n"
-        toks = self.tok(task, padding=False, truncation=True,
-                        max_length=self.max_length, return_tensors="np")
-        lang = toks["input_ids"][0].astype(np.int32)
+        if self.arch == "gr00t_n1_6":
+            # Parsers provide CHW images, normalized state and formatted task
+            # text through the common observation schema. Keep the legacy
+            # video/state modality path above for existing callers.
+            tokens_per_view = (self.image_size // 28) ** 2
+            image_blocks = "".join(
+                f"<image {i + 1}><img>" + "<IMG_CONTEXT>" * tokens_per_view + "</img>"
+                for i in range(len(images_f32))
+            )
+            text = self.tok.apply_chat_template(
+                [{"role": "user", "content": task + image_blocks}],
+                tokenize=False, add_generation_prompt=False,
+            )
+            ids = self.tok(text, add_special_tokens=False)["input_ids"]
+            if ids.count(self._GR00T_N16_IMG_PAD_ID) != len(images_f32) * tokens_per_view:
+                raise ValueError("Tokenizer <IMG_CONTEXT> slots do not match the camera images")
+            lang = np.asarray(ids, dtype=np.int32)
+        else:
+            if not task.endswith("\n"):
+                task = task + "\n"
+            toks = self.tok(task, padding=False, truncation=True,
+                            max_length=self.max_length, return_tensors="np")
+            lang = toks["input_ids"][0].astype(np.int32)
 
         req = self.pb.PredictRequest()
         req.request_id = self._step
