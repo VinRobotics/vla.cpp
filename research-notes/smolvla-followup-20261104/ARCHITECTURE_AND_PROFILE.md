@@ -1,6 +1,6 @@
 # SmolVLA: kiến trúc và giới hạn profiling
 
-Cập nhật 04/11/2026. Tài liệu kiến trúc từ paper và source, đã bổ sung kết quả trace ở cuối. Các đoạn kế hoạch được giữ làm giải thích phương pháp; số liệu hiện tại ở mục Kết quả profiling.
+Cập nhật 05/11/2026; số đo gốc ngày 04/11/2026. Tài liệu kiến trúc từ paper và source, đã bổ sung kết quả trace ở cuối. Các đoạn kế hoạch được giữ làm giải thích phương pháp; số liệu hiện tại ở mục Kết quả profiling.
 
 ## Paper và checkpoint đang dùng
 
@@ -104,7 +104,7 @@ Kế hoạch trace kernel dùng node và capture-range=cudaProfilerApi: load mod
 
 ## Kết quả profiling đã đo
 
-20predict sau3warmup, capture-range=cudaProfilerApi, cuda-graph-trace=node. Timing PHASE không tương đương throughput default vì topology/padding và graph/copy khác.
+20predict sau3warmup, capture-range=cudaProfilerApi, cuda-graph-trace=node. Timing PHASE không tương đương throughput default vì topology/padding và graph/copy khác. **Audit 05/11 phát hiện cả hai default-path node trace có diagnostic `Not all CUDA events might have been collected.`; mọi tổng/tỷ lệ chỉ mô tả sự kiện đã ghi nhận, chưa chứng minh trace đầy đủ.**
 
 | Cấu hình | Vision+connector GPU active ms | Prefill GPU active ms | Denoise+crossKV GPU active ms |
 |---|---:|---:|---:|
@@ -116,3 +116,14 @@ Kế hoạch trace kernel dùng node và capture-range=cudaProfilerApi: load mod
 Attribution theo vision graph và biên D2D KV copy từ source, kiểm tra đủ kernel không thiếu/trùng. Cách ban đầu đếm80graph launch thất bại do có direct launches; log lỗi được giữ. Cách sửa dùng1280KVcopies mặc định hoặc1200 cho30layer; xem summarize_phase_boundaries.py và kernel-phase-traces/*.boundaries.json. Active time loại khoảng trống, không phải wall time riêng module.
 
 Trace default path: tổng duration kernel2260,227ms →1733,185ms (flash-mm); GEMM theo tên58,30% →51,85%; gaps trong traced GPU activity10,54% →9,13%. GEMM gồm cả phép nhân attention; gaps chưa chứng minh toàn GPU rảnh hoặc nguyên nhân CPU. Raw kernel-traces/*.summary.json. Không gọi flash-mm là best theo SR; mới là ứng viên runtime nhanh.
+
+
+## Audit Task 5 ngày 05/11/2026 — kết luận cập nhật
+
+CPU timer steady_clock trong predict_impl gọi `ggml_backend_graph_compute`; source dependency `ggml-backend.cpp:455–458` gọi async compute rồi backend synchronize. Có chờ GPU nhưng vẫn gồm host dispatch/wait/gaps, không phải CUDA event hoặc pure active time. PHASE dùng16token thay padding48 và KV leaves/copies; xem [phạm vi từng timer và bảng phase wall](../task5-profiling/timing-methodology.md).
+
+Audit sáu log runtime-full-pair khớp runs.json. Trung vị ba run means 114,1/92,4 ms; trung vị run p50 114,1/92,5 và p90 115,4/93,0 ms. Không dùng minimum run113,9/91,5 làm số đại diện mới. Tất cả là dữ liệu lịch sử được kiểm tra lại, không GPU measurements mới. Model hash hiện tại khớp lịch sử; source/binary identity chưa được chứng minh bằng rebuild.
+
+Cả hai trace có cảnh báo completeness nêu trên, hardware tracing unsupported nên dùng legacy software tracing, Unified Memory không trace được. Không có diagnostic lost/drop không chứng minh đầy đủ. Phase boundary analyzer pass kiểm tra1280KVcopies và bao phủ recorded kernels, không bảo đảm capture đã có mọi event. CUDA API StreamSynchronize duration overlap GPU execution, không cộng thêm với kernel duration thành overhead. Chưa xác định launch overhead độc lập hay nguyên nhân từng gap.
+
+Kiến trúc, tensor shapes/source anchors, giải thích các khái niệm, evidence SHA256 và reproduction được tập hợp trong [phụ lục Task 5](../task5-profiling/README.md). Flash-mm screening35/40 so defaults38/40 chưa chứng minh best chất lượng. Hai CUDA tests chưa rerun do GPU có server hoạt động; không tuyên bố Task5 hoàn tất vô điều kiện.

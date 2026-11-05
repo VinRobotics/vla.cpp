@@ -1,0 +1,348 @@
+{
+  "commit": "92d134a7557f4580f3b8c14042c1bad61c3f1d7c",
+  "scope": "Offline reanalysis of historical evidence; no new GPU measurements",
+  "benchmark_median_of_three_run_statistics": {
+    "defaults": {
+      "mean_ms": 114.1,
+      "p50_ms": 114.1,
+      "p90_ms": 115.4,
+      "vision_ms": 56.1
+    },
+    "flash-mm": {
+      "mean_ms": 92.4,
+      "p50_ms": 92.5,
+      "p90_ms": 93.0,
+      "vision_ms": 43.6
+    }
+  },
+  "phase_mean_of_three_20_prediction_runs": {
+    "defaults": {
+      "ms_total": 235.68175404866537,
+      "ms_vision": 57.53474769592285,
+      "ms_prefill": 20.891171264648438,
+      "ms_denoise": 108.41351114908855,
+      "unaccounted_ms": 48.842322794596356
+    },
+    "flash-mm": {
+      "ms_total": 187.6772310892741,
+      "ms_vision": 43.98483416239421,
+      "ms_prefill": 15.13095547358195,
+      "ms_denoise": 84.58441422780355,
+      "unaccounted_ms": 43.977027384440106
+    }
+  },
+  "traces": {
+    "defaults": {
+      "kernel_count": 160020,
+      "summed_kernel_ms": 2260.227312,
+      "groups": {
+        "other": {
+          "calls": 72800,
+          "summed_ms": 326.800355
+        },
+        "GEMM_including_attention_products": {
+          "calls": 48160,
+          "summed_ms": 1317.748686
+        },
+        "softmax_or_RoPE": {
+          "calls": 11340,
+          "summed_ms": 446.447784
+        },
+        "norm": {
+          "calls": 14300,
+          "summed_ms": 39.28837
+        },
+        "attention_named": {
+          "calls": 13420,
+          "summed_ms": 129.942117
+        }
+      },
+      "activity_span_ms": 2541.98674,
+      "activity_union_ms": 2274.032569,
+      "gap_ms": 267.954171,
+      "gap_fraction": 0.10541131736981445,
+      "max_gap_ms": 16.748886,
+      "memcpy": {
+        "count": 340,
+        "bytes": 279408480,
+        "summed_ms": 17.339642
+      },
+      "runtime_api": [
+        {
+          "name": "cudaStreamSynchronize_v3020",
+          "calls": 360,
+          "summed_ms": 2096.295227
+        },
+        {
+          "name": "cudaGraphLaunch_v10000",
+          "calls": 60,
+          "summed_ms": 227.510787
+        },
+        {
+          "name": "cudaMemcpyAsync_v3020",
+          "calls": 300,
+          "summed_ms": 31.280731
+        },
+        {
+          "name": "cuProfilerStart",
+          "calls": 1,
+          "summed_ms": 0.035788
+        },
+        {
+          "name": "cudaDeviceSynchronize_v3020",
+          "calls": 1,
+          "summed_ms": 0.0113
+        }
+      ],
+      "diagnostics": [
+        "Process was launched by the profiler, see /tmp/nvidia/nsight_systems/quadd_session_1084041/streams/pid_84054_stdout.log and stderr.log for program output",
+        "Common injection library initialized successfully.",
+        "Buffers holding CUDA trace data will be flushed on CudaProfilerStop() call. See --flush-on-cudaprofilerstop to control this behavior.",
+        "Loaded CUPTI library: /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/libcupti.so.13.3",
+        "Enabling trace for device graph launch",
+        "CUDA injection initialized successfully.",
+        "CUDA device 0: Unified Memory cannot be traced on devices that don't support peer-to-peer transfers.Please verify that SLI/NVLink is functioning properly.",
+        "Profiling has started.",
+        "Profiling started due to cudaProfilerStart API invoked in the application.",
+        "Not all CUDA events might have been collected.",
+        "Number of CUDA events collected: \t161642.",
+        "Profiling has stopped.",
+        "CUDA hardware tracing is not supported on this system. A legacy (software instrumented) trace was collected instead.",
+        "Number of CUPTI events produced: \t162024, CUPTI buffers: 50.",
+        "S3EventHandler: S3 trace events were not found, not creating counters"
+      ],
+      "top_kernels": [
+        {
+          "name": "void <unnamed>::k_softmax_rows_loop<(int)1024, float>(float *, int, int, float, const T2 *, int, long)",
+          "calls": 480,
+          "summed_ms": 402.821843
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_64x64_16x6_tn_align4>(T1::Params)",
+          "calls": 10820,
+          "summed_ms": 368.373173
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_64x64_32x6_tn_align4>(T1::Params)",
+          "calls": 20480,
+          "summed_ms": 301.899495
+        },
+        {
+          "name": "ampere_s1688gemm_bf16_128x128_ldg8_stages_32x1_tn",
+          "calls": 960,
+          "summed_ms": 204.174625
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_64x64_16x10_tn_align4>(T1::Params)",
+          "calls": 13000,
+          "summed_ms": 195.835265
+        },
+        {
+          "name": "ampere_s1688gemm_bf16_64x128_sliced1x2_ldg8_tn",
+          "calls": 1920,
+          "summed_ms": 125.511352
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_256x64_16x4_tn_align4>(T1::Params)",
+          "calls": 480,
+          "summed_ms": 114.616958
+        },
+        {
+          "name": "void flash_attn_ext_f16<(int)64, (int)64, (int)64, (int)1, (bool)0, (bool)0, (bool)0>(const char *, const char *, const char *, const char *, const char *, const int *, float *, float2 *, float, float, float, float, unsigned int, float, int, uint3, int, int, int, int, int, int, int, int, int, int, int, long, int, int, long, int, int, int, int, int, long)",
+          "calls": 7020,
+          "summed_ms": 109.06193
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)",
+          "calls": 23540,
+          "summed_ms": 79.127762
+        },
+        {
+          "name": "void rope_neox<(bool)1, (bool)0, float, float>(const T3 *, T4 *, int, int, int, int, int, int, int, int, int, int, int, const int *, float, float, float, rope_corr_dims, float, const float *, const long *, int, bool)",
+          "calls": 10860,
+          "summed_ms": 43.625941
+        },
+        {
+          "name": "void k_bin_bcast<&op_add, float, float, float, const float *>(const T2 *, const T3 *, T4 *, unsigned int, unsigned int, unsigned int, uint3, uint3, uint3, uint3, uint3, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, T5...)",
+          "calls": 15160,
+          "summed_ms": 38.935014
+        },
+        {
+          "name": "void rms_norm_f32<(int)256, (bool)1, (bool)0, (bool)0>(const float *, float *, int, long, long, long, float, const float *, long, long, long, uint3, uint3, uint3, uint3, const float *, long, long, long, uint3, uint3, uint3, uint3, float)",
+          "calls": 14260,
+          "summed_ms": 38.244493
+        }
+      ]
+    },
+    "flash-mm": {
+      "kernel_count": 194100,
+      "summed_kernel_ms": 1733.184807,
+      "groups": {
+        "other": {
+          "calls": 106880,
+          "summed_ms": 503.439804
+        },
+        "GEMM_including_attention_products": {
+          "calls": 47200,
+          "summed_ms": 898.701638
+        },
+        "norm": {
+          "calls": 15260,
+          "summed_ms": 58.460772
+        },
+        "attention_named": {
+          "calls": 13900,
+          "summed_ms": 232.977641
+        },
+        "softmax_or_RoPE": {
+          "calls": 10860,
+          "summed_ms": 39.604952
+        }
+      },
+      "activity_span_ms": 1921.820922,
+      "activity_union_ms": 1746.417765,
+      "gap_ms": 175.403157,
+      "gap_fraction": 0.09126925146462736,
+      "max_gap_ms": 9.262489,
+      "memcpy": {
+        "count": 340,
+        "bytes": 279408480,
+        "summed_ms": 16.39378
+      },
+      "runtime_api": [
+        {
+          "name": "cudaStreamSynchronize_v3020",
+          "calls": 360,
+          "summed_ms": 1582.759689
+        },
+        {
+          "name": "cudaGraphLaunch_v10000",
+          "calls": 60,
+          "summed_ms": 227.927385
+        },
+        {
+          "name": "cudaMemcpyAsync_v3020",
+          "calls": 300,
+          "summed_ms": 33.052918
+        },
+        {
+          "name": "cudaDeviceSynchronize_v3020",
+          "calls": 1,
+          "summed_ms": 0.007867
+        },
+        {
+          "name": "cuProfilerStart",
+          "calls": 1,
+          "summed_ms": 0.007172
+        }
+      ],
+      "diagnostics": [
+        "Process was launched by the profiler, see /tmp/nvidia/nsight_systems/quadd_session_1084189/streams/pid_84203_stdout.log and stderr.log for program output",
+        "Common injection library initialized successfully.",
+        "Buffers holding CUDA trace data will be flushed on CudaProfilerStop() call. See --flush-on-cudaprofilerstop to control this behavior.",
+        "Loaded CUPTI library: /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/libcupti.so.13.3",
+        "Enabling trace for device graph launch",
+        "CUDA injection initialized successfully.",
+        "CUDA device 0: Unified Memory cannot be traced on devices that don't support peer-to-peer transfers.Please verify that SLI/NVLink is functioning properly.",
+        "Profiling has started.",
+        "Profiling started due to cudaProfilerStart API invoked in the application.",
+        "Not all CUDA events might have been collected.",
+        "Number of CUDA events collected: \t195722.",
+        "Profiling has stopped.",
+        "CUDA hardware tracing is not supported on this system. A legacy (software instrumented) trace was collected instead.",
+        "Number of CUPTI events produced: \t196107, CUPTI buffers: 50.",
+        "S3EventHandler: S3 trace events were not found, not creating counters"
+      ],
+      "top_kernels": [
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_s161616gemm_bf16_32x32_128x2_tn_align8>(T1::Params)",
+          "calls": 32000,
+          "summed_ms": 308.177763
+        },
+        {
+          "name": "void flash_attn_ext_f16<(int)64, (int)64, (int)64, (int)1, (bool)0, (bool)0, (bool)0>(const char *, const char *, const char *, const char *, const char *, const int *, float *, float2 *, float, float, float, float, unsigned int, float, int, uint3, int, int, int, int, int, int, int, int, int, int, int, long, int, int, long, int, int, int, int, int, long)",
+          "calls": 7500,
+          "summed_ms": 214.348223
+        },
+        {
+          "name": "void k_bin_bcast<&op_add, float, float, float, const float *>(const T2 *, const T3 *, T4 *, unsigned int, unsigned int, unsigned int, uint3, uint3, uint3, uint3, uint3, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, T5...)",
+          "calls": 19960,
+          "summed_ms": 165.302269
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_256x128_32x3_tn_align8>(T1::Params)",
+          "calls": 480,
+          "summed_ms": 121.614369
+        },
+        {
+          "name": "ampere_s1688gemm_bf16_64x128_sliced1x2_ldg8_tn",
+          "calls": 1920,
+          "summed_ms": 117.349684
+        },
+        {
+          "name": "void convert_unary_cont_vec4<float, __nv_bfloat16>(const void *, T2 *, long)",
+          "calls": 45700,
+          "summed_ms": 115.733686
+        },
+        {
+          "name": "ampere_s16816gemm_bf16_128x128_ldg8_stages_32x5_tn",
+          "calls": 1240,
+          "summed_ms": 96.10649
+        },
+        {
+          "name": "ampere_s1688gemm_bf16_128x128_ldg8_stages_32x1_tn",
+          "calls": 480,
+          "summed_ms": 92.811952
+        },
+        {
+          "name": "ampere_s16816gemm_bf16_64x64_ldg8_stages_64x5_tn",
+          "calls": 6440,
+          "summed_ms": 77.102792
+        },
+        {
+          "name": "void cpy_scalar<&cpy_1_scalar<float, float>>(const char *, char *, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long)",
+          "calls": 1520,
+          "summed_ms": 65.469737
+        },
+        {
+          "name": "ampere_s16816gemm_bf16_128x64_ldg8_stages_32x6_tn",
+          "calls": 1860,
+          "summed_ms": 57.186579
+        },
+        {
+          "name": "void k_bin_bcast<&op_mul, float, float, float, const float *>(const T2 *, const T3 *, T4 *, unsigned int, unsigned int, unsigned int, uint3, uint3, uint3, uint3, uint3, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, T5...)",
+          "calls": 8020,
+          "summed_ms": 40.132635
+        }
+      ]
+    }
+  },
+  "sha256": {
+    "research-notes/smolvla-followup-20261104/runtime-full-pair/defaults-0.log": "d780a945746ff7abe107aa09171cce39f035898ed3fdc8feab5152b58e31500d",
+    "research-notes/smolvla-followup-20261104/runtime-full-pair/flash-mm-0.log": "e85f39b8c1aabdff16c5f2ab7cf502a3b3edbe1ee4570bcf7b141841eb276ac8",
+    "research-notes/smolvla-followup-20261104/runtime-full-pair/flash-mm-1.log": "e7c392fa9345521e185b92c874902ae890518b50940864f96774a7d5e91cff0d",
+    "research-notes/smolvla-followup-20261104/runtime-full-pair/defaults-1.log": "170c504454e9cc936d2c51dbc5381c3bb2fa09161b3ba93d9317dae951aad5a5",
+    "research-notes/smolvla-followup-20261104/runtime-full-pair/defaults-2.log": "c1c805eafd68df1c3e53eccecc45a077c04e8efdd5e3ae2df0a285540a20e0b0",
+    "research-notes/smolvla-followup-20261104/runtime-full-pair/flash-mm-2.log": "b881b88959990e58549eb6b2469ec2e9693d31119881be874148822731998fae",
+    "research-notes/smolvla-followup-20261104/kernel-traces/defaults.sqlite": "23201813a4bdcc0c7738dd431b1bfe67f1dc9c89a2d5560198e56a9f8d5014cf",
+    "research-notes/smolvla-followup-20261104/kernel-traces/defaults.nsys-rep": "4a27c42333bfb27b2ef9b04f014bfcdab9f9b9e33d3fecd82422aae72b1bf260",
+    "research-notes/smolvla-followup-20261104/kernel-traces/defaults.summary.json": "ba9afb8b73dee474ffeb2d0383fff377396d77d131df3ddcefc495376aecd770",
+    "research-notes/smolvla-followup-20261104/kernel-traces/flash-mm.sqlite": "d2dea5990cbbc96c6cba636dfc7e0a826510a19279144d2010d3d9ca77ce78f7",
+    "research-notes/smolvla-followup-20261104/kernel-traces/flash-mm.nsys-rep": "b30304fd9ac6ad37fb9c4a9b2960ba7447e60e459e2d5bb31a86bb9d0b776a41",
+    "research-notes/smolvla-followup-20261104/kernel-traces/flash-mm.summary.json": "0445978d6037645e6de3c54a01105aefc00a7513b2678370d85b64a9b7d3087a",
+    "research-notes/smolvla-followup-20261104/phase-suite/defaults-0/result.json": "8b585d4f8f8194727c7bf85e8937a2b3ce6935017c2c099e6e7e0a76c23aed57",
+    "research-notes/smolvla-followup-20261104/phase-suite/defaults-1/result.json": "184812ce01fc3eecd2083e9d673a3473b901838c56c281a1f16c28a16de7f3f3",
+    "research-notes/smolvla-followup-20261104/phase-suite/defaults-2/result.json": "6fcc948857ce3a347d452aa582253a6642044a24866c3101454768314b7c49c3",
+    "research-notes/smolvla-followup-20261104/phase-suite/flash-mm-0/result.json": "7fa9911145be7deffe36e6d4b5022a5e1ee0adb7d11e044140ce0856d540ca56",
+    "research-notes/smolvla-followup-20261104/phase-suite/flash-mm-1/result.json": "b9df572c73d12e5e0dd336bc7908efa7c9d2b342ed0104e0428619ad84bb542a",
+    "research-notes/smolvla-followup-20261104/phase-suite/flash-mm-2/result.json": "d703fcfbfa476027e67da5a087e44e8acc252d4e5de554bb74cffefb19699893",
+    "research-notes/smolvla-followup-20261104/runtime-full-pair/runs.json": "34bb6a7c9ee06da7f8764046e09186a06d76df3972235e57ff5fcbb94ef456a1",
+    "research-notes/smolvla-followup-20261104/smolvla-metadata.json": "5194ba386fee799c73afbf79b432c698ecae09c42092a459ba8c8bfae418f3cd",
+    "research-notes/smolvla-followup-20261104/profile_phase.py": "e79e1216f62e5dd0192287efb41b2c605083192d3c32e8022a480e3e2c06e0ff",
+    "research-notes/smolvla-followup-20261104/trace_kernels.py": "d3abd5d637a3a517b5e55ffd69dc58cd59f4223e4c2567a19065eb899b9b8034",
+    "src/models/smolvla.cpp": "95b7435e76b259703b992c480f362cb048185f05279b5fbdcc0ea10c87c1e675",
+    "src/serving/vla-bench.cpp": "92e6d683bc9024b65ce9d05318c22a6be96314adcb8ab5a84e079064ed6a919e",
+    "build-cuda/libvla.so": "8c6f2e404ee19a2f14c54ffb3d30a238091799904714d5fa882b37e86e9986da",
+    "build-cuda/vla-bench": "35fcd3cf99a6a6f0c8bc1cdfba45dc77aa2b65c979c423aabbdc5d0449f21ffc"
+  }
+}

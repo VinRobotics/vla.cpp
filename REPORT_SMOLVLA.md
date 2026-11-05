@@ -56,6 +56,25 @@ Sai lệch output dùng input harness6token và noise cố định; benchmark d�
 
 [Kiến trúc và profile](research-notes/smolvla-followup-20261104/ARCHITECTURE_AND_PROFILE.md) giải thích phạm vi phase, module GPU-active và giới hạn nsys/WSL. [Ghi chú paper](PAPER_READING_SMOLVLA_CLP.md) nêu hướng CKA. Pruning hiện chỉ bỏ layer tail/spaced, không gọi là tái hiện CLP.
 
+### Task 5 — audit bổ sung ngày 05/11/2026
+
+Đã đối chiếu sáu raw benchmark log và tính lại hai SQLite node trace; không chạy inference mới. Commit source tại lúc audit: `92d134a7557f4580f3b8c14042c1bad61c3f1d7c`; model SHA256 hiện tại khớp lịch sử. GPU ngoài sandbox có server đang dùng nên không chạy benchmark/test CUDA cạnh tranh.
+
+| Runtime-pair, trung vị thống kê của ba lượt | Defaults | Flash-mm |
+|---|---:|---:|
+| Mean latency (ms) | 114,1 | 92,4 |
+| p50 (ms) | 114,1 | 92,5 |
+| p90 (ms) | 115,4 | 93,0 |
+| Vision + connector wall time (ms) | 56,1 | 43,6 |
+
+Mean đại diện giảm **19,02%**. Đây là trung vị ba run means/p50/p90, không percentile gộp 60 samples. Các số 113,9 → 91,5 ms ở phần lịch sử là lượt có mean thấp nhất của cùng batch; batch runtime 104,0 → 85,5 ms vẫn là thí nghiệm riêng, không thay control xuyên batch. Flash-mm giữ 10 bước denoise nhưng thay runtime arithmetic; screening 35/40 so với defaults 38/40 chưa xác nhận giữ chất lượng.
+
+Timer dùng CPU steady_clock; `ggml_backend_graph_compute` đồng bộ backend trước khi trả về. PHASE đổi prefix padding 48→16 language tokens, tạo graph riêng và copy K/V giữa hai timer; không coi là phân rã chính xác default latency. Vision gồm connector/preprocess/copies; denoise gồm cross-KV projection và solver. Không có text-token decode trong vòng action denoise.
+
+Trên 20 prediction được trace, summed kernel duration 2260,227 → 1733,185 ms; nhóm GEMM (gồm attention products) 1317,749 → 898,702 ms. Khoảng không có recorded process activity là 10,54% → 9,13%, không phải chứng minh toàn GPU idle. **Cả hai trace có cảnh báo `Not all CUDA events might have been collected.` và dùng legacy software tracing do hardware tracing không hỗ trợ.** Vì vậy coverage đầy đủ, exact attention time và nguyên nhân gap chưa được xác nhận; các tỷ lệ chỉ mô tả events đã ghi nhận. Hai test CUDA chưa rerun, không báo đã pass.
+
+Chi tiết: [kiến trúc và source anchors](research-notes/task5-profiling/architecture.md), [timer/phase measurements](research-notes/task5-profiling/timing-methodology.md), [Nsight API/kernel/memcpy](research-notes/task5-profiling/nsys-analysis.md), [giải thích tiếng Việt](research-notes/task5-profiling/explanation.md), [mentor review và giới hạn](research-notes/task5-profiling/limitations.md), [tái lập](research-notes/task5-profiling/reproduction.md).
+
 ## Vấn đề cần mentor review
 
 1. Hai CUDA tests fail và fused/unfused maxabs0,000545874: chưa tìm ra nguyên nhân; giữ defaults theo quyết định baseline của người dùng.

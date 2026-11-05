@@ -1,0 +1,8 @@
+## research/smolvla-optimization...origin/research/smolvla-optimization
+ M NOTES_SMOLVLA.md
+?? off.txt
+?? on.txt
+?? research-notes/smolvla-followup-20261104/lerobot-0.4.3-pypi.json
+?? research-notes/smolvla-followup-20261104/screen40-variants/smolvla-vision-tail-10/
+?? research-notes/smolvla-pruning/
+?? research-notes/task5-profiling/

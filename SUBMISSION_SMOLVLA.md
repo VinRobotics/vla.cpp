@@ -21,6 +21,12 @@ Phạm vi chốt báo cáo: sử dụng kết quả đã đo, không chạy thê
 
 Batch đã hoàn tất 120/120 episode, cả ba cấu hình exit 0. Official200 cho biến thể chưa chạy; screening chưa đủ để kết luận giữ chất lượng. Q8-vision giảm allocation còn 925,88 MiB, thấp hơn Q8-lm 1020,70 MiB; cả hai đạt 36/40 nhưng chưa chứng minh tương đương. Flash-mm ưu tiên latency; defaults vẫn là bản có SR official đã đo.
 
+## Task 5 — architecture và profiling đã audit
+
+Đối chiếu sáu raw latency log và hai node traces có sẵn; không chạy GPU workload mới khi server đang dùng GPU. Runtime-pair: trung vị ba run means **114,1 → 92,4 ms (−19,02%)**; đây là batch/thống kê riêng với bảng phần 3. Vision+connector wall time 56,1 → 43,6 ms. Flash-mm là ứng viên runtime giữ 10 steps, chưa best theo chất lượng.
+
+Cả hai trace có cảnh báo **có thể chưa thu đủ CUDA events** và sử dụng legacy software tracing. Gap 10,54% → 9,13% mô tả recorded process activity, không chứng minh toàn GPU idle. Phase CPU wall có đồng bộ GPU nhưng đổi graph/padding, không phải pure kernel time hay phân rã chính xác default path. Chưa có connector/attention riêng hoặc rerun CUDA tests. [Báo cáo audit, source và tái lập](research-notes/task5-profiling/README.md).
+
 ## Tài liệu chi tiết
 
 - [Kết quả theo task và kiểm tra 360 episode](research-notes/smolvla-followup-20261104/TASK_RESULTS.md) — đối chiếu CSV với manifest cuối, gồm official task 9 recovery.

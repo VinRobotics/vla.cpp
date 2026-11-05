@@ -58,6 +58,12 @@ Hai CUDA tests bit-exact còn fail; baseline giữ defaults theo lựa chọn ng
 
 Telemetry bổ sung: 120 mẫu, nhiệt độ ghi nhận 53–72°C; không phủ toàn bộ batch và không đủ để kết luận có/không throttle. Raw: `part3-runtime/telemetry.jsonl`.
 
+## Đối chiếu với audit Task 5
+
+Bảng runtime ở trên giữ quy tắc lịch sử: chọn run có mean thấp nhất trong batch part3-runtime. Audit Task 5 dùng batch runtime-full-pair riêng và thống kê trung vị ba lượt: defaults mean/p50/p90 = 114,1/114,1/115,4 ms; flash-mm = 92,4/92,5/93,0 ms, giảm mean 19,02%. Không thay control 104,0 ms trong bảng này bằng 114,1 ms hoặc ghép hai cách chọn thống kê để tính speedup.
+
+Đã tái phân tích kernel traces: GEMM vẫn là nhóm tên có summed duration lớn nhất, nhưng có cả attention products. Cả hai trace cảnh báo có thể không thu đủ CUDA events; không coi tỷ lệ nhóm/gaps là đầy đủ hoặc chứng minh bottleneck phần cứng. PHASE thay graph/padding và không tương đương default throughput. Xem [phân tích Nsight](research-notes/task5-profiling/nsys-analysis.md) và [so sánh phân biệt population](research-notes/task5-profiling/comparison.md).
+
 ## Phép tính bổ sung và liên hệ 6 task
 
 [Bảng tính tái lập](CALCULATIONS_SMOLVLA.md#task-3--mức-giảm-so-control-cùng-batch) bổ sung phần trăm giảm latency/allocation và speedup cho từng cấu hình. Flash-mm giảm mean17,79%, speedup1,216× và giảm allocation45,61% so control runtime104,0ms/1912,47MiB. Q8-lm và Q8-vision screening đều đã hoàn tất 36/40; official của biến thể chưa đo. Q8-vision giảm allocation 51,59% so với control quantization, Q8-lm giảm 46,63%; screening bằng nhau chưa chứng minh tương đương chất lượng. Xem [báo cáo đủ6task](REPORT_SMOLVLA.md) và [pruning](CALCULATIONS_SMOLVLA.md#task-6--ba-pruning-đã-implement-và-kiểm-tra).

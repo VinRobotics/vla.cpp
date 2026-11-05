@@ -36,6 +36,16 @@ Kết quả và script tái lập được lưu trong nhánh này. Screening đ�
 | 5. Profile | Phân biệt module GPU-active, phase wall và default path | Connector riêng, attention riêng và phân tích nguyên nhân gap chưa hoàn tất |
 | 6. Pruning | Có ba depth ablation và kết quả âm; phân biệt rõ với CLP | Nếu yêu cầu tái hiện phương pháp paper: cần activation calibration, CKA, mapping hợp lệ và quy trình finetuning/đánh giá tương ứng |
 
+## Task 5 — kết quả audit và điều kiện kết luận
+
+Audit CPU ngày 05/11 đã parse khớp sáu raw latency log, tính lại tổng kernel/gap từ hai SQLite trace và kiểm tra phase-boundary attribution trên các kernel đã lưu. Trung vị ba run means là defaults 114,1 ms và flash-mm 92,4 ms (giảm 19,02%); không dùng riêng minimum run mean 113,9/91,5 ms làm kết quả đại diện mới.
+
+Điểm cần review thêm: cả hai trace báo `Not all CUDA events might have been collected.`; không thể chứng minh completeness chỉ vì không có chuỗi lost/drop. Trace dùng legacy software instrumentation; Unified Memory không trace được. Gap 10,54%/9,13% chỉ thuộc recorded target-process activity, không whole-GPU idle hoặc CPU bottleneck đã xác nhận. Timer wall có backend synchronization; PHASE đổi graph/padding nên không chia trực tiếp baseline mặc định thành module times.
+
+GPU đang có server dùng tại lúc audit nên chưa đo lại hoặc rerun hai CUDA tests. File LastTestsFailed lịch sử vẫn liệt kê foldquant_cuda_op và fused_cuda_ops; không đồng nghĩa đã tái hiện fail hôm nay. Chưa xác minh source/binary provenance bằng rebuild, chưa có best theo official SR, exact connector/action-expert-only/attention timing hoặc resident process VRAM.
+
+[Review Task 5 chi tiết](research-notes/task5-profiling/limitations.md) và [script audit CPU](research-notes/task5-profiling/audit_evidence.py). Đây là báo cáo có thể review trên bằng chứng hiện có, chưa xác nhận hoàn tất toàn bộ yêu cầu thực nghiệm.
+
 ## Kiểm tra dữ liệu có thể chạy lại
 
 Từ thư mục gốc repo, không cần GPU hoặc simulator:
