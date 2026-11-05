@@ -1,0 +1,39 @@
+{
+  "classification": "screening, not official evaluation",
+  "suite": "libero_object",
+  "tasks": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "episodes_per_task": 4,
+  "expected_total": 40,
+  "seed": 42,
+  "n_action_steps": 1,
+  "variant": "smolvla-coupled-tail-30",
+  "model": "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-coupled-tail-30.gguf",
+  "flags": [],
+  "noise": "repo defaults random server noise; environment seed42 only",
+  "baseline_reference": "screen40-defaults:38/40; known bit-exact test failures disclosed",
+  "server": [
+    "/home/doris/projects/vla.cpp/build-cuda/vla-server",
+    "--bind",
+    "tcp://127.0.0.1:15560",
+    "/home/doris/projects/vla.cpp/research-notes/generated-models/smolvla-coupled-tail-30.gguf"
+  ],
+  "env": {
+    "MUJOCO_GL": "egl",
+    "CUDA_VISIBLE_DEVICES": "0",
+    "LIBERO_CONFIG_PATH": "/home/doris/projects/vla.cpp/research-notes/smolvla-followup-20261104/libero-config",
+    "TOKENIZERS_PARALLELISM": "false"
+  },
+  "initial_states": "repo client defaults: episode_index=0, stride=1; same seed and initial states for later configs",
+  "aborts": "halt on any aborted/missing episode; never silently reduce denominator"
+}

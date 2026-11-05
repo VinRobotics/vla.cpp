@@ -150,3 +150,15 @@ Các mục dưới đây là giới hạn và hướng nghiên cứu tiếp theo
 | Resident VRAM | Đo trên backend hỗ trợ process memory; WSL hiện trả N/A nên chỉ báo traced allocation |
 
 Bản báo cáo hoàn tất trong phạm vi dữ liệu hiện có. Chưa xác nhận giữ SR cho biến thể hoặc hiệu quả CLP/CKA; phép ngoại suy SR và mô hình depth chỉ là tính toán có giả định.
+
+## Cập nhật sau đợt báo cáo: screening pruning và official flash-mm
+
+Đã đối chiếu CSV screening ba depth ablation: vision-tail-10 **0/40**,
+vision-spaced-10 **0/40**, coupled-tail-30 **23/40 (57,5%)**; tổng 120 episode,
+không abort. Đây là số đo mới, bổ sung cho smoke 0/2 lịch sử ở phần trên.
+Chọn defaults theo SR quan sát: screening 38/40 và official 177/200;
+chưa khẳng định khác biệt có ý nghĩa thống kê.
+
+Theo yêu cầu mới, đã mở thêm official flash-mm 200 episode, ngoài phạm vi
+đợt chốt trước. Tại lúc cập nhật, lượt này đang chạy và chưa có SR cuối.
+Xem [scripts, kết quả và giới hạn CKA](research-notes/smolvla-pruning/README.md).

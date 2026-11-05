@@ -493,3 +493,63 @@ Kiểm tra: audit_screening.py pass; complete_calculations.py sinh lại phụ l
 ## Bổ sung rà soát tính hoàn chỉnh — 05/11/2026
 
 Đã thay checklist đầu nhật ký đã lỗi thời bằng trạng thái cuối, bổ sung bảng theo task và audit tái lập cho cả official lẫn screening. `audit_submission.py` kiểm tra 360 episode từ manifest cuối, gồm task 9 recovery; lưu SHA256 từng CSV. Đây là xác minh dữ liệu đã có, không phải chạy thêm rollout. Các giới hạn thực nghiệm vẫn giữ nguyên theo phạm vi chốt báo cáo.
+
+Screen40 smolvla-vision-tail-10: task 0 hoàn tất 0/4; tổng tạm thời 0/4. Log screen40-variants/smolvla-vision-tail-10/task-0.log; chưa phải official SR.
+
+Screen40 smolvla-vision-tail-10: task 1 hoàn tất 0/4; tổng tạm thời 0/8. Log screen40-variants/smolvla-vision-tail-10/task-1.log; chưa phải official SR.
+
+Screen40 smolvla-vision-tail-10: task 2 hoàn tất 0/4; tổng tạm thời 0/12. Log screen40-variants/smolvla-vision-tail-10/task-2.log; chưa phải official SR.
+
+Screen40 smolvla-vision-tail-10: task 3 hoàn tất 0/4; tổng tạm thời 0/16. Log screen40-variants/smolvla-vision-tail-10/task-3.log; chưa phải official SR.
+
+Screen40 smolvla-vision-tail-10: task 4 hoàn tất 0/4; tổng tạm thời 0/20. Log screen40-variants/smolvla-vision-tail-10/task-4.log; chưa phải official SR.
+
+Screen40 smolvla-vision-tail-10: task 5 hoàn tất 0/4; tổng tạm thời 0/24. Log screen40-variants/smolvla-vision-tail-10/task-5.log; chưa phải official SR.
+
+Screen40 smolvla-vision-tail-10: task 6 hoàn tất 0/4; tổng tạm thời 0/28. Log screen40-variants/smolvla-vision-tail-10/task-6.log; chưa phải official SR.
+
+Screen40 smolvla-vision-tail-10: task 7 hoàn tất 0/4; tổng tạm thời 0/32. Log screen40-variants/smolvla-vision-tail-10/task-7.log; chưa phải official SR.
+
+Screen40 smolvla-vision-tail-10: task 8 hoàn tất 0/4; tổng tạm thời 0/36. Log screen40-variants/smolvla-vision-tail-10/task-8.log; chưa phải official SR.
+
+Screen40 smolvla-vision-tail-10: task 9 hoàn tất 0/4; tổng tạm thời 0/40. Log screen40-variants/smolvla-vision-tail-10/task-9.log; chưa phải official SR.
+
+Screen40 smolvla-vision-spaced-10: task 0 hoàn tất 0/4; tổng tạm thời 0/4. Log screen40-variants/smolvla-vision-spaced-10/task-0.log; chưa phải official SR.
+
+Screen40 smolvla-vision-spaced-10: task 1 hoàn tất 0/4; tổng tạm thời 0/8. Log screen40-variants/smolvla-vision-spaced-10/task-1.log; chưa phải official SR.
+
+Screen40 smolvla-vision-spaced-10: task 2 hoàn tất 0/4; tổng tạm thời 0/12. Log screen40-variants/smolvla-vision-spaced-10/task-2.log; chưa phải official SR.
+
+Screen40 smolvla-vision-spaced-10: task 3 hoàn tất 0/4; tổng tạm thời 0/16. Log screen40-variants/smolvla-vision-spaced-10/task-3.log; chưa phải official SR.
+
+Screen40 smolvla-vision-spaced-10: task 4 hoàn tất 0/4; tổng tạm thời 0/20. Log screen40-variants/smolvla-vision-spaced-10/task-4.log; chưa phải official SR.
+
+Screen40 smolvla-vision-spaced-10: task 5 hoàn tất 0/4; tổng tạm thời 0/24. Log screen40-variants/smolvla-vision-spaced-10/task-5.log; chưa phải official SR.
+
+Screen40 smolvla-vision-spaced-10: task 6 hoàn tất 0/4; tổng tạm thời 0/28. Log screen40-variants/smolvla-vision-spaced-10/task-6.log; chưa phải official SR.
+
+Screen40 smolvla-vision-spaced-10: task 7 hoàn tất 0/4; tổng tạm thời 0/32. Log screen40-variants/smolvla-vision-spaced-10/task-7.log; chưa phải official SR.
+
+Screen40 smolvla-vision-spaced-10: task 8 hoàn tất 0/4; tổng tạm thời 0/36. Log screen40-variants/smolvla-vision-spaced-10/task-8.log; chưa phải official SR.
+
+Screen40 smolvla-vision-spaced-10: task 9 hoàn tất 0/4; tổng tạm thời 0/40. Log screen40-variants/smolvla-vision-spaced-10/task-9.log; chưa phải official SR.
+
+Screen40 smolvla-coupled-tail-30: task 0 hoàn tất 0/4; tổng tạm thời 0/4. Log screen40-variants/smolvla-coupled-tail-30/task-0.log; chưa phải official SR.
+
+Screen40 smolvla-coupled-tail-30: task 1 hoàn tất 0/4; tổng tạm thời 0/8. Log screen40-variants/smolvla-coupled-tail-30/task-1.log; chưa phải official SR.
+
+Screen40 smolvla-coupled-tail-30: task 2 hoàn tất 3/4; tổng tạm thời 3/12. Log screen40-variants/smolvla-coupled-tail-30/task-2.log; chưa phải official SR.
+
+Screen40 smolvla-coupled-tail-30: task 3 hoàn tất 3/4; tổng tạm thời 6/16. Log screen40-variants/smolvla-coupled-tail-30/task-3.log; chưa phải official SR.
+
+Screen40 smolvla-coupled-tail-30: task 4 hoàn tất 2/4; tổng tạm thời 8/20. Log screen40-variants/smolvla-coupled-tail-30/task-4.log; chưa phải official SR.
+
+Screen40 smolvla-coupled-tail-30: task 5 hoàn tất 2/4; tổng tạm thời 10/24. Log screen40-variants/smolvla-coupled-tail-30/task-5.log; chưa phải official SR.
+
+Screen40 smolvla-coupled-tail-30: task 6 hoàn tất 4/4; tổng tạm thời 14/28. Log screen40-variants/smolvla-coupled-tail-30/task-6.log; chưa phải official SR.
+
+Screen40 smolvla-coupled-tail-30: task 7 hoàn tất 2/4; tổng tạm thời 16/32. Log screen40-variants/smolvla-coupled-tail-30/task-7.log; chưa phải official SR.
+
+Screen40 smolvla-coupled-tail-30: task 8 hoàn tất 4/4; tổng tạm thời 20/36. Log screen40-variants/smolvla-coupled-tail-30/task-8.log; chưa phải official SR.
+
+Screen40 smolvla-coupled-tail-30: task 9 hoàn tất 3/4; tổng tạm thời 23/40. Log screen40-variants/smolvla-coupled-tail-30/task-9.log; chưa phải official SR.
