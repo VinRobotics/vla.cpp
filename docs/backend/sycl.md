@@ -126,6 +126,83 @@ BitVLA is the one exception: it pins its ggml graph to the CPU backend by design
 and offloads its LM through separate hand-written CUDA kernels, so a SYCL build
 leaves it on the CPU. There is no SYCL port of those kernels.
 
+## SYCL defaults: fused graphs and flash attention
+
+On SYCL, several archs swap their per-op ggml graph for fused nodes
+(`src/layers/fused_ew.h`, `src/modules/fused_lm.h`, each node with a CPU
+reference and a SYCL kernel), and flash attention runs on oneDNN's fused SDPA. A
+SYCL build turns these on without any flag:
+
+| Arch | On by default | Needs | Off switch |
+|---|---|---|---|
+| SmolVLA | flash attention; SigLIP as fused blocks, views batched; LM and expert layers as fused nodes, K/V in place | BF16 weights, flash attention | `VLA_SMOLVLA_NO_VIT_FUSE=1` (tower), `VLA_SMOLVLA_NO_FUSE=1` (LM and expert) |
+| VLA-Adapter | DINOv2 + SigLIP towers and Qwen2 LM layers as fused nodes | BF16 weights, flash attention | `VLA_ADAPTER_NO_FUSE=1` or `--flash-attn 0` |
+| GR00T N1.5, N1.6 | DiT blocks and SigLIP tower as fused nodes | BF16 weights, flash attention | `VLA_GR00T_NO_FUSE=1` |
+| GR00T N1.7 | per-op graph; `VLA_GR00T_N17_FUSE=1` fuses the DiT and the Qwen3-VL tower | BF16 weights, flash attention | - |
+| Evo-1 | flash attention; with `--act-dtype bf16`, InternViT, Qwen2 LM and DiT layers as fused nodes | BF16 activations, flash attention | `VLA_EVO1_NO_FUSE=1`, `--flash-attn 0` |
+| TurboVLA | F16 weights and flash attention | - | `--weight-dtype`, `--flash-attn 0` |
+| π0.5 | flash attention; fused expert elementwise ops; with `--act-dtype bf16`, SigLIP as fused blocks | - | `VLA_PI05_NO_FUSE=1`, `VLA_PI05_NO_VIT_FUSE=1`, `--flash-attn 0` |
+
+The load log has one line per switch that took effect, naming its off switch, for
+example `vla(smolvla): fused LM and expert layers, K/V in place
+(VLA_SMOLVLA_NO_FUSE=1 to disable)`. The fused graphs need BF16 weights, so
+`--weight-dtype f16` or `f32` drops an arch back to the per-op graph, which is
+much slower: on the Arc B390, SmolVLA takes 222 ms with F16 weights against 62 ms
+at the defaults. SmolVLA has one more opt-in on its fused graph:
+`VLA_SMOLVLA_W8A8=all`, or any of `vit`, `vlm`, `expert`, runs those GEMMs as
+W8A8 (`src/layers/qlinear.h`), with weights quantized at load.
+
+Arc B390 iGPU (OpenCL adapter), 2 views per model, `vla-bench` median of 20
+calls after 3 warmups, one process. "Per-op" is main just before the fused
+graphs (`4a542ed`); the escape hatches above restore it bit for bit:
+
+| Model | per-op | default | speedup |
+|---|--:|--:|--:|
+| SmolVLA (512 px) | 120.4 ms | 62.7 ms | 1.92x |
+| SmolVLA, `VLA_SMOLVLA_W8A8=all` | 120.4 ms | 52.5 ms | 2.29x |
+| VLA-Adapter | 304.4 ms | 86.5 ms | 3.52x |
+| GR00T N1.5 | 283.1 ms | 175.7 ms | 1.61x |
+| GR00T N1.6 | 226.3 ms | 115.7 ms | 1.96x |
+| GR00T N1.7, `VLA_GR00T_N17_FUSE=1` | 228.8 ms | 126.7 ms | 1.81x |
+| Evo-1 | 825.0 ms | 348.5 ms | 2.37x |
+| Evo-1, `--act-dtype bf16` | 825.0 ms | 168.9 ms | 4.88x |
+| TurboVLA | 47.1 ms | 25.5 ms | 1.84x |
+
+The [Core Ultra X7 358H report](../benchmark/core-ultra-x7-358h.md) has every
+arch at its native view count under the full benchmark protocol.
+
+The fused graphs are not bit-identical to the per-op graph. Against the ggml CPU
+build at F32 weights on 48 paired inputs, the median error grows from 1.7e-3 to
+2.8e-3 for SmolVLA, 2.5e-3 to 3.5e-3 for VLA-Adapter, 4.3e-3 to 7.7e-3 for
+GR00T N1.6 and 2.2e-3 to 6.3e-3 for GR00T N1.5, whose worst input reaches 4.4e-2
+against 8.0e-3. GR00T N1.7's fused graph moves its actions by up to 1.3e-2,
+which is why it stays opt-in until a LIBERO run validates it. TurboVLA's F16
+weights keep its actions within 3.4e-4 of the F32 graph, by the author's
+measurement on a Core Ultra 7 356H. The author also reports
+LIBERO-object success on the fused defaults of 99/100 for Evo-1 and 100/100 for
+VLA-Adapter and TurboVLA.
+
+### Prototype: one SmolVLA view on the NPU
+
+On a Core Ultra with an NPU, SmolVLA can encode its last camera view on the NPU
+while the GPU encodes the others, so vision costs the slower of the two rather
+than their sum. A Python worker serves the vision tower through OpenVINO, built
+straight from the GGUF:
+
+```bash
+python3 scripts/build_vision_ir.py smolvla-libero.gguf smolvla_vision.xml   # once
+python3 scripts/npu_vision_worker.py --ir smolvla_vision.xml --sock /tmp/smolvla_npu.sock --turbo
+VLA_SMOLVLA_NPU_VISION=/tmp/smolvla_npu.sock ./build-sycl/vla-server smolvla-libero.gguf
+```
+
+Run the worker in a shell without oneAPI's `setvars.sh`: OpenVINO and oneAPI ship
+conflicting TBB and OpenCL libraries. `--turbo` keeps the NPU clocked between
+requests. It needs 2 or more views, and Linux: on Windows the socket client is
+compiled out. If the worker fails, dies or stalls past a 2 s socket timeout, that
+view is encoded on the GPU and the log says `NPU view failed, encoding it on the
+GPU`. With the variable unset, the graph is unchanged. It has not been
+benchmarked in this repository.
+
 ## FoldQuant (W8A8 / W4A4) checkpoints
 
 A FoldQuant GGUF runs its integer path on SYCL: `src/sycl/vla_sycl_foldquant.cpp`
@@ -314,8 +391,10 @@ gripper dimension the worst normalized cosine is 0.9955 (W4A4).
 oneAPI 2026.1's Level Zero adapters crashed (`sycl-ls` segfaults) against Ubuntu
 24.04's `libze1` 1.16 on the machine above with an older GPU compute runtime.
 With the runtime at 26.35 (`libze-intel-gpu1`, `intel-opencl-icd`) Level Zero
-works against the same `libze1`, and the FoldQuant table above uses it. On an
-older runtime, pointing the runtime at the OpenCL adapter works:
+works against the same `libze1`, and the FoldQuant table above uses it. With
+runtime 26.22 it still crashes, which is why the
+[Core Ultra X7 358H report](../benchmark/core-ultra-x7-358h.md) ran on OpenCL. On
+an older runtime, pointing the runtime at the OpenCL adapter works:
 
 ```bash
 export UR_ADAPTERS_FORCE_LOAD=/opt/intel/oneapi/compiler/2026.1/lib/libur_adapter_opencl.so.0
