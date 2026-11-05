@@ -5,7 +5,7 @@ to take once it ran.
 
 > **Status: running on Windows on Arm and on a Dragonwing IQ-10 under Linux.**
 > vla.cpp builds with `GGML_HEXAGON=ON` and runs eleven checkpoints on a
-> Snapdragon X laptop's v73 NPU and twelve on an IQ-10's v81 NPU under Linux,
+> Snapdragon X laptop's v73 NPU and thirteen on an IQ-10's v81 NPU under Linux,
 > each checked against a CPU reference. The laptop build, its measurements and
 > the upstream bugs found along the way are in
 > [hexagon-windows.md](hexagon-windows.md); the Linux board is in [Linux
@@ -129,9 +129,9 @@ Two more ops are claimed and then refused at run time. On buffers mapped above
 4 GB of DSP address space, which the IQ-10 under Linux hands out, the NPU runs
 `CONCAT` only as the dim-1 contiguous DMA copy and answers any other concat with
 `NO_SUPPORT`, and the host aborts on the first predict. The wrapper sends those
-concats to the CPU. A `CPY` that reads a weight gets the same answer
-(VLA-Adapter casts its F16 action queries to F32 in the graph), and also runs on
-the CPU.
+concats to the CPU. A `CPY` or a `PAD` that reads a weight gets the same answer
+(VLA-Adapter casts its F16 action queries to F32 in the graph, ACT zero-pads its
+stem kernel), and also runs on the CPU.
 
 The experts' KV concats (π0, π0.5, SmolVLA) were such concats: along the token
 dim of contiguous [head dim, heads, tokens] tensors, once per layer per denoise
@@ -178,7 +178,7 @@ less than the trip to the CPU.
 The matrix unit (HMX) takes a matmul only when its inner dim K and its output
 dim N are multiples of 32, and with a batch only an F16 src0. Anything else runs
 on the vector units, at about 1/20 of the speed. `GGML_HEXAGON_PROFILE=1` on the
-IQ-10 showed three such matmuls dominating, and vla.cpp now avoids them in
+IQ-10 showed such matmuls dominating, and vla.cpp now avoids them in
 Hexagon builds:
 
 - **SigLIP-so400m's MLP is 4304 wide**: 440 ms of GR00T N1.5's 565 ms tower.
@@ -196,6 +196,15 @@ Hexagon builds:
   311 ms.
 - **Evo-1's LM attention multiplied F32 K and V against 14 query heads.** K and
   V now go to F16 (`fa_kv()`); the scores still accumulate in F32.
+- **ACT's ResNet convs are im2col and one matmul** with the patches as its
+  first operand. The stem's K of 147 and layer3's and layer4's 1200 and 300
+  output positions (640x480) are not multiples of 32: 80 ms of the 101 ms spent
+  on the NPU. On Hexagon `conv_2d_padded()` in `act.cpp` zero-pads the patch
+  matrix and the stem's kernel to `gemm_width()` and drops the extra rows:
+  228.5 to 155.6 ms (mean, 5 reps). Its im2col (padded and overlapping), bias
+  adds (a gapped broadcast) and max pool still run on the CPU; under the
+  benchmark's protocol ACT takes 152.9 ms on the NPU against 170.8 ms on the
+  CPU.
 
 What is left on the vector units: GR00T's DiT attention (head dim 48) and Evo-1's
 DiT cross-attention (head dim 112, 1025 keys), whose shapes the HMX does not
@@ -366,9 +375,11 @@ differ from the benchmark's for VLA-JEPA, VLA-Adapter, OpenVLA-OFT and Octo:
 | OpenVLA-OFT | 2 | 3.2e-4 |
 | Octo-Small | 1 | 5.3e-4 |
 | TurboVLA | 2 | 3.7e-4 |
+| ACT | 1 | 6.1e-4 |
 
 GR00T N1.6 with two views is 8.8e-4. At the benchmark's single view VLA-JEPA is
-1.9e-3, VLA-Adapter 5.7e-4 and OpenVLA-OFT 2.1e-4.
+1.9e-3, VLA-Adapter 5.7e-4 and OpenVLA-OFT 2.1e-4. ACT takes its one 640x480
+view, the benchmark's input.
 
 ### Serving
 
@@ -379,6 +390,8 @@ state), with fixed noise for the archs that draw it. The same request goes to a
 Hexagon server and to a CPU server with `--weight-dtype f32 --flash-attn 0`.
 Every model returns a finite chunk, the same chunk for a repeated request, an
 error reply to a malformed or an invalid request, and keeps serving afterwards.
+ACT has no `eval/client` preset; it gets the same checks from raw `vla.proto`
+requests carrying one fixed 640x480 view and a fixed 14-dim state.
 
 | Model | max\|Δ\| vs CPU F32 | CPU F16 vs CPU F32 |
 |---|--:|--:|
@@ -394,6 +407,7 @@ error reply to a malformed or an invalid request, and keeps serving afterwards.
 | OpenVLA-OFT | 5.9e-4 | |
 | Octo-Small | 2.4e-4 | |
 | TurboVLA | 8.5e-4 | |
+| ACT | 1.0e-3 | |
 
 GR00T N1.5 and N1.6 are above the bar on this input, and so is the CPU itself
 with F16 weights: N1.5 lands closer to the reference than the CPU at F16, N1.6

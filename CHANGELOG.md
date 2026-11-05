@@ -31,8 +31,12 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   observation at 13% more latency. VLA-Adapter's LM and action head and Octo's
   block transformer pad their softmax rows to a multiple of 32, and
   VLA-Adapter's and OpenVLA-OFT's DINOv2 build GELU (erf) from ops the NPU runs:
-  VLA-Adapter 17% faster, Octo 4%. GR00T N1.5 and N1.6 are above the bar on a
-  served LIBERO observation, as the CPU is at F16. See
+  VLA-Adapter 17% faster, Octo 4%. ACT runs within 6.1e-4 of the CPU F32
+  reference (1.0e-3 served): pads that read a weight, also answered
+  `NO_SUPPORT`, run on the CPU, and its ResNet's im2col matrices are
+  zero-padded to a multiple of 32 so the convs' matmuls take the HMX (152.9 ms,
+  170.8 ms on the CPU). GR00T N1.5 and N1.6 are above the bar on a served LIBERO
+  observation, as the CPU is at F16. See
   `docs/backend/hexagon.md` for the build, the skel install and the numbers.
 - **ROCm/HIP backend for VLA inference.** `-DGGML_HIP=ON` selects ggml's HIP
   backend without compiling vla.cpp's CUDA-only kernels. On Linux `gfx1200`
