@@ -286,6 +286,17 @@ interleaved rounds:
 | FoldQuant W8A8 | 4.42 GB | 115 | 16 |
 | FoldQuant W8A8, `VLA_PI05_W8A8=vit` | 4.42 GB | 106 | 12 |
 
+Re-measured on 5 November at main `a83bcad` on another Core Ultra X7 358H, built
+without `VLA_SYCL_TLA_DIR`, on the OpenCL adapter with compute runtime 26.22,
+under the [benchmark protocol](../benchmark/core-ultra-x7-358h.md) (3 warmups +
+20 calls, 3 processes, the best mean), the bf16 rows at 48 tokens give 282.2 ms
+(bf16), 173.5 ms (`--act-dtype bf16`), 101.2 ms (`+ VLA_PI05_W8A8=all`) and
+92.6 ms (`+ VLA_PI05_W4=expert`), and at the report's 16-token prompts 276.4,
+165.3, 99.6 and 91.6 ms. Their p50s are 2-8% above the table's. That machine
+differs from the table's in adapter, runtime and sycl-tla; the gap was not split
+between them. The FoldQuant rows need sycl-tla and the FoldQuant files, and were
+not re-measured.
+
 The FoldQuant rows run vision as the fused bf16 SigLIP blocks, as
 `--act-dtype bf16` does; plain bf16 keeps it F32. W4A4 is 3.3x faster than bf16
 and 1.9x faster than bf16 activations, at half the file size. The two bf16 opt-ins

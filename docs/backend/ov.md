@@ -367,6 +367,13 @@ brings the continuous dims to 7.3e-4 with every flip on time, and `backend_init`
 defaults it for π0 alone because it costs 2.5x (255 ms -> 625 ms). Set `=f16` to
 override. No other arch needs it.
 
+**The 2D im2col fold costs VLA-Adapter on the CPU plugin.** Folding
+`ggml_conv_2d`'s im2col chain into one Convolution is what made SmolVLA fast on
+the NPU, and on the GPU it is 5-7% faster for VLA-Adapter and OpenVLA-OFT. On the
+CPU plugin it is slower: VLA-Adapter's vision takes 1,100 ms with it and 974 ms
+without (1,828 against 1,704 ms end to end), measured alternating on the same
+binary. `GGML_OPENVINO_FUSE_CONV2D=0` turns it off.
+
 **Do not set `GGML_OPENVINO_CACHE_DIR`.** OpenVINO's on-disk blob cache reloads a
 compiled graph that computes the wrong thing. A cold run against a fresh cache
 directory is correct; the very next run, reading back the blobs it just wrote, is
