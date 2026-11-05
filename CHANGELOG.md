@@ -53,6 +53,29 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   GGUF with no calibration and nothing re-rounded; `--check-onnx` byte-compares
   every site against the TensorRT plugin graphs. The family converters expose
   `convert(ckpt, out, writer_factory=...)` for it.
+- **Every OpenVINO arch on the Intel NPU.** On the NPU, NPUW is off for
+  vla.cpp's graphs and RMSNorm can no longer overflow f16; on every plugin,
+  `ggml_conv_2d`'s 2D im2col chain folds into one Convolution.
+  `GGML_OPENVINO_NPU_PROPS` passes NPU compile properties such as
+  `NPU_TURBO=YES`, and `vla-bench --gap-ms` idles between timed calls to show the
+  NPU's clock drop. On a Core Ultra X7 358H all eleven OpenVINO archs now compile
+  and run on the AI Boost NPU, where six failed before, and SmolVLA goes from
+  1,679 to 165 ms. Per-arch error is in `docs/backend/ov.md`; π0 is still wrong
+  on the NPU.
+- **Fused graphs on SYCL.** SmolVLA, VLA-Adapter and GR00T N1.5 / N1.6 run as
+  fused nodes by default, Evo-1 with `--act-dtype bf16` (now also on SYCL), and
+  GR00T N1.7 behind `VLA_GR00T_N17_FUSE=1`. Flash attention on oneDNN's SDPA is
+  the SYCL default for SmolVLA, Evo-1, π0, π0.5 and TurboVLA, and TurboVLA keeps
+  F16 weights there. On an Arc B390 that takes SmolVLA from 228 to 62 ms,
+  VLA-Adapter from 145 to 63 ms, GR00T N1.5 and N1.6 by 1.5-1.7x and TurboVLA by
+  1.8x; Evo-1 runs in 144 ms with bf16 activations. The fused graphs move actions
+  1.45-2.8x further from the CPU at F32 than the per-op graph; each has an off
+  switch (`docs/backend/sycl.md`). `VLA_SMOLVLA_NPU_VISION` is a prototype that
+  encodes SmolVLA's last view on the NPU while the GPU does the rest.
+- **π0 and π0.5 kernels on SYCL**: BF16 activations, flash attention on
+  oneDNN's SDPA, fused elementwise nodes, and opt-in W8A8 / W4 GEMMs for π0.5
+  (`VLA_PI05_W8A8`, `VLA_PI05_W4`). On an Arc B390, π0 goes from 368 to 270 ms
+  and π0.5 from 370 to 276 ms, or 165 ms with `--act-dtype bf16`.
 - **Faster π0.5 FoldQuant on Intel GPUs** with `-DVLA_SYCL_TLA_DIR=<sycl-tla>`:
   INT4 x INT4 DPAS GEMMs for the W4A4 sites, flash attention over the cached
   prefix K/V with q/k/v + RoPE fused, and the expert's adaRMS folded into the
@@ -67,6 +90,11 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Changed
 
+- **Faster OpenVINO dispatch.** The naive path checks a graph fingerprint before
+  its compile cache, π0.5 opts out of the accuracy hint, and π0.5 pads its prompt
+  to 16-token buckets, so a LIBERO run no longer compiles one model per prompt
+  length until the GPU runs out of memory. Every arch on the Arc B390's GPU
+  plugin got 1.3-2.6x faster; π0.5 went from 586 to 225 ms.
 - **Faster CUDA inference with the same output.** At the default precision,
   every arch except ACT runs fused CUDA nodes, BF16 GEMMs on the fastest
   cuBLASLt algorithm that matches ggml's call (`gemm_exact`) and fused
