@@ -26,8 +26,13 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   DINOv2 + SigLIP towers take the same padding and flash attention, `linear()`
   multiplies a batch of activations as one matrix of rows, and large transposing
   copies run on the CPU: OpenVLA-OFT, VLA-Adapter and TurboVLA run 51-57%
-  faster, Evo-1 and SmolVLA 8-10%. GR00T N1.5, N1.6 and VLA-JEPA are above the
-  bar on a served LIBERO observation, as the CPU is at F16. See
+  faster, Evo-1 and SmolVLA 8-10%. VLA-JEPA's LM leaves flash attention unless
+  `--flash-attn` is given, which brings it within the bar on a served LIBERO
+  observation at 13% more latency. VLA-Adapter's LM and action head and Octo's
+  block transformer pad their softmax rows to a multiple of 32, and
+  VLA-Adapter's and OpenVLA-OFT's DINOv2 build GELU (erf) from ops the NPU runs:
+  VLA-Adapter 17% faster, Octo 4%. GR00T N1.5 and N1.6 are above the bar on a
+  served LIBERO observation, as the CPU is at F16. See
   `docs/backend/hexagon.md` for the build, the skel install and the numbers.
 - **ROCm/HIP backend for VLA inference.** `-DGGML_HIP=ON` selects ggml's HIP
   backend without compiling vla.cpp's CUDA-only kernels. On Linux `gfx1200`

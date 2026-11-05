@@ -98,6 +98,10 @@ changed all three conclusions:
   IQ-10 (b11223): more accurate than the CPU's (relative error 1.5e-6 against
   5.1e-5), and Evo-1 7% faster. It was left out: GR00T N1.7 sits close to the
   bar, and the kernel moved its fixed-input chunk from 2.0e-3 to 3.0e-3.
+  VLA-Adapter's and OpenVLA-OFT's DINOv2 MLP and projector build it from ops the
+  NPU runs instead (`vla::gelu_erf()`: x*sigmoid(p(x)), p an odd cubic in x
+  clamped to [-5, 5], within 2.5e-5 of the exact GELU): VLA-Adapter 740 to
+  705 ms, OpenVLA-OFT 1771 to 1740 ms.
 - **Absent is no longer fatal.** `src/backend_fallback.cpp` wraps the NPU in a
   backend that runs whatever it rejects on the CPU, without touching an arch.
   That also covers ops refused for shape rather than type: softmax rows that are
@@ -141,6 +145,19 @@ Flash attention on the HMX (v81) keeps scores and probabilities in F16. That is
 a precision limit rather than a wrong op, but in GR00T N1.7's LM it moves the
 action chunk 5.4e-3 from the CPU reference. N1.7's LM therefore takes the
 explicit path unless `--flash-attn` is given: 2.0e-3, at the same latency.
+VLA-JEPA's LM does the same: with flash attention a served LIBERO observation
+lands 6.7e-3 from the reference (the CPU with flash attention 5.5e-3), without
+it 2.6e-3, at a cost of 683 to 810 ms with two views.
+
+The softmax takes rows of up to 32 elements or a multiple of 32. Where a
+sequence can grow without changing its result, vla.cpp pads it to
+`gemm_width()` on Hexagon rather than send every layer's softmax to the CPU:
+VLA-Adapter's causal LM and Octo's block transformer get zero tokens appended,
+masked out as keys, and each VLA-Adapter action-head block stacks its three
+key/value sets as rows, padded and masked, instead of concatenating scores
+along their columns. VLA-Adapter goes from 859 to 747 ms, Octo-Small from 126.5
+to 122.6 ms. OpenVLA-OFT's LM gains nothing that way: its 22 padding tokens add
+as much 7B matmul as the softmax saves.
 
 `MUL_MAT` with a 2D weight against a batch of activations (weight `ne[2..3]`
 of 1, activations above 1) is claimed and comes out wrong. GR00T N1.6's SigLIP2
@@ -344,14 +361,14 @@ differ from the benchmark's for VLA-JEPA, VLA-Adapter, OpenVLA-OFT and Octo:
 | GR00T N1.5 | 1 | 2.4e-3 |
 | GR00T N1.6 | 1 | 1.4e-3 |
 | GR00T N1.7 | 1 | 2.0e-3 |
-| VLA-JEPA | 2 | 2.8e-3 |
-| VLA-Adapter | 2 | 5.6e-4 |
-| OpenVLA-OFT | 2 | 2.9e-4 |
-| Octo-Small | 1 | 4.1e-4 |
+| VLA-JEPA | 2 | 2.2e-3 |
+| VLA-Adapter | 2 | 5.4e-4 |
+| OpenVLA-OFT | 2 | 3.2e-4 |
+| Octo-Small | 1 | 5.3e-4 |
 | TurboVLA | 2 | 3.7e-4 |
 
 GR00T N1.6 with two views is 8.8e-4. At the benchmark's single view VLA-JEPA is
-1.9e-3, VLA-Adapter 4.8e-4 and OpenVLA-OFT 1.9e-4.
+1.9e-3, VLA-Adapter 5.7e-4 and OpenVLA-OFT 2.1e-4.
 
 ### Serving
 
@@ -372,17 +389,17 @@ error reply to a malformed or an invalid request, and keeps serving afterwards.
 | GR00T N1.6 | 1.3e-2 | 1.1e-2 |
 | GR00T N1.7 | 2.5e-3 | |
 | π0 | 5.8e-4 | |
-| VLA-JEPA | 6.7e-3 | 2.1e-2 |
-| VLA-Adapter | 6.1e-4 | |
-| OpenVLA-OFT | 5.2e-4 | |
-| Octo-Small | 9.3e-5 | |
+| VLA-JEPA | 2.6e-3 | 2.1e-2 |
+| VLA-Adapter | 5.4e-4 | |
+| OpenVLA-OFT | 5.9e-4 | |
+| Octo-Small | 2.4e-4 | |
 | TurboVLA | 8.5e-4 | |
 
-GR00T N1.5, N1.6 and VLA-JEPA are above the bar on this input, and so is the CPU
-itself with F16 weights: N1.5 and VLA-JEPA land closer to the reference than the
-CPU at F16, N1.6 slightly further (1.3e-2 against 1.1e-2). They are sensitive to
-16-bit precision rather than miscomputed. Running them with F32 weights on the
-NPU has not been tried yet.
+GR00T N1.5 and N1.6 are above the bar on this input, and so is the CPU itself
+with F16 weights: N1.5 lands closer to the reference than the CPU at F16, N1.6
+slightly further (1.3e-2 against 1.1e-2). They are sensitive to 16-bit precision
+rather than miscomputed. Running them with F32 weights on the NPU has not been
+tried yet.
 
 ## IQ-10, imagined
 
