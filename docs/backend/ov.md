@@ -5,16 +5,18 @@ account of how far it currently runs. Like SYCL, OpenVINO is **not**
 auto-detected: it needs an explicit `-DGGML_OPENVINO=ON` and the OpenVINO
 runtime on the configure line.
 
-> **Status: every architecture that can reach this backend translates faithfully,
-> on the CPU plugin and on the iGPU.** That is ten of the eleven in the tree -
+> **Status: every architecture that can reach this backend translates faithfully
+> and runs on all three plugins: CPU, iGPU and NPU.** That is eleven archs -
 > SmolVLA, π0, π0.5, Evo-1, VLA-Adapter, GR00T N1.5, GR00T N1.6, GR00T N1.7,
-> VLA-JEPA and OpenVLA-OFT - all agreeing with a CPU-backend reference to 1.4e-3 or
-> better on the OpenVINO CPU plugin, and nine of the ten are inside the same bar on
-> the Arc B390 iGPU, where the speedup over the native CPU backend runs from 3.0x
-> to 9.6x. The eleventh, BitVLA, pins its ggml graph to the CPU backend by design
-> and never reaches this backend at all.
+> VLA-JEPA, OpenVLA-OFT and TurboVLA. On the OpenVINO CPU plugin each agrees with
+> ggml's CPU backend at F32 weights to 2.5e-3 or better. The Arc B390 iGPU stays
+> inside the error ggml's own BF16 default carries on every BF16 arch, at 7.3x to 26x
+> the native CPU backend's speed. The NPU runs them all and is the fastest
+> OpenVINO device for six; it lands 2-14x outside that BF16 error on four, and π0
+> is wrong there. Octo-Small has no GroupNorm translation yet, ACT is in progress,
+> and BitVLA pins its ggml graph to the CPU backend by design.
 >
-> Fifteen fixes were needed, thirteen of them inside ggml's OpenVINO backend, which
+> Twenty fixes were needed, eighteen of them inside ggml's OpenVINO backend, which
 > is written against llama.cpp's graphs and had never seen a vision tower or an
 > action expert - see [What had to change](#what-had-to-change).
 >
@@ -23,11 +25,11 @@ runtime on the configure line.
 > precision upgrade. See [Picking the right baseline](#picking-the-right-baseline).
 
 Measured on an **Intel Core Ultra X7 358H** (Panther Lake) with the Arc B390
-iGPU and the AI Boost NPU, Ubuntu 24.04, OpenVINO 2026.2.1, llama.cpp `b10729`,
-on the checkpoints under `vrfai/` on the Hub. Every **fidelity** number was
-re-measured on that pin; only the **latency** table still dates from `b10331`.
-The build now pins llama.cpp `b11223` and `install_ov.sh` installs OpenVINO
-2026.4; the numbers below have not been re-measured on that pin yet.
+iGPU and the AI Boost NPU, Ubuntu 24.04, OpenVINO 2026.4, NPU driver 1.33.0,
+llama.cpp `b11223`, at main `a83bcad` (November 2026), on the checkpoints under
+`vrfai/` on the Hub. The latencies come from the
+[Core Ultra X7 358H report](../benchmark/core-ultra-x7-358h.md); the fidelity
+numbers compare fixed inputs against ggml's own CPU backend.
 
 ggml's backend translates a ggml compute graph into an OpenVINO model and hands
 it to the CPU, GPU or NPU plugin, which compiles and fuses it for the device.
@@ -128,8 +130,10 @@ warning there and falls back to `CPU`, which is still the OpenVINO CPU plugin,
 not ggml's native CPU backend. The second echoes what was requested, so the pair
 tells you whether you got the device you asked for.
 
-OpenVINO compiles each graph on first use, which is slow - a minute or two for a
-vision tower on the GPU. Compiled graphs are then cached in-process for the life
+OpenVINO compiles each graph on first use, which is slow: up to about 80 s per
+process on the GPU, and on the NPU 1-3 minutes for most archs, 7 for SmolVLA, 9
+for π0 and π0.5 and 14 for OpenVLA-OFT
+([per arch](../benchmark/core-ultra-x7-358h.md#notes)). Compiled graphs are then cached in-process for the life
 of the model, so only the first prediction pays that; give any client a receive
 timeout well above the first request. Do **not** set `GGML_OPENVINO_CACHE_DIR` to
 carry them across restarts; it produces silently wrong actions here - see
@@ -137,33 +141,34 @@ carry them across restarts; it produces silently wrong actions here - see
 
 ## Results
 
-`vla_predict_check` (a test target - add `-DVLA_BUILD_TESTS=ON`), fixed noise,
-one camera view, best of 4-6 iterations after 3 warmups. "CPU backend" is ggml's
-own CPU backend on the same 16-core host. No `GGML_OPENVINO_CACHE_DIR`.
+`vla-bench` on synthetic inputs, each arch at its native view count: 3 warmups
+and 20 timed calls per process, 3 processes, the best process's mean, at the
+defaults. "CPU backend" is ggml's own CPU backend on the same 16 cores. The
+[Core Ultra X7 358H report](../benchmark/core-ultra-x7-358h.md) adds min, p50,
+p90, memory and the fastest flags for each device. No `GGML_OPENVINO_CACHE_DIR`.
 
-Latencies were taken at `b10331` and have not been re-timed on `b10729` or
-`b11223`, except π0.5's in the [FoldQuant section](#foldquant-w8a8--w4a4-checkpoints)
-(`vla-bench`, 2 views: 243 ms on the GPU at `b11223`). Read the GPU column for
-VLA-JEPA and GR00T N1.7 as the cost of a wrong answer at that pin; both are
-correct now.
+| Model | views | input | CPU backend | OpenVINO CPU | OpenVINO GPU | OpenVINO NPU |
+|---|--:|--:|--:|--:|--:|--:|
+| TurboVLA | 2 | 256 | 232 ms | 281 ms | 30 ms (7.8x) | **25 ms** (9.2x) |
+| VLA-JEPA | 1 | 256 | 1,265 ms | 1,413 ms | 117 ms (10.8x) | **91 ms** (13.9x) |
+| GR00T N1.5 | 1 | 224 | 1,986 ms | 2,467 ms | **107 ms** (18.5x) | 135 ms (14.7x) |
+| VLA-Adapter | 1 | 224 | 1,666 ms | 1,838 ms | 185 ms (9.0x) | **128 ms** (13.0x) |
+| GR00T N1.6 | 1 | 224 | 1,705 ms | 2,312 ms | **131 ms** (13.0x) | 162 ms (10.5x) |
+| GR00T N1.7 | 1 | 256 | 1,539 ms | 2,084 ms | **132 ms** (11.7x) | 146 ms (10.6x) |
+| SmolVLA | 2 | 512 | 1,763 ms | 1,914 ms | 215 ms (8.2x) | **165 ms** (10.7x) |
+| π0.5 | 2 | 224 | 6,134 ms | 7,551 ms | **234 ms** (26.2x) | 438 ms (14.0x) |
+| Evo-1 | 1 | 448 | 4,122 ms | 4,651 ms | 568 ms (7.3x) | **258 ms** (16.0x) |
+| OpenVLA-OFT | 1 | 224 | 9,990 ms | 11,721 ms | 1,335 ms (7.5x) | **408 ms** (24.5x) |
+| π0 | 2 | 224 | 6,160 ms | 7,584 ms | 625 ms (9.9x) | 445 ms, [wrong](#known-issues) |
 
-| Model | input | CPU backend | OpenVINO CPU | OpenVINO GPU | OpenVINO NPU |
-|---|---|---:|---:|---:|---:|
-| VLA-JEPA    | 256 | 1,046 ms | 1,265 ms | **127 ms** (8.2x) | returns NaN |
-| GR00T N1.5  | 224 | 1,420 ms | 2,199 ms | **148 ms** (9.6x) | plugin throws |
-| VLA-Adapter | 224 | 1,228 ms | 1,603 ms | **161 ms** (7.6x) | not supported |
-| GR00T N1.6  | 224 | 1,276 ms | 2,256 ms | **323 ms** (3.9x) | plugin throws |
-| SmolVLA     | 512 | 1,364 ms | 1,340 ms | **451 ms** (3.0x) | 1,162 ms |
-| Evo-1       | 448 | 3,114 ms | 4,523 ms | **563 ms** (5.5x) | not supported |
-| π0.5        | 224 | 2,802 ms | 4,285 ms | **683 ms** (4.1x) |   916 ms |
-| GR00T N1.7  | 256 | 1,146 ms | not timed | **288 ms** (4.0x) | not attempted |
-
-The iGPU is the reason to use this backend, and it pays off most where the model
-is most vision-heavy. The OpenVINO CPU plugin is at best parity with ggml's own
-CPU backend and often well behind it, so it is only worth running to debug a
-translation. The NPU beats the CPU backend on the two models it accepts while
-drawing far less power, which is the interesting result for a robot - see the
-NPU limits under [Known issues](#known-issues).
+The NPU is the fastest OpenVINO device for TurboVLA, VLA-JEPA, VLA-Adapter,
+SmolVLA, Evo-1 and OpenVLA-OFT, and the GPU plugin for the GR00T models and π0.5.
+π0's NPU number is a latency only; see [Known issues](#known-issues). The OpenVINO
+CPU plugin is 9-36% behind ggml's own CPU backend on every arch, so it is only
+worth running to debug a translation. On the same iGPU, ggml's SYCL backend beats
+both OpenVINO devices on SmolVLA, VLA-Adapter, GR00T N1.5, GR00T N1.6 and π0
+([sycl.md](sycl.md)); the report has all five ways to run on this chip side by
+side.
 
 ### Picking the right baseline
 
@@ -174,59 +179,71 @@ constants and its CPU plugin executes them at F32, while ggml's CPU backend keep
 them BF16, so a naive comparison charges the OpenVINO backend for a precision
 *upgrade*. Running the reference with `--weight-dtype f32` removes that term.
 
-The two references bracket the answer, and which is tighter turns on how much of
-a given checkpoint is BF16 in the first place. Report both and take the smaller:
+The two references bracket the answer. On the OpenVINO CPU plugin, max|delta| on
+the continuous action dims (0-5), six fixed inputs per arch:
 
-| Model | vs BF16 reference | vs F32 reference | tighter reference |
-|---|---:|---:|---|
-| VLA-Adapter | 2.1e-3 | **2.4e-6** | F32 |
-| Evo-1       | 2.7e-3 | **3.5e-6** | F32 |
-| π0.5        | 7.7e-4 | **3.5e-5** | F32 |
-| VLA-JEPA    | 1.1e-2 | **1.1e-4** | F32 |
-| GR00T N1.5  | 5.5e-3 | **6.0e-4** | F32 |
-| GR00T N1.6  | 5.0e-3 | **1.0e-3** | F32 |
-| SmolVLA     | **8.9e-4** | 1.3e-3 | BF16 |
-| GR00T N1.7  | 1.5e0 | **4.2e-4** | F32 |
+| Model | vs BF16 reference | vs F32 reference |
+|---|---:|---:|
+| TurboVLA    | 3.1e-6 | **3.1e-6** |
+| OpenVLA-OFT | 1.4e-3 | **4.0e-5** |
+| VLA-Adapter | 3.5e-3 | **4.7e-5** |
+| Evo-1       | 2.7e-3 | **5.7e-5** |
+| π0.5        | 1.2e-3 | **8.2e-5** |
+| π0          | 5.5e-3 | **1.3e-4** |
+| GR00T N1.5  | 2.8e-3 | **4.9e-4** |
+| GR00T N1.7  | 2.4e-2 | **6.6e-4** |
+| SmolVLA     | 2.9e-2 | **7.6e-4** |
+| VLA-JEPA    | 2.4e-2 | **1.4e-3** |
+| GR00T N1.6  | 1.4e-2 | **2.5e-3** |
 
-Evo-1 and VLA-Adapter agree with an F32 reference to six decimal places, which is
-as close to "the translation is exact" as this harness can show; the BF16
-comparison for those two was measuring nothing but the dtype. SmolVLA is the
-counterexample that stops this being a universal rule. For context, the CPU
-backend's own output moves by 2.0e-3 (SmolVLA), 2.7e-3 (Evo-1) or 1.1e-2
-(VLA-JEPA) when you flip that one flag, so the model's intrinsic sensitivity to
-precision is the same size as the numbers being reported.
+At `b11223` the F32 reference is the tighter one for every arch, SmolVLA included,
+which was the one exception at `b10729`. TurboVLA's GGUF is F32, so its two
+references are the same run. OpenVLA-OFT, VLA-Adapter, Evo-1 and π0.5 agree with
+the F32 reference to 1e-4 or better, which is as close to "the translation is
+exact" as this harness can show; against BF16 they measure nothing but the dtype.
+The BF16 column is also about what the CPU backend's own output moves when you
+flip that one flag, so the models' sensitivity to precision is the same size as
+the numbers being reported, or larger.
 
 ### Full results
 
-Against the F32 reference, which is the fidelity number:
+Against the F32 reference, which is the fidelity number: max|delta| on the
+continuous action dims (0-5), six fixed inputs per arch (2 views for SmolVLA, π0,
+π0.5 and TurboVLA, 1 for the rest, 16-token prompts; π0 on the GPU and NPU: 48
+inputs). A bracket counts the chunks whose gripper (dim 6) flips at a different
+step from the reference. The first column is ggml's own CPU backend at its default
+BF16 weights, the yardstick for what precision alone does:
 
-| Model | OpenVINO CPU | OpenVINO GPU | OpenVINO NPU |
-|---|---:|---:|---:|
-| Evo-1       | 2.2e-6 | 6.0e-4 | compiler rejects |
-| VLA-Adapter | 3.9e-6 | 6.8e-3 | compiler rejects |
-| OpenVLA-OFT | 3.9e-6 | 2.2e-3 | compiler rejects |
-| π0.5        | 6.1e-5 | 7.6e-4 | 1.6e-3 |
-| VLA-JEPA    | 7.7e-5 | 2.6e-3 | returns NaN |
-| GR00T N1.7  | 3.9e-4 | 2.6e-3 | NPUW throws |
-| π0          | 5.8e-4 | 6.6e-5 | **1.7e0** |
-| GR00T N1.5  | 6.0e-4 | 4.6e-3 | NPUW throws |
-| GR00T N1.6  | 1.1e-3 | 1.4e-3 | NPUW throws |
-| SmolVLA     | 1.4e-3 | 2.6e-3 | 1.1e-2 |
+| Model | CPU backend, BF16 | OpenVINO CPU | OpenVINO GPU | OpenVINO NPU |
+|---|---:|---:|---:|---:|
+| TurboVLA    | F32 GGUF | 3.1e-6 | 2.7e-6 | 8.1e-3 |
+| OpenVLA-OFT | 1.4e-3 | 4.0e-5 | 4.1e-5 | 8.1e-4 |
+| VLA-Adapter | 3.5e-3 | 4.7e-5 | 4.8e-5 | 7.6e-3 |
+| Evo-1       | 2.7e-3 | 5.7e-5 | 5.8e-5 | 3.8e-2 |
+| π0.5        | 1.2e-3 | 8.2e-5 | 4.2e-4 | 5.9e-3 |
+| π0          | 5.4e-3 | 1.3e-4 | 7.3e-4 | **3.7e-2** [1/48] |
+| GR00T N1.5  | 2.8e-3 | 4.9e-4 | 8.1e-4 | 8.8e-3 |
+| GR00T N1.7  | 2.5e-2 [1/6] | 6.6e-4 | 1.7e-2 [1/6] | 2.2e-2 [1/6] |
+| SmolVLA     | 2.8e-2 [2/6] | 7.6e-4 | 1.2e-2 [1/6] | 1.8e-2 [1/6] |
+| VLA-JEPA    | 2.4e-2 | 1.4e-3 | 1.4e-2 | 1.4e-2 |
+| GR00T N1.6  | 1.3e-2 | 2.5e-3 | 2.2e-3 | 4.9e-3 |
 
-Every tested arch is inside the 2.9e-3 bar on the CPU plugin, most by one to
-three orders of magnitude, and nine of the ten are inside it on the GPU as well
-(GR00T N1.5's 4.6e-3 against F32 is 1.6e-3 against BF16, the tighter reference for
-that arch). The one outside is **VLA-Adapter**, at 6.8e-3 against F32 on actions
-peaking at 0.62 - the GPU plugin computing in F16, a precision effect rather than
-a translation error, since the same arch is 3.9e-6 on the CPU plugin. Judge
-translation fidelity on the CPU plugin and treat the GPU as a separate precision
-target. π0 is the exception in the other direction, *tighter* on the GPU (6.6e-5)
-because it is the one arch that runs the GPU at F32; see
-[Known issues](#known-issues), which also covers the NPU column.
+Every arch is within 2.5e-3 of the F32 reference on the CPU plugin, most by one to
+two orders of magnitude: the translation is faithful. Judge translation fidelity
+there, and treat the GPU and NPU as separate precision targets. The GPU plugin
+lands below the CPU backend's own BF16 error on every BF16 arch, and VLA-Adapter,
+Evo-1, OpenVLA-OFT and TurboVLA come out as close as on the CPU plugin. The NPU
+computes in F16 only. It lands below the BF16 yardstick on SmolVLA, the GR00T
+N1.6 and N1.7 models, VLA-JEPA and OpenVLA-OFT, and 2-14x above it on VLA-Adapter,
+GR00T N1.5, π0.5 and Evo-1. The gripper flips in the GPU and NPU columns also
+appear between ggml's own BF16 and F32 runs on these inputs: a saturating ±1
+channel near its threshold flips a step early or late on any precision change,
+and reads as a delta near 2. π0 is the exception; see
+[Known issues](#known-issues).
 
 ## What had to change
 
-Fifteen fixes: two in vla.cpp, thirteen in ggml's OpenVINO backend. Both
+Twenty fixes: two in vla.cpp, eighteen in ggml's OpenVINO backend. Both
 vla.cpp-side ones are ordinary correctness fixes that happen to be invisible on
 the other backends - `vla_predict_check` on a CPU build of this branch is
 byte-identical to the same build of the base commit, for every model tested.
@@ -254,7 +271,7 @@ larger through a model builder that assumes a decoder-only LLM. The literal path
 is the one that fits a vision tower and an action expert. An explicit setting
 still wins.
 
-The other thirteen are applied to ggml's OpenVINO backend by
+The other eighteen are applied to ggml's OpenVINO backend by
 `scripts/patch_ggml_openvino.py` at configure time; its docstring carries the
 per-fix detail. Each narrows an llama.cpp-shaped assumption that is stricter than
 the ggml contract, or fills a gap:
@@ -275,12 +292,20 @@ the ggml contract, or fills a gap:
 | Naive-path graph cache | that path re-compiled the whole model on every graph_compute, and its `graph_key` is a node count plus tensor names, which two graphs of different shapes can share |
 | Interleaved-mrope sectors bounded | the sector cycle ignored `sections`, so the last few took the wrong stream |
 | Naive-path threshold settable | the 20-node constant is what picks the literal path |
+| **No NPUW for naive graphs on the NPU** | **the NPU config turns on NPUW for llama.cpp's decoder layers, and its partitioning hands the compiler dynamic Reshape inputs** |
+| **An RMSNorm that cannot overflow f16, on the NPU** | **the NPU computes in f16, and a 2048-wide sum of squares overflows once activations reach about 6** |
+| 2D im2col folded into one Convolution | the matcher only knew the 1D chain, so the NPU ran a vision tower's patch embed on its SHAVE cores |
+| NPU compile properties settable | `GGML_OPENVINO_NPU_PROPS="K=V,..."` reaches the compile config, for example `NPU_TURBO=YES` |
 
 The bolded rows are the ones that turned a wrong arch into a correct one:
 PERMUTE op_case 2 for GR00T N1.7, the double-elementwise guard for the Eagle-VLM
 archs on the iGPU, the GELU mode for VLA-JEPA and GR00T N1.5, per-tensor position
-inputs for SmolVLA (which passes three position tensors, so they aliased). The
-GELU mode and the position-input fix are the two worth upstreaming.
+inputs for SmolVLA (which passes three position tensors, so they aliased), no
+NPUW for π0.5, Evo-1, the GR00T models and VLA-JEPA on the NPU, which did not
+compile before, and the f16-safe RMSNorm for the GR00T models and VLA-JEPA,
+which returned NaN there. The 2D im2col fold is a speedup: SmolVLA's 512 px
+views spent 350 ms each in the NPU's patch extraction. The GELU mode and the
+position-input fix are the two worth upstreaming.
 
 **Debugging a mistranslation.** The backend writes back true graph outputs and
 nothing else, so an interior tensor is observable only two ways: truncate the
@@ -318,8 +343,9 @@ MatMul) run on top of the GEMMs, so FoldQuant is only 7% faster than bf16 there,
 at a third of the memory. On an Intel GPU the SYCL backend is the faster
 FoldQuant path: built with sycl-tla, the same W4A4 file runs in 92 ms on this
 iGPU, against 263 ms for bf16 on SYCL
-([sycl.md](sycl.md#foldquant-w8a8--w4a4-checkpoints)). The NPU does not run π0.5
-at this pin (see [Known issues](#known-issues)).
+([sycl.md](sycl.md#foldquant-w8a8--w4a4-checkpoints)). The NPU runs π0.5's bf16
+GGUF in 438 ms; FoldQuant files read back as float weights there and were not
+timed.
 
 The FoldQuant files are FoldQuantVLA quantized checkpoints converted with
 `scripts/convert_quantized_model_to_gguf.py`: W4A4 and W4A4 with INT8 o/down are
@@ -332,13 +358,14 @@ calibrated on the same 128 LIBERO frames, seed 0.
 
 **π0 needs F32 on the GPU, and gets it by default.** The GPU plugin computes in
 F16, which is most of why it is fast. π0 unrolls its whole 10-step denoise loop
-inside a single graph, so that error compounds with nothing to reset it: its
-continuous action dims land 4e-2 from an F32 reference and its gripper - a
-saturating ±1 channel - crosses its threshold one step late. That reads as
-max|delta| 1.7; on a robot it is a late grasp. `GGML_OPENVINO_GPU_PRECISION=f32`
-puts it back at 6.5e-5, and `backend_init` defaults it for π0 alone because it
-costs about 3x (383 ms -> 1,170 ms). Set `=f16` to override. No other arch needs
-it.
+inside a single graph, so that error compounds with nothing to reset it. On 48
+fixed inputs against the CPU backend at F32 weights, F16 puts its continuous
+action dims up to 2.8e-2 off, and in one chunk in 48 its gripper - a saturating
+±1 channel - crosses its threshold one step early. That reads as max|delta| 1.8;
+on a robot it is an early grasp or release. `GGML_OPENVINO_GPU_PRECISION=f32`
+brings the continuous dims to 7.3e-4 with every flip on time, and `backend_init`
+defaults it for π0 alone because it costs 2.5x (255 ms -> 625 ms). Set `=f16` to
+override. No other arch needs it.
 
 **Do not set `GGML_OPENVINO_CACHE_DIR`.** OpenVINO's on-disk blob cache reloads a
 compiled graph that computes the wrong thing. A cold run against a fresh cache
@@ -351,38 +378,39 @@ several graphs, so one graph gets another's blob - the same class of bug as the
 in-process `graph_key` above, which is now keyed on shapes. In practice, pay the
 compile once per process and leave it unset.
 
-**At `b10729` the NPU accepted three of the ten archs, and only two of those were
-correct; at `b11223` π0.5 no longer compiles.**
-Check every NPU run against the startup banner: an unavailable NPU falls back to
-the CPU plugin silently and would otherwise report excellent numbers that are not
-NPU numbers at all. A partially-failing run still reports a wall-clock time, so
-do not read a latency off a run whose actions did not come out.
+**Every arch now compiles on the NPU, but check every NPU run against the startup
+banner.** An unavailable NPU falls back to the CPU plugin silently and would
+otherwise report excellent numbers that are not NPU numbers at all. A
+partially-failing run still reports a wall-clock time, so do not read a latency
+off a run whose actions did not come out.
 
-| Model | NPU outcome |
-|---|---|
-| SmolVLA | runs, 1.1e-2 (the compile config's dynamic quantization) |
-| π0.5 | runs, 1.6e-3 at `b10729`; at `b11223` / OpenVINO 2026.4 the compiler rejects the main graph: `IE.Reshape doesn't support dynamic shapes` |
-| π0 | runs, but **1.7e0 wrong** - see below |
-| VLA-JEPA | compiles and runs, returns all `NaN` (not diagnosed) |
-| GR00T N1.5 / N1.6 / N1.7 | `NPUW: Assertion all_ok failed`, `partitioning.cpp:1350` |
-| Evo-1 | compiler rejects: `Input channels '1025' is not aligned by '16'` |
-| VLA-Adapter | compiler rejects: `Input channels '261' is not aligned by '16'` |
-| OpenVLA-OFT | compiler rejects: `Input channels '261' is not aligned by '16'` |
+At `b10729` the NPU accepted three of the ten archs, and only two of those were
+correct. At `b11223`, with OpenVINO 2026.4 and NPU driver 1.33, all eleven compile
+and run, and the [Full results](#full-results) give their error. Three fixes did
+most of it: no NPUW for naive graphs (π0.5, Evo-1, the GR00T models and VLA-JEPA
+failed on dynamic Reshape inputs or an LLVM abort), the f16-safe RMSNorm (the GR00T
+models and VLA-JEPA returned NaN), and the 2D im2col fold (SmolVLA's vision went
+from 1,121 to 55 ms). Evo-1 (1025 input channels) and VLA-Adapter and
+OpenVLA-OFT (261), which the NPU compiler used to reject as not aligned to 16,
+compile at this pin as well.
 
-The three alignment rejections are Intel's NPU compiler: 1025 is Evo-1's 1024
-patches plus a CLS token, and 261 is 256 plus 5 - VLA-Adapter and OpenVLA-OFT hit
-the identical number for the identical reason. SmolVLA and π0.5 happen to have
-16-aligned sequence lengths. None of these are vla.cpp's doing.
+The NPU is slow to compile: 1-3 minutes per process for most archs, 7 for
+SmolVLA, 9 for π0 and π0.5 and 14 for OpenVLA-OFT, all before the first action
+comes out. It also drops its clock between requests, which costs a policy loop
+with 50-500 ms gaps 50-80 ms per request (`vla-bench --gap-ms` shows it);
+`GGML_OPENVINO_NPU_PROPS=NPU_TURBO=YES` keeps it up.
 
-**π0 on the NPU is the same bug as π0 on the GPU, and here there is no remedy.**
-Continuous dims 0-5 land at 4.0e-2 and the gripper flips at step 44, exactly as
-on the GPU. But the GPU fix does not transfer: setting the inference precision to
-F32 makes the NPU refuse to compile at all (`core.cpp:117`), because the hint
-conflicts with the NPUW and dynamic-quantization config the NPU path sets up. So
-`GGML_OPENVINO_GPU_PRECISION` is GPU-only by necessity, and π0 should not be run
-on the NPU.
+**π0 on the NPU is the same bug as π0 on the GPU at F16, and here there is no
+remedy.** On the same 48 inputs, continuous dims 0-5 land within 3.7e-2 (median
+8.3e-3), and in one chunk in 48 the gripper flips one step early (max|delta| 2.0),
+as at F16 on the GPU. The GPU fix does not transfer: at `b10729`, setting the
+inference precision to F32 made the NPU refuse to compile at all
+(`core.cpp:117`), because the hint conflicted with the NPUW and
+dynamic-quantization config the NPU path set up then. So `GGML_OPENVINO_GPU_PRECISION` is GPU-only by necessity,
+and π0 should not be run on the NPU.
 
-**SmolVLA's `VLA_TIMING=phase` path is wrong under OpenVINO.** SmolVLA has a
+**SmolVLA's `VLA_TIMING=phase` path is wrong under OpenVINO** (found at `b10729`,
+not re-checked since). SmolVLA has a
 second graph builder used when a caller asks for per-phase timings, and it does
 not survive translation - max|delta| 1.9 on every device. The default
 `TimingDetail::NONE` path, which is what `vla-server` and `vla-cli` use, is
@@ -394,18 +422,17 @@ tables above.
 
 ## TODO
 
-**Fixing issue channel not aligned by 16.** Feasible solution is padding dummy
-channel so that number of channels is a multiple of 16.
-
 **Splitting across devices.** Intel's own
 [π0.5 write-up](https://docs.openedgeplatform.intel.com/2026.1/OEP-articles/publications/optimizing-pi0.5-lva-model.html)
 puts the vision encoder and language model on the iGPU and the action expert on
 the NPU, with the KV cache as the only cross-device handoff. The toolchain does
 not carry over - PyTorch exported to OpenVINO IR as three separate models, no
 ggml - but the shape of the answer does: the two devices suit different stages,
-and π0.5 on the NPU alone is already within 1.5x of the iGPU at a fraction of the
-power. vla.cpp cannot make that split today because the core drives one backend
-for a whole prediction. It would need a per-*stage* backend rather than a per-op
+and π0.5 on the NPU alone is within 1.9x of the iGPU (438 ms against 234 ms) at a
+fraction of the power. vla.cpp cannot make that split today because the core
+drives one backend for a whole prediction. The one exception is a prototype:
+SmolVLA can send its last camera view to an NPU worker process while SYCL runs
+the rest ([sycl.md](sycl.md#prototype-one-smolvla-view-on-the-npu)). It would need a per-*stage* backend rather than a per-op
 scheduler - the vision tower, the prefix and the action expert already hand off
 through host memory, so the seam is in the right place - but that is an engine
 change, not a backend one.

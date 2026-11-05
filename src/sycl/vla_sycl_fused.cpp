@@ -203,6 +203,34 @@ void run_rms_q8(sycl::queue & q, const ggml_tensor * dst, float eps) {
     });
 }
 
+template <typename TI, typename TO>
+struct k_rms;
+
+// fused_rms: RMSNorm with its weight into rows of TO, one work-group per row.
+template <typename TI, typename TO>
+void run_rms(sycl::queue & q, const ggml_tensor * dst, float eps) {
+    const ggml_tensor * x = dst->src[0];
+    const int64_t h = x->ne[0], rows = ggml_nrows(x);
+    const char *  xb = (const char *) x->data;
+    const float * w  = (const float *) dst->src[1]->data;
+    char *        ob = (char *) dst->data;
+    const size_t  xs = x->nb[1], os = dst->nb[1];
+    q.parallel_for<k_rms<TI, TO>>(sycl::nd_range<1>(sycl::range<1>(rows * WG), sycl::range<1>(WG)),
+                                  [=](sycl::nd_item<1> it) {
+        const int64_t r   = it.get_group(0);
+        const int     tid = (int) it.get_local_id(0);
+        const TI *    xr  = (const TI *) (xb + r * xs);
+        float ss = 0.0f;
+        for (int64_t i = tid; i < h; i += WG) {
+            const float v = (float) xr[i];
+            ss += v * v;
+        }
+        const float inv = sycl::rsqrt(sycl::reduce_over_group(it.get_group(), ss, sycl::plus<float>()) / (float) h + eps);
+        TO * orow = (TO *) (ob + r * os);
+        for (int64_t i = tid; i < h; i += WG) orow[i] = TO((float) xr[i] * inv * w[i]);
+    });
+}
+
 template <typename TO>
 struct k_adarms;
 
@@ -265,6 +293,15 @@ inline float gelu_tanh_fast(float x) {
     return x / (1.0f + sycl::native::exp(-u2));
 }
 
+// The gate activation of a FusedGegluSpec node: SiLU or tanh GELU.
+inline float glu_act(bool silu, float x) {
+    return silu ? x / (1.0f + sycl::native::exp(-x)) : gelu_tanh_fast(x);
+}
+
+bool glu_silu(const ggml_tensor * dst) {
+    return static_cast<const FusedGegluSpec *>(custom_userdata(dst))->silu != 0;
+}
+
 // One work-item per 4 consecutive elements of a row (n % 4 == 0, which every
 // FFN width here is): 8-byte BF16 loads and stores instead of 2-byte ones.
 template <typename T>
@@ -276,6 +313,7 @@ void run_geglu(sycl::queue & q, const ggml_tensor * dst) {
     const char * ub = (const char *) u->data;
     char *       db = (char *) dst->data;
     const size_t gs = g->nb[1], us = u->nb[1], ds = dst->nb[1];
+    const bool   silu = glu_silu(dst);
     using V = sycl::vec<T, 4>;
     q.parallel_for<k_geglu<T>>(sycl::range<2>((size_t) rows, (size_t) n4), [=](sycl::item<2> it) {
         const int64_t r = (int64_t) it[0], c = (int64_t) it[1];
@@ -283,7 +321,7 @@ void run_geglu(sycl::queue & q, const ggml_tensor * dst) {
         const V uv = reinterpret_cast<const V *>(ub + r * us)[c];
         V o;
 #pragma unroll
-        for (int j = 0; j < 4; ++j) o[j] = T(gelu_tanh_fast((float) gv[j]) * (float) uv[j]);
+        for (int j = 0; j < 4; ++j) o[j] = T(glu_act(silu, (float) gv[j]) * (float) uv[j]);
         reinterpret_cast<V *>(db + r * ds)[c] = o;
     });
 }
@@ -301,12 +339,13 @@ void run_lnorm(sycl::queue & q, const ggml_tensor * dst, float eps) {
     const ggml_tensor * x = dst->src[0];
     const int64_t h = x->ne[0], rows = ggml_nrows(x);
     const char *  xb = (const char *) x->data;
-    const float * w  = (const float *) dst->src[1]->data;
-    const float * b  = (const float *) dst->src[2]->data;
+    // no affine (both null): the scalar kernel, with w = 1 and b = 0
+    const float * w  = dst->src[1] ? (const float *) dst->src[1]->data : nullptr;
+    const float * b  = dst->src[2] ? (const float *) dst->src[2]->data : nullptr;
     char *        ob = (char *) dst->data;
     const size_t  xs = x->nb[1], os = dst->nb[1];
     const sycl::nd_range<1> nr(sycl::range<1>(rows * WG), sycl::range<1>(WG));
-    if (rows_vec8(xb, xs, h, sizeof(TI)) && rows_vec8(ob, os, h, sizeof(TO)) && (uintptr_t) w % 32 == 0 &&
+    if (w && rows_vec8(xb, xs, h, sizeof(TI)) && rows_vec8(ob, os, h, sizeof(TO)) && (uintptr_t) w % 32 == 0 &&
         (uintptr_t) b % 32 == 0) {
         q.parallel_for<k_lnorm8<TI, TO>>(nr, [=](sycl::nd_item<1> it) {
             const int64_t r   = it.get_group(0);
@@ -355,7 +394,8 @@ void run_lnorm(sycl::queue & q, const ggml_tensor * dst, float eps) {
         }
         const float inv = sycl::rsqrt(sycl::reduce_over_group(it.get_group(), ss, sycl::plus<float>()) / (float) h + eps);
         TO * orow = (TO *) (ob + r * os);
-        for (int64_t i = tid; i < h; i += WG) orow[i] = TO(((float) xr[i] - mean) * inv * w[i] + b[i]);
+        for (int64_t i = tid; i < h; i += WG)
+            orow[i] = TO(((float) xr[i] - mean) * inv * (w ? w[i] : 1.0f) + (b ? b[i] : 0.0f));
     });
 }
 
@@ -373,6 +413,7 @@ void run_geglu_q8(sycl::queue & q, const ggml_tensor * dst) {
     float *      scales = (float *) (codes + rows * n);
     const size_t gs = g->nb[1], us = u->nb[1];
     const bool   v8 = rows_vec8(gb, gs, n, sizeof(T)) && rows_vec8(ub, us, n, sizeof(T));
+    const bool   silu = glu_silu(dst);
     q.parallel_for<k_geglu_q8<T>>(sycl::nd_range<1>(sycl::range<1>(rows * WG), sycl::range<1>(WG)),
                                   [=](sycl::nd_item<1> it) {
         const int64_t r  = it.get_group(0);
@@ -382,17 +423,20 @@ void run_geglu_q8(sycl::queue & q, const ggml_tensor * dst) {
             q8_row8(it, n, codes + r * n, scales + r, [&](int64_t c, float * v) {
                 const sycl::vec<float, 8> gv = load8(gr, c), uv = load8(ur, c);
 #pragma unroll
-                for (int j = 0; j < 8; ++j) v[j] = gelu_tanh_fast(gv[j]) * uv[j];
+                for (int j = 0; j < 8; ++j) v[j] = glu_act(silu, gv[j]) * uv[j];
             });
         } else {
             q8_row(it, n, codes + r * n, scales + r,
-                   [&](int64_t i) { return gelu_tanh_fast((float) gr[i]) * (float) ur[i]; });
+                   [&](int64_t i) { return glu_act(silu, (float) gr[i]) * (float) ur[i]; });
         }
     });
 }
 
+template <typename TO>
 struct k_ropekv;
 
+// TO: the q out and K/V buffer type, F16 (TO) or BF16 (the table mode).
+template <typename TO>
 void run_ropekv(sycl::queue & q, ggml_tensor * dst) {
     const auto &        s   = *static_cast<const FusedRopeKvSpec *>(custom_userdata(dst));
     const ggml_tensor * qkv = dst->src[0];
@@ -402,29 +446,39 @@ void run_ropekv(sycl::queue & q, ggml_tensor * dst) {
     const int64_t T = qkv->ne[1], h2 = s.hd / 2, heads = s.nq + 2 * s.nkv;
     const char *  xb = (const char *) qkv->data;
     const size_t  xs = qkv->nb[1];
-    sycl::half *  qo = (sycl::half *) dst->data;
-    sycl::half *  ko = (sycl::half *) ((char *) kb->data + s.row0 * kb->nb[2]);
-    sycl::half *  vo = (sycl::half *) ((char *) vb->data + s.row0 * vb->nb[2]);
+    TO *  qo = (TO *) dst->data;
+    TO *  ko = (TO *) ((char *) kb->data + s.row0 * kb->nb[2]);
+    TO *  vo = (TO *) ((char *) vb->data + s.row0 * vb->nb[2]);
     const int64_t nq = s.nq, nkv = s.nkv, hd = s.hd;
     const float   ts = s.theta_scale;
-    q.parallel_for<k_ropekv>(sycl::range<3>((size_t) T, (size_t) heads, (size_t) h2), [=](sycl::item<3> it) {
+    // table: cos / sin rows per token in place of the positions
+    const float * ct = s.table ? (const float *) dst->src[1]->data : nullptr;
+    const float * st = s.table ? (const float *) dst->src[4]->data : nullptr;
+    if (s.table) pos = nullptr;
+    q.parallel_for<k_ropekv<TO>>(sycl::range<3>((size_t) T, (size_t) heads, (size_t) h2), [=](sycl::item<3> it) {
         const int64_t t = it[0], hh = it[1], i = it[2];
         const float * x = (const float *) (xb + t * xs) + hh * hd;
         const float   x0 = x[i], x1 = x[i + h2];
-        sycl::half *  o;
+        TO *  o;
         if (hh < nq)            o = qo + (t * nq + hh) * hd;
         else if (hh < nq + nkv) o = ko + (t * nkv + hh - nq) * hd;
         else {
             o = vo + (t * nkv + hh - nq - nkv) * hd;
-            o[i]      = (sycl::half) x0;
-            o[i + h2] = (sycl::half) x1;
+            o[i]      = (TO) x0;
+            o[i + h2] = (TO) x1;
+            return;
+        }
+        if (ct) {
+            const float * c = ct + t * hd, * sn = st + t * hd;
+            o[i]      = (TO) (x0 * c[i] - x1 * sn[i]);
+            o[i + h2] = (TO) (x1 * c[i + h2] + x0 * sn[i + h2]);
             return;
         }
         // ggml-sycl's rope_neox with freq_scale 1, ext_factor 0, attn_factor 1.
         const float theta = (float) pos[t] * sycl::pow(ts, (float) i);
         const float c = sycl::cos(theta), sn = sycl::sin(theta);
-        o[i]      = (sycl::half) (x0 * c - x1 * sn);
-        o[i + h2] = (sycl::half) (x0 * sn + x1 * c);
+        o[i]      = (TO) (x0 * c - x1 * sn);
+        o[i + h2] = (TO) (x0 * sn + x1 * c);
     });
 }
 
@@ -444,13 +498,17 @@ bool supported(const ggml_tensor * op) {
                 (rows_packed(op) && (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_BF16)));
     }
     if (m == FUSED_ROPEKV_MAGIC) {
-        // Contiguous q out and K/V buffers ([hd, nkv, n_ctx] F16).
+        // Contiguous q out and K/V buffers ([hd, nkv, n_ctx], F16, or BF16 all three).
         return op->src[0]->type == GGML_TYPE_F32 && op->src[0]->nb[0] == 4 && ggml_is_contiguous(op) &&
-               ggml_is_contiguous(op->src[2]) && ggml_is_contiguous(op->src[3]);
+               ggml_is_contiguous(op->src[2]) && ggml_is_contiguous(op->src[3]) &&
+               (op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16) && op->src[2]->type == op->type &&
+               op->src[3]->type == op->type;
     }
     if (m == FUSED_RMSQ_MAGIC) {
         return (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_BF16) &&
-               rows_packed(op->src[0]) && ggml_is_contiguous(op->src[1]) && is_blob(op, op->src[0]);
+               rows_packed(op->src[0]) && ggml_is_contiguous(op->src[1]) &&
+               (is_blob(op, op->src[0]) ||
+                (rows_packed(op) && (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_BF16)));
     }
     if (m == FUSED_GATERES_MAGIC) {
         return op->src[0]->type == GGML_TYPE_F32 && rows_packed(op->src[0]) && rows_packed(op->src[1]) &&
@@ -514,13 +572,23 @@ bool forward(ggml_tensor * dst, void * queue) {
         return true;
     }
     if (magic_of(dst) == FUSED_ROPEKV_MAGIC) {
-        run_ropekv(q, dst);
+        if (dst->type == GGML_TYPE_BF16) run_ropekv<bf16>(q, dst);
+        else                             run_ropekv<sycl::half>(q, dst);
         return true;
     }
     if (magic_of(dst) == FUSED_RMSQ_MAGIC) {
         const float eps = static_cast<const FusedRmsSpec *>(custom_userdata(dst))->eps;
-        if (dst->src[0]->type == GGML_TYPE_BF16) run_rms_q8<bf16>(q, dst, eps);
-        else                                     run_rms_q8<float>(q, dst, eps);
+        const bool  bi  = dst->src[0]->type == GGML_TYPE_BF16;
+        if (dst->type == GGML_TYPE_I8) {
+            if (bi) run_rms_q8<bf16>(q, dst, eps);
+            else    run_rms_q8<float>(q, dst, eps);
+        } else if (dst->type == GGML_TYPE_BF16) {
+            if (bi) run_rms<bf16, bf16>(q, dst, eps);
+            else    run_rms<float, bf16>(q, dst, eps);
+        } else {
+            if (bi) run_rms<bf16, float>(q, dst, eps);
+            else    run_rms<float, float>(q, dst, eps);
+        }
         return true;
     }
     if (magic_of(dst) == FUSED_GEGLU_MAGIC && dst->type == GGML_TYPE_I8) {

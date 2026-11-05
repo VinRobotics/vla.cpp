@@ -17,6 +17,9 @@
 #include "model.h"
 #include "modules/preprocess.h"
 #include "modules/dual_tower.h"
+#include "modules/fused_lm.h"
+#include "env_flag.h"
+#include "sycl/vla_sycl_ops.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -44,7 +47,8 @@
 namespace vla {
 namespace {
 
-struct LMLayerW  { ggml_tensor *attn_norm,*Wq,*bq,*Wk,*bk,*Wv,*bv,*Wo,*ffn_norm,*Wg,*Wu,*Wd; };
+// fused: fw only (modules/fused_lm.h), the separate weights null.
+struct LMLayerW  { ggml_tensor *attn_norm,*Wq,*bq,*Wk,*bk,*Wv,*bv,*Wo,*ffn_norm,*Wg,*Wu,*Wd; FusedLmW fw; };
 struct HeadBlkW  { ggml_tensor *Wq,*bq,*Wks,*bks,*Wvs,*bvs,*Wka,*bka,*Wva,*bva,*Wkt,*bkt,*Wvt,*bvt,*Wo,*bo,*flnw,*flnb,*flw,*flb; float rg; };
 
 }
@@ -82,6 +86,10 @@ struct VlaAdapterModelArch : public ModelArchBase {
     ggml_backend_buffer_t weight_buf = nullptr;
     ggml_type mt = GGML_TYPE_BF16;
     bool fused_ops = false;   // CUDA fused (bit-exact) paths, BF16 weights only
+    // The fused graph: the towers (DualTower::enable_fused) and the LM layers
+    // (modules/fused_lm.h) as fused nodes. SYCL, BF16 weights.
+    bool fused = false;
+    FusedRmsSpec lm_rms_spec;
 
     int64_t lm_hidden=896,lm_layers=24,n_q=14,n_kv=2,lm_head_dim=64,vocab=151936;
     float   lm_rope_base=1e6f, lm_rms_eps=1e-6f;
@@ -155,6 +163,17 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
         if (m->mt == GGML_TYPE_BF16)
             m->fused_ops = enable_fused_ops("vla_adapter", b.is_cuda);
         m->vis.fused_ops = m->fused_ops;
+        // The fused graph on SYCL (view-taking flash attention, BF16 weights):
+        // BF16 activations into every GEMM, residual streams F32. --flash-attn 0
+        // or VLA_ADAPTER_NO_FUSE=1 keeps the per-op F32 graph.
+        if (b.is_sycl && vla::fa_takes_views() && m->mt == GGML_TYPE_BF16 && opts.flash_attn.value_or(true) &&
+            !env_flag("VLA_ADAPTER_NO_FUSE")) {
+            m->fused = true;
+            m->lm_rms_spec.eps = m->lm_rms_eps;
+            sycl_register_fused_ops();
+            sycl_register_bf16_ops();
+            std::printf("vla(vla_adapter): fused towers and LM layers (VLA_ADAPTER_NO_FUSE=1 to disable)\n");
+        }
     }
 
     ggml_init_params wp = { (size_t)64*1024*1024, nullptr, true };
@@ -168,6 +187,7 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
     m->token_embd=mm("token_embd.weight"); m->action_queries=mm("action_queries.weight"); m->lm_out_norm=f32("lm.output_norm.weight");
     m->lm.resize(m->lm_layers);
     for(int i=0;i<m->lm_layers;++i){ auto&w=m->lm[i]; char b[64];
+        if(m->fused){ w=LMLayerW{}; w.fw=fused_lm_declare(L,"lm.blk."+std::to_string(i)+".",true); continue; }
         auto N=[&](const char*s){ std::snprintf(b,sizeof(b),"lm.blk.%d.%s",i,s); return (const char*)b; };
         w.attn_norm=f32(N("attn_norm.weight")); w.ffn_norm=f32(N("ffn_norm.weight"));
         w.Wq=mm(N("attn_q.weight")); w.bq=f32(N("attn_q.bias")); w.Wk=mm(N("attn_k.weight")); w.bk=f32(N("attn_k.bias"));
@@ -194,6 +214,8 @@ std::unique_ptr<ModelArchBase> vla_adapter_create(const std::string& mmproj_path
         w.rg=std::tanh(gv[0]); }
 
     if (!L.upload(m->backend, &m->weight_buf))
+        return nullptr;
+    if (m->fused && !m->vis.enable_fused("vla_adapter"))
         return nullptr;
 
     std::printf("vla(vla_adapter): weights resident %.2f GiB (%s) - DINOv2+SigLIP towers + Qwen2.5-0.5B + Bridge head\n",
@@ -269,6 +291,12 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     const float lsc=1.0f/std::sqrt((float)lm_head_dim);
     std::vector<ggml_tensor*> lout(lm_layers); ggml_tensor*x=mm_seq;
     const bool fused_lm=fused_ops && LSEQ==SEQ && cublas_rows(SEQ) && SEQ<=4096;
+    if(fused){
+        const FusedLmDims d{lm_head_dim,n_q,n_kv,lm_rope_base};
+        ggml_tensor*kbuf,*vbuf; fused_lm_kv(C,d,SEQ,&kbuf,&vbuf);
+        ggml_tensor*mask_f16=ggml_cast(C,t_mask,GGML_TYPE_F16);
+        for(int i=0;i<lm_layers;++i){ x=fused_lm_layer(C,lm[i].fw,d,lm_rms_spec,x,t_pos,mask_f16,SEQ,nullptr,kbuf,vbuf); lout[i]=x; }
+    } else
     for(int i=0;i<lm_layers;++i){ const auto&l=lm[i];
         if(fused_lm){
             // The same layer on the fused (bit-identical) kernels: RMSNorm into
