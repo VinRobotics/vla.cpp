@@ -176,12 +176,34 @@ struct ActModelArch : public ModelArchBase {
 
 namespace {
 
+// conv_2d_f32 with the patch matrix padded with zeros to gemm_width() in both
+// dims, for one view. The HMX takes a matmul only when those are multiples of
+// 32; the stem's K of 147 and layer3's and layer4's 1200 and 300 rows are not.
+// Returns nullptr where nothing would be padded.
+ggml_tensor * conv_2d_padded(ggml_context * C, ggml_tensor * w, ggml_tensor * x, int stride, int pad) {
+    const int64_t ow = (x->ne[0] + 2*pad - w->ne[0]) / stride + 1, oh = (x->ne[1] + 2*pad - w->ne[1]) / stride + 1;
+    const int64_t K = w->ne[0]*w->ne[1]*w->ne[2], R = ow*oh, Kp = gemm_width(K), Rp = gemm_width(R);
+    if (x->ne[3] != 1 || (Kp == K && Rp == R))
+        return nullptr;
+    ggml_tensor * col = ggml_im2col(C, w, x, stride, stride, pad, pad, 1, 1, true, GGML_TYPE_F32);
+    ggml_tensor * c2 = ggml_pad(C, ggml_reshape_2d(C, col, K, R), (int) (Kp - K), (int) (Rp - R), 0, 0);
+    ggml_tensor * w2 = ggml_reshape_2d(C, w, K, w->ne[3]);
+    if (Kp > K)
+        w2 = ggml_pad(C, w2, (int) (Kp - K), 0, 0, 0);
+    ggml_tensor * y = ggml_mul_mat(C, c2, w2);
+    if (Rp > R)
+        y = ggml_cont(C, ggml_view_2d(C, y, R, y->ne[1], y->nb[1], 0));
+    return ggml_reshape_4d(C, y, col->ne[1], col->ne[2], w->ne[3], 1);
+}
+
 // [w, h, c, view] to [ow, oh, oc, view]. The kernel's type picks the path; see
 // ActModelArch::conv_direct.
 ggml_tensor * conv2d(ggml_context * C, const ConvW & cw, ggml_tensor * x, int stride, int pad) {
-    ggml_tensor * y = cw.w->type == GGML_TYPE_F16
-        ? ggml_conv_2d_direct(C, cw.w, x, stride, stride, pad, pad, 1, 1)
-        : conv_2d_f32(C, cw.w, x, stride, pad);
+    ggml_tensor * y = nullptr;
+    if (cw.w->type == GGML_TYPE_F16)
+        y = ggml_conv_2d_direct(C, cw.w, x, stride, stride, pad, pad, 1, 1);
+    else if (!(y = conv_2d_padded(C, cw.w, x, stride, pad)))
+        y = conv_2d_f32(C, cw.w, x, stride, pad);
     return ggml_add(C, y, ggml_reshape_4d(C, cw.b, 1, 1, cw.b->ne[0], 1));
 }
 
