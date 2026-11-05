@@ -135,7 +135,7 @@ inline ggml_tensor* vit_block(ggml_context*C, const ViTLayerW&w, ggml_tensor*x, 
                       :attention(C,Q,K,ggml_cont(C,ggml_permute(C,head_view(C,qkv,hd,heads,N,hidden,3,2),1,2,0,3)),nullptr,scale,hidden,N);
     ggml_tensor*ao=linear(C,w.Wproj,w.bproj,att);
     x=ggml_add(C,x,ls?ggml_mul(C,ao,w.ls1):ao);
-    ggml_tensor*h=ffn_gelu_erf(C,w.Wfc1,w.bfc1,w.Wfc2,w.bfc2,layer_norm(C,x,w.n2w,w.n2b,eps));
+    ggml_tensor*h=linear(C,w.Wfc2,w.bfc2,gelu_erf(C,linear(C,w.Wfc1,w.bfc1,layer_norm(C,x,w.n2w,w.n2b,eps))));
     return ggml_add(C,x,ls?ggml_mul(C,h,w.ls2):h);
 }
 
@@ -198,8 +198,8 @@ inline ggml_tensor* DualTower::encode(ggml_backend_t backend, graph_cache<int64_
             ph=fused_bias_gelu_erf(C,mm_exact(C,pj_fc2w,ph),pj_fc2b,bf16_operand(pj_fc3w,rows));
             io.proj=ggml_add(C,mm_exact(C,pj_fc3w,ph),pj_fc3b);
         } else {
-            ggml_tensor*ph=ggml_gelu_erf(C,linear(C,pj_fc1w,pj_fc1b,allp));
-            ph=ggml_gelu_erf(C,linear(C,pj_fc2w,pj_fc2b,ph));
+            ggml_tensor*ph=gelu_erf(C,linear(C,pj_fc1w,pj_fc1b,allp));
+            ph=gelu_erf(C,linear(C,pj_fc2w,pj_fc2b,ph));
             io.proj=linear(C,pj_fc3w,pj_fc3b,ph);
         }
         ggml_set_output(io.proj);

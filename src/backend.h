@@ -249,6 +249,26 @@ inline ggml_tensor * gelu(ggml_context * ctx, ggml_tensor * x) {
 #endif
 }
 
+/**
+ * @brief `ggml_gelu_erf`, in ops the compiled-in backend runs.
+ *
+ * ggml-hexagon has no GELU_ERF, so every MLP that uses it round-trips its
+ * activations through the CPU. There it is x*sigmoid(p(x)), p an odd cubic in
+ * x clamped to [-5, 5] fitted to logit(Phi(x)): within 2.5e-5 of the exact
+ * GELU for every x. Elsewhere this is plain ggml_gelu_erf.
+ */
+inline ggml_tensor * gelu_erf(ggml_context * ctx, ggml_tensor * x) {
+#ifdef GGML_USE_HEXAGON
+    ggml_tensor * xc = ggml_clamp(ctx, x, -5.0f, 5.0f);
+    ggml_tensor * x2 = ggml_mul(ctx, xc, xc);
+    ggml_tensor * p  = ggml_mul(ctx, ggml_scale_bias(ctx, x2, -7.0303601711e-4f, 7.4011308986e-2f), x2);
+    p = ggml_mul(ctx, ggml_scale_bias(ctx, p, 1.0f, 1.5950157475f), xc);
+    return ggml_mul(ctx, x, ggml_sigmoid(ctx, p));
+#else
+    return ggml_gelu_erf(ctx, x);
+#endif
+}
+
 inline ggml_tensor * geglu(ggml_context * ctx, ggml_tensor * gate, ggml_tensor * up) {
 #if !defined(GGML_USE_METAL) && !defined(GGML_USE_OPENVINO) && \
     !defined(GGML_USE_HEXAGON) && !defined(GGML_USE_OPENCL)
