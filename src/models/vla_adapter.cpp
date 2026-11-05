@@ -237,6 +237,10 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     const int64_t NUM_PROMPT_TOKENS = NPROMPT-1;
     const int64_t NPATCH = NP * n_views;
     const int64_t SEQ = 1+NPATCH+(NPROMPT-1)+num_tokens+1;
+    // The LM runs on LSEQ tokens, zeros appended. The mask is causal, so no real
+    // token sees them, and on Hexagon the softmax rows become a multiple of 32,
+    // which is what the NPU takes.
+    const int64_t LSEQ = gemm_width(SEQ);
     const auto ti=clock::now();
     // LM + action head graph depends only on the sequence layout.
     const MainKey mkey{ SEQ, n_views, NPROMPT };
@@ -254,12 +258,14 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     ggml_tensor*erest=ggml_cont(C,ggml_view_2d(C,emb2,HC,NPROMPT+num_tokens,emb2->nb[1],emb2->nb[1]));
     ggml_tensor*t_proj=ggml_new_tensor_2d(C,GGML_TYPE_F32,HC,NPATCH); ggml_set_input(t_proj);
     ggml_tensor*mm_seq=ggml_concat(C,ggml_concat(C,e0,t_proj,1),erest,1);
+    if(LSEQ>SEQ)
+        mm_seq=ggml_pad(C,mm_seq,0,(int)(LSEQ-SEQ),0,0);
 
-    ggml_tensor*t_pos=ggml_new_tensor_1d(C,GGML_TYPE_I32,SEQ); ggml_set_input(t_pos); ggml_set_output(t_pos);
-    ggml_tensor*t_mask=ggml_new_tensor_2d(C,GGML_TYPE_F32,SEQ,SEQ); ggml_set_input(t_mask); ggml_set_output(t_mask);
+    ggml_tensor*t_pos=ggml_new_tensor_1d(C,GGML_TYPE_I32,LSEQ); ggml_set_input(t_pos); ggml_set_output(t_pos);
+    ggml_tensor*t_mask=ggml_new_tensor_2d(C,GGML_TYPE_F32,LSEQ,LSEQ); ggml_set_input(t_mask); ggml_set_output(t_mask);
     const float lsc=1.0f/std::sqrt((float)lm_head_dim);
     std::vector<ggml_tensor*> lout(lm_layers); ggml_tensor*x=mm_seq;
-    const bool fused_lm=fused_ops && cublas_rows(SEQ) && SEQ<=4096;
+    const bool fused_lm=fused_ops && LSEQ==SEQ && cublas_rows(SEQ) && SEQ<=4096;
     for(int i=0;i<lm_layers;++i){ const auto&l=lm[i];
         if(fused_lm){
             // The same layer on the fused (bit-identical) kernels: RMSNorm into
@@ -277,19 +283,22 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         }
         ggml_tensor*hn=ggml_mul(C,ggml_rms_norm(C,x,lm_rms_eps),l.attn_norm);
         ggml_tensor*qp=ggml_add(C,ggml_mul_mat(C,l.Wq,hn),l.bq),*kp=ggml_add(C,ggml_mul_mat(C,l.Wk,hn),l.bk),*vp=ggml_add(C,ggml_mul_mat(C,l.Wv,hn),l.bv);
-        ggml_tensor*qh=ggml_reshape_3d(C,qp,lm_head_dim,n_q,SEQ),*kh=ggml_reshape_3d(C,kp,lm_head_dim,n_kv,SEQ),*vh=ggml_reshape_3d(C,vp,lm_head_dim,n_kv,SEQ);
+        ggml_tensor*qh=ggml_reshape_3d(C,qp,lm_head_dim,n_q,LSEQ),*kh=ggml_reshape_3d(C,kp,lm_head_dim,n_kv,LSEQ),*vh=ggml_reshape_3d(C,vp,lm_head_dim,n_kv,LSEQ);
         ggml_tensor*qr=ggml_rope_ext(C,qh,t_pos,nullptr,(int)lm_head_dim,GGML_ROPE_TYPE_NEOX,0,lm_rope_base,1.0f,0.0f,1.0f,32.0f,1.0f);
         ggml_tensor*kr=ggml_rope_ext(C,kh,t_pos,nullptr,(int)lm_head_dim,GGML_ROPE_TYPE_NEOX,0,lm_rope_base,1.0f,0.0f,1.0f,32.0f,1.0f);
         ggml_tensor*Q=ggml_cont(C,ggml_permute(C,qr,0,2,1,3)),*K=ggml_cont(C,ggml_permute(C,kr,0,2,1,3)),*V=ggml_cont(C,ggml_permute(C,vh,1,2,0,3));
         ggml_tensor*kq=ggml_mul_mat(C,K,Q); ggml_prec_set_acc(kq,GGML_PREC_F32);
         ggml_tensor*aw=ggml_soft_max_ext(C,kq,t_mask,lsc,0.0f);
         ggml_tensor*kqv=ggml_mul_mat(C,V,aw);
-        ggml_tensor*att=ggml_reshape_2d(C,ggml_cont(C,ggml_permute(C,kqv,0,2,1,3)),HC,SEQ);
+        ggml_tensor*att=ggml_reshape_2d(C,ggml_cont(C,ggml_permute(C,kqv,0,2,1,3)),HC,LSEQ);
         x=ggml_add(C,x,ggml_mul_mat(C,l.Wo,att));
         ggml_tensor*hn2=ggml_mul(C,ggml_rms_norm(C,x,lm_rms_eps),l.ffn_norm);
         ggml_tensor*gt=ggml_silu(C,ggml_mul_mat(C,l.Wg,hn2)),*ut=ggml_mul_mat(C,l.Wu,hn2);
         x=ggml_add(C,x,ggml_mul_mat(C,l.Wd,ggml_mul(C,gt,ut))); lout[i]=x;
     }
+    if(LSEQ>SEQ)
+        for(auto&o:lout)
+            o=ggml_view_2d(C,o,HC,SEQ,o->nb[1],0);
     ggml_tensor*final_norm=ggml_mul(C,ggml_rms_norm(C,lout[lm_layers-1],lm_rms_eps),lm_out_norm);
 
     std::vector<ggml_tensor*> cond(head_blocks);
@@ -363,11 +372,11 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     if(!ggml_are_same_shape(proj,t_proj)){ std::fprintf(stderr,"vla(vla_adapter): projector output does not match the LM width\n"); return {}; }
     ggml_backend_tensor_copy(proj,t_proj);
     if(!gio.consts){
-        std::vector<int32_t> pp(SEQ);
-        for(int64_t i=0;i<SEQ;++i)
+        std::vector<int32_t> pp(LSEQ);
+        for(int64_t i=0;i<LSEQ;++i)
             pp[i]=(int32_t)i;
         ggml_backend_tensor_set(t_pos,pp.data(),0,ggml_nbytes(t_pos));
-        std::vector<float> mk; build_causal_mask(SEQ, mk);
+        std::vector<float> mk; build_causal_mask(LSEQ, mk);
         ggml_backend_tensor_set(t_mask,mk.data(),0,ggml_nbytes(t_mask));
         std::vector<float> zx((size_t)action_dim*HC*chunk,0.0f);
         ggml_backend_tensor_set(t_x0,zx.data(),0,ggml_nbytes(t_x0));
