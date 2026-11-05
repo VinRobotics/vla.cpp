@@ -11,7 +11,7 @@ Báo cáo này kiểm tra source hiện tại và tái phân tích artifact ngà
 3. [Baseline](baseline-results.md): protocol, tất cả lượt chạy, thống kê.
 4. [Nsight](nsys-analysis.md): kernel/API/memcpy/gap và cảnh báo trace.
 5. [Comparison](comparison.md): số liệu so sánh có phân biệt loại phép đo.
-6. [Limitations và mentor review](limitations.md).
+6. [Limitations và các phần xin review](limitations.md).
 7. [Giải thích kiến thức](explanation.md) và [tái lập](reproduction.md).
 
 Kết luận được hỗ trợ: flash-mm là ứng viên runtime nhanh hơn defaults trên protocol đã lưu; trung vị mean ba lượt 114,1 → 92,4 ms (−19,0%). Chưa xác nhận tốt nhất về chất lượng: LIBERO screening 35/40 so với defaults 38/40. Giữ 10 bước denoise khi so sánh. `steps-3` nhanh nhưng thay đổi solver và sai khác action lớn nên không đưa vào cặp đối chứng giữ cùng số bước.

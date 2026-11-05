@@ -13,7 +13,7 @@ Cập nhật trạng thái ngày 05/11/2026 (UTC+07). Các mục phía sau là n
 | 5. Architecture / profile | Metadata checkpoint, sơ đồ, phase và nsys node traces | Connector/attention chưa tách riêng; GPU-active khác wall time |
 | 6. Pruning | Ba GGUF depth ablation, kiểm tra output, latency module và smoke | Cả ba smoke 0/2; chưa implement CLP/CKA hoặc finetuning |
 
-Kiểm tra lại CSV cho đủ 360 episode và bảng theo task: [TASK_RESULTS.md](research-notes/smolvla-followup-20261104/TASK_RESULTS.md). Phần còn thiếu và tiêu chí hoàn tất: [MENTOR_REVIEW.md](MENTOR_REVIEW.md).
+Kiểm tra lại CSV cho đủ 360 episode và bảng theo task: [TASK_RESULTS.md](research-notes/smolvla-followup-20261104/TASK_RESULTS.md). Phần còn thiếu và tiêu chí hoàn tất: [REVIEW_REQUESTS.md](REVIEW_REQUESTS.md).
 
 ## Nguyên văn mentor
 
@@ -483,7 +483,7 @@ Screen40 q8-vision: task 9 hoàn tất 4/4; tổng tạm thời 36/40. Log scree
 
 Batch ba biến thể đã complete, 120/120 episode, cả ba exit 0: flash-mm 35/40, Q8-lm 36/40, Q8-vision 36/40. Q8-vision task 9 đạt 4/4, không skip. Trạng thái chạy trong các dòng nhật ký trước là lịch sử.
 
-Đã cập nhật REPORT_SMOLVLA.md, SUBMISSION_SMOLVLA.md, PART3_OPTIMIZATION.md, CALCULATIONS_SMOLVLA.md, MENTOR_REVIEW.md và PAPER_READING_SMOLVLA_CLP.md. Phụ lục có thêm Q8-vision, Wilson 95% 76,9–96,0%; 180/200 vẫn chỉ là ngoại suy, chưa phải official. Báo cáo có bảng tiêu chí đóng các thực nghiệm còn mở.
+Đã cập nhật REPORT_SMOLVLA.md, SUBMISSION_SMOLVLA.md, PART3_OPTIMIZATION.md, CALCULATIONS_SMOLVLA.md, REVIEW_REQUESTS.md và PAPER_READING_SMOLVLA_CLP.md. Phụ lục có thêm Q8-vision, Wilson 95% 76,9–96,0%; 180/200 vẫn chỉ là ngoại suy, chưa phải official. Báo cáo có bảng tiêu chí đóng các thực nghiệm còn mở.
 
 Thêm audit_screening.py: đối chiếu result.json với 40 CSV của defaults và ba biến thể (160 episode), kiểm tra ID episode/task, steps, success, aborted, SR và exit batch. Kết quả khớp: defaults 38/40; flash-mm 35/40; Q8-lm 36/40; Q8-vision 36/40; tất cả aborted=0. screening-final-audit.json lưu số đo từng episode và SHA256 CSV; không kiểm tra video. submission-progress.json được cập nhật từ result cuối.
 
@@ -553,3 +553,5 @@ Screen40 smolvla-coupled-tail-30: task 7 hoàn tất 2/4; tổng tạm thời 16
 Screen40 smolvla-coupled-tail-30: task 8 hoàn tất 4/4; tổng tạm thời 20/36. Log screen40-variants/smolvla-coupled-tail-30/task-8.log; chưa phải official SR.
 
 Screen40 smolvla-coupled-tail-30: task 9 hoàn tất 3/4; tổng tạm thời 23/40. Log screen40-variants/smolvla-coupled-tail-30/task-9.log; chưa phải official SR.
+
+Official200 flash-mm: task 0 hoàn tất 17/20; tổng tạm thời 17/20. Log official200-flash-mm/task-0.log; SR tạm thời; chỉ chốt sau đủ200 episode.

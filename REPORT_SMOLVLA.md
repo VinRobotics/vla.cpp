@@ -73,9 +73,9 @@ Timer dùng CPU steady_clock; `ggml_backend_graph_compute` đồng bộ backend 
 
 Trên 20 prediction được trace, summed kernel duration 2260,227 → 1733,185 ms; nhóm GEMM (gồm attention products) 1317,749 → 898,702 ms. Khoảng không có recorded process activity là 10,54% → 9,13%, không phải chứng minh toàn GPU idle. **Cả hai trace có cảnh báo `Not all CUDA events might have been collected.` và dùng legacy software tracing do hardware tracing không hỗ trợ.** Vì vậy coverage đầy đủ, exact attention time và nguyên nhân gap chưa được xác nhận; các tỷ lệ chỉ mô tả events đã ghi nhận. Hai test CUDA chưa rerun, không báo đã pass.
 
-Chi tiết: [kiến trúc và source anchors](research-notes/task5-profiling/architecture.md), [timer/phase measurements](research-notes/task5-profiling/timing-methodology.md), [Nsight API/kernel/memcpy](research-notes/task5-profiling/nsys-analysis.md), [giải thích tiếng Việt](research-notes/task5-profiling/explanation.md), [mentor review và giới hạn](research-notes/task5-profiling/limitations.md), [tái lập](research-notes/task5-profiling/reproduction.md).
+Chi tiết: [kiến trúc và source anchors](research-notes/task5-profiling/architecture.md), [timer/phase measurements](research-notes/task5-profiling/timing-methodology.md), [Nsight API/kernel/memcpy](research-notes/task5-profiling/nsys-analysis.md), [giải thích tiếng Việt](research-notes/task5-profiling/explanation.md), [các phần xin review và giới hạn](research-notes/task5-profiling/limitations.md), [tái lập](research-notes/task5-profiling/reproduction.md).
 
-## Vấn đề cần mentor review
+## Vấn đề cần các phần xin review
 
 1. Hai CUDA tests fail và fused/unfused maxabs0,000545874: chưa tìm ra nguyên nhân; giữ defaults theo quyết định baseline của người dùng.
 2. Peak allocation1912,47MiB chưa bao hết context/driver. NVML process memory trả N/A; không gọi là toàn bộ process resident VRAM.
@@ -89,7 +89,7 @@ Chi tiết: [kiến trúc và source anchors](research-notes/task5-profiling/arc
 - [Bảng kết quả theo task](research-notes/smolvla-followup-20261104/TASK_RESULTS.md) và [audit 360 episode](research-notes/smolvla-followup-20261104/submission-audit.json): kiểm tra lại 200 official + 160 screening từ CSV, có hash và loại lượt task 9 bị gián đoạn. Chạy lại bằng `python3 research-notes/smolvla-followup-20261104/audit_submission.py`; không cần inference mới.
 - [Nhật ký](NOTES_SMOLVLA.md) là lịch sử, không dùng các dòng trạng thái cũ làm hiện trạng.
 - [Report lịch sử](research-notes/review-20261104/REPORT_HISTORY.md) giữ nguyên snapshot cũ, có nội dung đã hết hiệu lực.
-- [Review Markdown](MENTOR_REVIEW.md) liệt kê các vấn đề tài liệu và phương pháp.
+- [Các phần xin review](REVIEW_REQUESTS.md) liệt kê các vấn đề tài liệu và phương pháp.
 - Dữ liệu nhỏ/scripts được commit; GGUF, video, trace nsys/sqlite, wheel và môi trường cài đặt không đưa lên Git.
 
 ## Task 1 — cài đặt, công cụ và tiêu chí đạt

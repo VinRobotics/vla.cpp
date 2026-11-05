@@ -1,10 +1,10 @@
-# Các điểm nhờ mentor review
+# Các phần xin review
 
 Cập nhật ngày 05/11/2026 (UTC+07). Tài liệu chính: [REPORT_SMOLVLA.md](REPORT_SMOLVLA.md), [bảng phần3](PART3_OPTIMIZATION.md).
 
 ## Các vấn đề thực nghiệm còn mở
 
-Đợt báo cáo chốt theo dữ liệu hiện có; không chạy thêm official cho biến thể hoặc thí nghiệm mới. Hai lỗi CUDA tạm hoãn xử lý, vẫn ghi nhận 13/15 tests pass. Các câu hỏi dưới đây phục vụ nhận xét kết quả và định hướng nghiên cứu sau đợt này.
+Nhờ người review góp ý về phương pháp đo, cách diễn giải kết quả và hướng nghiên cứu trong các phần dưới đây. Hai lỗi CUDA vẫn được công bố: 13/15 tests pass. Official flash-mm đã được khởi chạy theo yêu cầu bổ sung; chưa đưa SR cuối vào tài liệu này.
 
 | Vấn đề | Bằng chứng / giới hạn | Câu hỏi review |
 |---|---|---|
@@ -16,12 +16,12 @@ Cập nhật ngày 05/11/2026 (UTC+07). Tài liệu chính: [REPORT_SMOLVLA.md](
 | Synthetic output | Input 6 token, 50×7 chiều action thực; benchmark 16 token | Nên thêm calibration/real observation output checks nào? |
 | LIBERO recovery | Task 9 official chạy lại 20 episode; toàn bộ phần dở bị loại | Policy recovery này có phù hợp không? |
 | Dependencies | Bảy metadata conflicts; client import/render/rollout thành công | Có yêu cầu môi trường lock sạch để tái lập không? |
-| Pruning | Tail/spaced; cả 3 bản smoke đạt 0/2; chưa CKA/finetune | Chọn calibration, bảo toàn parity SA/CA và coupling VLM/expert thế nào? |
+| Pruning | Screening vision-tail 0/40, vision-spaced 0/40, coupled-tail 23/40; có tiện ích CKA nhưng chưa calibration thực/finetune | Chọn calibration, bảo toàn parity SA/CA và coupling VLM/expert thế nào? |
 | Profile | GPU active khác wall; denoise gồm crossKV; vision gồm connector | Cần thêm instrumentation để tách action expert/connector không? |
 
 ## Dữ liệu và trạng thái đánh giá
 
-Kết quả và script tái lập được lưu trong nhánh này. Screening đã hoàn tất 120/120 episode: flash-mm 35/40, Q8-lm 36/40, Q8-vision 36/40, so với defaults 38/40. Official biến thể và repeated-seed chưa chạy; chưa kết luận giữ SR. Kết quả đã đối chiếu CSV bằng `research-notes/smolvla-followup-20261104/audit_screening.py`.
+Kết quả và script tái lập được lưu trong nhánh này. Screening đã hoàn tất 120/120 episode: flash-mm 35/40, Q8-lm 36/40, Q8-vision 36/40, so với defaults 38/40. Official flash-mm đã khởi chạy; official hai bản Q8 và repeated-seed chưa có. Chưa kết luận giữ SR. Kết quả đã đối chiếu CSV bằng `research-notes/smolvla-followup-20261104/audit_screening.py`.
 
 ## Rà soát phần thiếu và tiêu chí hoàn tất
 
@@ -32,7 +32,7 @@ Kết quả và script tái lập được lưu trong nhánh này. Screening đ�
 | 1. Cài đặt | Thống nhất trạng thái 13/15 giữa checklist và báo cáo | Sửa hai test CUDA, chạy lại theo hợp đồng hiện tại; chưa thực hiện vì đang tạm hoãn |
 | 2. Baseline | Giữ rõ allocation và resident VRAM; công bố điều kiện đo và giới hạn telemetry | Đo process resident memory trên môi trường hỗ trợ nếu yêu cầu đúng chỉ số này |
 | 3. Tối ưu | Đã có bảng bốn chỉ tiêu, control riêng và tính speedup cùng batch | Kiểm tra chất lượng cho cấu hình định chọn; không suy SR từ synthetic delta |
-| 4. LIBERO | Audit cả official và screening; thêm bảng thành công từng task | Official cho cấu hình được chọn chưa có; không chạy thêm trong đợt chốt này |
+| 4. LIBERO | Audit cả official và screening; thêm bảng thành công từng task | Defaults đã có official 177/200; flash-mm đang được đánh giá bổ sung, chưa có kết quả cuối trong tài liệu này |
 | 5. Profile | Phân biệt module GPU-active, phase wall và default path | Connector riêng, attention riêng và phân tích nguyên nhân gap chưa hoàn tất |
 | 6. Pruning | Có ba depth ablation và kết quả âm; phân biệt rõ với CLP | Nếu yêu cầu tái hiện phương pháp paper: cần activation calibration, CKA, mapping hợp lệ và quy trình finetuning/đánh giá tương ứng |
 
@@ -42,7 +42,7 @@ Audit CPU ngày 05/11 đã parse khớp sáu raw latency log, tính lại tổng
 
 Điểm cần review thêm: cả hai trace báo `Not all CUDA events might have been collected.`; không thể chứng minh completeness chỉ vì không có chuỗi lost/drop. Trace dùng legacy software instrumentation; Unified Memory không trace được. Gap 10,54%/9,13% chỉ thuộc recorded target-process activity, không whole-GPU idle hoặc CPU bottleneck đã xác nhận. Timer wall có backend synchronization; PHASE đổi graph/padding nên không chia trực tiếp baseline mặc định thành module times.
 
-GPU đang có server dùng tại lúc audit nên chưa đo lại hoặc rerun hai CUDA tests. File LastTestsFailed lịch sử vẫn liệt kê foldquant_cuda_op và fused_cuda_ops; không đồng nghĩa đã tái hiện fail hôm nay. Chưa xác minh source/binary provenance bằng rebuild, chưa có best theo official SR, exact connector/action-expert-only/attention timing hoặc resident process VRAM.
+GPU đang có server dùng tại lúc audit nên chưa đo lại hoặc rerun hai CUDA tests. File LastTestsFailed lịch sử vẫn liệt kê foldquant_cuda_op và fused_cuda_ops; không đồng nghĩa đã tái hiện fail hôm nay. Chưa xác minh source/binary provenance bằng rebuild, defaults được chọn theo SR quan sát, chưa có official so sánh cho biến thể, exact connector/action-expert-only/attention timing hoặc resident process VRAM.
 
 [Review Task 5 chi tiết](research-notes/task5-profiling/limitations.md) và [script audit CPU](research-notes/task5-profiling/audit_evidence.py). Đây là báo cáo có thể review trên bằng chứng hiện có, chưa xác nhận hoàn tất toàn bộ yêu cầu thực nghiệm.
 

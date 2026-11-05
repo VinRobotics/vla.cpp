@@ -1,4 +1,4 @@
-# Giới hạn và mentor review
+# Giới hạn và các phần xin review
 
 ## Observed facts
 
@@ -20,7 +20,7 @@ Không chạy lại vì GPU đang được server dùng. Không tự kill server
 
 Vision softmax giảm cùng chuyển sang flash path gợi ý giảm materialization/traffic hữu ích; chưa có hardware counters chứng minh bandwidth bottleneck. Gap có thể liên quan host copies/setup/sync hoặc instrumentation/scheduling; chưa correlation đầy đủ từng gap→CPU event để kết luận CPU bottleneck. Cần GPU rảnh và trace mới xử lý/công bố completeness warning; dùng source/NVTX correlation nếu cần exact module attribution, đo instrumentation overhead.
 
-## Mentor review
+## Các phần xin review
 
 | Yêu cầu mentor | Trạng thái |
 |---|---|

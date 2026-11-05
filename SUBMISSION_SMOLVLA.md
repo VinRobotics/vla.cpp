@@ -34,7 +34,7 @@ Cả hai trace có cảnh báo **có thể chưa thu đủ CUDA events** và s�
 - [Báo cáo tổng thể](REPORT_SMOLVLA.md)
 - [Bảng tối ưu không train](PART3_OPTIMIZATION.md)
 - [Kiến trúc và profiling](research-notes/smolvla-followup-20261104/ARCHITECTURE_AND_PROFILE.md)
-- [Các câu hỏi cần góp ý](MENTOR_REVIEW.md)
+- [Các câu hỏi cần góp ý](REVIEW_REQUESTS.md)
 - [Ghi chú hai paper](PAPER_READING_SMOLVLA_CLP.md)
 
 ## Giới hạn cần đọc cùng kết quả
