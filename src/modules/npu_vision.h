@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Prototype: one camera view's vision encoder on the NPU (docs/backend/ptl_npu.md).
+// Prototype: one camera view's vision encoder on the NPU (docs/backend/sycl.md).
 //
 // A model with >= 2 views sends its last view's preprocessed CHW image to
 // scripts/npu_vision_worker.py, which serves that model's vision graph (built
