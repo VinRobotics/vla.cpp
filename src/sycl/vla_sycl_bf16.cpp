@@ -183,6 +183,9 @@ bool mul_mat(ggml_tensor * dst, sycl::queue & q) {
 }
 
 // ---------------------------------------------------------------------------
+// The specs' gelu field: 1 tanh, 2 erf (layers/fused_ew.h: FUSED_GELU_*).
+constexpr int GELU_ERF = 2;
+
 // fused linear (layers/fused_ew.h): act(x W^T + b) (+ res) as one matmul with
 // its bias and post-ops
 // ---------------------------------------------------------------------------
@@ -231,7 +234,8 @@ bool fused_linear(ggml_tensor * dst, const void * spec_v, sycl::queue & q) {
                 p.c_md = dnnl::memory::desc({ M, N }, dnnl_type(dst->type), ddims{ N, 1 });
                 if (b) p.bias_md = dnnl::memory::desc({ 1, N }, dt::f32, ddims{ N, 1 });
                 dnnl::post_ops po;
-                if (gelu) po.append_eltwise(dnnl::algorithm::eltwise_gelu_tanh, 0.0f, 0.0f);
+                if (gelu) po.append_eltwise(gelu == GELU_ERF ? dnnl::algorithm::eltwise_gelu_erf
+                                                                  : dnnl::algorithm::eltwise_gelu_tanh, 0.0f, 0.0f);
                 if (res) {
                     p.r_md = dnnl::memory::desc({ M, N }, dnnl_type(res->type), ddims{ key.res_ld, 1 });
                     po.append_binary(dnnl::algorithm::binary_add, p.r_md);
@@ -409,7 +413,8 @@ bool qlinear(ggml_tensor * dst, const void * spec_v, sycl::queue & q) {
                 dnnl::post_ops po;
                 int            idx = 0;
                 if (gelu) {
-                    po.append_eltwise(dnnl::algorithm::eltwise_gelu_tanh, 0.0f, 0.0f);
+                    po.append_eltwise(gelu == GELU_ERF ? dnnl::algorithm::eltwise_gelu_erf
+                                                             : dnnl::algorithm::eltwise_gelu_tanh, 0.0f, 0.0f);
                     ++idx;
                 }
                 if (gt) {
