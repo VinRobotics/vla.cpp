@@ -18,7 +18,6 @@
 
 #include "model.h"
 
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -159,9 +158,11 @@ int32_t vla_predict(vla_model * h, const vla_inputs * in,
                                      ? vla::TimingDetail::PHASE
                                      : vla::TimingDetail::NONE;
 
-        if (in->prev_actions && !vla::supports_prefix_cond(h->m)) {
-            std::fprintf(stderr, "vla: this architecture does not support prev_actions (real-time chunking)\n");
-            return VLA_ERR_UNSUPPORTED;
+        if (in->prev_actions) {
+            if (in->n_prev_actions <= 0 || in->n_prev_actions > vla::model_config(h->m).n_suffix)
+                return VLA_ERR_ARG;
+            if (!vla::supports_prefix_cond(h->m))
+                return VLA_ERR_UNSUPPORTED;
         }
         const std::vector<float> act = vla::predict(h->m, ci);
         if (act.empty())

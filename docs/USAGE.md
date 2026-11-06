@@ -108,7 +108,8 @@ jump at the chunk switch was cut by about 70 % with a horizon of 25 at delays of
 
 SmolVLA only. Any other architecture refuses the input instead of ignoring it:
 `VLA_ERR_UNSUPPORTED` from `vla_predict`, `NotImplementedError` in Python, an error
-response from `vla-server`.
+response from `vla-server`. `n_prev_actions` must be between 1 and the chunk size: anything else
+is `VLA_ERR_ARG` from `vla_predict` and an error response from `vla-server`.
 
 ## Runtime flags
 

@@ -581,6 +581,12 @@ int main(int argc, char ** argv) {
         in.prev_actions     = prev_vec.empty() ? nullptr : prev_vec.data();
         in.n_prev_actions   = static_cast<int>(prev_vec.size()/size_t(cfg.max_action_dim));
         in.inference_delay  = static_cast<int>(req.inference_delay());
+        if (!prev_vec.empty() && (prev_vec.size() % size_t(cfg.max_action_dim) != 0 || in.n_prev_actions <= 0 || in.n_prev_actions > cfg.n_suffix)) {
+            char buf[160]; std::snprintf(buf, sizeof(buf),
+                "prev_actions has %zu values, want 1 to %lld rows of %lld", prev_vec.size(), (long long) cfg.n_suffix, (long long) cfg.max_action_dim);
+            send_reply(make_error_response(rid, buf));
+            continue;
+        }
 
         std::vector<float> action_chunk = vla::predict(model, in);
         const auto & st = vla::last_stats(model);

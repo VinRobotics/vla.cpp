@@ -43,7 +43,7 @@ typedef enum {
     VLA_ERR_ARG        = -1,  ///< Null handle or malformed vla_inputs.
     VLA_ERR_PREDICT    = -2,  ///< The engine returned no actions.
     VLA_ERR_EXCEPTION  = -3,  ///< A C++ exception was caught at the boundary.
-    VLA_ERR_UNSUPPORTED = -4, ///< The loaded architecture does not support a requested input (prev_actions).
+    VLA_ERR_UNSUPPORTED = -4, ///< The loaded architecture does not support an input that was set.
 } vla_status;
 
 typedef enum {
