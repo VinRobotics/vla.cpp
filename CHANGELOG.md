@@ -35,8 +35,13 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   reference (1.0e-3 served): pads that read a weight, also answered
   `NO_SUPPORT`, run on the CPU, and its ResNet's im2col matrices are
   zero-padded to a multiple of 32 so the convs' matmuls take the HMX (152.9 ms,
-  170.8 ms on the CPU). GR00T N1.5 and N1.6 are above the bar on a served LIBERO
-  observation, as the CPU is at F16. See
+  170.8 ms on the CPU). Explicit attention takes F16 K/V with its head dim and
+  keys zero-padded to a multiple of 32, the padding masked out, so both matmuls
+  run on the HMX: OpenVLA-OFT's LM, Octo's block transformer, Evo-1's DiT
+  cross-attention and GR00T's DiT (OpenVLA-OFT 35% faster, Evo-1 29%, Octo
+  29%, GR00T N1.5 11%); VLA-Adapter's LM only for V. Fidelity is measured
+  against a CPU-only build of the same commit. GR00T N1.5 and N1.6 are above
+  the bar on a served LIBERO observation, as the CPU is at F16. See
   `docs/backend/hexagon.md` for the build, the skel install and the numbers.
 - **ROCm/HIP backend for VLA inference.** `-DGGML_HIP=ON` selects ggml's HIP
   backend without compiling vla.cpp's CUDA-only kernels. On Linux `gfx1200`
