@@ -148,6 +148,9 @@ bool load_config(const gguf_reader & g, const Options & opts, VlaJepaModelArch &
     m.dit.cfg.layers       = m.dit_layers;
     m.dit.cfg.ln_eps       = m.dit_ln_eps;
     m.dit.cfg.norm_out_eps = m.dit_norm_out_eps;
+    // Its cross-attention K/V overflow F16 on the IQ-10 (NaN actions); they
+    // stay F32 there, and only the self-attention takes the HMX.
+    m.dit.cfg.cross_kv_f16 = false;
 
     cfg = Config{};
     cfg.n_img = m.vit.n_tokens();

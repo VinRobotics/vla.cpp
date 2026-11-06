@@ -50,6 +50,9 @@ struct DitCfg {
     float   ln_eps       = 1e-5f;
     float   norm_out_eps = 1e-6f;
     bool    fused_ops    = false;   // layers/fused_ops.h nodes (CUDA only)
+    // Cross-attention K/V in F16 where the HMX wants it (Hexagon). Off for a
+    // conditioning whose projections overflow F16.
+    bool    cross_kv_f16 = true;
 };
 
 struct DitHead {
@@ -72,13 +75,17 @@ struct DitHead {
                  const char * outer = nullptr, const FqModuleSpec * fq = nullptr);
 
     // xq_pre: an activation blob already computed from src (shared with q).
+    // cross: src is the conditioning rather than the block's own tokens.
     void kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
-            ggml_tensor ** K_out, ggml_tensor ** V_out, ggml_tensor * xq_pre = nullptr) const;
+            ggml_tensor ** K_out, ggml_tensor ** V_out, ggml_tensor * xq_pre = nullptr, bool cross = true) const;
 
     ggml_tensor * block(ggml_context * C, const DitLayerW & w, ggml_tensor * h, ggml_tensor * mod,
                         ggml_tensor * enc, ggml_tensor * K_pre = nullptr, ggml_tensor * V_pre = nullptr) const;
 
     ggml_tensor * time_emb(ggml_context * C, ggml_tensor * tproj) const;
+
+    // [NK, Tq] additive mask hiding keys Nk.. of NK, made once per graph (by name).
+    ggml_tensor * key_mask(ggml_context * C, int64_t NK, int64_t Nk, int64_t Tq) const;
 
     // (shift, scale), opposite to the blocks.
     ggml_tensor * proj_out(ggml_context * C, ggml_tensor * h, ggml_tensor * mod) const;
