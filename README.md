@@ -1,6 +1,4 @@
-# vla.cpp
-
-![logo](assets/logo_vlacpp_white.png)
+<h1 align="center"><code>vla.cpp</code></h1>
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE.md)
 [![Built on llama.cpp](https://img.shields.io/badge/built%20on-llama.cpp-lightgrey)](https://github.com/ggml-org/llama.cpp)
@@ -12,6 +10,8 @@ A C++ inference engine for **Vision-Language-Action (VLA) models**, built on [`l
 It runs the open VLA policies under one runtime, each packaged as a single self-contained GGUF that needs no Python or
 PyTorch at inference time. The binaries drive robots on **CPU**, **Apple Silicon**,
 **NVIDIA** (including Jetson), **AMD**, **Intel** and **Qualcomm** hardware.
+
+![thumbnails](assets/sim-and-real-rollouts.gif)
 
 ---
 

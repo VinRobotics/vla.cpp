@@ -72,11 +72,13 @@ sets them too, and the command line wins. The fastest configuration per model,
 with measured latency and success rate, is in [CHANGELOG.md](../CHANGELOG.md);
 per-device fastest flags are in [benchmark/](benchmark/).
 
-- `--weight-dtype f32|bf16|f16` - resident dtype for GEMM weights.
+- `--weight-dtype f32|bf16|f16` - resident dtype for GEMM weights. TurboVLA
+  defaults to f16 on SYCL.
 - `--act-dtype f32|bf16` - activation dtype; bf16 needs bf16 weights and is
-  for π0 and π0.5 on CUDA or SYCL (not with a FoldQuant checkpoint) and Evo-1
-  on CUDA.
-- `--flash-attn` - faster on the larger towers, but changes numerics.
+  for π0, π0.5 and Evo-1 on CUDA or SYCL (not with a FoldQuant checkpoint).
+- `--flash-attn [0|1]` - faster on the larger towers, but changes numerics. On
+  by default on SYCL for SmolVLA, Evo-1, π0, π0.5 and TurboVLA; `--flash-attn 0`
+  turns it off.
 - `--mm-prec default|f32` - matmul accumulation precision.
 - `--num-steps N` - flow-matching solver steps for π0, π0.5, SmolVLA, Evo-1,
   GR00T and VLA-JEPA (default: the checkpoint's). The other archs refuse it.
@@ -91,6 +93,11 @@ These apply to every arch:
 - `VLA_FUSED_OPS` - CUDA: `0` turns off the fused kernels and runs the plain
   ggml graph. Both give the same output; the other switches are in
   [backend/cuda.md](backend/cuda.md#the-bit-exact-fast-path).
+- SYCL runs fused graphs by default for several archs; unlike CUDA's they move
+  the actions slightly. `VLA_SMOLVLA_NO_FUSE=1`, `VLA_ADAPTER_NO_FUSE=1`,
+  `VLA_GR00T_NO_FUSE=1` and the others restore the per-op graph, and
+  `VLA_GR00T_N17_FUSE=1` opts GR00T N1.7 in; the full list is in
+  [backend/sycl.md](backend/sycl.md#sycl-defaults-fused-graphs-and-flash-attention).
 
 Checkpoints that carry stats for several datasets need the one to un-normalize
 with, for example `VLA_OCTO_UNNORM_DATASET=libero_object` for the Octo LIBERO
