@@ -85,6 +85,7 @@ struct Evo1ModelArch : public ModelArchBase {
     struct MainIO {
         ggml_tensor *t_embeds=nullptr,*t_pos=nullptr,*t_lmmask=nullptr,*t_qmask=nullptr;
         ggml_tensor *t_state=nullptr,*t_x=nullptr,*t_amask=nullptr,*x_action=nullptr;
+        ggml_tensor *t_dmask=nullptr;
         std::vector<int32_t> lm_ok;
     };
     graph_cache<MainKey, MainIO> main_graph;
@@ -870,6 +871,14 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     const int64_t E = embed_dim, hd_dit = E/dit_heads;
     const float   scale_dit = 1.0f/std::sqrt((float) hd_dit);
     const int64_t Nctx = SEQ+1;
+    // On Hexagon the DiT's cross-attention pads its head dim and its keys with
+    // zeros to gemm_width(), the keys masked out, and takes F16 K/V: both
+    // matmuls then run on the HMX instead of as F32 x F32 on the vector units.
+    const int64_t HP = gemm_width(hd_dit), NK = gemm_width(Nctx);
+    ggml_tensor * t_dmask = nullptr;
+    if (NK > Nctx) {
+        t_dmask = ggml_new_tensor_2d(C, GGML_TYPE_F32, NK, horizon); ggml_set_input(t_dmask); ggml_set_output(t_dmask);
+    }
 
     ggml_tensor * t_embeds   = ggml_new_tensor_2d(C, GGML_TYPE_F32, lm_hidden, SEQ);     ggml_set_input(t_embeds);
     ggml_tensor * t_pos      = ggml_new_tensor_1d(C, GGML_TYPE_I32, SEQ);                ggml_set_input(t_pos);
@@ -935,6 +944,12 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
         } else {
             dc[i].K = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, kp, hd_dit, dit_heads, Nctx), 0, 2, 1, 3));
             dc[i].V = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, vp, hd_dit, dit_heads, Nctx), 1, 2, 0, 3));
+            if (HP > hd_dit || NK > Nctx) {
+                dc[i].K = ggml_pad(C, dc[i].K, (int) (HP-hd_dit), (int) (NK-Nctx), 0, 0);
+                dc[i].V = ggml_pad(C, dc[i].V, (int) (NK-Nctx), (int) (HP-hd_dit), 0, 0);
+            }
+            dc[i].K = fa_kv(C, dc[i].K);
+            dc[i].V = fa_kv(C, dc[i].V);
         }
     }
 
@@ -1003,11 +1018,16 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
             } else {
                 ggml_tensor * qp = as_type(C, ggml_add(C, mm_act(C, c.Wq, x_q, at), c.bq), GGML_TYPE_F32);
                 ggml_tensor * Q = ggml_cont(C, ggml_permute(C, ggml_reshape_3d(C, qp, hd_dit, dit_heads, horizon), 0, 2, 1, 3));
+                if (HP > hd_dit)
+                    Q = ggml_pad(C, Q, (int) (HP-hd_dit), 0, 0, 0);
                 ggml_tensor * kq = ggml_mul_mat(C, c.K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
                 // The Evo-1 reference cross-attends over the full padded context
-                // (no key mask), so the action queries see every LM position.
-                ggml_tensor * aw = ggml_soft_max_ext(C, kq, nullptr, scale_dit, 0.0f);
+                // (no key mask), so the action queries see every LM position;
+                // t_dmask hides only the keys padded on Hexagon.
+                ggml_tensor * aw = ggml_soft_max_ext(C, kq, t_dmask, scale_dit, 0.0f);
                 ggml_tensor * kqv = ggml_mul_mat(C, c.V, aw);
+                if (HP > hd_dit)
+                    kqv = ggml_view_3d(C, kqv, hd_dit, horizon, dit_heads, kqv->nb[1], kqv->nb[2], 0);
                 att_pre = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), E, horizon);
             }
             ggml_tensor * attn_out = ggml_add(C, mm_act(C, w.Wo, as_type(C, att_pre, at), at), w.bo);
@@ -1040,7 +1060,7 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
     ggml_set_output(x_action);
 
     gio.t_embeds=t_embeds; gio.t_pos=t_pos; gio.t_lmmask=t_lmmask; gio.t_qmask=t_qmask;
-    gio.t_state=t_state; gio.t_x=t_x; gio.t_amask=t_amask; gio.x_action=x_action;
+    gio.t_state=t_state; gio.t_x=t_x; gio.t_amask=t_amask; gio.x_action=x_action; gio.t_dmask=t_dmask;
 
     ggml_cgraph * gf = ggml_new_graph_custom(C, main_nodes, false);
     ggml_build_forward_expand(gf, x_action);
@@ -1067,6 +1087,14 @@ std::vector<float> Evo1ModelArch::predict(const Inputs& in) {
           ggml_backend_tensor_set(t_amask, am.data(), 0, ggml_nbytes(t_amask)); }
         { std::vector<float> qm(SEQ, 0.0f); for (int64_t p=0; p<SEQ; ++p) qm[p] = attn_ok[p] ? 1.0f : 0.0f;
           ggml_backend_tensor_set(t_qmask, qm.data(), 0, ggml_nbytes(t_qmask)); }
+        if (gio.t_dmask) {
+            const int64_t NK = gio.t_dmask->ne[0], rows = gio.t_dmask->ne[1], Nctx = SEQ+1;
+            std::vector<float> dm((size_t) (NK*rows), 0.0f);
+            for (int64_t r=0; r<rows; ++r)
+                for (int64_t k=Nctx; k<NK; ++k)
+                    dm[(size_t) (r*NK+k)] = -std::numeric_limits<float>::infinity();
+            ggml_backend_tensor_set(gio.t_dmask, dm.data(), 0, ggml_nbytes(gio.t_dmask));
+        }
         gio.lm_ok = attn_ok;
     }
     ggml_backend_tensor_set(t_state, state_norm.data(), 0, ggml_nbytes(t_state));
