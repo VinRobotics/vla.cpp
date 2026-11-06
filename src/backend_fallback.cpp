@@ -359,6 +359,13 @@ bool accel_runs(FallbackCtx * fc, const ggml_tensor * t, const char ** why) {
         *why = "cannot run (NO_SUPPORT) a weight-reading";
         return false;
     }
+    if (fc->hexagon && t->op == GGML_OP_PAD && is_weight(t->src[0])) {
+        // The same for a pad that reads a weight: ACT zero-pads its stem kernel
+        // [147,64] to K = 160 so the conv's matmul takes the HMX, and the host
+        // aborts with the pad on the NPU.
+        *why = "cannot run (NO_SUPPORT) a weight-reading";
+        return false;
+    }
     if (fc->hexagon && t->op == GGML_OP_REPEAT && !is_weight(t->src[0])) {
         // The NPU's REPEAT reads its source through the data cache, which is
         // invalidated only between op batches, while the op that wrote the

@@ -12,7 +12,7 @@ AGX Orin row ran at `e6653e8`, on the bit-exact CUDA path
 ran at `d0e5d00`, PR #35 merged with main `f464653` (same llama.cpp pin), with
 fixed-input checks against the CPU build in
 [backend/rocm.md](../backend/rocm.md). The Qualcomm Dragonwing IQ-10 row ran at
-`7c76ea9` (same llama.cpp pin). Each report
+`7c76ea9`, its ACT cell at `0f3e010` (same llama.cpp pin). Each report
 lists the device, the build, each model's configuration, latency and peak memory
 at the defaults, and the fastest runtime flags for that device.
 
@@ -21,33 +21,35 @@ every report has. `N/A` means the arch does not run on that backend, and `-`
 means the model does not fit or fails there; each report says which and why.
 `n/r` means not run.
 
-| Device | Octo-Small | TurboVLA | VLA-JEPA | VLA-Adapter | GR00T N1.5 | GR00T N1.6 | GR00T N1.7 | BitVLA | SmolVLA | π0 | π0.5 | OpenVLA-OFT | Evo-1 |
-|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| [RTX 5090 (CUDA), author's numbers](rtx-5090.md) | 2.69 | 4.88 | 14.3 | 16.0 | 16.1 | 19.4 | 19.5 | 20.8 | 38.2 | 28.8 | 29.2 | 34.5 | 49.1 |
-| [RTX 3090 (CUDA)](rtx-3090.md) | 4.3 | 9.0 | 27.3 | 34.2 | 36.6 | 36.3 | 35.3 | 26.9 | 61.0 | 97.5 | 97.8 | 134.2 | 108.6 |
-| [RTX 3060 (CUDA)](rtx-3060.md) | 8.3 | 21.6 | 57.1 | 74.7 | 86.8 | 78.1 | 82.8 | 59.1 | 125.1 | 228.2 | 229.9 | - | 230.8 |
-| [RTX 5070 Laptop (CUDA)](rtx-5070-laptop.md) | 4.7 | 14.1 | 38.0 | 56.3 | 73.0 | 65.5 | 63.3 | 54.4 | 89.3 | 177.1 | 180.5 | - | 184.6 |
-| [Radeon RX 9060 XT (ROCm)](rx-9060-xt.md) | 14.0 | 33.8 | 65.9 | 70.1 | 79.5 | 94.6 | 97.1 | N/A | 207.7 | 217.9 | 220.6 | 182.2 | 233.6 |
-| [Jetson AGX Orin (CUDA)](jetson-agx-orin.md) | 14.3 | 28.0 | 60.6 | 79.1 | 96.7 | 101.2 | 93.0 | 76.8 | 164.3 | 269.0 | 266.6 | 297.4 | 298.5 |
-| [Jetson Orin NX 16 GB (CUDA)](jetson-orin-nx.md) | 27.4 | 79.7 | 176.7 | 270.7 | 260.8 | 252.1 | 251.4 | 269.1 | 411.2 | 739.6 | 742.9 | - | 893.2 |
-| [Jetson Orin Nano Super (CUDA)](jetson-orin-nano.md) | 31.9 | 89.3 | 193.9 | 297.5 | 293.4 | 272.3 | 271.7 | 335.0 | 462.8 | 845.2 | 849.7 | - | 1011.5 |
-| [Apple M4 (Metal)](apple-m4.md) | 22.6 | 65.2 | 248.7 | 315.7 | 401.5 | 358.9 | 350.8 | N/A | 357.6 | 1141.1 | 1153.8 | 1650.7 | 829.3 |
-| [Intel Arc B390 iGPU (SYCL)](core-ultra-x7-358h.md) | 15.5 | 25.0 | 102.1 | 62.6 | 101.2 | 106.1 | 178.4 | N/A | 61.7 | 269.3 | 275.2 | 434.9 | 270.4 |
-| [Intel Arc B390 iGPU (OpenVINO)](core-ultra-x7-358h.md) | N/A | 28.5 | 116.3 | 170.2 | 106.0 | 122.8 | 131.4 | N/A | 213.1 | 620.5 | 232.5 | 1262.5 | 566.0 |
-| [Intel Arc A380 (SYCL)](arc-a380.md) | 60.5 | 103.5 | 355.9 | 408.9 | 472.0 | 646.0 | 615.3 | N/A | 734.5 | 921.9 | 945.6 | - | 1047.3 |
-| [Snapdragon X Hexagon NPU](snapdragon-x-hexagon.md) | 239.7 | 2280.8 | 821.0 | 4072.1 | 2755.7 | 2940.0 | 1400.2 | N/A | 1239.3 | 5730.0 | 9321.7 | - | 7208.6 |
-| [Qualcomm Dragonwing IQ-10 Hexagon NPU](qualcomm-iq10.md) | 117.6 | 188.1 | 505.4 | 703.2 | 591.6 | 696.5 | 759.5 | N/A | 583.6 | 1114.0 | 1113.0 | 1720.3 | 2333.6 |
-| [Intel AI Boost NPU (OpenVINO)](core-ultra-x7-358h.md) | N/A | 23.5 | 90.7 | 126.7 | 134.0 | 161.1 | 144.9 | N/A | 161.3 | 438.3 | 430.2 | 405.8 | 256.3 |
-| [Intel Core i7-14700F (CPU)](core-i7-14700f.md) | 39.8 | 195.1 | 825.5 | 1140.6 | 1913.8 | 1627.9 | 1453.4 | N/A | 1689.2 | 6455.7 | 6068.1 | 9869.0 | 4159.6 |
-| [Intel Core i9-14900HX (CPU)](core-i9-14900hx.md) | 67.0 | 314.7 | 1227.2 | 1659.3 | 1935.4 | 1688.9 | 1505.5 | N/A | 1822.6 | 6182.1 | 5735.0 | 9126.4 | 4118.2 |
-| [Intel Core Ultra X7 358H (CPU)](core-ultra-x7-358h.md) | 48.0 | 199.0 | 1258.1 | 1645.4 | 1979.1 | 1697.3 | 1532.5 | N/A | 1758.0 | 6083.9 | 6120.3 | 9894.3 | 4025.8 |
-| [Intel Core Ultra X7 358H (OpenVINO CPU)](core-ultra-x7-358h.md) | N/A | 238.4 | 1407.2 | 1831.2 | 2456.6 | 2300.4 | 2076.5 | N/A | 1899.5 | 7537.1 | 7522.7 | 11651.3 | 4626.5 |
-| [Intel Core i5-12400F (CPU)](core-i5-12400f.md) | 78.1 | 392.7 | 1668.5 | 2165.7 | 2681.4 | 2216.8 | 1973.6 | N/A | 2288.4 | 8953.5 | 8637.9 | - | 5435.0 |
-| [AMD Ryzen 5 5500 (CPU)](ryzen-5-5500.md) | 96.6 | 475.7 | 2133.0 | 2781.7 | 3447.0 | 2826.0 | 2518.8 | N/A | 3124.3 | 11321.3 | 11225.6 | - | 7347.2 |
-| [Snapdragon X Oryon (CPU)](snapdragon-x-hexagon.md) | 109.5 | 548.9 | 1656.5 | 2013.1 | 2736.6 | 2226.0 | 1988.1 | N/A | 2080.9 | 9224.5 | 9140.6 | - | 5518.9 |
+| Device | Octo-Small | ACT | TurboVLA | VLA-JEPA | VLA-Adapter | GR00T N1.5 | GR00T N1.6 | GR00T N1.7 | BitVLA | SmolVLA | π0 | π0.5 | OpenVLA-OFT | Evo-1 |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| [RTX 5090 (CUDA), author's numbers](rtx-5090.md) | 2.69 | n/r | 4.88 | 14.3 | 16.0 | 16.1 | 19.4 | 19.5 | 20.8 | 38.2 | 28.8 | 29.2 | 34.5 | 49.1 |
+| [RTX 3090 (CUDA)](rtx-3090.md) | 4.3 | n/r | 9.0 | 27.3 | 34.2 | 36.6 | 36.3 | 35.3 | 26.9 | 61.0 | 97.5 | 97.8 | 134.2 | 108.6 |
+| [RTX 3060 (CUDA)](rtx-3060.md) | 8.3 | n/r | 21.6 | 57.1 | 74.7 | 86.8 | 78.1 | 82.8 | 59.1 | 125.1 | 228.2 | 229.9 | - | 230.8 |
+| [RTX 5070 Laptop (CUDA)](rtx-5070-laptop.md) | 4.7 | n/r | 14.1 | 38.0 | 56.3 | 73.0 | 65.5 | 63.3 | 54.4 | 89.3 | 177.1 | 180.5 | - | 184.6 |
+| [Radeon RX 9060 XT (ROCm)](rx-9060-xt.md) | 14.0 | n/r | 33.8 | 65.9 | 70.1 | 79.5 | 94.6 | 97.1 | N/A | 207.7 | 217.9 | 220.6 | 182.2 | 233.6 |
+| [Jetson AGX Orin (CUDA)](jetson-agx-orin.md) | 14.3 | n/r | 28.0 | 60.6 | 79.1 | 96.7 | 101.2 | 93.0 | 76.8 | 164.3 | 269.0 | 266.6 | 297.4 | 298.5 |
+| [Jetson Orin NX 16 GB (CUDA)](jetson-orin-nx.md) | 27.4 | n/r | 79.7 | 176.7 | 270.7 | 260.8 | 252.1 | 251.4 | 269.1 | 411.2 | 739.6 | 742.9 | - | 893.2 |
+| [Jetson Orin Nano Super (CUDA)](jetson-orin-nano.md) | 31.9 | n/r | 89.3 | 193.9 | 297.5 | 293.4 | 272.3 | 271.7 | 335.0 | 462.8 | 845.2 | 849.7 | - | 1011.5 |
+| [Apple M4 (Metal)](apple-m4.md) | 22.6 | n/r | 65.2 | 248.7 | 315.7 | 401.5 | 358.9 | 350.8 | N/A | 357.6 | 1141.1 | 1153.8 | 1650.7 | 829.3 |
+| [Intel Arc B390 iGPU (SYCL)](core-ultra-x7-358h.md) | 15.5 | n/r | 25.0 | 102.1 | 62.6 | 101.2 | 106.1 | 178.4 | N/A | 61.7 | 269.3 | 275.2 | 434.9 | 270.4 |
+| [Intel Arc B390 iGPU (OpenVINO)](core-ultra-x7-358h.md) | N/A | n/r | 28.5 | 116.3 | 170.2 | 106.0 | 122.8 | 131.4 | N/A | 213.1 | 620.5 | 232.5 | 1262.5 | 566.0 |
+| [Intel Arc A380 (SYCL)](arc-a380.md) | 60.5 | n/r | 103.5 | 355.9 | 408.9 | 472.0 | 646.0 | 615.3 | N/A | 734.5 | 921.9 | 945.6 | - | 1047.3 |
+| [Snapdragon X Hexagon NPU](snapdragon-x-hexagon.md) | 239.7 | n/r | 2280.8 | 821.0 | 4072.1 | 2755.7 | 2940.0 | 1400.2 | N/A | 1239.3 | 5730.0 | 9321.7 | - | 7208.6 |
+| [Qualcomm Dragonwing IQ-10 Hexagon NPU](qualcomm-iq10.md) | 117.6 | 148.5 | 188.1 | 505.4 | 703.2 | 591.6 | 696.5 | 759.5 | N/A | 583.6 | 1114.0 | 1113.0 | 1720.3 | 2333.6 |
+| [Intel AI Boost NPU (OpenVINO)](core-ultra-x7-358h.md) | N/A | n/r | 23.5 | 90.7 | 126.7 | 134.0 | 161.1 | 144.9 | N/A | 161.3 | 438.3 | 430.2 | 405.8 | 256.3 |
+| [Intel Core i7-14700F (CPU)](core-i7-14700f.md) | 39.8 | n/r | 195.1 | 825.5 | 1140.6 | 1913.8 | 1627.9 | 1453.4 | N/A | 1689.2 | 6455.7 | 6068.1 | 9869.0 | 4159.6 |
+| [Intel Core i9-14900HX (CPU)](core-i9-14900hx.md) | 67.0 | n/r | 314.7 | 1227.2 | 1659.3 | 1935.4 | 1688.9 | 1505.5 | N/A | 1822.6 | 6182.1 | 5735.0 | 9126.4 | 4118.2 |
+| [Intel Core Ultra X7 358H (CPU)](core-ultra-x7-358h.md) | 48.0 | n/r | 199.0 | 1258.1 | 1645.4 | 1979.1 | 1697.3 | 1532.5 | N/A | 1758.0 | 6083.9 | 6120.3 | 9894.3 | 4025.8 |
+| [Intel Core Ultra X7 358H (OpenVINO CPU)](core-ultra-x7-358h.md) | N/A | n/r | 238.4 | 1407.2 | 1831.2 | 2456.6 | 2300.4 | 2076.5 | N/A | 1899.5 | 7537.1 | 7522.7 | 11651.3 | 4626.5 |
+| [Intel Core i5-12400F (CPU)](core-i5-12400f.md) | 78.1 | n/r | 392.7 | 1668.5 | 2165.7 | 2681.4 | 2216.8 | 1973.6 | N/A | 2288.4 | 8953.5 | 8637.9 | - | 5435.0 |
+| [AMD Ryzen 5 5500 (CPU)](ryzen-5-5500.md) | 96.6 | n/r | 475.7 | 2133.0 | 2781.7 | 3447.0 | 2826.0 | 2518.8 | N/A | 3124.3 | 11321.3 | 11225.6 | - | 7347.2 |
+| [Snapdragon X Oryon (CPU)](snapdragon-x-hexagon.md) | 109.5 | n/r | 548.9 | 1656.5 | 2013.1 | 2736.6 | 2226.0 | 1988.1 | N/A | 2080.9 | 9224.5 | 9140.6 | - | 5518.9 |
 
 Notes on the table:
 
+- ACT runs its ALOHA checkpoint on one 640x480 view. Only the IQ-10 report
+  measures it; the other rows are `n/r`.
 - The RTX 5090 row comes from the PR #32 author and was not re-measured. Its
   numbers are a minimum over 5 alternating rounds, not the protocol the other
   reports use (3 warmups + 20 timed reps, best of 3 processes).
