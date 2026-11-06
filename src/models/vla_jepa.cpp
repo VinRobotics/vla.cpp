@@ -130,7 +130,10 @@ bool load_config(const gguf_reader & g, const Options & opts, VlaJepaModelArch &
     m.lm.cfg.head_dim    = m.lm_head_dim;
     m.lm.cfg.inter       = m.lm_inter;
     m.lm.cfg.rms_eps     = m.lm_rms_eps;
-    m.lm.cfg.flash_attn  = flash_attn_enabled();
+    // The LM takes flash attention only when --flash-attn asks for it. Where it
+    // is the default (Hexagon), its F16 K/V put a served LIBERO request 6.7e-3
+    // from the CPU F32 reference on an IQ-10 (v81), 2.6e-3 with the explicit path.
+    m.lm.cfg.flash_attn  = opts.flash_attn.value_or(false);
     m.lm.cfg.rope.type   = GGML_ROPE_TYPE_IMROPE;
     m.lm.cfg.rope.n_dims = (int) m.lm_head_dim;
     m.lm.cfg.rope.freq_base   = m.lm_rope_base;

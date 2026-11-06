@@ -192,6 +192,44 @@ inline ggml_tensor * fa_kv([[maybe_unused]] ggml_context * ctx, ggml_tensor * t)
 }
 
 /**
+ * @brief `ggml_concat(a, b, 2)` of [d0, d1, n] tensors, as the compiled-in
+ * backend runs it.
+ *
+ * Hexagon runs a concat on the NPU only as a dim-1 copy of whole rows; any other
+ * goes to the CPU fallback (src/backend_fallback.cpp). For contiguous inputs a
+ * dim-2 concat appends whole d0*d1 rows, so it is done as a dim-1 concat of the
+ * [d0*d1, n] views, which writes the same bytes. Everywhere else, and for
+ * non-contiguous inputs, this is ggml_concat(a, b, 2).
+ */
+inline ggml_tensor * concat_dim2(ggml_context * ctx, ggml_tensor * a, ggml_tensor * b) {
+#ifdef GGML_USE_HEXAGON
+    if (ggml_is_contiguous(a) && ggml_is_contiguous(b) && a->ne[3] == 1 && b->ne[3] == 1 &&
+        a->ne[0] == b->ne[0] && a->ne[1] == b->ne[1]) {
+        ggml_tensor * rows = ggml_concat(ctx, ggml_reshape_2d(ctx, a, a->ne[0] * a->ne[1], a->ne[2]),
+                                         ggml_reshape_2d(ctx, b, b->ne[0] * b->ne[1], b->ne[2]), 1);
+        return ggml_reshape_3d(ctx, rows, a->ne[0], a->ne[1], a->ne[2] + b->ne[2]);
+    }
+#endif
+    return ggml_concat(ctx, a, b, 2);
+}
+
+/**
+ * @brief A GEMM's inner width as the compiled-in backend's matmul takes it.
+ *
+ * Hexagon's matrix unit (HMX) takes an F16 weight only when both of its dims
+ * are multiples of 32; anything else runs on the vector units. SigLIP's
+ * 4304-wide MLP spends 440 ms there per tower on the IQ-10, against about
+ * 0.5 ms a matmul on the HMX. Everywhere else this returns @p n.
+ */
+inline int64_t gemm_width(int64_t n) {
+#ifdef GGML_USE_HEXAGON
+    return (n + 31) / 32 * 32;
+#else
+    return n;
+#endif
+}
+
+/**
  * @brief `ggml_gelu` (the tanh form), in ops the compiled-in backend gets right.
  *
  * ggml-hexagon runs GELU as x*sigmoid(1.702x), which is GELU_QUICK, so the
@@ -208,6 +246,26 @@ inline ggml_tensor * gelu(ggml_context * ctx, ggml_tensor * x) {
     return ggml_mul(ctx, x, ggml_sigmoid(ctx, ggml_scale(ctx, z, 2.0f * c)));
 #else
     return ggml_gelu(ctx, x);
+#endif
+}
+
+/**
+ * @brief `ggml_gelu_erf`, in ops the compiled-in backend runs.
+ *
+ * ggml-hexagon has no GELU_ERF, so every MLP that uses it round-trips its
+ * activations through the CPU. There it is x*sigmoid(p(x)), p an odd cubic in
+ * x clamped to [-5, 5] fitted to logit(Phi(x)): within 2.5e-5 of the exact
+ * GELU for every x. Elsewhere this is plain ggml_gelu_erf.
+ */
+inline ggml_tensor * gelu_erf(ggml_context * ctx, ggml_tensor * x) {
+#ifdef GGML_USE_HEXAGON
+    ggml_tensor * xc = ggml_clamp(ctx, x, -5.0f, 5.0f);
+    ggml_tensor * x2 = ggml_mul(ctx, xc, xc);
+    ggml_tensor * p  = ggml_mul(ctx, ggml_scale_bias(ctx, x2, -7.0303601711e-4f, 7.4011308986e-2f), x2);
+    p = ggml_mul(ctx, ggml_scale_bias(ctx, p, 1.0f, 1.5950157475f), xc);
+    return ggml_mul(ctx, x, ggml_sigmoid(ctx, p));
+#else
+    return ggml_gelu_erf(ctx, x);
 #endif
 }
 

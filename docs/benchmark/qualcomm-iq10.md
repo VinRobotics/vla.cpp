@@ -15,9 +15,9 @@ through vla.cpp's fallback wrapper.
 | Power | CPU governor `performance` |
 | OS | Ubuntu 24.04.4 LTS, kernel 6.6.110 |
 | Toolchain | `ghcr.io/snapdragon-toolchain/arm64-linux:v0.7`: clang 21.1.8, Hexagon SDK 6.6.0.0 (tools 19.0.07) |
-| Commit | `e8dfa34` (PR #69, on top of #68) |
+| Commit | `7c76ea9`; ACT at `0f3e010` |
 | llama.cpp | `b11223` |
-| Date | 2026-11-02 11:02 to 11:48 (UTC+07) |
+| Date | 2026-11-05 14:26 to 14:57 (UTC+07); ACT 17:00 to 17:01 |
 | Build | `scripts/build_linux_hexagon.sh` (servers included); the HTP skel processed for the board and installed in `/vendor/dsp/cdsp0..3` |
 | Runtime flags | defaults; the fastest flags per model are in the second table |
 | Method | 3 warmups + 20 timed reps per process, 3 processes. The process with the lowest mean is reported, and memory is the peak over all three. |
@@ -31,8 +31,9 @@ buffers. Nothing else ran on the board.
 ## Model configuration
 
 Each model runs at its native view count and input size, with weights as
-shipped. Checkpoints are the `vrfai/*` GGUFs; where a repo ships several, we use
-the `libero_object` variant. Settings not listed are the defaults.
+shipped. Checkpoints are the `vrfai/*` GGUFs, and ACT's is
+`ravediamond/act-aloha-sim-transfer-cube-gguf`; where a repo ships several, we
+use the `libero_object` variant. Settings not listed are the defaults.
 
 | Model | Checkpoint | Views | Input | Lang tokens | Action chunk | Action dim | Action head | Steps |
 |---|---|--:|--:|--:|--:|--:|---|--:|
@@ -49,6 +50,7 @@ the `libero_object` variant. Settings not listed are the defaults.
 | OpenVLA-OFT | `openvla-oft-libero-gguf` | 1 | 224 | 16 | 8 | 7 | L1 regression head | 1 |
 | Octo-Small | `octo-small-libero-gguf` | 2 | 256 + 128 | 16 | 4 | 7 | DDPM diffusion | 20 |
 | TurboVLA | `turbovla-libero-gguf` | 2 | 256 | 16 | 12 | 7 | single-pass decoder | 1 |
+| ACT | `act-aloha-sim-transfer-cube-gguf` | 1 | 640 x 480 | - | 100 | 14 | transformer decoder | 1 |
 
 - **Lang tokens** is the synthetic prompt length. VLA-JEPA adds its 32
   `<embodied>` tokens with `--extra-token 151697 --extra-count 32`.
@@ -57,6 +59,8 @@ the `libero_object` variant. Settings not listed are the defaults.
   `VLA_GR00T_EMBODIMENT=new_embodiment` for N1.5, `libero_panda` for N1.6 and
   `libero_sim` for N1.7. **Octo** needs `VLA_OCTO_UNNORM_DATASET=libero_object`.
 - **Octo** takes a 256 px primary view and a 128 px wrist view.
+- **ACT** is an ALOHA checkpoint (sim transfer cube): no language, a 14-dim
+  bimanual state and action, run with `--images 1 --size 640 --height 480`.
 
 ## Latency and memory
 
@@ -65,12 +69,19 @@ vision stage separately.
 
 | Model | Views | Input | min ms | mean ms | p50 ms | p90 ms | vision ms | Peak RSS MiB | System RAM MiB |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| GR00T N1.7 | 1 | 256 | 747.5 | 754.7 | 753.0 | 762.7 | 196.1 | 191 | 5083 |
-| SmolVLA | 2 | 512 | 810.3 | 818.6 | 820.5 | 822.6 | 283.0 | 146 | 1187 |
-| GR00T N1.5 | 1 | 224 | 1020.9 | 1024.2 | 1024.2 | 1027.0 | 563.2 | 162 | 3650 |
-| GR00T N1.6 | 1 | 224 | 1110.3 | 1114.5 | 1113.6 | 1118.5 | 559.8 | 147 | 4687 |
-| π0.5 | 2 | 224 | 2914.6 | 2942.6 | 2934.4 | 2967.2 | 1429.6 | 285 | 5517 |
-| Evo-1 | 1 | 448 | 3519.4 | 3572.4 | 3576.7 | 3588.2 | 854.5 | 319 | 1579 |
+| Octo-Small | 2 | 256 + 128 | 117.6 | 119.4 | 118.4 | 120.7 | 21.2 | 253 | 723 |
+| ACT | 1 | 640 x 480 | 148.5 | 152.9 | 152.5 | 157.3 | - | 194 | 467 |
+| TurboVLA | 2 | 256 | 188.1 | 190.8 | 188.6 | 194.9 | - | 249 | 1075 |
+| VLA-JEPA | 1 | 256 | 505.4 | 512.6 | 510.1 | 522.2 | 196.4 | 184 | 3969 |
+| SmolVLA | 2 | 512 | 583.6 | 584.4 | 584.4 | 585.1 | 229.9 | 145 | 1196 |
+| GR00T N1.5 | 1 | 224 | 591.6 | 594.9 | 593.4 | 597.1 | 138.9 | 162 | 3639 |
+| GR00T N1.6 | 1 | 224 | 696.5 | 699.3 | 699.2 | 702.2 | 145.1 | 147 | 4692 |
+| VLA-Adapter | 1 | 224 | 703.2 | 708.4 | 708.2 | 715.3 | 258.1 | 872 | 3566 |
+| GR00T N1.7 | 1 | 256 | 759.5 | 766.3 | 766.0 | 773.4 | 197.6 | 191 | 5113 |
+| π0 | 2 | 224 | 1114.0 | 1116.6 | 1116.4 | 1118.2 | 277.1 | 284 | 5537 |
+| π0.5 | 2 | 224 | 1113.0 | 1117.3 | 1116.6 | 1120.7 | 277.9 | 285 | 5826 |
+| OpenVLA-OFT | 1 | 224 | 1720.3 | 1725.5 | 1724.7 | 1731.0 | 263.4 | 844 | 15451 |
+| Evo-1 | 1 | 448 | 2333.6 | 2348.3 | 2349.9 | 2360.1 | 820.6 | 319 | 1757 |
 
 ### Fastest configuration
 
@@ -90,27 +101,44 @@ replaces the defaults only if its mean is more than 3% lower, both in the screen
 and in the full re-run.
 
 Flash attention and the matmul precision can move the action chunk. Success
-rates measured at the defaults therefore do not carry over to these rows.
+rates measured at the defaults therefore do not carry over to these rows. For
+VLA-JEPA and GR00T N1.7, `--flash-attn` puts their LM back on flash attention,
+which the defaults leave off because it is outside the fidelity bar (VLA-JEPA
+6.7e-3 on a served LIBERO observation, N1.7 5.4e-3 on fixed inputs).
 
 | Model | Fastest flags | min ms | mean ms | p50 ms | p90 ms | vision ms | Peak RSS MiB | System RAM MiB | vs defaults |
 |---|---|--:|--:|--:|--:|--:|--:|--:|--:|
-| GR00T N1.7 | *(defaults)* | 747.5 | 754.7 | 753.0 | 762.7 | 196.1 | 191 | 5083 | - |
-| SmolVLA | *(defaults)* | 810.3 | 818.6 | 820.5 | 822.6 | 283.0 | 146 | 1187 | - |
-| GR00T N1.5 | *(defaults)* | 1020.9 | 1024.2 | 1024.2 | 1027.0 | 563.2 | 162 | 3650 | - |
-| GR00T N1.6 | *(defaults)* | 1110.3 | 1114.5 | 1113.6 | 1118.5 | 559.8 | 147 | 4687 | - |
-| π0.5 | *(defaults)* | 2914.6 | 2942.6 | 2934.4 | 2967.2 | 1429.6 | 285 | 5517 | - |
-| Evo-1 | *(defaults)* | 3519.4 | 3572.4 | 3576.7 | 3588.2 | 854.5 | 319 | 1579 | - |
+| Octo-Small | *(defaults)* | 117.6 | 119.4 | 118.4 | 120.7 | 21.2 | 253 | 723 | - |
+| ACT | *(defaults)* | 148.5 | 152.9 | 152.5 | 157.3 | - | 194 | 467 | - |
+| TurboVLA | *(defaults)* | 188.1 | 190.8 | 188.6 | 194.9 | - | 249 | 1075 | - |
+| VLA-JEPA | `--flash-attn --mm-prec default` | 442.1 | 452.4 | 450.2 | 460.6 | 198.3 | 184 | 3985 | -11.7% |
+| SmolVLA | *(defaults)* | 583.6 | 584.4 | 584.4 | 585.1 | 229.9 | 145 | 1196 | - |
+| GR00T N1.5 | *(defaults)* | 591.6 | 594.9 | 593.4 | 597.1 | 138.9 | 162 | 3639 | - |
+| GR00T N1.6 | *(defaults)* | 696.5 | 699.3 | 699.2 | 702.2 | 145.1 | 147 | 4692 | - |
+| VLA-Adapter | *(defaults)* | 703.2 | 708.4 | 708.2 | 715.3 | 258.1 | 872 | 3566 | - |
+| GR00T N1.7 | `--flash-attn --mm-prec default` | 727.8 | 734.1 | 733.2 | 742.4 | 196.2 | 191 | 5081 | -4.2% |
+| π0 | *(defaults)* | 1114.0 | 1116.6 | 1116.4 | 1118.2 | 277.1 | 284 | 5537 | - |
+| π0.5 | *(defaults)* | 1113.0 | 1117.3 | 1116.6 | 1120.7 | 277.9 | 285 | 5826 | - |
+| OpenVLA-OFT | *(defaults)* | 1720.3 | 1725.5 | 1724.7 | 1731.0 | 263.4 | 844 | 15451 | - |
+| Evo-1 | *(defaults)* | 2333.6 | 2348.3 | 2349.9 | 2360.1 | 820.6 | 319 | 1757 | - |
 
 <details><summary>Screen means (ms) per flag set</summary>
 
 | Model | defaults | `--flash-attn` | `--mm-prec default` | `--flash-attn --mm-prec default` | `--flash-attn 0` |
 |---|--:|--:|--:|--:|--:|
-| GR00T N1.7 | 768.7 | 748.5 | 761.3 | 744.5 | 1086.6 |
-| SmolVLA | 823.1 | 818.9 | 819.5 | 818.5 | 3018.8 |
-| GR00T N1.5 | 1026.1 | 1023.0 | 1025.3 | 1026.1 | 1501.2 |
-| GR00T N1.6 | 1114.4 | 1115.1 | 1114.4 | 1113.3 | 1290.3 |
-| π0.5 | 2939.0 | 2956.9 | 2959.0 | 2962.7 | 2959.6 |
-| Evo-1 | 3583.7 | 3593.9 | 3591.8 | 3582.6 | 5828.5 |
+| Octo-Small | 121.8 | 120.4 | 121.8 | 123.2 | 123.8 |
+| ACT | 143.4 | 153.4 | 157.5 | 155.8 | 174.8 |
+| TurboVLA | 196.5 | 189.3 | 192.3 | 190.9 | 257.4 |
+| VLA-JEPA | 514.8 | 454.3 | 512.0 | 452.9 | 1662.4 |
+| SmolVLA | 584.6 | 585.0 | 585.2 | 584.6 | 2147.2 |
+| GR00T N1.5 | 594.7 | 592.6 | 600.1 | 601.0 | 877.2 |
+| GR00T N1.6 | 709.6 | 714.5 | 711.1 | 713.1 | 875.3 |
+| VLA-Adapter | 712.4 | 711.1 | 713.7 | 712.8 | 989.2 |
+| GR00T N1.7 | 765.5 | 739.0 | 758.3 | 733.1 | 865.3 |
+| π0 | 1131.6 | 1138.1 | 1118.0 | 1128.8 | 2051.6 |
+| π0.5 | 1125.8 | 1109.1 | 1134.2 | 1134.6 | 2036.0 |
+| OpenVLA-OFT | 1737.9 | 1722.4 | 1715.7 | 1718.5 | 2005.8 |
+| Evo-1 | 2345.2 | 2352.4 | 2355.4 | 2361.4 | 3877.1 |
 
 </details>
 
@@ -118,8 +146,6 @@ rates measured at the defaults therefore do not carry over to these rows.
 
 - **BitVLA**: N/A off CUDA. The only published GGUF is int2-packed, and only
   CUDA builds load it.
-- **π0, VLA-JEPA, VLA-Adapter, OpenVLA-OFT, Octo-Small, TurboVLA**: not run in
-  this round; their GGUFs were not on the board.
 
 ## Notes
 
@@ -128,12 +154,12 @@ The HTP skel has to be processed for this board and installed in
 [backend/hexagon.md](../backend/hexagon.md#linux-iq-10).
 
 GR00T N1.6 runs one view here, as the configuration above fixes. With two views
-its SigLIP2 tower hits the batched `MUL_MAT` the wrapper sends to the CPU; see
+one batched `MUL_MAT` of its SigLIP2 tower still runs on the CPU; see
 [backend/hexagon.md](../backend/hexagon.md#op-coverage-measured).
 
 These rows time the defaults; they do not vouch for accuracy. On a served LIBERO
-observation, GR00T N1.5 and N1.6 land above the 2.9e-3 fidelity bar, about as
-far off as the CPU at F16; see
+observation, GR00T N1.5 and N1.6 land above the 2.9e-3 fidelity bar: N1.5
+closer to the reference than the CPU at F16, N1.6 slightly further; see
 [backend/hexagon.md](../backend/hexagon.md#serving).
 
 ## Reproducing

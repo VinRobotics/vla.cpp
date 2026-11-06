@@ -27,6 +27,7 @@
 #include "ggml-backend.h"
 
 #include <cmath>
+#include <string>
 #include <vector>
 
 namespace vla {
@@ -64,6 +65,8 @@ void EncStack::declare(WeightLoader & L, const char * prefix, int64_t layers, co
             w.q_fc1 = L.quant_i8(b + n.fc1 + ".q8", {b + n.fc1 + ".weight"});
             w.q_fc2 = L.quant_i8(b + n.fc2 + ".q8", {b + n.fc2 + ".weight"});
         } else {
+            const std::string b = std::string(prefix) + "." + std::to_string(i) + ".";
+            L.pad_mlp(b + n.fc1, b + n.fc2);
             w.Wo   = L.gemm("%s.%lld.attn_o.weight",  prefix, (long long)i);
             w.Wfc1 = L.gemm("%s.%lld.%s.weight",      prefix, (long long)i, n.fc1);
             w.Wfc2 = L.gemm("%s.%lld.%s.weight",      prefix, (long long)i, n.fc2);

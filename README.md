@@ -50,7 +50,7 @@ cmake --build build -j$(nproc)
 For a GPU or NPU, follow the backend's page in [docs/backend/](docs/backend):
 [CUDA](docs/backend/cuda.md), [ROCm](docs/backend/rocm.md),
 [SYCL](docs/backend/sycl.md), [OpenVINO](docs/backend/ov.md),
-[Metal](docs/backend/metal.md), [Hexagon](docs/backend/hexagon-windows.md).
+[Metal](docs/backend/metal.md), [Hexagon](docs/backend/hexagon.md).
 For containers, see [docs/DOCKER.md](docs/DOCKER.md).
 
 ---
@@ -86,10 +86,10 @@ Per-device latency and memory are in [docs/benchmark/](docs/benchmark).
 Use [ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) and follow [the instruction](docs/ARCHITECTURE.md#adding-an-architecture) to add a new model.
 
 
-| Model | CPU (x86-64 / ARM) | [CUDA (NVIDIA)](docs/backend/cuda.md) | [ROCm (AMD)](docs/backend/rocm.md) | [SYCL (Intel)](docs/backend/sycl.md) | [Metal (Apple)](docs/backend/metal.md) | [OpenVINO (Intel)](docs/backend/ov.md) | [Hexagon (Qualcomm)](docs/backend/hexagon-windows.md) |
+| Model | CPU (x86-64 / ARM) | [CUDA (NVIDIA)](docs/backend/cuda.md) | [ROCm (AMD)](docs/backend/rocm.md) | [SYCL (Intel)](docs/backend/sycl.md) | [Metal (Apple)](docs/backend/metal.md) | [OpenVINO (Intel)](docs/backend/ov.md) | [Hexagon (Qualcomm)](docs/backend/hexagon.md) |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | [SmolVLA](https://hf.co/vrfai/smolvla-libero-gguf)             | Y | Y | Y | Y | Y | Y | Y |
-| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | Y | Y | Y | Y | ~ |
+| [π0](https://hf.co/vrfai/pi0-libero-finetuned-v044-gguf)       | Y | Y | Y | Y | Y | Y | Y |
 | [π0.5](https://hf.co/vrfai/pi05-libero-gguf)                   | Y | Y | Y | Y | Y | Y | Y |
 | [GR00T N1.5](https://hf.co/vrfai/gr00tn1d5-libero-object-gguf) | Y | Y | Y | Y | Y | Y | Y |
 | [GR00T N1.6](https://hf.co/vrfai/gr00tn1d6-libero-gguf)        | Y | Y | Y | Y | Y | Y | Y |
@@ -97,13 +97,19 @@ Use [ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) and follow [t
 | [BitVLA](https://hf.co/vrfai/bitvla-libero-gguf)               | Y | Y | - | - | - | - | - |
 | [Evo-1](https://hf.co/vrfai/evo1-libero-gguf)                  | Y | Y | Y | Y | Y | Y | Y |
 | [VLA-Adapter](https://hf.co/vrfai/vla-adapter-libero-gguf)     | Y | Y | Y | Y | Y | Y | Y |
-| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | Y | Y | Y | Y | - |
-| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | Y | Y | Y | Y | ~ |
+| [OpenVLA-OFT](https://hf.co/vrfai/openvla-oft-libero-gguf)     | Y | Y | Y | Y | Y | Y | Y |
+| [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | Y | Y | Y | Y | Y |
 | [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | Y | - | Y |
 | [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | Y | Y | Y | Y | Y |
-| [ACT](https://hf.co/ravediamond/act-aloha-sim-transfer-cube-gguf) | Y | Y | Y | ~ | Y | ~ | ~ |
+| [ACT](https://hf.co/ravediamond/act-aloha-sim-transfer-cube-gguf) | Y | Y | Y | ~ | Y | ~ | Y |
 
 Legend: `Y` = supported (released and benchmarked), `~` = in progress, `-` = planned.
+
+The Hexagon column is the Dragonwing IQ-10 under Linux
+([docs/backend/hexagon.md](docs/backend/hexagon.md)). On a Snapdragon X laptop
+under Windows, π0 and VLA-JEPA land above the 2.9e-3 fidelity bar, OpenVLA-OFT
+was not attempted (about 14 GB at F16, over its 8 GB budget) and ACT was not run
+([docs/backend/hexagon-windows.md](docs/backend/hexagon-windows.md)).
 
 ---
 

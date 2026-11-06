@@ -351,6 +351,39 @@ bool accel_runs(FallbackCtx * fc, const ggml_tensor * t, const char ** why) {
         *why = "miscomputes a 2D weight against a batch in";
         return false;
     }
+    if (fc->hexagon && t->op == GGML_OP_CPY && is_weight(t->src[0])) {
+        // Claimed, but a copy that reads a weight is answered with NO_SUPPORT
+        // and the host aborts. VLA-Adapter casts its F16 action queries
+        // [896,64] to F32 in the graph; with the cast on the CPU it is within
+        // 4.2e-4 of the CPU F32 reference.
+        *why = "cannot run (NO_SUPPORT) a weight-reading";
+        return false;
+    }
+    if (fc->hexagon && t->op == GGML_OP_PAD && is_weight(t->src[0])) {
+        // The same for a pad that reads a weight: ACT zero-pads its stem kernel
+        // [147,64] to K = 160 so the conv's matmul takes the HMX, and the host
+        // aborts with the pad on the NPU.
+        *why = "cannot run (NO_SUPPORT) a weight-reading";
+        return false;
+    }
+    if (fc->hexagon && t->op == GGML_OP_REPEAT && !is_weight(t->src[0])) {
+        // The NPU's REPEAT reads its source through the data cache, which is
+        // invalidated only between op batches, while the op that wrote the
+        // source used DMA, so within one batch it can read stale lines.
+        // TurboVLA repeats its ViT prefix [768,5] over two views: max|delta|
+        // 0.19 and different on every run, 3.1e-4 with the repeat on the CPU.
+        *why = "can read stale data in a";
+        return false;
+    }
+    if (fc->hexagon && t->op == GGML_OP_CONT && t->src[0]->nb[0] != ggml_type_size(t->src[0]->type) &&
+        ggml_nelements(t) >= 256 * 1024) {
+        // Runs, but a large copy that transposes the innermost dim is a strided
+        // gather on the NPU: 18 ms for TurboVLA's fusion values [512,256,4], 32 ms
+        // for Evo-1's [1025,112,8], 48 ms for OpenVLA-OFT's [330,128,32]. Small
+        // ones take tens of microseconds there, less than a trip to the CPU.
+        *why = "is slow on a large transposing";
+        return false;
+    }
     return ggml_backend_supports_op(fc->accel, t);
 }
 

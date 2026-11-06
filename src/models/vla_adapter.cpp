@@ -34,12 +34,14 @@
 #include "layers/norm.h"
 #include "layers/rope.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace vla {
@@ -77,6 +79,7 @@ struct VlaAdapterModelArch : public ModelArchBase {
         ggml_tensor *t_ids=nullptr,*t_proj=nullptr,*t_pos=nullptr,*t_mask=nullptr;
         ggml_tensor *t_state=nullptr,*t_x0=nullptr,*norm_actions=nullptr;
         ggml_tensor *cT=nullptr,*sT=nullptr,*cA=nullptr,*sA=nullptr,*cK=nullptr,*sK=nullptr;
+        ggml_tensor *cJ=nullptr,*sJ=nullptr,*hmask=nullptr;
         bool consts=false;
     };
     graph_cache<MainKey, MainIO> main_graph;
@@ -259,6 +262,10 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     const int64_t NUM_PROMPT_TOKENS = NPROMPT-1;
     const int64_t NPATCH = NP * n_views;
     const int64_t SEQ = 1+NPATCH+(NPROMPT-1)+num_tokens+1;
+    // The LM runs on LSEQ tokens, zeros appended. The mask is causal, so no real
+    // token sees them, and on Hexagon the softmax rows become a multiple of 32,
+    // which is what the NPU takes.
+    const int64_t LSEQ = gemm_width(SEQ);
     const auto ti=clock::now();
     // LM + action head graph depends only on the sequence layout.
     const MainKey mkey{ SEQ, n_views, NPROMPT };
@@ -276,12 +283,14 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     ggml_tensor*erest=ggml_cont(C,ggml_view_2d(C,emb2,HC,NPROMPT+num_tokens,emb2->nb[1],emb2->nb[1]));
     ggml_tensor*t_proj=ggml_new_tensor_2d(C,GGML_TYPE_F32,HC,NPATCH); ggml_set_input(t_proj);
     ggml_tensor*mm_seq=ggml_concat(C,ggml_concat(C,e0,t_proj,1),erest,1);
+    if(LSEQ>SEQ)
+        mm_seq=ggml_pad(C,mm_seq,0,(int)(LSEQ-SEQ),0,0);
 
-    ggml_tensor*t_pos=ggml_new_tensor_1d(C,GGML_TYPE_I32,SEQ); ggml_set_input(t_pos); ggml_set_output(t_pos);
-    ggml_tensor*t_mask=ggml_new_tensor_2d(C,GGML_TYPE_F32,SEQ,SEQ); ggml_set_input(t_mask); ggml_set_output(t_mask);
+    ggml_tensor*t_pos=ggml_new_tensor_1d(C,GGML_TYPE_I32,LSEQ); ggml_set_input(t_pos); ggml_set_output(t_pos);
+    ggml_tensor*t_mask=ggml_new_tensor_2d(C,GGML_TYPE_F32,LSEQ,LSEQ); ggml_set_input(t_mask); ggml_set_output(t_mask);
     const float lsc=1.0f/std::sqrt((float)lm_head_dim);
     std::vector<ggml_tensor*> lout(lm_layers); ggml_tensor*x=mm_seq;
-    const bool fused_lm=fused_ops && cublas_rows(SEQ) && SEQ<=4096;
+    const bool fused_lm=fused_ops && LSEQ==SEQ && cublas_rows(SEQ) && SEQ<=4096;
     if(fused){
         const FusedLmDims d{lm_head_dim,n_q,n_kv,lm_rope_base};
         ggml_tensor*kbuf,*vbuf; fused_lm_kv(C,d,SEQ,&kbuf,&vbuf);
@@ -305,19 +314,22 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         }
         ggml_tensor*hn=ggml_mul(C,ggml_rms_norm(C,x,lm_rms_eps),l.attn_norm);
         ggml_tensor*qp=ggml_add(C,ggml_mul_mat(C,l.Wq,hn),l.bq),*kp=ggml_add(C,ggml_mul_mat(C,l.Wk,hn),l.bk),*vp=ggml_add(C,ggml_mul_mat(C,l.Wv,hn),l.bv);
-        ggml_tensor*qh=ggml_reshape_3d(C,qp,lm_head_dim,n_q,SEQ),*kh=ggml_reshape_3d(C,kp,lm_head_dim,n_kv,SEQ),*vh=ggml_reshape_3d(C,vp,lm_head_dim,n_kv,SEQ);
+        ggml_tensor*qh=ggml_reshape_3d(C,qp,lm_head_dim,n_q,LSEQ),*kh=ggml_reshape_3d(C,kp,lm_head_dim,n_kv,LSEQ),*vh=ggml_reshape_3d(C,vp,lm_head_dim,n_kv,LSEQ);
         ggml_tensor*qr=ggml_rope_ext(C,qh,t_pos,nullptr,(int)lm_head_dim,GGML_ROPE_TYPE_NEOX,0,lm_rope_base,1.0f,0.0f,1.0f,32.0f,1.0f);
         ggml_tensor*kr=ggml_rope_ext(C,kh,t_pos,nullptr,(int)lm_head_dim,GGML_ROPE_TYPE_NEOX,0,lm_rope_base,1.0f,0.0f,1.0f,32.0f,1.0f);
         ggml_tensor*Q=ggml_cont(C,ggml_permute(C,qr,0,2,1,3)),*K=ggml_cont(C,ggml_permute(C,kr,0,2,1,3)),*V=ggml_cont(C,ggml_permute(C,vh,1,2,0,3));
         ggml_tensor*kq=ggml_mul_mat(C,K,Q); ggml_prec_set_acc(kq,GGML_PREC_F32);
         ggml_tensor*aw=ggml_soft_max_ext(C,kq,t_mask,lsc,0.0f);
         ggml_tensor*kqv=ggml_mul_mat(C,V,aw);
-        ggml_tensor*att=ggml_reshape_2d(C,ggml_cont(C,ggml_permute(C,kqv,0,2,1,3)),HC,SEQ);
+        ggml_tensor*att=ggml_reshape_2d(C,ggml_cont(C,ggml_permute(C,kqv,0,2,1,3)),HC,LSEQ);
         x=ggml_add(C,x,ggml_mul_mat(C,l.Wo,att));
         ggml_tensor*hn2=ggml_mul(C,ggml_rms_norm(C,x,lm_rms_eps),l.ffn_norm);
         ggml_tensor*gt=ggml_silu(C,ggml_mul_mat(C,l.Wg,hn2)),*ut=ggml_mul_mat(C,l.Wu,hn2);
         x=ggml_add(C,x,ggml_mul_mat(C,l.Wd,ggml_mul(C,gt,ut))); lout[i]=x;
     }
+    if(LSEQ>SEQ)
+        for(auto&o:lout)
+            o=ggml_view_2d(C,o,HC,SEQ,o->nb[1],0);
     ggml_tensor*final_norm=ggml_mul(C,ggml_rms_norm(C,lout[lm_layers-1],lm_rms_eps),lm_out_norm);
 
     std::vector<ggml_tensor*> cond(head_blocks);
@@ -333,9 +345,21 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         ggml_tensor*ss=ggml_new_tensor_2d(C,GGML_TYPE_F32,HD,Lh); ggml_set_input(ss); ggml_set_output(ss);
         return {cc,ss};
     };
+    // Each head block attends its own tokens, the action queries and the vision
+    // tokens. Where gemm_width() pads (Hexagon), their keys and values are
+    // stacked as rows and padded to a multiple of 32, masked out: one softmax
+    // the NPU takes, and no column concats.
+    const int64_t LJ=chunk+num_tokens+1+NPATCH, LH=gemm_width(LJ);
+    const bool joint=LH>LJ;
     auto [cT,sT]=cs_tensor(chunk);
-    auto [cA,sA]=cs_tensor(num_tokens+1);
-    auto [cK,sK]=cs_tensor(NPATCH);
+    ggml_tensor *cA=nullptr,*sA=nullptr,*cK=nullptr,*sK=nullptr,*cJ=nullptr,*sJ=nullptr,*hmask=nullptr;
+    if(joint){
+        std::tie(cJ,sJ)=cs_tensor(LH);
+        hmask=ggml_new_tensor_2d(C,GGML_TYPE_F32,LH,chunk); ggml_set_input(hmask); ggml_set_output(hmask);
+    }else{
+        std::tie(cA,sA)=cs_tensor(num_tokens+1);
+        std::tie(cK,sK)=cs_tensor(NPATCH);
+    }
 
     ggml_tensor*t_x0=ggml_new_tensor_2d(C,GGML_TYPE_F32,action_dim*HC,chunk); ggml_set_input(t_x0); ggml_set_output(t_x0);
     ggml_tensor*hx=ggml_relu(C,linear(C,h_fc1w,h_fc1b,layer_norm(C,t_x0,h_ln1w,h_ln1b,head_ln_eps)));
@@ -348,18 +372,31 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         auto qk=[&](ggml_tensor*p,ggml_tensor*cs,ggml_tensor*sn){ return rope_pairwise(C,to_heads(C,p,HD,NH,p->ne[1]),cs,sn,HD); };
         auto tov=[&](ggml_tensor*p){ return to_heads_v(C,p,HD,NH,p->ne[1]); };
         ggml_tensor*q=qk(linear(C,w.Wq,w.bq,hx),cT,sT);
-        ggml_tensor*kse=qk(linear(C,w.Wks,w.bks,hx),cT,sT);
-        ggml_tensor*vse=linear(C,w.Wvs,w.bvs,hx);
-        ggml_tensor*kad=qk(linear(C,w.Wka,w.bka,had),cA,sA); ggml_tensor*vad=linear(C,w.Wva,w.bva,had);
-        ggml_tensor*kta=qk(linear(C,w.Wkt,w.bkt,ht),cK,sK); ggml_tensor*vta=linear(C,w.Wvt,w.bvt,ht);
-        ggml_tensor*Vs=tov(vse),*Va=tov(vad),*VT=tov(vta);
-        ggml_tensor*ss2=ggml_mul_mat(C,kse,q),*sa=ggml_mul_mat(C,kad,q),*sr=ggml_mul_mat(C,kta,q);
-        ggml_prec_set_acc(ss2,GGML_PREC_F32); ggml_prec_set_acc(sa,GGML_PREC_F32); ggml_prec_set_acc(sr,GGML_PREC_F32);
-        ggml_tensor*st2=ggml_scale(C,sr,w.rg);
-        ggml_tensor*scr=ggml_concat(C,ggml_concat(C,ss2,sa,0),st2,0);
-        ggml_tensor*attn=ggml_soft_max_ext(C,scr,nullptr,hsc,0.0f);
-        ggml_tensor*Vc=ggml_concat(C,ggml_concat(C,Vs,Va,0),VT,0);
-        ggml_tensor*kqv=ggml_mul_mat(C,Vc,attn);
+        ggml_tensor*kqv;
+        if(joint){
+            // rg scales the vision scores; RoPE is linear, so it goes on their keys.
+            ggml_tensor*kj=ggml_concat(C,ggml_concat(C,linear(C,w.Wks,w.bks,hx),linear(C,w.Wka,w.bka,had),1),
+                                       ggml_scale(C,linear(C,w.Wkt,w.bkt,ht),w.rg),1);
+            ggml_tensor*vj=ggml_concat(C,ggml_concat(C,linear(C,w.Wvs,w.bvs,hx),linear(C,w.Wva,w.bva,had),1),
+                                       linear(C,w.Wvt,w.bvt,ht),1);
+            ggml_tensor*K=qk(ggml_pad(C,kj,0,(int)(LH-LJ),0,0),cJ,sJ);
+            ggml_tensor*V=tov(ggml_pad(C,vj,0,(int)(LH-LJ),0,0));
+            ggml_tensor*sc=ggml_mul_mat(C,K,q); ggml_prec_set_acc(sc,GGML_PREC_F32);
+            kqv=ggml_mul_mat(C,V,ggml_soft_max_ext(C,sc,hmask,hsc,0.0f));
+        }else{
+            ggml_tensor*kse=qk(linear(C,w.Wks,w.bks,hx),cT,sT);
+            ggml_tensor*vse=linear(C,w.Wvs,w.bvs,hx);
+            ggml_tensor*kad=qk(linear(C,w.Wka,w.bka,had),cA,sA); ggml_tensor*vad=linear(C,w.Wva,w.bva,had);
+            ggml_tensor*kta=qk(linear(C,w.Wkt,w.bkt,ht),cK,sK); ggml_tensor*vta=linear(C,w.Wvt,w.bvt,ht);
+            ggml_tensor*Vs=tov(vse),*Va=tov(vad),*VT=tov(vta);
+            ggml_tensor*ss2=ggml_mul_mat(C,kse,q),*sa=ggml_mul_mat(C,kad,q),*sr=ggml_mul_mat(C,kta,q);
+            ggml_prec_set_acc(ss2,GGML_PREC_F32); ggml_prec_set_acc(sa,GGML_PREC_F32); ggml_prec_set_acc(sr,GGML_PREC_F32);
+            ggml_tensor*st2=ggml_scale(C,sr,w.rg);
+            ggml_tensor*scr=ggml_concat(C,ggml_concat(C,ss2,sa,0),st2,0);
+            ggml_tensor*attn=ggml_soft_max_ext(C,scr,nullptr,hsc,0.0f);
+            ggml_tensor*Vc=ggml_concat(C,ggml_concat(C,Vs,Va,0),VT,0);
+            kqv=ggml_mul_mat(C,Vc,attn);
+        }
         ggml_tensor*mg=ggml_reshape_2d(C,ggml_cont(C,ggml_permute(C,kqv,0,2,1,3)),HC,chunk);
         ggml_tensor*res=ggml_add(C,linear(C,w.Wo,w.bo,mg),hx);
         hx=ggml_relu(C,linear(C,w.flw,w.flb,layer_norm(C,res,w.flnw,w.flnb,head_ln_eps)));
@@ -369,6 +406,7 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     gio.t_ids=t_ids; gio.t_proj=t_proj; gio.t_pos=t_pos; gio.t_mask=t_mask;
     gio.t_state=t_state; gio.t_x0=t_x0; gio.norm_actions=norm_actions;
     gio.cT=cT; gio.sT=sT; gio.cA=cA; gio.sA=sA; gio.cK=cK; gio.sK=sK;
+    gio.cJ=cJ; gio.sJ=sJ; gio.hmask=hmask;
 
     ggml_cgraph*gf=ggml_new_graph_custom(C,65536,false); ggml_build_forward_expand(gf,norm_actions);
     return gf;
@@ -391,17 +429,33 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
     if(!ggml_are_same_shape(proj,t_proj)){ std::fprintf(stderr,"vla(vla_adapter): projector output does not match the LM width\n"); return {}; }
     ggml_backend_tensor_copy(proj,t_proj);
     if(!gio.consts){
-        std::vector<int32_t> pp(SEQ);
-        for(int64_t i=0;i<SEQ;++i)
+        std::vector<int32_t> pp(LSEQ);
+        for(int64_t i=0;i<LSEQ;++i)
             pp[i]=(int32_t)i;
         ggml_backend_tensor_set(t_pos,pp.data(),0,ggml_nbytes(t_pos));
-        std::vector<float> mk; build_causal_mask(SEQ, mk);
+        std::vector<float> mk; build_causal_mask(LSEQ, mk);
         ggml_backend_tensor_set(t_mask,mk.data(),0,ggml_nbytes(t_mask));
         std::vector<float> zx((size_t)action_dim*HC*chunk,0.0f);
         ggml_backend_tensor_set(t_x0,zx.data(),0,ggml_nbytes(t_x0));
         auto fill_cs=[&](ggml_tensor*cc,ggml_tensor*ss,int64_t Lh){ std::vector<float> cb,sb; rope_pairwise_table(HD,Lh,head_rope_base,cb,sb);
             ggml_backend_tensor_set(cc,cb.data(),0,ggml_nbytes(cc)); ggml_backend_tensor_set(ss,sb.data(),0,ggml_nbytes(ss)); };
-        fill_cs(cT,sT,chunk); fill_cs(cA,sA,num_tokens+1); fill_cs(cK,sK,NPATCH);
+        fill_cs(cT,sT,chunk);
+        if(gio.cJ){
+            std::vector<float> cb,sb,cj,sj;
+            for(int64_t Lh:{chunk,num_tokens+1,NPATCH}){
+                rope_pairwise_table(HD,Lh,head_rope_base,cb,sb);
+                cj.insert(cj.end(),cb.begin(),cb.end()); sj.insert(sj.end(),sb.begin(),sb.end());
+            }
+            const int64_t LH=gio.cJ->ne[1], LJ=(int64_t)cj.size()/HD;
+            cj.resize((size_t)(HD*LH),1.0f); sj.resize((size_t)(HD*LH),0.0f);
+            ggml_backend_tensor_set(gio.cJ,cj.data(),0,ggml_nbytes(gio.cJ)); ggml_backend_tensor_set(gio.sJ,sj.data(),0,ggml_nbytes(gio.sJ));
+            std::vector<float> hm((size_t)(LH*chunk),0.0f);
+            for(int64_t r=0;r<chunk;++r)
+                std::fill(hm.begin()+r*LH+LJ,hm.begin()+(r+1)*LH,-INFINITY);
+            ggml_backend_tensor_set(gio.hmask,hm.data(),0,ggml_nbytes(gio.hmask));
+        }else{
+            fill_cs(cA,sA,num_tokens+1); fill_cs(cK,sK,NPATCH);
+        }
         gio.consts=true;
     }
     { std::vector<float> sv(proprio_dim,0.0f); for(int64_t i=0;i<proprio_dim && in.state;++i) sv[i]=in.state[i];

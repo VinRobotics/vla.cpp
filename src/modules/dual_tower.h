@@ -76,6 +76,8 @@ struct DualTower {
             v.resize(n);
             for (int64_t i=0; i<n; ++i) {
                 ViTLayerW & w = v[i];
+                const std::string b = std::string(pre) + ".blk." + std::to_string(i) + ".";
+                L.pad_mlp(b + "fc1", b + "fc2");
                 w.n1w   = L.f32 ("%s.blk.%lld.ln1.weight",  pre, (long long)i);
                 w.n1b   = L.f32 ("%s.blk.%lld.ln1.bias",    pre, (long long)i);
                 w.n2w   = L.f32 ("%s.blk.%lld.ln2.weight",  pre, (long long)i);
@@ -136,14 +138,16 @@ inline ggml_tensor* vit_block_fused(ggml_context*C, const ViTLayerW&w, ggml_tens
     return ls?fused_bias_gate_res(C,h,w.bfc2,w.ls2,x):fused_bias_res(C,h,w.bfc2,x);
 }
 
-inline ggml_tensor* vit_block(ggml_context*C, const ViTLayerW&w, ggml_tensor*x, int64_t N, int64_t hidden, int64_t heads, int64_t hd, float eps, bool ls){
+inline ggml_tensor* vit_block(ggml_context*C, const ViTLayerW&w, ggml_tensor*x, int64_t N, int64_t hidden, int64_t heads, int64_t hd, float eps, bool ls, bool fa){
     ggml_tensor*qkv=linear(C,w.Wqkv,w.bqkv,layer_norm(C,x,w.n1w,w.n1b,eps));
     ggml_tensor*Q=ggml_cont(C,ggml_permute(C,head_view(C,qkv,hd,heads,N,hidden,3,0),0,2,1,3));
     ggml_tensor*K=ggml_cont(C,ggml_permute(C,head_view(C,qkv,hd,heads,N,hidden,3,1),0,2,1,3));
-    ggml_tensor*V=ggml_cont(C,ggml_permute(C,head_view(C,qkv,hd,heads,N,hidden,3,2),1,2,0,3));
-    ggml_tensor*ao=linear(C,w.Wproj,w.bproj,attention(C,Q,K,V,nullptr,1.0f/std::sqrt((float)hd),hidden,N));
+    const float scale=1.0f/std::sqrt((float)hd);
+    ggml_tensor*att=fa?flash_attention(C,Q,K,ggml_cont(C,ggml_permute(C,head_view(C,qkv,hd,heads,N,hidden,3,2),0,2,1,3)),nullptr,scale)
+                      :attention(C,Q,K,ggml_cont(C,ggml_permute(C,head_view(C,qkv,hd,heads,N,hidden,3,2),1,2,0,3)),nullptr,scale,hidden,N);
+    ggml_tensor*ao=linear(C,w.Wproj,w.bproj,att);
     x=ggml_add(C,x,ls?ggml_mul(C,ao,w.ls1):ao);
-    ggml_tensor*h=ffn_gelu_erf(C,w.Wfc1,w.bfc1,w.Wfc2,w.bfc2,layer_norm(C,x,w.n2w,w.n2b,eps));
+    ggml_tensor*h=linear(C,w.Wfc2,w.bfc2,gelu_erf(C,linear(C,w.Wfc1,w.bfc1,layer_norm(C,x,w.n2w,w.n2b,eps))));
     return ggml_add(C,x,ls?ggml_mul(C,h,w.ls2):h);
 }
 
@@ -165,11 +169,11 @@ inline ggml_tensor* tower_embed(ggml_context*C, ggml_tensor*pix, ggml_tensor*pw,
 
 inline ggml_tensor* tower(ggml_context*C, ggml_tensor*pix, ggml_tensor*pw, ggml_tensor*pb, ggml_tensor*pos,
                           ggml_tensor*cls, ggml_tensor*reg, const std::vector<ViTLayerW>&blk,
-                          int64_t hidden, int64_t heads, int64_t hd, int64_t patch, float eps, bool prefix, bool fused){
+                          int64_t hidden, int64_t heads, int64_t hd, int64_t patch, float eps, bool prefix, bool fused, bool fa){
     ggml_tensor*x=tower_embed(C,pix,pw,pb,pos,cls,reg,hidden,patch,prefix);
     const int64_t nprefix=prefix?5:0, N=x->ne[1], NP=N-nprefix;
     for(size_t i=0;i<blk.size();++i)
-        x=fused?vit_block_fused(C,blk[i],x,N,hidden,heads,hd,eps,prefix):vit_block(C,blk[i],x,N,hidden,heads,hd,eps,prefix);
+        x=fused?vit_block_fused(C,blk[i],x,N,hidden,heads,hd,eps,prefix):vit_block(C,blk[i],x,N,hidden,heads,hd,eps,prefix,fa);
     if(prefix)
         x=ggml_cont(C,ggml_view_2d(C,x,hidden,NP,x->nb[1],nprefix*x->nb[1]));
     return x;
@@ -221,6 +225,10 @@ inline ggml_tensor* DualTower::encode(ggml_backend_t backend, graph_cache<int64_
     // preprocesses in bf16, so these are the values it actually sees.
     static const float DMEAN[3]={0.484375f,0.455078125f,0.40625f}, DSTD[3]={0.228515625f,0.2236328125f,0.224609375f};
 
+    // Where flash attention is on by default (Hexagon), the towers take it: their
+    // explicit scores are F32 x F32 matmuls the NPU runs on the vector units, and
+    // V's transposed copy is a slow strided CONT there.
+    const bool fa=!fused_ops && default_flash_attn() && flash_attn_enabled();
     const size_t max_nodes=(size_t)64*(d_layers+s_layers+1)*n_views+1024;
     const bool built=cache.ensure(backend,n_views,ggml_tensor_overhead()*max_nodes+ggml_graph_overhead_custom(max_nodes,false),
                                   [&](ggml_context*C, VisIO&io)->ggml_cgraph*{
@@ -258,8 +266,8 @@ inline ggml_tensor* DualTower::encode(ggml_backend_t backend, graph_cache<int64_
         for(int v=0; v<n_views; ++v){
             io.px_d[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(io.px_d[v]);
             io.px_s[v]=ggml_new_tensor_3d(C,GGML_TYPE_F32,S,S,3); ggml_set_input(io.px_s[v]);
-            ggml_tensor*pd=tower(C,io.px_d[v],d_patch_w,d_patch_b,d_pos,d_cls,d_reg,dvit,d_hidden,d_heads,d_head_dim,patch_size,ln_eps,true,fused_ops);
-            ggml_tensor*ps=tower(C,io.px_s[v],s_patch_w,s_patch_b,s_pos,nullptr,nullptr,svit,s_hidden,s_heads,s_head_dim,patch_size,ln_eps,false,fused_ops);
+            ggml_tensor*pd=tower(C,io.px_d[v],d_patch_w,d_patch_b,d_pos,d_cls,d_reg,dvit,d_hidden,d_heads,d_head_dim,patch_size,ln_eps,true,fused_ops,fa);
+            ggml_tensor*ps=tower(C,io.px_s[v],s_patch_w,s_patch_b,s_pos,nullptr,nullptr,svit,s_hidden,s_heads,s_head_dim,patch_size,ln_eps,false,fused_ops,fa);
             cmb[v]=ggml_concat(C,pd,ps,0);
         }
         ggml_tensor*allp=cmb[0]; for(int v=1;v<n_views;++v) allp=ggml_concat(C,allp,cmb[v],1);
@@ -269,8 +277,8 @@ inline ggml_tensor* DualTower::encode(ggml_backend_t backend, graph_cache<int64_
             ph=fused_bias_gelu_erf(C,mm_exact(C,pj_fc2w,ph),pj_fc2b,bf16_operand(pj_fc3w,rows));
             io.proj=ggml_add(C,mm_exact(C,pj_fc3w,ph),pj_fc3b);
         } else {
-            ggml_tensor*ph=ggml_gelu_erf(C,linear(C,pj_fc1w,pj_fc1b,allp));
-            ph=ggml_gelu_erf(C,linear(C,pj_fc2w,pj_fc2b,ph));
+            ggml_tensor*ph=gelu_erf(C,linear(C,pj_fc1w,pj_fc1b,allp));
+            ph=gelu_erf(C,linear(C,pj_fc2w,pj_fc2b,ph));
             io.proj=linear(C,pj_fc3w,pj_fc3b,ph);
         }
         ggml_set_output(io.proj);
