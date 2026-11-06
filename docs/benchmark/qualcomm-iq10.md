@@ -79,8 +79,8 @@ vision stage separately.
 | GR00T N1.6 | 1 | 224 | 680.9 | 682.1 | 681.6 | 683.9 | 145.3 | 146 | 4889 |
 | GR00T N1.7 | 1 | 256 | 739.6 | 746.4 | 745.1 | 753.8 | 196.4 | 190 | 5215 |
 | π0.5 | 2 | 224 | 1114.0 | 1116.1 | 1115.5 | 1117.8 | 278.0 | 285 | 5802 |
-| OpenVLA-OFT | 1 | 224 | 1117.7 | 1120.2 | 1120.4 | 1121.8 | 262.3 | 844 | 15321 |
 | π0 | 2 | 224 | 1117.6 | 1120.5 | 1119.9 | 1123.8 | 277.8 | 284 | 5547 |
+| OpenVLA-OFT | 1 | 224 | 1117.7 | 1120.2 | 1120.4 | 1121.8 | 262.3 | 844 | 15321 |
 | Evo-1 | 1 | 448 | 1653.5 | 1661.4 | 1661.2 | 1665.6 | 815.6 | 319 | 1556 |
 
 ### Fastest configuration
@@ -94,7 +94,7 @@ under the full protocol:
 
 The weight dtype stays F16 in every set. `--weight-dtype f16` is the default,
 and `--weight-dtype bf16` is left out: the NPU has no BF16 kernels, so every
-matmul would run on the CPU (SmolVLA: 18.7 s against 0.82 s).
+matmul would run on the CPU (SmolVLA: 18.6 s against 0.58 s, mean, 5 reps).
 
 The screen runs 2 warmups and 5 reps in one process per flag set. A flag set
 replaces the defaults only if its mean is more than 3% lower, both in the screen
@@ -103,8 +103,9 @@ and in the full re-run.
 Flash attention and the matmul precision can move the action chunk. Success
 rates measured at the defaults therefore do not carry over to these rows. For
 VLA-JEPA and GR00T N1.7, `--flash-attn` puts their LM back on flash attention,
-which the defaults leave off because it is outside the fidelity bar (VLA-JEPA
-6.7e-3 on a served LIBERO observation, N1.7 5.4e-3 on fixed inputs).
+which the defaults leave off because it is outside the fidelity bar against a
+CPU-only build: VLA-JEPA 6.2e-3 on a served LIBERO observation (2.7e-3 on fixed
+inputs), N1.7 6.2e-3 on fixed inputs (2.7e-3 served).
 
 | Model | Fastest flags | min ms | mean ms | p50 ms | p90 ms | vision ms | Peak RSS MiB | System RAM MiB | vs defaults |
 |---|---|--:|--:|--:|--:|--:|--:|--:|--:|
@@ -118,8 +119,8 @@ which the defaults leave off because it is outside the fidelity bar (VLA-JEPA
 | GR00T N1.6 | *(defaults)* | 680.9 | 682.1 | 681.6 | 683.9 | 145.3 | 146 | 4889 | - |
 | GR00T N1.7 | `--flash-attn --mm-prec default` | 715.1 | 719.2 | 718.7 | 722.9 | 195.5 | 190 | 5074 | -3.6% |
 | π0.5 | *(defaults)* | 1114.0 | 1116.1 | 1115.5 | 1117.8 | 278.0 | 285 | 5802 | - |
-| OpenVLA-OFT | *(defaults)* | 1117.7 | 1120.2 | 1120.4 | 1121.8 | 262.3 | 844 | 15321 | - |
 | π0 | *(defaults)* | 1117.6 | 1120.5 | 1119.9 | 1123.8 | 277.8 | 284 | 5547 | - |
+| OpenVLA-OFT | *(defaults)* | 1117.7 | 1120.2 | 1120.4 | 1121.8 | 262.3 | 844 | 15321 | - |
 | Evo-1 | *(defaults)* | 1653.5 | 1661.4 | 1661.2 | 1665.6 | 815.6 | 319 | 1556 | - |
 
 <details><summary>Screen means (ms) per flag set</summary>
@@ -136,8 +137,8 @@ which the defaults leave off because it is outside the fidelity bar (VLA-JEPA
 | GR00T N1.6 | 689.2 | 685.8 | 687.3 | 683.0 | 851.0 |
 | GR00T N1.7 | 758.3 | 733.1 | 752.8 | 723.2 | 858.2 |
 | π0.5 | 1125.2 | 1117.6 | 1134.2 | 1134.2 | 2039.2 |
-| OpenVLA-OFT | 1125.5 | 1127.8 | 1123.4 | 1123.5 | 1402.2 |
 | π0 | 1113.2 | 1126.1 | 1114.8 | 1126.1 | 2056.3 |
+| OpenVLA-OFT | 1125.5 | 1127.8 | 1123.4 | 1123.5 | 1402.2 |
 | Evo-1 | 1668.8 | 1669.2 | 1669.8 | 1657.4 | 3116.8 |
 
 \* Octo-Small's defaults screen was re-run: the first run (672.8 ms, with a
@@ -157,7 +158,8 @@ The HTP skel has to be processed for this board and installed in
 [backend/hexagon.md](../backend/hexagon.md#linux-iq-10).
 
 GR00T N1.6 runs one view here, as the configuration above fixes. With two views
-one batched `MUL_MAT` of its SigLIP2 tower still runs on the CPU; see
+its SigLIP2 tower's patch matmul and flash attention, batched over the views,
+still run on the CPU; see
 [backend/hexagon.md](../backend/hexagon.md#op-coverage-measured).
 
 These rows time the defaults; they do not vouch for accuracy. On a served LIBERO

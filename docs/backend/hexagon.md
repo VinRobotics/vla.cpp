@@ -143,11 +143,11 @@ the same path.
 
 Flash attention on the HMX (v81) keeps scores and probabilities in F16. That is
 a precision limit rather than a wrong op, but in GR00T N1.7's LM it moves the
-action chunk 5.4e-3 from the CPU reference. N1.7's LM therefore takes the
+action chunk 6.2e-3 from the CPU reference. N1.7's LM therefore takes the
 explicit path unless `--flash-attn` is given: 2.0e-3, at the same latency.
 VLA-JEPA's LM does the same: with flash attention a served LIBERO observation
-lands 6.7e-3 from the reference (the CPU with flash attention 5.5e-3), without
-it 2.6e-3, at a cost of 683 to 810 ms with two views.
+lands 6.2e-3 from the reference, without it 2.2e-3, at a cost of 683 to 810 ms
+with two views.
 
 The softmax takes rows of up to 32 elements or a multiple of 32. Where a
 sequence can grow without changing its result, vla.cpp pads it to
@@ -165,7 +165,7 @@ tower takes two camera views that way: its action chunk lands 0.16 from the CPU
 reference. The wrapper runs those matmuls on the CPU. On Hexagon `linear()` in
 `src/layers/linear.h` multiplies a contiguous batch as one 2D matrix of rows
 instead, the same product, so most of them never reach the rule: GR00T N1.6
-with two views lands 8.8e-4 from the reference, and the matmuls of TurboVLA's
+with two views lands 7.5e-4 from the reference, and the matmuls of TurboVLA's
 DINOv3, which takes its two views as a batch, run on the NPU.
 
 A copy that transposes the innermost dim, such as the `CONT` of a permuted V
