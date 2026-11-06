@@ -28,6 +28,7 @@
 #include "layers/linear.h"
 #include "layers/norm.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -68,6 +69,7 @@ struct OpenVlaOftModelArch : public ModelArchBase {
     };
     struct MainIO {
         ggml_tensor *t_ids=nullptr,*t_state=nullptr,*t_proj=nullptr,*act0=nullptr,*t_pos=nullptr,*norm_actions=nullptr;
+        ggml_tensor *kv_mask=nullptr;
         bool consts=false;
     };
     graph_cache<MainKey, MainIO> main_graph;
@@ -255,6 +257,9 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     seq=ggml_concat(C,seq,stop,1);
 
     ggml_tensor*t_pos=ggml_new_tensor_1d(C,GGML_TYPE_I32,SEQ); ggml_set_input(t_pos); ggml_set_output(t_pos);
+    const int64_t KP=gemm_width(SEQ);
+    ggml_tensor*kv_mask=nullptr;
+    if(KP>SEQ){ kv_mask=ggml_new_tensor_2d(C,GGML_TYPE_F32,KP,SEQ); ggml_set_input(kv_mask); ggml_set_output(kv_mask); }
     const float lsc=1.0f/std::sqrt((float)lm_head_dim);
     ggml_tensor*x=seq;
     const bool fused_lm=fused_ops && cublas_rows(SEQ) && SEQ<=4096;
@@ -278,11 +283,21 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
         ggml_tensor*qh=ggml_reshape_3d(C,qp,lm_head_dim,n_q,SEQ),*kh=ggml_reshape_3d(C,kp,lm_head_dim,n_kv,SEQ),*vh=ggml_reshape_3d(C,vp,lm_head_dim,n_kv,SEQ);
         ggml_tensor*qr=ggml_rope_ext(C,qh,t_pos,nullptr,(int)lm_head_dim,GGML_ROPE_TYPE_NEOX,0,lm_rope_base,1.0f,0.0f,1.0f,32.0f,1.0f);
         ggml_tensor*kr=ggml_rope_ext(C,kh,t_pos,nullptr,(int)lm_head_dim,GGML_ROPE_TYPE_NEOX,0,lm_rope_base,1.0f,0.0f,1.0f,32.0f,1.0f);
+        // fa_kv: on Hexagon K and V go to F16, and the keys are padded with zeros
+        // to gemm_width(SEQ), masked out, so both matmuls run on the HMX rather
+        // than as F32 x F32 on the vector units. Scores accumulate in F32 and the
+        // softmax stays F32. Other backends keep F32 K/V and SEQ keys.
         ggml_tensor*Q=ggml_cont(C,ggml_permute(C,qr,0,2,1,3)),*K=ggml_cont(C,ggml_permute(C,kr,0,2,1,3)),*V=ggml_cont(C,ggml_permute(C,vh,1,2,0,3));
+        if(kv_mask){
+            K=ggml_pad(C,K,0,(int)(KP-SEQ),0,0);
+            V=ggml_pad(C,V,(int)(KP-SEQ),0,0,0);
+        }
+        K=fa_kv(C,K); V=fa_kv(C,V);
         ggml_tensor*kq=ggml_mul_mat(C,K,Q); ggml_prec_set_acc(kq,GGML_PREC_F32);
-        // Unmasked on purpose: OpenVLA-OFT patches transformers to replace the
-        // causal mask across the whole sequence (modeling_llama.py:719-723).
-        ggml_tensor*aw=ggml_soft_max_ext(C,kq,nullptr,lsc,0.0f);
+        // No causal mask on purpose: OpenVLA-OFT patches transformers to replace
+        // it across the whole sequence (modeling_llama.py:719-723). kv_mask only
+        // hides the key padding.
+        ggml_tensor*aw=ggml_soft_max_ext(C,kq,kv_mask,lsc,0.0f);
         ggml_tensor*kqv=ggml_mul_mat(C,V,aw);
         ggml_tensor*att=ggml_reshape_2d(C,ggml_cont(C,ggml_permute(C,kqv,0,2,1,3)),HC,SEQ);
         x=ggml_add(C,x,ggml_mul_mat(C,l.Wo,att));
@@ -306,7 +321,7 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
     ggml_tensor*norm_actions=linear(C,h_fc2w,h_fc2b,hh); ggml_set_output(norm_actions);
 
     gio.t_ids=t_ids; gio.t_state=t_state; gio.t_proj=t_proj; gio.act0=act0;
-    gio.t_pos=t_pos; gio.norm_actions=norm_actions;
+    gio.t_pos=t_pos; gio.norm_actions=norm_actions; gio.kv_mask=kv_mask;
 
     ggml_cgraph*gf=ggml_new_graph_custom(C,16384,false); ggml_build_forward_expand(gf,norm_actions);
     return gf;
@@ -330,6 +345,13 @@ std::vector<float> OpenVlaOftModelArch::predict(const Inputs& in) {
         for(int64_t i=0;i<SEQ;++i)
             pp[i]=(int32_t)i;
         ggml_backend_tensor_set(t_pos,pp.data(),0,ggml_nbytes(t_pos));
+        if(gio.kv_mask){
+            const int64_t KP=gio.kv_mask->ne[0];
+            std::vector<float> mk((size_t)(KP*SEQ),0.0f);
+            for(int64_t q=0;q<SEQ;++q)
+                std::fill(mk.begin()+q*KP+SEQ,mk.begin()+(q+1)*KP,-INFINITY);
+            ggml_backend_tensor_set(gio.kv_mask,mk.data(),0,ggml_nbytes(gio.kv_mask));
+        }
         std::vector<float> z((size_t)HC*n_act,0.0f);
         ggml_backend_tensor_set(act0,z.data(),0,ggml_nbytes(act0));
         gio.consts=true;

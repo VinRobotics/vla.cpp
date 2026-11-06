@@ -152,8 +152,25 @@ void DitHead::declare(WeightLoader & L, const char * prefix, bool fuse_qkv, bool
     po2b = L.f32 ("%s.proj_out2.bias",   outer);
 }
 
+namespace {
+
+// K [hd, T, heads] and V^T [T, hd, heads] in F16, the head dim and the keys
+// zero-padded to gemm_width(), as the HMX takes them (Hexagon). Elsewhere both
+// come back unchanged.
+void hmx_kv(ggml_context * C, ggml_tensor ** K, ggml_tensor ** V) {
+    const int64_t hd = (*K)->ne[0], T = (*K)->ne[1], HP = gemm_width(hd), NK = gemm_width(T);
+    if (HP > hd || NK > T) {
+        *K = ggml_pad(C, *K, (int) (HP-hd), (int) (NK-T), 0, 0);
+        *V = ggml_pad(C, *V, (int) (NK-T), (int) (HP-hd), 0, 0);
+    }
+    *K = fa_kv(C, *K);
+    *V = fa_kv(C, *V);
+}
+
+}
+
 void DitHead::kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
-                 ggml_tensor ** K_out, ggml_tensor ** V_out, ggml_tensor * xq_pre) const {
+                 ggml_tensor ** K_out, ggml_tensor ** V_out, ggml_tensor * xq_pre, bool cross) const {
     const int64_t hd    = cfg.head_dim;
     const int64_t heads = cfg.heads;
     const int64_t Tkv   = src->ne[1];
@@ -187,6 +204,8 @@ void DitHead::kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
         }
         *K_out = ggml_cont(C, ggml_permute(C, head_view(C, kvp, hd, heads, Tkv, cfg.hidden, 2, 0), 0, 2, 1, 3));
         *V_out = ggml_cont(C, ggml_permute(C, head_view(C, kvp, hd, heads, Tkv, cfg.hidden, 2, 1), 1, 2, 0, 3));
+        if (!cfg.fused_ops && (!cross || cfg.cross_kv_f16))
+            hmx_kv(C, K_out, V_out);
         return;
     }
     if (w.fq_k) {
@@ -198,6 +217,20 @@ void DitHead::kv(ggml_context * C, const DitLayerW & w, ggml_tensor * src,
     }
     *K_out = to_heads  (C, linear(C, w.Wk, w.bk, src), hd, heads, Tkv);
     *V_out = to_heads_v(C, linear(C, w.Wv, w.bv, src), hd, heads, Tkv);
+    if (!cfg.fused_ops && (!cross || cfg.cross_kv_f16))
+        hmx_kv(C, K_out, V_out);
+}
+
+ggml_tensor * DitHead::key_mask(ggml_context * C, int64_t NK, int64_t Nk, int64_t Tq) const {
+    char name[GGML_MAX_NAME];
+    std::snprintf(name, sizeof(name), "dit.key_mask.%lld.%lld.%lld", (long long) NK, (long long) Nk, (long long) Tq);
+    if (ggml_tensor * m = ggml_get_tensor(C, name))
+        return m;
+    // 0 for the Nk real keys, -1e30 for the padding: step(i - Nk + 0.5) * -1e30.
+    ggml_tensor * m = ggml_step(C, ggml_scale_bias(C, ggml_arange(C, 0.0f, (float) NK, 1.0f), 1.0f, 0.5f - (float) Nk));
+    m = ggml_repeat_4d(C, ggml_scale(C, m, -1e30f), NK, Tq, 1, 1);
+    ggml_set_name(m, name);
+    return m;
 }
 
 ggml_tensor * DitHead::block(ggml_context * C, const DitLayerW & w, ggml_tensor * h, ggml_tensor * mod,
@@ -278,6 +311,8 @@ ggml_tensor * DitHead::block(ggml_context * C, const DitLayerW & w, ggml_tensor 
         Q = ggml_cont(C, ggml_permute(C, head_view(C, qkv, hd, heads, Tk, dim, 3, 0), 0, 2, 1, 3));
         K = ggml_cont(C, ggml_permute(C, head_view(C, qkv, hd, heads, Tk, dim, 3, 1), 0, 2, 1, 3));
         V = ggml_cont(C, ggml_permute(C, head_view(C, qkv, hd, heads, Tk, dim, 3, 2), 1, 2, 0, 3));
+        if (!cfg.fused_ops)
+            hmx_kv(C, &K, &V);
         }
     } else {
         // Self-attention with separate FoldQuant q/k/v: one activation blob of n
@@ -294,7 +329,7 @@ ggml_tensor * DitHead::block(ggml_context * C, const DitLayerW & w, ggml_tensor 
             V = V_pre;
         }
         else       {
-            kv(C, w, enc ? enc : n, &K, &V, enc ? nullptr : xq);
+            kv(C, w, enc ? enc : n, &K, &V, enc ? nullptr : xq, enc != nullptr);
         }
     }
 
@@ -310,8 +345,22 @@ ggml_tensor * DitHead::block(ggml_context * C, const DitLayerW & w, ggml_tensor 
         ggml_tensor * g   = fused_bias_gelu(C, mm_exact(C, w.Wff0, n3), w.bff0, bf16_operand(w.Wff2, Tk));
         return fused_bias_res(C, mm_exact(C, w.Wff2, g), w.bff2, h1);
     }
-    ggml_tensor * att = exact ? fused_attn_exact(C, Q, K, V, scale, false)
-                              : attention(C, Q, K, V, nullptr, scale, dim, Tk);
+    ggml_tensor * att;
+    const int64_t Nk = enc ? enc->ne[1] : Tk;
+    if (!exact && (K->ne[0] > hd || K->ne[1] > Nk)) {
+        // hmx_kv padded K/V: the queries take the head-dim padding too, the
+        // padded keys are masked out and the output drops the padded columns.
+        if (K->ne[0] > hd)
+            Q = ggml_pad(C, Q, (int) (K->ne[0]-hd), 0, 0, 0);
+        ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
+        ggml_tensor * mask = K->ne[1] > Nk ? key_mask(C, K->ne[1], Nk, Tk) : nullptr;
+        ggml_tensor * kqv = ggml_mul_mat(C, V, ggml_soft_max_ext(C, kq, mask, scale, 0.0f));
+        kqv = ggml_view_3d(C, kqv, hd, Tk, heads, kqv->nb[1], kqv->nb[2], 0);
+        att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), dim, Tk);
+    } else {
+        att = exact ? fused_attn_exact(C, Q, K, V, scale, false)
+                    : attention(C, Q, K, V, nullptr, scale, dim, Tk);
+    }
     // FoldQuant: both residual adds ride in the GEMM epilogues.
     ggml_tensor * h1  = w.fq_o ? fq_linear(C, w.fq_o, att, h) : ggml_add(C, h, linear(C, w.Wo, w.bo, att));
     ggml_tensor * n3  = cfg.fused_ops ? fused_ln(C, h1, nullptr, nullptr, cfg.ln_eps, false) : ggml_norm(C, h1, cfg.ln_eps);
