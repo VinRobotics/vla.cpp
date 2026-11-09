@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -41,6 +42,17 @@
 
 namespace vla {
 namespace {
+
+// fallback_keep_on_cpu(): weights by address, with the name to tell a freed
+// tensor's address reused by another apart.
+std::mutex                                           g_cpu_mu;
+std::unordered_map<const ggml_tensor *, std::string> g_cpu_weights;
+
+bool kept_on_cpu(const ggml_tensor * w) {
+    std::lock_guard<std::mutex> lock(g_cpu_mu);
+    auto it = g_cpu_weights.find(w);
+    return it != g_cpu_weights.end() && it->second == w->name;
+}
 
 enum class Where : uint8_t { Accel, Cpu, Either };
 
@@ -302,6 +314,10 @@ bool concat_is_dma_row_copy(const ggml_tensor * t) {
 // op it claims and computes differently from the CPU reference is refused here.
 bool accel_runs(FallbackCtx * fc, const ggml_tensor * t, const char ** why) {
     *why = "rejects";
+    if (t->op == GGML_OP_MUL_MAT && kept_on_cpu(t->src[0])) {
+        *why = "leaves to the CPU a registered weight's";
+        return false;
+    }
     if (fc->hexagon && t->op == GGML_OP_UNARY && ggml_get_unary_op(t) == GGML_UNARY_OP_GELU) {
         // ggml-hexagon maps GELU and GELU_QUICK to one kernel, x*sigmoid(1.702x),
         // which is GELU_QUICK. ggml_gelu is the tanh form; on SmolVLA's SigLIP
@@ -525,6 +541,11 @@ void hexagon_default_skel_path() {
     // loader in libcdsprpc.dll reads it from.
     _putenv_s("ADSP_LIBRARY_PATH", path);
 #endif
+}
+
+void fallback_keep_on_cpu(const ggml_tensor * w) {
+    std::lock_guard<std::mutex> lock(g_cpu_mu);
+    g_cpu_weights[w] = w->name;
 }
 
 }  // namespace vla

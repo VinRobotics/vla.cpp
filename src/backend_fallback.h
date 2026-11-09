@@ -50,6 +50,16 @@ namespace vla {
 ggml_backend_t fallback_backend_new(ggml_backend_t accel, int n_threads);
 
 /**
+ * @brief Keep every matmul whose weight is @p w on the CPU.
+ *
+ * For a weight whose products the accelerator computes too coarsely for the
+ * arch: Hexagon's matrix unit rounds the activations to F16. An arch registers
+ * such weights while it loads them, in F32 so that the CPU product is the F32
+ * reference's.
+ */
+void fallback_keep_on_cpu(const ggml_tensor * w);
+
+/**
  * @brief Point the Hexagon FastRPC loader at this executable's directory.
  *
  * The HTP skels (`libggml-htp-vNN.so` and their signed catalog) are copied

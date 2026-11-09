@@ -192,6 +192,30 @@ inline ggml_tensor * fa_kv([[maybe_unused]] ggml_context * ctx, ggml_tensor * t)
 }
 
 /**
+ * @brief Whether the compiled-in backend's matrix unit multiplies with F16
+ * activations whatever the weight type (Hexagon's HMX).
+ */
+constexpr bool hmx_f16_activations() {
+#ifdef GGML_USE_HEXAGON
+    return true;
+#else
+    return false;
+#endif
+}
+
+/**
+ * @brief Keep the matmuls with weight @p w on the CPU where the compiled-in
+ * backend would round their activations to F16 (Hexagon's matrix unit).
+ *
+ * See fallback_keep_on_cpu(). Elsewhere this does nothing.
+ */
+inline void keep_matmul_on_cpu([[maybe_unused]] const ggml_tensor * w) {
+#ifdef GGML_USE_HEXAGON
+    fallback_keep_on_cpu(w);
+#endif
+}
+
+/**
  * @brief `ggml_concat(a, b, 2)` of [d0, d1, n] tensors, as the compiled-in
  * backend runs it.
  *
