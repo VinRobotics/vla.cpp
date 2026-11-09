@@ -69,28 +69,3 @@ python scripts/foldquant_fake_export.py --in model-bf16.gguf --out model-fq.gguf
 python scripts/inspect_gguf_quant.py model-fq.gguf
 ./build/vla-bench --ckpt model-fq.gguf --images 1 --size 256 --tokens 16
 ```
-
-## Cosmos3 Policy
-
-Cosmos3 Policy (`lerobot/Cosmos3-Edge-Policy-LIBERO`, a world-action model) converts like the others:
-
-```bash
-python scripts/convert_cosmos3_policy_to_gguf.py --ckpt <checkpoint dir> --out cosmos3-policy-libero-bf16.gguf
-./build/vla-cli --ckpt cosmos3-policy-libero-bf16.gguf --image third_person.png --image wrist.png \
-    --text "turn on the stove" --libero --pretty
-```
-
-What differs at run time: the two views must come in the order `[third person, wrist]` (they are composed into
-the model's 192x320 canvas as lerobot's processor does; one image of that size is taken as a composed canvas);
-`--text` builds the JSON caption and chat template of the prompt step and tokenizes it with the model's BPE from
-the GGUF, ASCII only; the output chunk is 16x10 in dataset units, `[dpos(3), rot6d(6), gripper]`, and `--libero`
-prints LIBERO commands `[dpos(3), axis-angle(3), gripper]` instead. `vla-server` serves it unchanged;
-`eval/client/vla_cpp_client.py --arch cosmos3_policy` builds the token ids and decodes the rot6d chunk, and
-`eval/run_libero.sh -m cosmos3_policy` runs it from `cosmos3-policy-libero-gguf/cosmos3-policy-libero-bf16.gguf`.
-`--act-dtype bf16` is refused; the engine is written for this policy's setup (mode `wam`, no robot state, no
-classifier-free guidance, one or two cameras of the 256 tier) and the converter refuses a config that differs.
-
-Against lerobot's policy in bf16 on the same views, tokens and noise the chunk agrees to a scaled error of 2.2e-3
-on CUDA and 2.6e-3 on CPU on one prompt and 1.8e-2 on another, the second within the bf16 reference's own
-rounding; the caption, token ids and action decode match lerobot and Hugging Face on every LIBERO task. One
-chunk takes 4.3 s on an RTX 3060 and 74 to 103 s on a 12-thread CPU. Only CPU and CUDA were tried.

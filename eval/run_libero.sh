@@ -576,7 +576,7 @@ if should_run vla_jepa; then
     fi
 fi
 
-# cosmos3_policy: the GGUF of scripts/convert_cosmos3_policy_to_gguf.py (docs/MODELS.md#cosmos3-policy-world-action-model), not
+# cosmos3_policy: the GGUF of scripts/convert_cosmos3_policy_to_gguf.py, not
 # published yet, so a missing one is skipped instead of failing a sweep over all models.
 if should_run cosmos3_policy; then
     cosmos3_gguf="${MODELS_ROOT}/cosmos3-policy-libero-gguf/cosmos3-policy-libero-bf16.gguf"
