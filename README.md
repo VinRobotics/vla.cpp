@@ -105,12 +105,6 @@ Use [ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) and follow [t
 
 Legend: `Y` = supported (released and benchmarked), `~` = in progress, `-` = planned.
 
-The Hexagon column is the Dragonwing IQ-10 under Linux
-([docs/backend/hexagon.md](docs/backend/hexagon.md)). On a Snapdragon X laptop
-under Windows, π0 and VLA-JEPA land above the 2.9e-3 fidelity bar, OpenVLA-OFT
-was not attempted (about 14 GB at F16, over its 8 GB budget) and ACT was not run
-([docs/backend/hexagon-windows.md](docs/backend/hexagon-windows.md)).
-
 ---
 
 ## Rollout on a real robot
