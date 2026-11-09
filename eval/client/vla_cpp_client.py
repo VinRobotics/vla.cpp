@@ -98,35 +98,65 @@ VLA_JEPA_PROMPT_TPL = (
 )
 
 # Cosmos3-Edge: the prompt is lerobot's Cosmos3PromptProcessorStep caption in the chat template of
-# Cosmos3TokenizerProcessorStep, for the canvas this GGUF was compiled for (src/models/cosmos3_edge.cpp).
+# Cosmos3TokenizerProcessorStep. The caption's settings (view description, fps, chunk, canvas, aspect ratio,
+# use_state) are the ones the GGUF was converted with (`cosmos3_edge.caption.*`, what src/models/cosmos3_edge_prompt.cpp
+# reads for vla-cli --text), so the client reads them from the GGUF vla-server runs (--gguf). Without one it assumes
+# the values of the published LIBERO checkpoint, and says so.
 COSMOS3_EDGE_N_VIEWS  = 2
-COSMOS3_EDGE_CHUNK    = 16
-COSMOS3_EDGE_FPS      = 20.0
-COSMOS3_EDGE_CANVAS   = (192, 320)
-COSMOS3_EDGE_ASPECT   = "16,9"
 COSMOS3_EDGE_CONCAT_VIEW = "This video contains concatenated views from multiple camera perspectives."
-COSMOS3_EDGE_VIEW_DESCRIPTION = ("The left half shows the third-person view; "
-                                 "the right half shows the wrist-mounted camera.")
 COSMOS3_EDGE_START_OF_GENERATION = "<|vision_start|>"
+COSMOS3_EDGE_LIBERO_SETTINGS = {  # lerobot/Cosmos3-Edge-Policy-LIBERO, compiled for a 192x320 canvas
+    "view_description": "The left half shows the third-person view; the right half shows the wrist-mounted camera.",
+    "aspect_ratio": "16,9", "fps": 20.0, "use_state": False, "chunk_size": 16,
+    "canvas_h": 192, "canvas_w": 320, "prompt_len": 192,
+}
 
 
-def _cosmos3_edge_caption(task: str) -> str:
+def _cosmos3_edge_settings(gguf_path: str | Path) -> dict:
+    """The caption settings of a Cosmos3-Edge GGUF (written by scripts/convert_cosmos3_edge_to_gguf.py --policy-dir)."""
+    try:
+        import gguf  # llama.cpp's gguf-py
+    except ImportError as e:
+        raise ImportError("reading the GGUF needs the gguf package (pip install gguf)") from e
+    reader = gguf.GGUFReader(str(gguf_path))
+
+    def field(key: str, cast):
+        f = reader.fields.get(key)
+        if f is None:
+            raise KeyError(f"{gguf_path} has no {key}; convert it with --policy-dir")
+        v = f.parts[-1]
+        return bytes(v).decode() if cast is str else cast(v[0])
+
+    return {
+        "view_description": field("cosmos3_edge.caption.view_description", str),
+        "aspect_ratio": field("cosmos3_edge.caption.aspect_ratio", str),
+        "fps": field("cosmos3_edge.caption.fps", float),
+        "use_state": bool(field("cosmos3_edge.caption.use_state", int)),
+        "chunk_size": field("cosmos3_edge.chunk_size", int),
+        "canvas_h": field("cosmos3_edge.canvas_h", int),
+        "canvas_w": field("cosmos3_edge.canvas_w", int),
+        "prompt_len": field("cosmos3_edge.prompt_len", int),
+    }
+
+
+def _cosmos3_edge_caption(task: str, s: dict) -> str:
+    """Cosmos3PromptProcessorStep.caption with 0 idle frames for the settings `s`, as the C++ builds it."""
     task = task.strip()
     if not task:
         return ""
     if not task.endswith((".", "!", "?")):
         task = f"{task}."
-    duration = (COSMOS3_EDGE_CHUNK + 1) / COSMOS3_EDGE_FPS
+    duration = (s["chunk_size"] + 1) / s["fps"]
     rounded = round(duration)
-    framing = " ".join(t for t in (COSMOS3_EDGE_CONCAT_VIEW, COSMOS3_EDGE_VIEW_DESCRIPTION.strip()) if t)
+    framing = " ".join(t for t in (COSMOS3_EDGE_CONCAT_VIEW, s["view_description"].strip()) if t)
     return json.dumps({
         "cinematography": {"framing": framing},
         "actions": [{"time": f"0:00-{rounded // 60}:{rounded % 60:02d}", "description": task,
-                     "idle_frame": f"0 out of {COSMOS3_EDGE_CHUNK}."}],
+                     "idle_frame": f"0 out of {s['chunk_size'] + (1 if s['use_state'] else 0)}."}],
         "duration": f"{int(duration)}s",
-        "fps": float(int(COSMOS3_EDGE_FPS)),
-        "resolution": {"H": COSMOS3_EDGE_CANVAS[0], "W": COSMOS3_EDGE_CANVAS[1]},
-        "aspect_ratio": COSMOS3_EDGE_ASPECT,
+        "fps": float(int(s["fps"])),
+        "resolution": {"H": s["canvas_h"], "W": s["canvas_w"]},
+        "aspect_ratio": s["aspect_ratio"],
     })
 
 
@@ -219,6 +249,7 @@ class VlaCppClient:
         stats_json: str | Path | None = None,
         bitvla_unnorm_key: str | None = None,
         rel_stats_json: str | Path | None = None,
+        cosmos3_gguf: str | Path | None = None,
     ):
         if arch not in ARCH_PRESETS:
             raise ValueError(f"unknown arch {arch!r}; expected one of {sorted(ARCH_PRESETS)}")
@@ -226,6 +257,17 @@ class VlaCppClient:
         tokenizer_name = tokenizer_name if tokenizer_name is not None else preset["tokenizer"]
         image_size     = image_size     if image_size     is not None else preset["image_size"]
         max_state_dim  = max_state_dim  if max_state_dim  is not None else preset.get("max_state_dim", 32)
+        # cosmos3_edge: the caption settings and the prompt length come from the GGUF the server runs.
+        self._cosmos3 = None
+        if arch == "cosmos3_edge":
+            if cosmos3_gguf:
+                self._cosmos3 = _cosmos3_edge_settings(cosmos3_gguf)
+                if max_length is None:
+                    max_length = self._cosmos3["prompt_len"]
+            else:
+                self._cosmos3 = dict(COSMOS3_EDGE_LIBERO_SETTINGS)
+                print("vla-cpp-direct: no --gguf given; the caption is built with the settings of "
+                      "lerobot/Cosmos3-Edge-Policy-LIBERO (pass the server's GGUF to read them from it)", flush=True)
         max_length     = max_length     if max_length     is not None else preset.get("max_length", 48)
         if tokenizer_name is None:
             raise ValueError(
@@ -885,7 +927,7 @@ class VlaCppClient:
     def _cosmos3_edge_prompt_ids(self, task: str) -> list[int]:
         """Token ids of the prompt of `task`, as Cosmos3TokenizerProcessorStep.encode builds them: one user turn
         in the chat template, the end-of-turn token and <|vision_start|>, no special tokens added."""
-        messages = [{"role": "user", "content": [{"type": "text", "text": _cosmos3_edge_caption(task)}]}]
+        messages = [{"role": "user", "content": [{"type": "text", "text": _cosmos3_edge_caption(task, self._cosmos3)}]}]
         text = self.tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         text += self.tok.eos_token + COSMOS3_EDGE_START_OF_GENERATION
         return self.tok(text, add_special_tokens=False)["input_ids"]
@@ -935,8 +977,8 @@ class VlaCppClient:
             raise RuntimeError(f"vla-server error: {resp.error}")
         self._last_response = resp
         chunk = np.array(resp.action_chunk, dtype=np.float32).reshape(resp.chunk_size, resp.action_dim)
-        if chunk.shape != (COSMOS3_EDGE_CHUNK, 10):
-            raise RuntimeError(f"expected a 16x10 chunk from the Cosmos3-Edge server, got {chunk.shape}")
+        if chunk.shape != (self._cosmos3["chunk_size"], 10):
+            raise RuntimeError(f"expected a {self._cosmos3['chunk_size']}x10 chunk from the Cosmos3-Edge server, got {chunk.shape}")
         return _cosmos3_edge_libero(chunk)
 
     _VJ_PS, _VJ_TPS, _VJ_MERGE, _VJ_SIDE = 16, 2, 2, 256

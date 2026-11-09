@@ -113,13 +113,15 @@ refused. It is specialized to this model: two views, a 192x320 canvas, prompts o
 `predict()` whatever the architecture is, and Cosmos3-Edge fits its checks (no state, a 16x10 noise, a 16x10
 response; the start-up warm-up of two 224x224 views and 32 made-up tokens runs). The server has no text field, so
 the client sends token ids. `eval/client/vla_cpp_client.py` has a `cosmos3_edge` preset that builds them (the caption
-and chat template of lerobot's prompt step, with the policy's tokenizer), sends the two 256x256 views as float RGB,
-and decodes the 16x10 rot6d chunk it gets back to 16 LIBERO commands:
+and chat template of lerobot's prompt step, with the policy's tokenizer, and the caption settings read from the
+server's GGUF with `--gguf`, the same `cosmos3_edge.caption.*` keys `vla-cli --text` uses; without `--gguf` it assumes
+the LIBERO checkpoint's), sends the two 256x256 views as float RGB, and decodes the 16x10 rot6d chunk it gets back
+to 16 LIBERO commands:
 
 ```bash
 ./build/vla-server cosmos3-edge-bf16.gguf                      # -DVLA_BUILD_SERVER=ON
 python eval/client/run_sim_client_direct.py --arch cosmos3_edge --n-action-steps 16 \
-    --tokenizer <checkpoint dir>/tokenizer ...                  # nvidia/Cosmos3-Edge if reachable
+    --gguf cosmos3-edge-bf16.gguf --tokenizer <checkpoint dir>/tokenizer ...   # nvidia/Cosmos3-Edge if reachable
 ```
 
 `eval/run_libero.sh -m cosmos3_edge` runs the whole flow (server, LIBERO client, stop) from a models directory that

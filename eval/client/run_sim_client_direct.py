@@ -96,6 +96,11 @@ if __name__ == "__main__":
              "returns the raw [50, 128] chunk (won't drive LIBERO).",
     )
     parser.add_argument(
+        "--gguf", type=str, default=None,
+        help="[cosmos3_edge] the GGUF vla-server runs: the caption settings (view description, fps, canvas, ...) "
+             "are read from it, so the prompt is the one the server's model was converted for.",
+    )
+    parser.add_argument(
         "--bitvla-unnorm-key", type=str, default=None,
         help="[bitvla/gr00t_n1_6/gr00t_n1_7] embodiment key inside dataset_statistics.json "
              "(default: auto-detect - bitvla picks the sole top-level key; "
@@ -120,6 +125,7 @@ if __name__ == "__main__":
         n_action_steps=args.n_action_steps,
         stats_json=args.stats_json,
         bitvla_unnorm_key=args.bitvla_unnorm_key,
+        cosmos3_gguf=args.gguf,
     )
     if args.arch == "evo1":
         client = Evo1PipelineAdapter(client=client)

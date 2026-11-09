@@ -329,10 +329,12 @@ run_model() {
     if [[ "${arch}" == vla_jepa ]]; then
         client_py="${VLA_JEPA_PYTHON}"
     fi
-    # cosmos3_edge: the tokenizer is the policy's (nvidia/Cosmos3-Edge on the Hub unless a local copy is given), and
-    # a chunk takes seconds on a GPU but about a minute on a CPU, so the client waits longer than its 30 s default.
+    # cosmos3_edge: the tokenizer is the policy's (nvidia/Cosmos3-Edge on the Hub unless a local copy is given), the
+    # caption settings are read from the GGUF the server runs, and a chunk takes seconds on a GPU but about a minute
+    # on a CPU, so the client waits longer than its 30 s default.
     if [[ "${arch}" == cosmos3_edge ]]; then
         client_py="${COSMOS3_EDGE_PYTHON}"
+        client_extra+=(--gguf "${server_args[0]}")
         if [[ -n "${COSMOS3_EDGE_TOKENIZER}" ]]; then
             client_extra+=(--tokenizer "${COSMOS3_EDGE_TOKENIZER}")
         fi

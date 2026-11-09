@@ -93,7 +93,7 @@ fails += not same
 
 # (2) the client's tokens, (3) its rot6d decode
 client = C.VlaCppClient(args.addr, arch="cosmos3_edge", tokenizer_name=args.tokenizer, n_action_steps=16,
-                        recv_timeout_ms=600_000)
+                        recv_timeout_ms=600_000, cosmos3_gguf=args.gguf)
 mine = client._cosmos3_edge_prompt_ids(args.task)
 ok_tok = mine == tokens
 print(f"(2) client tokens for {args.task!r}: {len(mine)} ids, identical to the case's {ok_tok}")
