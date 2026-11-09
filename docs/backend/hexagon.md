@@ -230,7 +230,8 @@ The shape of the diff was predicted correctly, apart from the scheduler:
 2. **A rung in [src/backend.h](../../src/backend.h).**
    - It goes through the registry, because `ggml_backend_hexagon_init` is
      declared but not defined upstream.
-   - `VLA_DEVICE` indexes HTP sessions, and `VLA_DEVICE=cpu` gives the reference.
+   - `VLA_DEVICE` indexes HTP sessions, and `VLA_DEVICE=cpu` skips them. That
+     run is not a fidelity reference (see [Fidelity](#fidelity)).
    - It sets the defaults above and points `ADSP_LIBRARY_PATH` at the
      executable's folder.
 3. **Weights.**
@@ -264,9 +265,11 @@ found.
    to the CPU and how much was copied (`VLA_FALLBACK_STATS=1` for per-graph
    detail).
 4. **Fidelity before latency.**
-   - Compare `vla_predict_check` output against the same binary with
-     `VLA_DEVICE=cpu`, and against `--weight-dtype f32`. Add `--flash-attn 0`
-     to the reference: a Hexagon build defaults to flash attention on the CPU too.
+   - Compare `vla_predict_check` output against a CPU-only build
+     (`-DGGML_HEXAGON=OFF`) of the same commit, run with `--weight-dtype f32
+     --flash-attn 0`. The Hexagon binary with `VLA_DEVICE=cpu` is not a
+     reference: its NPU changes (flash attention, F16 K/V, padding to
+     `gemm_width()`) run on the CPU too.
    - The bar is 2.9e-3.
    - A run with a wrong kernel still prints a latency, and it is usually a good
      one.

@@ -346,14 +346,18 @@ ggml_tensor * DitHead::block(ggml_context * C, const DitLayerW & w, ggml_tensor 
         return fused_bias_res(C, mm_exact(C, w.Wff2, g), w.bff2, h1);
     }
     ggml_tensor * att;
-    const int64_t Nk = enc ? enc->ne[1] : Tk;
-    if (!exact && (K->ne[0] > hd || K->ne[1] > Nk)) {
+    // hmx_kv pads to gemm_width(), which is the identity off Hexagon, so these
+    // stay false there whatever K/V the caller passes.
+    const int64_t Nk   = enc ? enc->ne[1] : Tk;
+    const bool    hpad = K->ne[0] > hd && K->ne[0] == gemm_width(hd);
+    const bool    kpad = K->ne[1] > Nk && K->ne[1] == gemm_width(Nk);
+    if (!exact && (hpad || kpad)) {
         // hmx_kv padded K/V: the queries take the head-dim padding too, the
         // padded keys are masked out and the output drops the padded columns.
-        if (K->ne[0] > hd)
+        if (hpad)
             Q = ggml_pad(C, Q, (int) (K->ne[0]-hd), 0, 0, 0);
         ggml_tensor * kq = ggml_mul_mat(C, K, Q); ggml_prec_set_acc(kq, GGML_PREC_F32);
-        ggml_tensor * mask = K->ne[1] > Nk ? key_mask(C, K->ne[1], Nk, Tk) : nullptr;
+        ggml_tensor * mask = kpad ? key_mask(C, K->ne[1], Nk, Tk) : nullptr;
         ggml_tensor * kqv = ggml_mul_mat(C, V, ggml_soft_max_ext(C, kq, mask, scale, 0.0f));
         kqv = ggml_view_3d(C, kqv, hd, Tk, heads, kqv->nb[1], kqv->nb[2], 0);
         att = ggml_reshape_2d(C, ggml_cont(C, ggml_permute(C, kqv, 0, 2, 1, 3)), dim, Tk);
