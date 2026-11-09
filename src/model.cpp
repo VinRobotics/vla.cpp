@@ -254,8 +254,7 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
                           : arch == Arch::VLA_ADAPTER ? "vla_adapter"
                           : arch == Arch::OPENVLA_OFT ? "openvla_oft"
                           : arch == Arch::TURBOVLA    ? "turbovla"
-                          : arch == Arch::ACT         ? "act"
-                          : arch == Arch::COSMOS3_EDGE ? "cosmos3_edge" : nullptr;
+                          : arch == Arch::ACT         ? "act" : nullptr;
         if (name) {
             std::fprintf(stderr, "vla(%s): num_steps is not supported\n", name);
             return nullptr;

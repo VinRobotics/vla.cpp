@@ -576,7 +576,7 @@ if should_run vla_jepa; then
     fi
 fi
 
-# cosmos3_edge: the GGUF of ggml-compiler's graphs (docs/MODELS.md#cosmos3-edge-world-action-model), which is not
+# cosmos3_edge: the GGUF of scripts/convert_cosmos3_edge_to_gguf.py (docs/MODELS.md#cosmos3-edge-world-action-model), not
 # published yet, so a missing one is skipped instead of failing a sweep over all models.
 if should_run cosmos3_edge; then
     cosmos3_gguf="${MODELS_ROOT}/cosmos3-edge-libero-gguf/cosmos3-edge-libero-bf16.gguf"

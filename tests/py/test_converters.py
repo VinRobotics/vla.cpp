@@ -387,52 +387,57 @@ def test_act_converter_remap():
     assert "model.encoder.norm.weight" not in tensors.keys_read
 
 
-def _cosmos3_edge_program(**over):
-    prog = {
-        "stages": [{"name": n} for n in ("vae_encode", "prefix", "init", "step", "finish")],
-        "inputs": [{"name": n} for n in ("canvas", "input_ids", "attention_mask", "video_noise", "action_noise")],
-        "values": [
-            {"name": "canvas", "ne": [320, 192, 3, 1]},
-            {"name": "input_ids", "ne": [192, 1]},
-            {"name": "video_noise", "ne": [192, 200, 1]},
-            {"name": "action_noise", "ne": [10, 16, 1]},
-        ],
-        "driver": [
-            {"op": "call", "stage": "vae_encode"},
-            {"op": "loop", "n": 3, "scalars": [
-                {"value": v, "values": [float(k), float(k) + 0.5, float(k) + 0.25]}
-                for k, v in enumerate(("t", "sigma", "E", "A", "B", "C", "D", "Fc", "Gc", "Hc"))
-            ]},
-        ],
+def _cosmos3_edge_config(**over):
+    cfg = {
+        "type": "cosmos3_edge",
+        "input_features": {
+            "observation.images.image": {"type": "VISUAL", "shape": [3, 256, 256]},
+            "observation.images.image2": {"type": "VISUAL", "shape": [3, 256, 256]},
+            "observation.state": {"type": "STATE", "shape": [8]},
+        },
+        "view_size": [256, 256],
+        "vae": {"scale_factor_spatial": 16, "patch_size": 2, "is_residual": True},
+        "mot_backbone": {"text_config": {"hidden_act": "relu2", "joint_attn_implementation": "two_way",
+                                         "rope_parameters": {"rope_type": "default"}}},
+        "mode": "wam", "use_state": False, "guidance_scale": 1.0, "n_obs_steps": 1, "sampler": "unipc",
+        "latent_patch_size": 2,
     }
-    prog.update(over)
-    return prog
+    cfg.update(over)
+    return cfg
 
 
-def test_cosmos3_edge_converter_program():
+def test_cosmos3_edge_converter_canvas_layout():
+    """canvas_layout follows lerobot's Cosmos3VideoCanvasProcessorStep: two 256x256 views side by side pick the
+    16:9 canvas of the 256 tier, fit without enlarging (160x320 of 192x320), latent grid 10x20."""
     _stub_deps()
     sys.path.insert(0, str(SCRIPTS))
     import convert_cosmos3_edge_to_gguf as c
 
-    info = c.parse_program(_cosmos3_edge_program())
-    # sizes come from the compiler's ggml-order shapes (innermost first)
-    assert (info["canvas_h"], info["canvas_w"], info["prompt_len"]) == (192, 320, 192)
-    assert (info["video_tok"], info["video_dim"], info["horizon"], info["action_dim"]) == (200, 192, 16, 10)
-    # the table is [step][scalar]: row k holds step k's ten values, in the order of c.SCALARS
-    assert info["n_steps"] == 3 and len(info["table"]) == 3
-    assert info["table"][0] == [float(j) for j in range(10)]
-    assert info["table"][1] == [j + 0.5 for j in range(10)]
+    lay = c.canvas_layout(_cosmos3_edge_config())
+    assert (lay["n_views"], lay["view_h"], lay["view_w"]) == (2, 256, 256)
+    assert (lay["canvas_h"], lay["canvas_w"], lay["content_h"], lay["content_w"]) == (192, 320, 160, 320)
+    assert (lay["latent_h"], lay["latent_w"], lay["aspect_ratio"]) == (10, 20, "16,9")
+    assert lay["cameras"] == ["observation.images.image", "observation.images.image2"]
 
+    # One square view fills the square canvas as it is.
+    one = _cosmos3_edge_config(input_features={"observation.images.image": {"type": "VISUAL", "shape": [3, 256, 256]}})
+    lay1 = c.canvas_layout(one)
+    assert (lay1["canvas_h"], lay1["canvas_w"], lay1["content_h"], lay1["content_w"]) == (256, 256, 256, 256)
+    assert (lay1["latent_h"], lay1["latent_w"], lay1["aspect_ratio"]) == (16, 16, "1,1")
+
+    c.check_config(_cosmos3_edge_config())
     for bad in (
-        _cosmos3_edge_program(stages=[{"name": "prefix"}]),
-        _cosmos3_edge_program(inputs=[{"name": "canvas"}]),
-        _cosmos3_edge_program(driver=[]),
+        _cosmos3_edge_config(type="cosmos3_nano"),
+        _cosmos3_edge_config(mode="forward_dynamics"),
+        _cosmos3_edge_config(use_state=True),
+        _cosmos3_edge_config(guidance_scale=3.0),
+        _cosmos3_edge_config(sampler="euler"),
     ):
         try:
-            c.parse_program(bad)
+            c.check_config(bad)
         except SystemExit:
             continue
-        raise AssertionError("a program that is not Cosmos3-Edge's was accepted")
+        raise AssertionError("a config the engine is not written for was accepted")
 
 
 def test_cosmos3_edge_converter_tokenizer(tmp_path):
