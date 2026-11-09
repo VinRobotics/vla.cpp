@@ -122,6 +122,12 @@ python eval/client/run_sim_client_direct.py --arch cosmos3_edge --n-action-steps
     --tokenizer <checkpoint dir>/tokenizer ...                  # nvidia/Cosmos3-Edge if reachable
 ```
 
+`eval/run_libero.sh -m cosmos3_edge` runs the whole flow (server, LIBERO client, stop) from a models directory that
+holds `cosmos3-edge-libero-gguf/cosmos3-edge-libero-bf16.gguf`; a missing directory is skipped, so `-m all` is
+unaffected. The client needs a Python with LIBERO and a transformers that reads the policy's tokenizer:
+`COSMOS3_EDGE_PYTHON` picks it (default: the LIBERO venv of `eval/sim/libero/setup_libero.sh`, which pins an older
+transformers), `COSMOS3_EDGE_TOKENIZER` the local `tokenizer/` directory.
+
 **What was checked** (bf16 GGUF; CPU and CUDA on an RTX 3090 only):
 
 - *The engine.* Given lerobot's canvas, its output is bit-identical to ggml-compiler's runtime: on CPU for three
@@ -147,8 +153,10 @@ python eval/client/run_sim_client_direct.py --arch cosmos3_edge --n-action-steps
 - *The server* (CPU, the older revision `0a81054`, `tests/py/cosmos3_edge_server_check.py`). A request for one
   case returns exactly what a direct `libvla` call returns on the same inputs (bit-identical), after a warm-up of
   62 s. The client builds the same 150 token ids as the case's, its numpy rot6d decode matches lerobot's to 7e-7,
-  and `get_action` returned a whole chunk of 16 finite LIBERO commands.
+  and `get_action` returned a whole chunk of 16 finite LIBERO commands. Through `eval/run_libero.sh -m cosmos3_edge
+  -s libero_spatial` (task 0, one episode, CPU) the episode was solved in 79 steps. One episode shows that the
+  path works end to end; it says nothing about a success rate.
 
-Not checked: ROCm, SYCL, Metal, OpenVINO and Hexagon; `vla-server` on a GPU; a closed-loop LIBERO run through the
-server (CPU takes about a minute per chunk, and `eval/run_libero.sh` has no Cosmos3-Edge block until there is a
-released model directory for it); and a full 50-episode-per-task LIBERO run through vla.cpp itself.
+Not checked: ROCm, SYCL, Metal, OpenVINO and Hexagon; `vla-server` on a GPU; more than one closed-loop episode
+through the server (CPU takes about a minute per chunk); and a full 50-episode-per-task LIBERO run through vla.cpp
+itself.
