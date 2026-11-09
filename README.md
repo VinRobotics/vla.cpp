@@ -151,7 +151,7 @@ Installing, wiring and running the client are in the fork's
 | [docs/ADOPTION.md](docs/ADOPTION.md) | C ABI, Python bindings, release packaging, and what is left |
 | [docs/UPSTREAMING.md](docs/UPSTREAMING.md) | The ggml-openvino fixes to send upstream to llama.cpp |
 | [CHANGELOG.md](CHANGELOG.md) | Per-release changes, with the fastest configuration and success rate per model |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Proving a change is numerically neutral, adding an architecture |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Proving a change is numerically neutral, benchmarking new hardware |
 | [bindings/python/](bindings/python/README.md) | Python bindings |
 
 ---

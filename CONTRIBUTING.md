@@ -42,35 +42,76 @@ the binaries fetch them:
 ./build/vla-cli -hf vrfai/smolvla-libero-gguf --image assets/front.jpg --tokens 1,100,2
 ```
 
-## Adding an architecture
+## Benchmarking new hardware
 
-Seven sites, all mechanical. Every arch loads one GGUF with its vision tower
-bundled; `mmproj_path` is accepted and ignored.
+New models are not hand-written into this tree (see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#adding-an-architecture)); new
+devices are. A benchmark report is one file,
+`docs/benchmark/<device>.md`, written from
+[docs/benchmark/TEMPLATE.md](docs/benchmark/TEMPLATE.md). The template fixes
+the section and column order so that reports compare cell for cell; this is
+the procedure that fills it.
 
-1. `src/arch.h` - add to `enum class Arch`.
-2. `src/arch.h` - declare `<name>_create(mmproj_path, ckpt_path, config_path, opts)`.
-3. `src/model.cpp` - add `<name>.architecture` to the `try_str` list in
-   `detect_arch_gguf`.
-4. `src/model.cpp` - map the string to the enum in the same function.
-5. `src/model.cpp` - add a `case` to the `model_load` switch.
-6. `src/model.cpp` - if the arch has no flow-matching solver, add it to the
-   `opts.num_steps` refusal list in `model_load`; if it has one, read the step
-   count with `resolve_num_steps`.
-7. `CMakeLists.txt` - add `src/models/<name>.cpp` to `vla_core`.
+1. **Build once, at one commit.** Configure a Release build of `main` with the
+   backend's flags and run the whole round from it. If the code changes, start
+   the round over. The report records the short SHA, the llama.cpp tag
+   (`scripts/llama_tag.sh`), the cmake flags including `GGML_NATIVE`, the
+   driver or toolkit version and the compiler (`scripts/print_versions.sh`
+   prints a block), the OS and kernel, and the power state: limits, governor
+   or profile, AC or battery, `nvpmodel` on Jetson.
 
-Then write `src/models/<name>.cpp`. Before adding a helper, check `src/`:
-`gguf_reader.h` (tensor and KV reads), `loader.h` (weight upload and fusion),
-`modules/preprocess.h` (view checks, CHW preprocessing), `modules/dual_tower.h`
-(DINOv2 + SigLIP), `modules/qwen3vl_vit.h` (Qwen3-VL tower), `layers/` (attention,
-FFN, norms, RoPE, time embeddings, causal mask), `scratch_ctx.h` (compute context
-and graph reuse), `backend.h` (accelerator selection).
+2. **Fetch the checkpoints.** Every report runs the `vrfai/*` GGUFs in the
+   template's "Model configuration" table, at the views, input size, token
+   count and steps given there. `-hf vrfai/<repo>` fetches them; check each
+   file's sha256 against the one Hugging Face lists, so every device runs
+   identical weights.
 
-Your loader must fail rather than return a half-built model: check every tensor
-lookup, and check `real_*_dim <= max_*_dim` (`config_is_sane` in `src/model.cpp`
-does this for all archs).
+3. **Measure the defaults.** One process per model, run three times:
 
-A converter goes in `scripts/convert_<name>_to_gguf.py`, and its tensor-name
-remap should be covered by `tests/py/test_converters.py`.
+   ```bash
+   ./build/vla-bench --ckpt smolvla-libero.gguf --images 2 --size 512 --warmup 3 --reps 20
+   ```
+
+   Report the process with the lowest mean, copying `min`, `mean`, `p50`,
+   `p90` and `vision` as printed (`--markdown` prints the row). Memory is the
+   peak over the three processes, taken with the probe the template names
+   for the backend: `nvidia-smi --query-compute-apps` sampled every 0.5 s on
+   discrete CUDA, DRM `fdinfo` on Intel GPUs and NPUs, peak RSS where the
+   device shares the process's memory (Jetson, Apple silicon, CPU). Per-model
+   extras: `--extra-token 151697 --extra-count 32` for VLA-JEPA,
+   `VLA_GR00T_EMBODIMENT` for GR00T (`new_embodiment`, `libero_panda`,
+   `libero_sim` for N1.5, N1.6, N1.7), `VLA_OCTO_UNNORM_DATASET=libero_object`
+   for Octo, `--size 640 --height 480` for ACT.
+
+4. **Screen the runtime flags.** For each model, run 2 warmups and 5 reps
+   per flag set from the template's list (`--flash-attn`, `--mm-prec default`,
+   `--weight-dtype bf16|f16`, their combinations, `--act-dtype bf16` on CUDA
+   only, plus any backend-specific candidate). A set replaces the defaults
+   only if its mean is more than 3% lower in the screen and again under the
+   full protocol of step 3. The screen means go in the collapsed table; the
+   winner goes in "Fastest configuration".
+
+5. **Account for every model.** A model with no latency row gets a bullet
+   under "Not run": `N/A` when the arch has no path on the backend, "does
+   not fit" with the quoted allocation failure, "not attempted" with both
+   sizes when the weights plainly exceed the device's memory, or the error
+   it printed. Anything a reader needs to interpret the numbers (a power
+   limit that puts `min` well below `p50`, a required environment variable,
+   a row whose output is known to be wrong) goes under "Notes".
+
+6. **Write it up.** Copy the template, fill every `<placeholder>`, delete the
+   HTML comments, and end with a "Reproducing" block that gives the cmake
+   line and one `vla-bench` row. Never name a host, a user or an IP address.
+   Add the device to the summary table in
+   [docs/benchmark/README.md](docs/benchmark/README.md): the `min ms` at the
+   defaults per model, `N/A`, `-` or `n/r` with the meanings the README
+   gives, and a sentence in its intro if the round ran at a commit the other
+   reports did not.
+
+A new backend, as opposed to a new device on a backend the tree already
+supports, also needs a numeric check: run `vla_predict_check` on fixed inputs
+against the CPU build and report the differences, as
+[docs/backend/rocm.md](docs/backend/rocm.md) does.
 
 ## Ports of upstream quirks
 

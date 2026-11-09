@@ -124,4 +124,4 @@ CUDA nodes, FoldQuant) and per-backend tuning. For one, extend the `Arch` enum,
 declare a `*_create` factory in `arch.h`, implement it under `src/models/`, wire
 detection and dispatch in `src/model.cpp`, and add a converter in `scripts/`.
 Reuse `gguf_reader.h`, `loader.h`, `layers/` and `modules/` rather than copying
-them. [CONTRIBUTING.md](../CONTRIBUTING.md) lists the exact sites.
+them; `src/models/act.cpp` is the smallest complete example.
