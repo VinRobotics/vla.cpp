@@ -88,6 +88,14 @@ Clients: the LIBERO and SimplerEnv runners in [EVAL.md](EVAL.md), and the
 real-robot client in the README's
 [Rollout on a real robot](../README.md#rollout-on-a-real-robot).
 
+## Models compiled by ggml-compiler
+
+A GGUF written by `ggml-compiler compile` loads like any other on every binary
+above, provided the build has `VLA_COMPILED=ON` (the default) and the program
+carries a `vla` serving manifest. `--text` is not available for it (no
+tokenizer in the GGUF); pass `--tokens`. `--weight-dtype`, `--act-dtype` and
+`--num-steps` do not apply. See [COMPILED.md](COMPILED.md).
+
 ## Runtime flags
 
 The same on `vla-server`, `vla-cli` and `vla-bench` (`--help` for the full

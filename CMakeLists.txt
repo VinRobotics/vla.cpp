@@ -159,6 +159,25 @@ function(vla_exclude_fetched_targets dir)
 endfunction()
 vla_exclude_fetched_targets(${llama_SOURCE_DIR})
 
+# Models compiled by ggml-compiler run from their GGUF through its runtime,
+# built here against this tree's ggml so one process holds one ggml (its
+# backends included). The runtime is pinned to a ggml-compiler commit and
+# checks that our llama.cpp tag is the one it was tested with.
+option(VLA_COMPILED "Serve GGUFs written by ggml-compiler (fetches its runtime)" ON)
+if(VLA_COMPILED)
+    set(VLA_GGML_COMPILER_TAG "f72f90189dff555fca70b3a43c1a6d5aa89dac16" CACHE STRING "ggml-compiler git ref providing the runtime")
+    set(GGML_COMPILER_EXTERNAL_GGML     ON                 CACHE BOOL   "" FORCE)
+    set(GGML_COMPILER_GGML_SOURCE_DIR   ${llama_SOURCE_DIR} CACHE PATH   "" FORCE)
+    set(GGML_COMPILER_EXTERNAL_GGML_TAG ${VLA_LLAMA_TAG}    CACHE STRING "" FORCE)
+    set(GGML_COMPILER_BUILD_TOOLS       OFF                CACHE BOOL   "" FORCE)
+    FetchContent_Declare(ggml_compiler
+        GIT_REPOSITORY https://github.com/khanhnd61-vr/ggml-compiler
+        GIT_TAG        ${VLA_GGML_COMPILER_TAG}
+        SOURCE_SUBDIR  runtime
+    )
+    FetchContent_MakeAvailable(ggml_compiler)
+endif()
+
 # SentencePiece, and through it a protobuf, is only needed to tokenize --text with
 # a tokenizer stored in the GGUF. Optional so a build without it has no protobuf.
 option(VLA_SPM "Link SentencePiece for in-GGUF tokenizers (needs system protobuf)" ON)
@@ -269,6 +288,11 @@ target_include_directories(vla_core
 )
 # The VLA archs call no llama_* API; only vlm_core needs llama.
 target_link_libraries(vla_core PUBLIC ggml)
+if(VLA_COMPILED)
+    target_sources(vla_core PRIVATE src/models/compiled.cpp)
+    target_link_libraries(vla_core PUBLIC ggml_compiler_rt)
+    target_compile_definitions(vla_core PUBLIC VLA_COMPILED)
+endif()
 # The FoldQuant CPU reference must match the CUDA and SYCL kernels bit for bit,
 # so no FMA contraction on either side (aarch64 GCC contracts by default; under
 # icpx, after the project-wide -fp-model=precise, which would allow it).
@@ -630,6 +654,9 @@ install(FILES LICENSE.md ${llama_SOURCE_DIR}/licenses/LICENSE-jsonhpp
 install(FILES ${llama_SOURCE_DIR}/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}
     RENAME LICENSE.llama.cpp COMPONENT libvla)
 install(TARGETS vla_core vla-cli vla-bench)
+if(VLA_COMPILED)
+    install(TARGETS ggml_compiler_rt)
+endif()
 install(FILES scripts/tokenize_prompt.py DESTINATION ${CMAKE_INSTALL_DATADIR}/vla)
 if(VLA_BUILD_SERVER)
     install(TARGETS vlm_core vla-server vlm-server)

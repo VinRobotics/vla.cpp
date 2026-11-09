@@ -13,6 +13,11 @@ add_executable(vla_predict_check predict_check.cpp)
 target_link_libraries(vla_predict_check PRIVATE vla_core)
 target_compile_options(vla_predict_check PRIVATE -Wall -Wextra)
 
+add_executable(test_compiled_manifest test_compiled_manifest.cpp)
+target_include_directories(test_compiled_manifest PRIVATE ${CMAKE_SOURCE_DIR}/src ${llama_SOURCE_DIR}/vendor)
+target_compile_options(test_compiled_manifest PRIVATE -Wall -Wextra)
+add_test(NAME compiled_manifest COMMAND test_compiled_manifest)
+
 add_executable(test_vision_common test_vision_common.cpp)
 target_include_directories(test_vision_common PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(test_vision_common PRIVATE -Wall -Wextra)

@@ -22,8 +22,9 @@ Done:
    `vla-cli`, `vla-server` and `vla-bench`, cached under `$VLA_CACHE`. A repo
    with several GGUFs lists them instead of guessing.
 6. **Reproducible benchmarks.** `vla-bench` emits the README table rows.
-7. **Contributor path.** `CONTRIBUTING.md` has the six-site walkthrough for
-   adding an architecture, plus issue and PR templates.
+7. **Contributor path.** `CONTRIBUTING.md` has the benchmark protocol for a
+   new device, plus issue and PR templates; new models go through
+   ggml-compiler (`docs/COMPILED.md`).
 8. **Instruction in, action out.** `vla-cli --text` builds each arch's real
    prompt. Octo carries its tokenizer in the GGUF, and
    `scripts/add_tokenizer_to_gguf.py` adds one to pi0, pi0.5 and OpenVLA-OFT, so

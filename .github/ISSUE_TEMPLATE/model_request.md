@@ -16,5 +16,5 @@ Where the weights live and under what license.
 
 Benchmark numbers, or what it does that the supported archs do not.
 
-CONTRIBUTING.md has the six-site walkthrough if you want to send the port
-yourself.
+docs/COMPILED.md shows how to serve a model compiled by ggml-compiler without
+a port; docs/ARCHITECTURE.md covers a hand-written one.
