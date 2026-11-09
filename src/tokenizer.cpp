@@ -159,6 +159,14 @@ bool tokenize_prompt(const std::string& ckpt_path, const char * arch, const std:
             std::fprintf(stderr, "vla(cosmos3_edge): cannot tokenize the instruction: %s\n", err.c_str());
             return false;
         }
+        // The graphs take a fixed number of tokens. Refuse a longer prompt here, before the model is loaded,
+        // rather than truncate it: the chat template and <|vision_start|> are its last tokens.
+        const int prompt_len = (int) g.u32("cosmos3_edge.prompt_len");
+        if (prompt_len > 0 && (int) ids.size() > prompt_len) {
+            std::fprintf(stderr, "vla(cosmos3_edge): the prompt is %zu tokens, the model takes at most %d; shorten the instruction\n",
+                         ids.size(), prompt_len);
+            return false;
+        }
         attention_mask.clear();
         return true;
     }

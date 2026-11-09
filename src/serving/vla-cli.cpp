@@ -347,6 +347,11 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "vla-cli: %s takes no instruction; drop --text/--tokens\n", arch_slug(arch));
         return 1;
     }
+    if (libero && arch != Arch::COSMOS3_EDGE) {
+        std::fprintf(stderr, "vla-cli: --libero decodes the 10-wide rot6d action of Cosmos3-Edge only; %s is %s\n",
+                     ckpt.c_str(), arch_slug(arch));
+        return 1;
+    }
     // Validate the cheap args before loading the model.
     std::vector<int32_t> lang;
     std::vector<int32_t> attn;   // Octo only; empty leaves Inputs::attention_mask null.
@@ -384,6 +389,11 @@ int main(int argc, char ** argv) {
         return 1;
     }
     const Config & cfg = model_config(m);
+    if (libero && cfg.max_action_dim != 10) {
+        std::fprintf(stderr, "vla-cli: --libero needs 10-wide actions, this model returns %lld\n", (long long) cfg.max_action_dim);
+        model_free(m);
+        return 1;
+    }
 
     if (!state.empty() && (int64_t) state.size() != cfg.max_state_dim)
         std::fprintf(stderr, "vla-cli: --state has %zu values, model expects %lld; padding or truncating\n",
@@ -421,12 +431,7 @@ int main(int argc, char ** argv) {
     }
 
     int64_t cols = cfg.max_action_dim > 0 ? cfg.max_action_dim : 1;
-    if (libero) {
-        if (arch != Arch::COSMOS3_EDGE || cols != 10) {
-            std::fprintf(stderr, "vla-cli: --libero decodes the 10-wide rot6d action of Cosmos3-Edge only\n");
-            model_free(m);
-            return 1;
-        }
+    if (libero) {  // checked above: Cosmos3-Edge, 10 columns
         std::vector<float> cmd;
         for (size_t r = 0; r + 10 <= act.size(); r += 10) {
             float row[7];
