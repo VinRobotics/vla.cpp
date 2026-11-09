@@ -216,8 +216,10 @@ bool Cosmos3Prompt::load(const gguf_reader & g) {
                 raw += (char) it->second;
                 k += (size_t) len;
             }
-            if (ok && !raw.empty())
+            if (ok && !raw.empty()) {
                 specials_.emplace_back(raw, (int32_t) i);
+                special_first_[(unsigned char) raw[0]] = true;
+            }
         }
     }
     std::stable_sort(specials_.begin(), specials_.end(),
@@ -334,8 +336,9 @@ bool Cosmos3Prompt::bpe_segment(const std::string & text, std::vector<int32_t> &
 bool Cosmos3Prompt::encode(const std::string & text, std::vector<int32_t> & ids, std::string & err) const {
     size_t start = 0, i = 0;
     while (i < text.size()) {
-        const char c = text[i];
-        if (c == '<' || c == '[') {
+        // A special token can start here only with a byte some special starts with (what the GGUF declares,
+        // whatever its spelling: '<' and '[' for the Cosmos3 tokenizer).
+        if (special_first_[(unsigned char) text[i]]) {
             const std::pair<std::string, int32_t> * hit = nullptr;
             for (const auto & sp : specials_)  // longest first
                 if (text.compare(i, sp.first.size(), sp.first) == 0) {

@@ -58,6 +58,7 @@ private:
     std::unordered_map<std::string, int32_t>     vocab_;       // byte-level spelling -> id
     std::unordered_map<std::string, int32_t>     rank_;        // "left right" -> merge priority
     std::vector<std::pair<std::string, int32_t>> specials_;    // raw text -> id, longest first
+    bool                                         special_first_[256] = {};  // bytes a special can start with
     std::string                                  byte_str_[256];  // byte -> its byte-level character (UTF-8)
 
     // Caption settings.
