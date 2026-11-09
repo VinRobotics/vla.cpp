@@ -1149,8 +1149,11 @@ bool run_transformer_graph(OctoRuntime& rt,
             ggml_tensor * n1  = layer_norm(C, x, blk_w[i][0], blk_w[i][1], ln_eps);
             ggml_tensor * qkv = linear(C, blk_w[i][2], blk_w[i][3], n1);
             ggml_tensor * Q   = ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, pseq, kHidden, 3, 0), 0, 2, 1, 3));
-            ggml_tensor * K   = ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, pseq, kHidden, 3, 1), 0, 2, 1, 3));
-            ggml_tensor * V   = ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, pseq, kHidden, 3, 2), 1, 2, 0, 3));
+            // fa_kv: on Hexagon K and V go to F16, so both matmuls run on the HMX
+            // rather than as F32 x F32 on the vector units. Scores accumulate in F32
+            // and the softmax stays F32. Other backends keep F32 K/V.
+            ggml_tensor * K   = fa_kv(C, ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, pseq, kHidden, 3, 1), 0, 2, 1, 3)));
+            ggml_tensor * V   = fa_kv(C, ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, pseq, kHidden, 3, 2), 1, 2, 0, 3)));
 
             ggml_tensor * merged   = attention(C, Q, K, V, mask, attn_scale, kHidden, pseq);
             ggml_tensor * residual = ggml_add(C, x, linear(C, blk_w[i][4], blk_w[i][5], merged));

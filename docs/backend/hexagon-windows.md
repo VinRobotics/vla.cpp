@@ -130,7 +130,7 @@ PyTorch and LIBERO; the smoke test used a 20-line pyzmq client instead.
 
 | Variable / flag | Effect in the Hexagon and OpenCL builds |
 |---|---|
-| `VLA_DEVICE=cpu` | Skip the accelerator. The same binary then produces the CPU reference. |
+| `VLA_DEVICE=cpu` | Skip the accelerator. Not a fidelity reference: the Hexagon build's NPU changes (F16 K/V, padding) run on the CPU too, so compare against a CPU-only build with `--weight-dtype f32 --flash-attn 0`. |
 | `VLA_DEVICE=<n>` | Registry device index: an HTP session, or an OpenCL GPU |
 | `--weight-dtype f16\|f32\|bf16` | Resident dtype for GEMM weights. New: `f16`, which is also the default on both accelerators. |
 | `--flash-attn on\|off` | On by default in Hexagon builds, off elsewhere |

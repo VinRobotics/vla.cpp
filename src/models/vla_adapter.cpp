@@ -317,7 +317,10 @@ std::vector<float> VlaAdapterModelArch::predict(const Inputs& in) {
         ggml_tensor*qh=ggml_reshape_3d(C,qp,lm_head_dim,n_q,LSEQ),*kh=ggml_reshape_3d(C,kp,lm_head_dim,n_kv,LSEQ),*vh=ggml_reshape_3d(C,vp,lm_head_dim,n_kv,LSEQ);
         ggml_tensor*qr=ggml_rope_ext(C,qh,t_pos,nullptr,(int)lm_head_dim,GGML_ROPE_TYPE_NEOX,0,lm_rope_base,1.0f,0.0f,1.0f,32.0f,1.0f);
         ggml_tensor*kr=ggml_rope_ext(C,kh,t_pos,nullptr,(int)lm_head_dim,GGML_ROPE_TYPE_NEOX,0,lm_rope_base,1.0f,0.0f,1.0f,32.0f,1.0f);
-        ggml_tensor*Q=ggml_cont(C,ggml_permute(C,qr,0,2,1,3)),*K=ggml_cont(C,ggml_permute(C,kr,0,2,1,3)),*V=ggml_cont(C,ggml_permute(C,vh,1,2,0,3));
+        // fa_kv on V only: on Hexagon the PV matmul then runs on the HMX. K stays
+        // F32, since F16 scores put this LM 3.9e-3 from the CPU F32 reference on
+        // the IQ-10. Other backends keep F32 V.
+        ggml_tensor*Q=ggml_cont(C,ggml_permute(C,qr,0,2,1,3)),*K=ggml_cont(C,ggml_permute(C,kr,0,2,1,3)),*V=fa_kv(C,ggml_cont(C,ggml_permute(C,vh,1,2,0,3)));
         ggml_tensor*kq=ggml_mul_mat(C,K,Q); ggml_prec_set_acc(kq,GGML_PREC_F32);
         ggml_tensor*aw=ggml_soft_max_ext(C,kq,t_mask,lsc,0.0f);
         ggml_tensor*kqv=ggml_mul_mat(C,V,aw);
