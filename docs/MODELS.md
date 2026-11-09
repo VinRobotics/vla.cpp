@@ -109,6 +109,19 @@ compiled graphs, so `--weight-dtype`, `--act-dtype`, `--flash-attn`, `--mm-prec-
 refused. It is specialized to this model: two views, a 192x320 canvas, prompts of at most 192 tokens, domain 5
 (LIBERO), no robot state and no guidance; another setup needs a new compile.
 
+**Serving.** `vla-server` needs no change for this model: it hands the images, token ids and noise of a request to
+`predict()` whatever the architecture is, and Cosmos3-Edge fits its checks (no state, a 16x10 noise, a 16x10
+response; the start-up warm-up of two 224x224 views and 32 made-up tokens runs). The server has no text field, so
+the client sends token ids. `eval/client/vla_cpp_client.py` has a `cosmos3_edge` preset that builds them (the caption
+and chat template of lerobot's prompt step, with the policy's tokenizer), sends the two 256x256 views as float RGB,
+and decodes the 16x10 rot6d chunk it gets back to 16 LIBERO commands:
+
+```bash
+./build/vla-server cosmos3-edge-bf16.gguf                      # -DVLA_BUILD_SERVER=ON
+python eval/client/run_sim_client_direct.py --arch cosmos3_edge --n-action-steps 16 \
+    --tokenizer <checkpoint dir>/tokenizer ...                  # nvidia/Cosmos3-Edge if reachable
+```
+
 **What was checked** (bf16 GGUF; CPU and CUDA on an RTX 3090 only):
 
 - *The engine.* Given lerobot's canvas, its output is bit-identical to ggml-compiler's runtime: on CPU for three
@@ -131,5 +144,11 @@ refused. It is specialized to this model: two views, a 192x320 canvas, prompts o
   0 token mismatches in 168 calls. Twenty episodes cannot separate these from each other or from the PyTorch
   baseline.
 
-Not checked: ROCm, SYCL, Metal, OpenVINO and Hexagon; `vla-server`; and a full 50-episode-per-task LIBERO run
-through vla.cpp itself.
+- *The server* (CPU, the older revision `0a81054`, `tests/py/cosmos3_edge_server_check.py`). A request for one
+  case returns exactly what a direct `libvla` call returns on the same inputs (bit-identical), after a warm-up of
+  62 s. The client builds the same 150 token ids as the case's, its numpy rot6d decode matches lerobot's to 7e-7,
+  and `get_action` returned a whole chunk of 16 finite LIBERO commands.
+
+Not checked: ROCm, SYCL, Metal, OpenVINO and Hexagon; `vla-server` on a GPU; a closed-loop LIBERO run through the
+server (CPU takes about a minute per chunk, and `eval/run_libero.sh` has no Cosmos3-Edge block until there is a
+released model directory for it); and a full 50-episode-per-task LIBERO run through vla.cpp itself.

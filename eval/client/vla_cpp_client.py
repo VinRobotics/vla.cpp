@@ -58,6 +58,12 @@ ARCH_PRESETS = {
     },
     "gr00t_n1_7": {"image_size": 256, "tokenizer": "nvidia/Cosmos-Reason2-2B", "max_state_dim": 132},
 
+    # Cosmos3-Edge (LIBERO): two 256x256 views, no state, a 16x10 rot6d chunk that the client turns into 16 LIBERO
+    # commands; run it with --n-action-steps 16 (the policy executes the whole chunk). The tokenizer is the one
+    # the policy was trained with (config.json tokenizer_name); a local copy works too (`tokenizer/` of the
+    # checkpoint) with --tokenizer.
+    "cosmos3_edge": {"image_size": 256, "tokenizer": "nvidia/Cosmos3-Edge", "max_state_dim": 0, "max_length": 192},
+
     "gr00t_n1_5": {"image_size": 224, "tokenizer": "lerobot/eagle2hg-processor-groot-n1p5",
                    "max_state_dim": 64, "trust_remote_code": True},
 
@@ -90,6 +96,60 @@ VLA_JEPA_PROMPT_TPL = (
     + VLA_JEPA_EMBODIED_PROMPT
     + "."
 )
+
+# Cosmos3-Edge: the prompt is lerobot's Cosmos3PromptProcessorStep caption in the chat template of
+# Cosmos3TokenizerProcessorStep, for the canvas this GGUF was compiled for (src/models/cosmos3_edge.cpp).
+COSMOS3_EDGE_N_VIEWS  = 2
+COSMOS3_EDGE_CHUNK    = 16
+COSMOS3_EDGE_FPS      = 20.0
+COSMOS3_EDGE_CANVAS   = (192, 320)
+COSMOS3_EDGE_ASPECT   = "16,9"
+COSMOS3_EDGE_CONCAT_VIEW = "This video contains concatenated views from multiple camera perspectives."
+COSMOS3_EDGE_VIEW_DESCRIPTION = ("The left half shows the third-person view; "
+                                 "the right half shows the wrist-mounted camera.")
+COSMOS3_EDGE_START_OF_GENERATION = "<|vision_start|>"
+
+
+def _cosmos3_edge_caption(task: str) -> str:
+    task = task.strip()
+    if not task:
+        return ""
+    if not task.endswith((".", "!", "?")):
+        task = f"{task}."
+    duration = (COSMOS3_EDGE_CHUNK + 1) / COSMOS3_EDGE_FPS
+    rounded = round(duration)
+    framing = " ".join(t for t in (COSMOS3_EDGE_CONCAT_VIEW, COSMOS3_EDGE_VIEW_DESCRIPTION.strip()) if t)
+    return json.dumps({
+        "cinematography": {"framing": framing},
+        "actions": [{"time": f"0:00-{rounded // 60}:{rounded % 60:02d}", "description": task,
+                     "idle_frame": f"0 out of {COSMOS3_EDGE_CHUNK}."}],
+        "duration": f"{int(duration)}s",
+        "fps": float(int(COSMOS3_EDGE_FPS)),
+        "resolution": {"H": COSMOS3_EDGE_CANVAS[0], "W": COSMOS3_EDGE_CANVAS[1]},
+        "aspect_ratio": COSMOS3_EDGE_ASPECT,
+    })
+
+
+def _cosmos3_edge_libero(chunk: np.ndarray) -> np.ndarray:
+    """[16, 10] rot6d rows -> [16, 7] LIBERO commands, as lerobot's Cosmos3LiberoActionProcessorStep does:
+    the two columns and their cross product make a matrix, projected onto SO(3) by an SVD, then converted to an
+    axis-angle vector (all in float64); the gripper goes from 1 open / 0 closed to -1 open / +1 closed."""
+    a = np.asarray(chunk, dtype=np.float64)
+    first, second = a[:, 3:6], a[:, 6:9]
+    m = np.stack([first, second, np.cross(first, second)], axis=-1)  # columns
+    u, _, vh = np.linalg.svd(m)
+    reflection = np.linalg.det(u @ vh) < 0
+    u = np.where(reflection[:, None, None], u * np.array([1.0, 1.0, -1.0]), u)
+    r = u @ vh
+    skew = np.stack([r[:, 2, 1] - r[:, 1, 2], r[:, 0, 2] - r[:, 2, 0], r[:, 1, 0] - r[:, 0, 1]], -1)
+    sin_a = np.linalg.norm(skew, axis=-1) / 2
+    cos_a = (np.trace(r, axis1=-2, axis2=-1) - 1) / 2
+    angle = np.arctan2(sin_a, cos_a)
+    scale = np.where(sin_a > 1e-8, angle / np.maximum(sin_a, 1e-8), 1.0)
+    axis_angle = skew * scale[:, None] / 2
+    gripper = np.clip(1.0 - 2.0 * a[:, 9:], -1.0, 1.0)
+    return np.concatenate([a[:, :3], axis_angle, gripper], axis=-1).astype(np.float32)
+
 
 def _load_pb():
 
@@ -670,6 +730,8 @@ class VlaCppClient:
 
         if self.arch == "turbovla":
             return self._predict_chunk_turbovla(observations)
+        if self.arch == "cosmos3_edge":
+            return self._predict_chunk_cosmos3_edge(observations)
         if self.arch == "evo1":
             return self._predict_chunk_evo1(observations)
         if self.arch == "gr00t_n1_7":
@@ -819,6 +881,63 @@ class VlaCppClient:
             resp.chunk_size, resp.action_dim
         )
         return self._turbovla_action_unnorm(chunk)
+
+    def _cosmos3_edge_prompt_ids(self, task: str) -> list[int]:
+        """Token ids of the prompt of `task`, as Cosmos3TokenizerProcessorStep.encode builds them: one user turn
+        in the chat template, the end-of-turn token and <|vision_start|>, no special tokens added."""
+        messages = [{"role": "user", "content": [{"type": "text", "text": _cosmos3_edge_caption(task)}]}]
+        text = self.tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        text += self.tok.eos_token + COSMOS3_EDGE_START_OF_GENERATION
+        return self.tok(text, add_special_tokens=False)["input_ids"]
+
+    def _predict_chunk_cosmos3_edge(self, observations: dict[str, Any]) -> np.ndarray:
+        """Two views, the instruction as tokens, no state; the server returns a [16, 10] rot6d chunk in dataset
+        units (the engine de-normalizes), decoded here to [16, 7] LIBERO commands."""
+        if len(self.image_keys) != COSMOS3_EDGE_N_VIEWS:
+            raise ValueError(f"Cosmos3-Edge takes {COSMOS3_EDGE_N_VIEWS} views [third person, wrist], "
+                             f"got image keys {self.image_keys}")
+        images_f32: list[np.ndarray] = []
+        for key in self.image_keys:
+            if key not in observations:
+                raise KeyError(f"Cosmos3-Edge image key {key!r} missing; got {list(observations)}")
+            image = observations[key]
+            if isinstance(image, torch.Tensor):
+                image = image.numpy()
+            image = np.asarray(image, dtype=np.float32)
+            if image.ndim != 3 or image.shape[0] != 3:
+                raise ValueError(f"{key}: expected CHW float32 [3,H,W] in [0,1], got {image.shape}")
+            images_f32.append(np.ascontiguousarray(np.transpose(image, (1, 2, 0)), dtype=np.float32))
+
+        task = observations.get("task", "")
+        if isinstance(task, bytes):
+            task = task.decode()
+        if not isinstance(task, str) or not task.strip():
+            raise ValueError("Cosmos3-Edge requires a non-empty task instruction")
+        lang = self._cosmos3_edge_prompt_ids(task)
+        if len(lang) > self.max_length:
+            raise ValueError(f"the prompt is {len(lang)} tokens; the model was compiled for {self.max_length}")
+
+        req = self.pb.PredictRequest()
+        req.request_id = self._step
+        self._step += 1
+        for image in images_f32:
+            proto_image = req.images.add()
+            proto_image.encoding = self.pb.Image.F32_RGB_01
+            proto_image.height, proto_image.width = image.shape[:2]
+            proto_image.data = image.tobytes()
+        req.lang_tokens.extend(lang)
+        # no state, and no noise: the server samples it
+
+        self.sock.send(req.SerializeToString())
+        resp = self.pb.PredictResponse()
+        resp.ParseFromString(self.sock.recv())
+        if resp.error:
+            raise RuntimeError(f"vla-server error: {resp.error}")
+        self._last_response = resp
+        chunk = np.array(resp.action_chunk, dtype=np.float32).reshape(resp.chunk_size, resp.action_dim)
+        if chunk.shape != (COSMOS3_EDGE_CHUNK, 10):
+            raise RuntimeError(f"expected a 16x10 chunk from the Cosmos3-Edge server, got {chunk.shape}")
+        return _cosmos3_edge_libero(chunk)
 
     _VJ_PS, _VJ_TPS, _VJ_MERGE, _VJ_SIDE = 16, 2, 2, 256
 

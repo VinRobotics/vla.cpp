@@ -18,8 +18,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   output into the GGUF with the weights byte for byte (`--policy-dir` adds the tokenizer). On CPU and CUDA,
   fed lerobot's canvas, the engine is bit-identical to ggml-compiler's runtime; captions, token ids and the
   action decode match lerobot and Hugging Face on every LIBERO task; a 20-episode closed-loop smoke test on
-  libero_spatial succeeded in 19 episodes with the C++ canvas, tokenizer and decode in the loop. Only CPU and
-  CUDA were tried. See `docs/MODELS.md#cosmos3-edge-world-action-model` for the build, the input contract
+  libero_spatial succeeded in 19 episodes with the C++ canvas, tokenizer and decode in the loop. `vla-server`
+  serves it unchanged, and `eval/client/vla_cpp_client.py` has a `cosmos3_edge` preset (tokens from the caption
+  and chat template, rot6d decoded to LIBERO commands); a request to the server returned the same bits as a
+  direct call (CPU). Only CPU and CUDA were tried, the server on CPU only. See `docs/MODELS.md#cosmos3-edge-world-action-model` for the build, the input contract
   and what is and is not checked.
 - **Hexagon NPU on the Qualcomm Dragonwing IQ-10 (Linux).**
   `scripts/build_linux_hexagon.sh` cross-builds vla.cpp with `GGML_HEXAGON=ON`
