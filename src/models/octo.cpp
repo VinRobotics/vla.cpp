@@ -1083,6 +1083,10 @@ bool run_transformer_graph(OctoRuntime& rt,
     const int n_readout = (int) layout.readout_seq_idx.size();
     if (input.size() != (size_t) kHidden*seq)
         return false;
+    // Zero tokens appended to a multiple of 32 where gemm_width() pads (Hexagon),
+    // masked out as keys: the softmax rows are then a width the NPU takes. The
+    // readouts are gathered by index, so the extra rows never reach them.
+    const int pseq = (int) gemm_width(seq);
 
     OctoRuntime::BtKey key;
     for (const OctoSeqRun& r : layout.runs)
@@ -1109,12 +1113,12 @@ bool run_transformer_graph(OctoRuntime& rt,
         if (!out_w || !out_b)
             return nullptr;
 
-        ggml_tensor * x = ggml_new_tensor_2d(C, GGML_TYPE_F32, kHidden, seq);
+        ggml_tensor * x = ggml_new_tensor_2d(C, GGML_TYPE_F32, kHidden, pseq);
         ggml_set_name(x, "octo.block_transformer.input");
         ggml_set_input(x);
         io.input = x;
 
-        ggml_tensor * mask = ggml_new_tensor_2d(C, GGML_TYPE_F32, seq, seq);
+        ggml_tensor * mask = ggml_new_tensor_2d(C, GGML_TYPE_F32, pseq, pseq);
         ggml_set_name(mask, "octo.block_transformer.additive_mask");
         ggml_set_input(mask);
         ggml_set_output(mask);
@@ -1127,7 +1131,7 @@ bool run_transformer_graph(OctoRuntime& rt,
         io.readout_idx = readout_idx;
 
         for (int i=0; i<12; ++i) {
-            if (rt.fused_ops && seq <= 4096) {
+            if (rt.fused_ops && pseq == seq && seq <= 4096) {
                 // The same block on the fused (bit-identical) kernels: LayerNorm,
                 // bias + head split + V^T in one pass, exact attention with the
                 // mask, and the bias + residual and bias + GELU epilogues.
@@ -1144,11 +1148,14 @@ bool run_transformer_graph(OctoRuntime& rt,
             }
             ggml_tensor * n1  = layer_norm(C, x, blk_w[i][0], blk_w[i][1], ln_eps);
             ggml_tensor * qkv = linear(C, blk_w[i][2], blk_w[i][3], n1);
-            ggml_tensor * Q   = ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, seq, kHidden, 3, 0), 0, 2, 1, 3));
-            ggml_tensor * K   = ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, seq, kHidden, 3, 1), 0, 2, 1, 3));
-            ggml_tensor * V   = ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, seq, kHidden, 3, 2), 1, 2, 0, 3));
+            ggml_tensor * Q   = ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, pseq, kHidden, 3, 0), 0, 2, 1, 3));
+            // fa_kv: on Hexagon K and V go to F16, so both matmuls run on the HMX
+            // rather than as F32 x F32 on the vector units. Scores accumulate in F32
+            // and the softmax stays F32. Other backends keep F32 K/V.
+            ggml_tensor * K   = fa_kv(C, ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, pseq, kHidden, 3, 1), 0, 2, 1, 3)));
+            ggml_tensor * V   = fa_kv(C, ggml_cont(C, ggml_permute(C, head_view(C, qkv, head_dim, heads, pseq, kHidden, 3, 2), 1, 2, 0, 3)));
 
-            ggml_tensor * merged   = attention(C, Q, K, V, mask, attn_scale, kHidden, seq);
+            ggml_tensor * merged   = attention(C, Q, K, V, mask, attn_scale, kHidden, pseq);
             ggml_tensor * residual = ggml_add(C, x, linear(C, blk_w[i][4], blk_w[i][5], merged));
 
             ggml_tensor * n2 = layer_norm(C, residual, blk_w[i][6], blk_w[i][7], ln_eps);
@@ -1177,10 +1184,21 @@ bool run_transformer_graph(OctoRuntime& rt,
     if (fresh) {
         std::vector<float> mask;
         build_transformer_mask(layout, mask);
+        if (pseq > seq) {
+            std::vector<float> padded((size_t) pseq*pseq, 0.0f);
+            for (int q=0; q<pseq; ++q)
+                for (int k=0; k<pseq; ++k)
+                    padded[(size_t) q*pseq+k] = k >= seq ? -FLT_MAX : q < seq ? mask[(size_t) q*seq+k] : 0.0f;
+            mask.swap(padded);
+        }
         ggml_backend_tensor_set(io.mask,        mask.data(),                    0, ggml_nbytes(io.mask));
         ggml_backend_tensor_set(io.readout_idx, layout.readout_seq_idx.data(),  0, ggml_nbytes(io.readout_idx));
     }
-    ggml_backend_tensor_set(io.input, input.data(), 0, ggml_nbytes(io.input));
+    ggml_backend_tensor_set(io.input, input.data(), 0, input.size()*sizeof(float));
+    if (pseq > seq) {
+        const std::vector<float> zeros((size_t) kHidden*(pseq-seq), 0.0f);
+        ggml_backend_tensor_set(io.input, zeros.data(), input.size()*sizeof(float), zeros.size()*sizeof(float));
+    }
     if (!octo_compute(rt, rt.transformer.graph(), "block transformer"))
         return false;
     readout_action.resize((size_t) kHidden*n_readout);

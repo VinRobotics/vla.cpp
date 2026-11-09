@@ -525,8 +525,8 @@ inline ggml_tensor * gemma_attn(
     ggml_tensor * K_full = k_rope;
     ggml_tensor * V_full = v_h;
     if (cached_K && cached_V) {
-        K_full = ggml_concat(ctx, cached_K, k_rope, 2);
-        V_full = ggml_concat(ctx, cached_V, v_h,    2);
+        K_full = concat_dim2(ctx, cached_K, k_rope);
+        V_full = concat_dim2(ctx, cached_V, v_h);
     }
 
     const float scale = 1.f/std::sqrt((float) hd);

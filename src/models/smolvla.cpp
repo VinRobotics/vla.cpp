@@ -732,8 +732,8 @@ ggml_tensor * build_expert_self_attn_layer(
     ggml_tensor * k_h = ggml_reshape_3d(ctx, mm_w(ctx, w.Wk, x_norm), cfg.head_dim, cfg.n_kv_heads, cfg.n_suffix);
     ggml_tensor * v_h = ggml_reshape_3d(ctx, mm_w(ctx, w.Wv, x_norm), cfg.head_dim, cfg.n_kv_heads, cfg.n_suffix);
 
-    ggml_tensor * K_full = ggml_concat(ctx, cached_K, rope(ctx, rope_spec(cfg), k_h, positions_full), 2);
-    ggml_tensor * V_full = ggml_concat(ctx, cached_V, v_h, 2);
+    ggml_tensor * K_full = concat_dim2(ctx, cached_K, rope(ctx, rope_spec(cfg), k_h, positions_full));
+    ggml_tensor * V_full = concat_dim2(ctx, cached_V, v_h);
     return attn_mlp(ctx, w, x_in, rope(ctx, rope_spec(cfg), q_h, positions_full), K_full, V_full, mask_full, cfg, cfg.n_suffix);
 }
 

@@ -146,6 +146,14 @@ namespace {
 // straight off the [hd, H, S] views. Otherwise the unfused graph is used.
 bool use_fused_attention() { return vla::flash_attn_enabled() && vla::fa_takes_views(); }
 
+// Where flash attention is on by default (Hexagon), the three sites also take the
+// plain flash attention when the kernel does not take views. Their explicit
+// scores are matmuls the NPU does not run: SigLIP's at head dim 72, and the VLM's
+// and the expert's, whose single KV head the fallback wrapper sends to the CPU.
+bool use_flash_attention() {
+    return use_fused_attention() || (vla::default_flash_attn() && vla::flash_attn_enabled());
+}
+
 ggml_tensor * build_adarms(
         ggml_context * ctx, ggml_tensor * x, ggml_tensor * mod, int64_t h, float eps,
         ggml_tensor ** gate_out) {
@@ -185,7 +193,7 @@ ggml_tensor * build_expert_layer(
         ggml_tensor * gate_ffn  = ggml_view_1d(ctx, mod_ffn,  h, (size_t) 2*h * sizeof(float));
         ggml_tensor * xq_attn = fq_act_mod(ctx, &w.act_mod_qkv, w.fq_qkv, x_in, fqx->scale1_attn, fqx->shift_attn);
         ggml_tensor * h1 = gemma_attn(ctx, w, nullptr, positions, cfg, seq, cached_K, cached_V, mask, nullptr, nullptr,
-                                      GGML_TYPE_F32, use_fused_attention(), nullptr, x_in, nullptr, fqx->K16, fqx->V16,
+                                      GGML_TYPE_F32, use_flash_attention(), nullptr, x_in, nullptr, fqx->K16, fqx->V16,
                                       xq_attn, gate_attn);
         ggml_tensor * xq_ffn = fq_act_mod(ctx, &w.act_mod_gu, w.fq_gu, h1, fqx->scale1_ffn, fqx->shift_ffn);
         return gemma_mlp(ctx, w, nullptr, GGML_TYPE_F32, nullptr, h1, xq_ffn, gate_ffn);
@@ -207,13 +215,13 @@ ggml_tensor * build_expert_layer(
         // out * gate + x reading the GEMM output in whatever type it has.
         ggml_tensor * xn = fused_adarms(ctx, x_in, mod_attn, at, *fa);
         ggml_tensor * o  = gemma_attn(ctx, w, xn, positions, cfg, seq, cached_K, cached_V, mask,
-                                      nullptr, nullptr, at, use_fused_attention(), nullptr, nullptr, kv);
+                                      nullptr, nullptr, at, use_flash_attention(), nullptr, nullptr, kv);
         ggml_tensor * h1 = fused_gateres(ctx, x_in, o, mod_attn, *fg);
         ggml_tensor * xm = fused_adarms(ctx, h1, mod_ffn, at, *fa);
         return fused_gateres(ctx, h1, gemma_mlp(ctx, w, xm, at), mod_ffn, *fg);
     }
 
-    if (!mask && !kv && gemma_fused(w, at, use_fused_attention(), seq, seq + (cached_K ? cached_K->ne[2] : 0))) {
+    if (!mask && !kv && gemma_fused(w, at, use_flash_attention(), seq, seq + (cached_K ? cached_K->ne[2] : 0))) {
         auto part = [&](ggml_tensor * mod, int j) {
             return ggml_view_1d(ctx, mod, h, (size_t) j*h*sizeof(float));
         };
@@ -237,7 +245,7 @@ ggml_tensor * build_expert_layer(
     // mm_act does not convert its input: a BF16 GEMM must be handed BF16 rows,
     // but adaRMS produces F32, whose bits would be misread as BF16.
     ggml_tensor * o_out  = gemma_attn(ctx, w, as_type(ctx, x_norm, at), positions, cfg, seq, cached_K, cached_V, mask,
-                                      nullptr, nullptr, at, use_fused_attention(), x_norm, nullptr, kv,
+                                      nullptr, nullptr, at, use_flash_attention(), x_norm, nullptr, kv,
                                       fqx ? fqx->K16 : nullptr, fqx ? fqx->V16 : nullptr);
     o_out = as_type(ctx, o_out, GGML_TYPE_F32);
 
@@ -544,7 +552,7 @@ std::unique_ptr<ModelArchBase> pi05_create(const std::string& mmproj_path,
         std::printf("vla(pi05): expert weights INT4 (W4A8), %s\n",
                     aex_w4_group > 0 ? ("group " + std::to_string(aex_w4_group)).c_str() : "per channel");
     }
-    m->vis.vit.enc.cfg.flash_attn = use_fused_attention();
+    m->vis.vit.enc.cfg.flash_attn = use_flash_attention();
     // Fused SigLIP blocks (modules/encoder.h, EncCfg::fused): SYCL, BF16, fused
     // attention. A FoldQuant GGUF takes them too: its integer sites are the LM's
     // and the expert's, and its vision tower is BF16 like any other checkpoint's.
@@ -837,7 +845,7 @@ std::vector<float> Pi05ModelArch::predict(const Inputs& in) {
                                    pl.rms_spec);
             else
                 h = gemma_layer(C, pl.blk[i], h, t_prefix_pos, cfg, n_prefix_g,
-                                nullptr, nullptr, t_prefix_mask, &cK[i], &cV[i], act_type, use_fused_attention(),
+                                nullptr, nullptr, t_prefix_mask, &cK[i], &cV[i], act_type, use_flash_attention(),
                                 kv_inplace ? &kv[i] : nullptr);
         }
         (void) h;

@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace vla {
 
@@ -39,11 +40,39 @@ void WeightLoader::as_float(const std::string & name, int64_t K, int64_t N, Floa
     as_float_[name] = AsFloat{K, N, std::move(make)};
 }
 
+void WeightLoader::pad(const std::string & name, int64_t ne0, int64_t ne1) {
+    pad_[name] = {ne0, ne1};
+}
+
+void WeightLoader::pad_mlp(const std::string & fc1, const std::string & fc2) {
+    const ggml_tensor * w1 = g_.meta((fc1 + ".weight").c_str());
+    const ggml_tensor * w2 = g_.meta((fc2 + ".weight").c_str());
+    if (!w1 || !w2 || ggml_is_quantized(gemm_) || ggml_is_quantized(w1->type) || ggml_is_quantized(w2->type))
+        return;
+    const int64_t ff = w1->ne[1];
+    const int64_t fp = gemm_width(ff);
+    if (fp == ff || w2->ne[0] != ff)
+        return;
+    pad(fc1 + ".weight", w1->ne[0], fp);
+    pad(fc1 + ".bias", fp, 1);
+    pad(fc2 + ".weight", fp, w2->ne[1]);
+}
+
 bool WeightLoader::read_resident(const std::string & name, ggml_type type, bool gemma_norm, std::vector<uint8_t> & out) {
     const auto it = as_float_.find(name);
     if (it == as_float_.end()) {
         out = g_.read_convert(name.c_str(), type, gemma_norm);
-        return !out.empty();
+        const auto p = pad_.find(name);
+        if (p == pad_.end() || out.empty())
+            return !out.empty();
+        const ggml_tensor * src = g_.meta(name.c_str());
+        const size_t rs = ggml_row_size(type, src->ne[0]);
+        const size_t rp = ggml_row_size(type, p->second.first);
+        std::vector<uint8_t> padded(rp * (size_t) p->second.second, 0);
+        for (int64_t r = 0; r < src->ne[1]; ++r)
+            std::memcpy(padded.data() + r * rp, out.data() + r * rs, rs);
+        out.swap(padded);
+        return true;
     }
     const AsFloat & a = it->second;
     std::vector<float> f;
@@ -97,7 +126,23 @@ ggml_tensor * WeightLoader::declare(ggml_type want, bool required, bool gemma_no
         return nullptr;
     }
 
-    ggml_tensor * t = ggml_new_tensor(ctx_, g_.resident_type(src, want), ggml_n_dims(src), src->ne);
+    const ggml_type rt = g_.resident_type(src, want);
+    int64_t ne[GGML_MAX_DIMS];
+    std::memcpy(ne, src->ne, sizeof(ne));
+    int n_dims = ggml_n_dims(src);
+    if (const auto p = pad_.find(name); p != pad_.end()) {
+        const bool float_type = rt == GGML_TYPE_F32 || rt == GGML_TYPE_F16 || rt == GGML_TYPE_BF16;
+        if (!float_type || n_dims > 2 || p->second.first < ne[0] || p->second.second < ne[1]) {
+            std::fprintf(stderr, "vla(%s): cannot pad %s to [%lld, %lld]\n", arch_, name,
+                         (long long) p->second.first, (long long) p->second.second);
+            ok_ = false;
+            return nullptr;
+        }
+        ne[0]  = p->second.first;
+        ne[1]  = p->second.second;
+        n_dims = 2;
+    }
+    ggml_tensor * t = ggml_new_tensor(ctx_, rt, n_dims, ne);
     if (!t) {
         std::fprintf(stderr, "vla(%s): ggml_new_tensor failed for %s (weight context too small?)\n", arch_, name);
         ok_ = false;
