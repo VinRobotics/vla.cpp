@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Cosmos3-Edge outside the graphs (src/models/cosmos3_edge.cpp): the prompt (lerobot's Cosmos3PromptProcessorStep and
+// Cosmos3 Policy outside the graphs (src/models/cosmos3_policy.cpp): the prompt (lerobot's Cosmos3PromptProcessorStep and
 // Cosmos3TokenizerProcessorStep) and the LIBERO action decode (Cosmos3LiberoActionProcessorStep).
 //
 //  * The prompt is the JSON caption of the task in the chat template of the understanding stream, then the
@@ -34,7 +34,7 @@
 namespace vla {
 
 struct Cosmos3Prompt {
-    // Loads the tokenizer and the caption settings from a Cosmos3-Edge GGUF written with
+    // Loads the tokenizer and the caption settings from a Cosmos3 Policy GGUF written with
     // `--policy-dir`. False, with a reason on stderr, when the file has none.
     bool load(const gguf_reader & g);
 

@@ -27,7 +27,7 @@
 #include "model.h"
 #include "options.h"
 #include "serving/hf_fetch.h"
-#include "models/cosmos3_edge.h"
+#include "models/cosmos3_policy.h"
 #include "tokenizer.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -133,7 +133,7 @@ const char * arch_slug(Arch a) {
         case Arch::OCTO:        return "octo";
         case Arch::TURBOVLA:    return "turbovla";
         case Arch::ACT:         return "act";
-        case Arch::COSMOS3_EDGE: return "cosmos3_edge";
+        case Arch::COSMOS3_POLICY: return "cosmos3_policy";
     }
     return "";
 }
@@ -258,7 +258,7 @@ void usage(const char * prog) {
         "  --state    proprioception floats, comma-separated (default zeros); pi05\n"
         "             --text needs it, since the state is part of the prompt\n"
         "  --pretty   print one action row (max_action_dim values) per line\n"
-        "  --libero   Cosmos3-Edge only: print LIBERO commands [dpos(3), axis-angle(3), gripper] instead of rot6d rows\n"
+        "  --libero   Cosmos3 Policy only: print LIBERO commands [dpos(3), axis-angle(3), gripper] instead of rot6d rows\n"
         "  --config   policy config.json; its \"runtime\" block sets the flags below,\n"
         "             and flags given here win\n"
         "%s",
@@ -347,8 +347,8 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "vla-cli: %s takes no instruction; drop --text/--tokens\n", arch_slug(arch));
         return 1;
     }
-    if (libero && arch != Arch::COSMOS3_EDGE) {
-        std::fprintf(stderr, "vla-cli: --libero decodes the 10-wide rot6d action of Cosmos3-Edge only; %s is %s\n",
+    if (libero && arch != Arch::COSMOS3_POLICY) {
+        std::fprintf(stderr, "vla-cli: --libero decodes the 10-wide rot6d action of Cosmos3 Policy only; %s is %s\n",
                      ckpt.c_str(), arch_slug(arch));
         return 1;
     }
@@ -360,7 +360,7 @@ int main(int argc, char ** argv) {
     if (!parse_floats(state_s, state))
         return 1;
     if (!text_s.empty()) {
-        if (arch == Arch::COSMOS3_EDGE || has_spm_tokenizer(ckpt, arch_slug(arch))) {
+        if (arch == Arch::COSMOS3_POLICY || has_spm_tokenizer(ckpt, arch_slug(arch))) {
             if (!tokenize_prompt(ckpt, arch_slug(arch), text_s, state, lang, attn))
                 return 1;
             for (size_t i=0; i<lang.size(); ++i)
@@ -431,7 +431,7 @@ int main(int argc, char ** argv) {
     }
 
     int64_t cols = cfg.max_action_dim > 0 ? cfg.max_action_dim : 1;
-    if (libero) {  // checked above: Cosmos3-Edge, 10 columns
+    if (libero) {  // checked above: Cosmos3 Policy, 10 columns
         std::vector<float> cmd;
         for (size_t r = 0; r + 10 <= act.size(); r += 10) {
             float row[7];

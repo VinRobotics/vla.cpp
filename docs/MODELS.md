@@ -70,12 +70,12 @@ python scripts/inspect_gguf_quant.py model-fq.gguf
 ./build/vla-bench --ckpt model-fq.gguf --images 1 --size 256 --tokens 16
 ```
 
-## Cosmos3-Edge (world-action model)
+## Cosmos3 Policy (world-action model)
 
-Cosmos3-Edge (`lerobot/Cosmos3-Edge-Policy-LIBERO`) is a world-action model: a 28-layer Mixture-of-Transformers
+Cosmos3 Policy (`lerobot/Cosmos3-Edge-Policy-LIBERO`) is a world-action model: a 28-layer Mixture-of-Transformers
 backbone (Nemotron 3 Dense, an understanding stream over the prompt and a generation stream over
 `[video patches | actions]`) denoises 4 latent video frames and a 16-step action chunk together, conditioned
-on the Wan2.2 VAE latent of the current frame, with 30 UniPC steps. `src/models/cosmos3_edge.cpp` follows
+on the Wan2.2 VAE latent of the current frame, with 30 UniPC steps. `src/models/cosmos3_policy.cpp` follows
 lerobot's `policies/cosmos3/modeling_cosmos3.py`: the VAE encoder and the backbone are ggml graphs (the
 understanding stream runs once, its keys and values are kept for the 30 steps), the UniPC solver
 (diffusers' `UniPCMultistepScheduler`, flow prediction, order 2, corrector) runs on the host in f32 as the
@@ -85,8 +85,8 @@ reference does. Convert from the checkpoint directory:
 # the VAE encoder (one frame: the 3-D kernels' last temporal tap), the 28 layers of both streams, the
 # projections of domain 5 (LIBERO), the latent statistics, the action quantiles, the canvas layout, the caption
 # settings and the tokenizer. The decoder, the SigLIP tower and the language head stay out.
-python scripts/convert_cosmos3_edge_to_gguf.py --ckpt <checkpoint dir> --out cosmos3-edge-libero-bf16.gguf
-./build/vla-cli --ckpt cosmos3-edge-libero-bf16.gguf --image third_person.png --image wrist.png \
+python scripts/convert_cosmos3_policy_to_gguf.py --ckpt <checkpoint dir> --out cosmos3-policy-libero-bf16.gguf
+./build/vla-cli --ckpt cosmos3-policy-libero-bf16.gguf --image third_person.png --image wrist.png \
     --text "turn on the stove" --libero --pretty
 ```
 
@@ -107,25 +107,25 @@ setup: mode `wam`, no robot state, no classifier-free guidance, one or two camer
 the converter refuses a config that differs.
 
 **Serving.** `vla-server` needs no change for this model: it hands the images, token ids and noise of a request to
-`predict()` whatever the architecture is, and Cosmos3-Edge fits its checks (no state, a 16x10 noise, a 16x10
+`predict()` whatever the architecture is, and Cosmos3 Policy fits its checks (no state, a 16x10 noise, a 16x10
 response; the start-up warm-up of two 224x224 views and 32 made-up tokens runs). The server has no text field, so
-the client sends token ids. `eval/client/vla_cpp_client.py` has a `cosmos3_edge` preset that builds them (the caption
+the client sends token ids. `eval/client/vla_cpp_client.py` has a `cosmos3_policy` preset that builds them (the caption
 and chat template of lerobot's prompt step, with the policy's tokenizer, and the caption settings read from the
-server's GGUF with `--gguf`, the same `cosmos3_edge.caption.*` keys `vla-cli --text` uses; without `--gguf` it assumes
+server's GGUF with `--gguf`, the same `cosmos3_policy.caption.*` keys `vla-cli --text` uses; without `--gguf` it assumes
 the LIBERO checkpoint's), sends the two 256x256 views as float RGB, and decodes the 16x10 rot6d chunk it gets back
 to 16 LIBERO commands:
 
 ```bash
-./build/vla-server cosmos3-edge-bf16.gguf                      # -DVLA_BUILD_SERVER=ON
-python eval/client/run_sim_client_direct.py --arch cosmos3_edge --n-action-steps 16 \
-    --gguf cosmos3-edge-bf16.gguf --tokenizer <checkpoint dir>/tokenizer ...   # nvidia/Cosmos3-Edge if reachable
+./build/vla-server cosmos3-policy-bf16.gguf                      # -DVLA_BUILD_SERVER=ON
+python eval/client/run_sim_client_direct.py --arch cosmos3_policy --n-action-steps 16 \
+    --gguf cosmos3-policy-bf16.gguf --tokenizer <checkpoint dir>/tokenizer ...   # nvidia/Cosmos3 Policy if reachable
 ```
 
-`eval/run_libero.sh -m cosmos3_edge` runs the whole flow (server, LIBERO client, stop) from a models directory that
-holds `cosmos3-edge-libero-gguf/cosmos3-edge-libero-bf16.gguf`; a missing directory is skipped, so `-m all` is
+`eval/run_libero.sh -m cosmos3_policy` runs the whole flow (server, LIBERO client, stop) from a models directory that
+holds `cosmos3-policy-libero-gguf/cosmos3-policy-libero-bf16.gguf`; a missing directory is skipped, so `-m all` is
 unaffected. The client needs a Python with LIBERO and a transformers that reads the policy's tokenizer:
-`COSMOS3_EDGE_PYTHON` picks it (default: the LIBERO venv of `eval/sim/libero/setup_libero.sh`, which pins an older
-transformers), `COSMOS3_EDGE_TOKENIZER` the local `tokenizer/` directory.
+`COSMOS3_POLICY_PYTHON` picks it (default: the LIBERO venv of `eval/sim/libero/setup_libero.sh`, which pins an older
+transformers), `COSMOS3_POLICY_TOKENIZER` the local `tokenizer/` directory.
 
 **What was checked** (bf16 GGUF; CPU and CUDA on an RTX 3060):
 
@@ -149,7 +149,7 @@ transformers), `COSMOS3_EDGE_TOKENIZER` the local `tokenizer/` directory.
 - *The server* (CPU, an earlier revision of the engine). A request for one case returned exactly what a direct
   `libvla` call returned on the same inputs, the client built the same 150 token ids as the case's, its numpy
   rot6d decode matched lerobot's to 7e-7, and `get_action` returned a whole chunk of 16 finite LIBERO commands.
-  Through `eval/run_libero.sh -m cosmos3_edge -s libero_spatial` (task 0, one episode, CPU) the episode was
+  Through `eval/run_libero.sh -m cosmos3_policy -s libero_spatial` (task 0, one episode, CPU) the episode was
   solved. The engine has been rewritten since; the server path itself is unchanged.
 
 Not checked with the hand-written engine: the closed loop on LIBERO (an earlier revision of this port, with

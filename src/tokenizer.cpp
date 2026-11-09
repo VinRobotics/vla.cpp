@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #include "tokenizer.h"
-#include "models/cosmos3_edge.h"
+#include "models/cosmos3_policy.h"
 
 #ifdef VLA_USE_SPM
 #include "sentencepiece_processor.h"
@@ -150,20 +150,20 @@ bool tokenize_prompt(const std::string& ckpt_path, const char * arch, const std:
         return false;
     const std::string a = arch;
 
-    if (a == "cosmos3_edge") {  // the task goes into a JSON caption, then a byte-level BPE; no SentencePiece
+    if (a == "cosmos3_policy") {  // the task goes into a JSON caption, then a byte-level BPE; no SentencePiece
         Cosmos3Prompt prompt;
         std::string   err;
         if (!prompt.load(g))
             return false;
         if (!prompt.tokens(text, ids, err)) {
-            std::fprintf(stderr, "vla(cosmos3_edge): cannot tokenize the instruction: %s\n", err.c_str());
+            std::fprintf(stderr, "vla(cosmos3_policy): cannot tokenize the instruction: %s\n", err.c_str());
             return false;
         }
         // The graphs take a fixed number of tokens. Refuse a longer prompt here, before the model is loaded,
         // rather than truncate it: the chat template and <|vision_start|> are its last tokens.
-        const int prompt_len = (int) g.u32("cosmos3_edge.prompt_len");
+        const int prompt_len = (int) g.u32("cosmos3_policy.prompt_len");
         if (prompt_len > 0 && (int) ids.size() > prompt_len) {
-            std::fprintf(stderr, "vla(cosmos3_edge): the prompt is %zu tokens, the model takes at most %d; shorten the instruction\n",
+            std::fprintf(stderr, "vla(cosmos3_policy): the prompt is %zu tokens, the model takes at most %d; shorten the instruction\n",
                          ids.size(), prompt_len);
             return false;
         }

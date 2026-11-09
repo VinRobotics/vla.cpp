@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Cosmos3-Edge-Policy (lerobot/Cosmos3-Edge-Policy-LIBERO) -> vla.cpp GGUF.
+"""Cosmos3 Policy (lerobot/Cosmos3-Edge-Policy-LIBERO) -> vla.cpp GGUF.
 
 Reads the checkpoint directory: config.json, model.safetensors, the postprocessor's unnormalizer stats and
 tokenizer/. Only what inference needs is written:
@@ -27,12 +27,12 @@ tokenizer/. Only what inference needs is written:
 - the timestep embedding, in f32 as the policy keeps it;
 - the latent statistics of the VAE, the action quantiles of the unnormalizer, the canvas layout of the policy's
   cameras, the caption settings of the prompt step and the byte-level BPE tokenizer (llama.cpp's
-  `tokenizer.ggml.*` keys), so `vla-cli --text` builds the prompt itself (src/models/cosmos3_edge.cpp).
+  `tokenizer.ggml.*` keys), so `vla-cli --text` builds the prompt itself (src/models/cosmos3_policy.cpp).
 
 GEMM weights keep the checkpoint's bf16 (the engine casts them to its matmul type at load), norms and biases
 are f32.
 
-    python scripts/convert_cosmos3_edge_to_gguf.py --ckpt <checkpoint dir> --out cosmos3-edge-libero-bf16.gguf
+    python scripts/convert_cosmos3_policy_to_gguf.py --ckpt <checkpoint dir> --out cosmos3-policy-libero-bf16.gguf
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ from gguf_common import (
     resolve_out,
 )
 
-ARCH = "cosmos3_edge"
+ARCH = "cosmos3_policy"
 KV = kv_prefix(ARCH)
 NET = "model.network."
 LM = NET + "mot_backbone.model.language_model."
@@ -186,7 +186,7 @@ class Weights:
 
 def check_config(config: dict) -> None:
     """The engine is written for the LIBERO policy's setup; refuse what it does not do."""
-    if config.get("type") != "cosmos3_edge":
+    if config.get("type") != "cosmos3_edge":  # lerobot's policy type of the Edge backbone
         raise SystemExit(f"config.json is a {config.get('type')!r} policy, not cosmos3_edge")
     text = config["mot_backbone"]["text_config"]
     if text["hidden_act"] != "relu2" or text["rope_parameters"]["rope_type"] != "default":

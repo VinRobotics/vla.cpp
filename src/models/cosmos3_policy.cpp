@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Cosmos3-Edge-Policy (LIBERO): a world-action model. One 28-layer Mixture-of-Transformers backbone (Nemotron 3
+// Cosmos3 Policy (LIBERO): a world-action model. One 28-layer Mixture-of-Transformers backbone (Nemotron 3
 // Dense, two streams) denoises 4 latent video frames and a 16-step action chunk together, conditioned on the
 // Wan2.2 VAE latent of the current frame and on the prompt, with 30 UniPC steps. lerobot's
 // policies/cosmos3/modeling_cosmos3.py is the reference; this file follows its inference path:
@@ -35,7 +35,7 @@
 
 #include "arch.h"
 #include "backend.h"
-#include "cosmos3_edge.h"
+#include "cosmos3_policy.h"
 #include "gguf_reader.h"
 #include "loader.h"
 #include "model.h"
@@ -70,7 +70,7 @@
 namespace vla {
 namespace {
 
-constexpr const char * kTag = "vla(cosmos3_edge)";
+constexpr const char * kTag = "vla(cosmos3_policy)";
 
 double now_ms() {
     using clock = std::chrono::steady_clock;
@@ -81,7 +81,7 @@ double now_ms() {
 // The canvas: lerobot's Cosmos3VideoCanvasProcessorStep
 // ------------------------------------------------------------------------------------------------
 
-// How the policy's cameras fill the canvas, from the GGUF (scripts/convert_cosmos3_edge_to_gguf.py).
+// How the policy's cameras fill the canvas, from the GGUF (scripts/convert_cosmos3_policy_to_gguf.py).
 struct Layout {
     int n_views = 2, view_h = 256, view_w = 256;  // every view resized to view_h x view_w, composed side by side
     int canvas_h = 192, canvas_w = 320;           // the canvas of the resolution tier
@@ -432,9 +432,9 @@ bool cuda_conv_has_mma() {
 // The architecture
 // ------------------------------------------------------------------------------------------------
 
-struct Cosmos3EdgeModelArch : public ModelArchBase {
-    Cosmos3EdgeModelArch() : ModelArchBase(Arch::COSMOS3_EDGE) {}
-    ~Cosmos3EdgeModelArch() override;
+struct Cosmos3PolicyModelArch : public ModelArchBase {
+    Cosmos3PolicyModelArch() : ModelArchBase(Arch::COSMOS3_POLICY) {}
+    ~Cosmos3PolicyModelArch() override;
 
     ggml_backend_t backend   = nullptr;
     int            n_threads = default_cpu_threads();
@@ -529,7 +529,7 @@ struct Cosmos3EdgeModelArch : public ModelArchBase {
     std::vector<float> predict(const Inputs & in) override;
 };
 
-Cosmos3EdgeModelArch::~Cosmos3EdgeModelArch() {
+Cosmos3PolicyModelArch::~Cosmos3PolicyModelArch() {
     vae_graph.release();
     prefix_graph.release();
     step_graph.release();
@@ -549,9 +549,9 @@ Cosmos3EdgeModelArch::~Cosmos3EdgeModelArch() {
         ggml_backend_free(backend);
 }
 
-bool Cosmos3EdgeModelArch::load_config(gguf_reader & g) {
-    auto u = [&](const std::string & k) { return (int64_t) g.u32(("cosmos3_edge." + k).c_str()); };
-    auto f = [&](const std::string & k) { return g.f32(("cosmos3_edge." + k).c_str()); };
+bool Cosmos3PolicyModelArch::load_config(gguf_reader & g) {
+    auto u = [&](const std::string & k) { return (int64_t) g.u32(("cosmos3_policy." + k).c_str()); };
+    auto f = [&](const std::string & k) { return g.f32(("cosmos3_policy." + k).c_str()); };
     n_layers = u("n_layers"); hidden = u("hidden"); inter = u("intermediate");
     n_heads = u("n_heads"); n_kv_heads = u("n_kv_heads"); head_dim = u("head_dim");
     mrope[0] = (int) u("mrope_section_t"); mrope[1] = (int) u("mrope_section_h"); mrope[2] = (int) u("mrope_section_w");
@@ -603,10 +603,10 @@ bool Cosmos3EdgeModelArch::load_config(gguf_reader & g) {
         }
     }
 
-    lat_mean = g.read_f32("cosmos3_edge.latents_mean");
-    lat_std  = g.read_f32("cosmos3_edge.latents_std");
-    q01      = g.read_f32("cosmos3_edge.action_q01");
-    q99      = g.read_f32("cosmos3_edge.action_q99");
+    lat_mean = g.read_f32("cosmos3_policy.latents_mean");
+    lat_std  = g.read_f32("cosmos3_policy.latents_std");
+    q01      = g.read_f32("cosmos3_policy.action_q01");
+    q99      = g.read_f32("cosmos3_policy.action_q99");
     if ((int64_t) lat_mean.size() != z_dim || (int64_t) lat_std.size() != z_dim || (int64_t) q01.size() != adim ||
         (int64_t) q99.size() != adim) {
         std::fprintf(stderr, "%s: latent statistics or action quantiles disagree with the sizes\n", kTag);
@@ -620,13 +620,13 @@ bool Cosmos3EdgeModelArch::load_config(gguf_reader & g) {
     return true;
 }
 
-bool Cosmos3EdgeModelArch::load_weights(gguf_reader & g) {
+bool Cosmos3PolicyModelArch::load_weights(gguf_reader & g) {
     const int64_t n_tensors = gguf_get_n_tensors(g.gctx);
     ggml_init_params p = { (size_t) (n_tensors + 16) * ggml_tensor_overhead(), nullptr, true };
     ctx_w = ggml_init(p);
     if (!ctx_w)
         return false;
-    WeightLoader wl("cosmos3_edge", g, ctx_w, mt);
+    WeightLoader wl("cosmos3_policy", g, ctx_w, mt);
     const ggml_type ct = conv_direct ? GGML_TYPE_F16 : GGML_TYPE_F32;
 
     tok_embd = wl.gemm("token_embd.weight");
@@ -710,7 +710,7 @@ bool Cosmos3EdgeModelArch::load_weights(gguf_reader & g) {
 // frame has zero frames in front of it) and groups of the resulting channels are averaged into the block's
 // output channels. On one frame that is a strided convolution over the block's input with a constant kernel of
 // 0 and 1/g, built here. A block that keeps its size and width (the last) is the identity and gets no kernel.
-bool Cosmos3EdgeModelArch::make_avg_kernels() {
+bool Cosmos3PolicyModelArch::make_avg_kernels() {
     struct Pending {
         ggml_tensor *      t;
         std::vector<float> k;
@@ -769,7 +769,7 @@ bool Cosmos3EdgeModelArch::make_avg_kernels() {
     return true;
 }
 
-bool Cosmos3EdgeModelArch::ensure_kv(int64_t n) {
+bool Cosmos3PolicyModelArch::ensure_kv(int64_t n) {
     if (kv.ctx && kv.n == n)
         return true;
     if (kv.buf)
@@ -808,7 +808,7 @@ bool Cosmos3EdgeModelArch::ensure_kv(int64_t n) {
 // Graph pieces
 // ------------------------------------------------------------------------------------------------
 
-ggml_tensor * Cosmos3EdgeModelArch::lin(ggml_context * C, ggml_tensor * W, ggml_tensor * b, ggml_tensor * x) const {
+ggml_tensor * Cosmos3PolicyModelArch::lin(ggml_context * C, ggml_tensor * W, ggml_tensor * b, ggml_tensor * x) const {
     ggml_tensor * y = ggml_mul_mat(C, W, x);
     if (mm_prec_f32_enabled())
         ggml_prec_set_acc(y, GGML_PREC_F32);
@@ -816,28 +816,28 @@ ggml_tensor * Cosmos3EdgeModelArch::lin(ggml_context * C, ggml_tensor * W, ggml_
 }
 
 // x [W, H, C, 1] -> [OW, OH, OC, 1] with the bias.
-ggml_tensor * Cosmos3EdgeModelArch::conv(ggml_context * C, const ConvW & cw, ggml_tensor * x, int stride, int pad) const {
+ggml_tensor * Cosmos3PolicyModelArch::conv(ggml_context * C, const ConvW & cw, ggml_tensor * x, int stride, int pad) const {
     ggml_tensor * y = cw.w->type == GGML_TYPE_F16 ? ggml_conv_2d_direct(C, cw.w, x, stride, stride, pad, pad, 1, 1)
                                                   : conv_2d_f32(C, cw.w, x, stride, pad);
     return cw.b ? ggml_add(C, y, ggml_reshape_4d(C, cw.b, 1, 1, cw.b->ne[0], 1)) : y;
 }
 
 // A 1x1 convolution stored as a linear map [IC, OC].
-ggml_tensor * Cosmos3EdgeModelArch::conv1x1(ggml_context * C, const ConvW & cw, ggml_tensor * x) const {
+ggml_tensor * Cosmos3PolicyModelArch::conv1x1(ggml_context * C, const ConvW & cw, ggml_tensor * x) const {
     const ConvW k4 = { ggml_reshape_4d(C, cw.w, 1, 1, cw.w->ne[0], cw.w->ne[1]), cw.b };
     return conv(C, k4, x, 1, 0);
 }
 
 // WanRMS_norm over the channels of x [W, H, C, 1]: F.normalize(x, dim=channels) * sqrt(C) * gamma, which is
 // x / rms(x) * gamma. (F.normalize clamps the norm at 1e-12; a channel vector of zeros does not occur.)
-ggml_tensor * Cosmos3EdgeModelArch::chan_rms(ggml_context * C, ggml_tensor * x, ggml_tensor * gamma) const {
+ggml_tensor * Cosmos3PolicyModelArch::chan_rms(ggml_context * C, ggml_tensor * x, ggml_tensor * gamma) const {
     ggml_tensor * t = ggml_cont(C, ggml_permute(C, x, 1, 2, 0, 3));  // [C, W, H]
     t = ggml_mul(C, ggml_rms_norm(C, t, 1e-24f), gamma);
     return ggml_cont(C, ggml_permute(C, t, 2, 0, 1, 3));  // [W, H, C]
 }
 
 // WanResidualBlock on one frame: norm, SiLU, conv, norm, SiLU, conv, plus the (1x1) shortcut.
-ggml_tensor * Cosmos3EdgeModelArch::resnet(ggml_context * C, const ResW & r, ggml_tensor * x) const {
+ggml_tensor * Cosmos3PolicyModelArch::resnet(ggml_context * C, const ResW & r, ggml_tensor * x) const {
     ggml_tensor * h = r.shortcut.w ? conv1x1(C, r.shortcut, x) : x;
     ggml_tensor * y = conv(C, r.conv1, ggml_silu(C, chan_rms(C, x, r.norm1)), 1, 1);
     y               = conv(C, r.conv2, ggml_silu(C, chan_rms(C, y, r.norm2)), 1, 1);
@@ -845,7 +845,7 @@ ggml_tensor * Cosmos3EdgeModelArch::resnet(ggml_context * C, const ResW & r, ggm
 }
 
 // WanAttentionBlock: single-head attention over the frame's positions, the channels as the head.
-ggml_tensor * Cosmos3EdgeModelArch::vae_attention(ggml_context * C, ggml_tensor * x) const {
+ggml_tensor * Cosmos3PolicyModelArch::vae_attention(ggml_context * C, ggml_tensor * x) const {
     const int64_t W = x->ne[0], H = x->ne[1], Ch = x->ne[2], N = W * H;
     ggml_tensor * qkv = conv1x1(C, vae.qkv, chan_rms(C, x, vae.attn_norm));  // [W, H, 3 Ch]
     auto part = [&](int i) {  // channel block i as [Ch, N]: one row per position
@@ -865,7 +865,7 @@ ggml_tensor * Cosmos3EdgeModelArch::vae_attention(ggml_context * C, ggml_tensor 
 
 // q [head_dim, n_q, n_heads], k and v [head_dim, n_k, n_kv_heads] (the query heads of a key head read it, as
 // grouped-query attention does) -> [hidden, n_q]. mask [n_k, n_q] F32 or null.
-ggml_tensor * Cosmos3EdgeModelArch::attend(ggml_context * C, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
+ggml_tensor * Cosmos3PolicyModelArch::attend(ggml_context * C, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
                                            ggml_tensor * mask, int64_t n_q) const {
     const float scale = 1.0f / std::sqrt((float) head_dim);
     if (flash_attn_enabled()) {
@@ -882,7 +882,7 @@ ggml_tensor * Cosmos3EdgeModelArch::attend(ggml_context * C, ggml_tensor * q, gg
 
 // The Wan2.2 encoder on one frame. px: the canvas in [-1, 1], pixel-unshuffled to [W/2, H/2, 12] (host).
 // lat: the mean of the posterior, [W/16, H/16, z_dim], before normalization and cropping (host).
-ggml_cgraph * Cosmos3EdgeModelArch::build_vae(ggml_context * C, VaeIO & io) const {
+ggml_cgraph * Cosmos3PolicyModelArch::build_vae(ggml_context * C, VaeIO & io) const {
     const int64_t W0 = layout.canvas_w / vae_patch, H0 = layout.canvas_h / vae_patch;
     io.px = ggml_new_tensor_4d(C, GGML_TYPE_F32, W0, H0, 3 * vae_patch * vae_patch, 1);
     ggml_set_input(io.px);
@@ -913,7 +913,7 @@ ggml_cgraph * Cosmos3EdgeModelArch::build_vae(ggml_context * C, VaeIO & io) cons
 
 // The understanding stream over the n prompt tokens (causal), writing every layer's keys as the generation
 // queries read them (their own norm, then RoPE) and values into kv.
-ggml_cgraph * Cosmos3EdgeModelArch::build_prefix(ggml_context * C, PrefixIO & io, int64_t n) const {
+ggml_cgraph * Cosmos3PolicyModelArch::build_prefix(ggml_context * C, PrefixIO & io, int64_t n) const {
     io.ids  = ggml_new_tensor_1d(C, GGML_TYPE_I32, n);
     io.cos  = ggml_new_tensor_2d(C, GGML_TYPE_F32, head_dim, n);
     io.sin  = ggml_new_tensor_2d(C, GGML_TYPE_F32, head_dim, n);
@@ -945,7 +945,7 @@ ggml_cgraph * Cosmos3EdgeModelArch::build_prefix(ggml_context * C, PrefixIO & io
 
 // One network call of the generation stream: [video patches | actions] at the timestep, attending to
 // [prompt | itself] in every layer, to the velocities of the video patches and the actions.
-ggml_cgraph * Cosmos3EdgeModelArch::build_step(ggml_context * C, StepIO & io, int64_t n) const {
+ggml_cgraph * Cosmos3PolicyModelArch::build_step(ggml_context * C, StepIO & io, int64_t n) const {
     (void) n;  // the prompt length enters through kv
     const int64_t n_gen = n_video + chunk;
     io.xv   = ggml_new_tensor_2d(C, GGML_TYPE_F32, patch_dim, n_video);
@@ -1004,7 +1004,7 @@ ggml_cgraph * Cosmos3EdgeModelArch::build_step(ggml_context * C, StepIO & io, in
 
 // The understanding stream's positions are 0..n-1 on all three M-RoPE axes, so its rotation is the plain one.
 // Float arithmetic as the reference: inv_freq = 1 / theta^(2j/d) in f32, angle = position * inv_freq in f32.
-void Cosmos3EdgeModelArch::rope_text(int64_t n, std::vector<float> & cs, std::vector<float> & sn) const {
+void Cosmos3PolicyModelArch::rope_text(int64_t n, std::vector<float> & cs, std::vector<float> & sn) const {
     const int64_t half = head_dim / 2;
     cs.resize((size_t) (n * head_dim));
     sn.resize((size_t) (n * head_dim));
@@ -1022,7 +1022,7 @@ void Cosmos3EdgeModelArch::rope_text(int64_t n, std::vector<float> & cs, std::ve
 // (temporal / fps) on the time axis and on its patch grid on the height and width axes; action i at
 // (i + 1) * frame_step / temporal with zero height and width. The three axes interleave over the frequencies
 // as Qwen3-VL's rotary embedding does ([T H W T H W ... T T] over mrope_section).
-void Cosmos3EdgeModelArch::rope_gen(int64_t n_text, std::vector<float> & cs, std::vector<float> & sn) const {
+void Cosmos3PolicyModelArch::rope_gen(int64_t n_text, std::vector<float> & cs, std::vector<float> & sn) const {
     const int64_t half = head_dim / 2, n_gen = n_video + chunk;
     const int64_t grid_w = latent_w / latent_patch;
     const float   gen_start  = (float) (n_text - 1) + 1.f + (float) margin;
@@ -1056,7 +1056,7 @@ void Cosmos3EdgeModelArch::rope_gen(int64_t n_text, std::vector<float> & cs, std
 }
 
 // SinusoidalTimesteps of t * timestep_scale: cos features then sin, frequencies exp(-ln(10000) j / half).
-void Cosmos3EdgeModelArch::time_sinusoid(int64_t t, std::vector<float> & out) const {
+void Cosmos3PolicyModelArch::time_sinusoid(int64_t t, std::vector<float> & out) const {
     const int64_t half = time_dim / 2;
     const float   ts   = (float) t * timestep_scale;
     out.resize((size_t) time_dim);
@@ -1072,7 +1072,7 @@ void Cosmos3EdgeModelArch::time_sinusoid(int64_t t, std::vector<float> & out) co
 // predict
 // ------------------------------------------------------------------------------------------------
 
-std::vector<float> Cosmos3EdgeModelArch::predict(const Inputs & in) {
+std::vector<float> Cosmos3PolicyModelArch::predict(const Inputs & in) {
     const double t0 = now_ms();
     stats           = Stats{};
     if (in.precomputed_img_emb) {
@@ -1265,7 +1265,7 @@ std::vector<float> Cosmos3EdgeModelArch::predict(const Inputs & in) {
 
 }  // namespace
 
-std::unique_ptr<ModelArchBase> cosmos3_edge_create(const std::string & mmproj_path, const std::string & ckpt_path,
+std::unique_ptr<ModelArchBase> cosmos3_policy_create(const std::string & mmproj_path, const std::string & ckpt_path,
                                                    const std::string &, const Options & opts) {
     if (!mmproj_path.empty())
         std::printf("%s: note - mmproj '%s' is ignored (the VAE is baked into the GGUF)\n", kTag, mmproj_path.c_str());
@@ -1274,16 +1274,16 @@ std::unique_ptr<ModelArchBase> cosmos3_edge_create(const std::string & mmproj_pa
         return nullptr;
     }
 
-    auto m = std::make_unique<Cosmos3EdgeModelArch>();
+    auto m = std::make_unique<Cosmos3PolicyModelArch>();
     m->mt  = opts.weight_dtype.value_or(default_weight_dtype(GGML_TYPE_BF16));
-    gguf_reader g("cosmos3_edge");
+    gguf_reader g("cosmos3_policy");
     if (!g.open(ckpt_path))
         return nullptr;
-    if (!g.has("cosmos3_edge.architecture")) {
-        std::fprintf(stderr, "%s: %s is not a Cosmos3-Edge GGUF\n", kTag, ckpt_path.c_str());
+    if (!g.has("cosmos3_policy.architecture")) {
+        std::fprintf(stderr, "%s: %s is not a Cosmos3 Policy GGUF\n", kTag, ckpt_path.c_str());
         return nullptr;
     }
-    if (!m->load_config(g) || !resolve_num_steps("cosmos3_edge", opts, m->steps))
+    if (!m->load_config(g) || !resolve_num_steps("cosmos3_policy", opts, m->steps))
         return nullptr;
 
     const Backend b = backend_init(kTag, m->n_threads);
@@ -1340,7 +1340,7 @@ std::unique_ptr<ModelArchBase> cosmos3_edge_create(const std::string & mmproj_pa
 
 // ------------------------------------------------------------------------------------------------
 // The prompt (lerobot's Cosmos3PromptProcessorStep and Cosmos3TokenizerProcessorStep) and the LIBERO action
-// decode (Cosmos3LiberoActionProcessorStep), outside the graphs. See cosmos3_edge.h.
+// decode (Cosmos3LiberoActionProcessorStep), outside the graphs. See cosmos3_policy.h.
 // ------------------------------------------------------------------------------------------------
 
 namespace {
@@ -1489,18 +1489,18 @@ bool Cosmos3Prompt::load(const gguf_reader & g) {
     const int64_t  kt  = gguf_find_key(ctx, "tokenizer.ggml.tokens");
     const int64_t  kg  = gguf_find_key(ctx, "tokenizer.ggml.token_type");
     const int64_t  km  = gguf_find_key(ctx, "tokenizer.ggml.merges");
-    if (kt < 0 || kg < 0 || km < 0 || !g.has("cosmos3_edge.caption.view_description")) {
-        std::fprintf(stderr, "vla(cosmos3_edge): this GGUF has no tokenizer; convert with --policy-dir, or pass --tokens\n");
+    if (kt < 0 || kg < 0 || km < 0 || !g.has("cosmos3_policy.caption.view_description")) {
+        std::fprintf(stderr, "vla(cosmos3_policy): this GGUF has no tokenizer; convert with --policy-dir, or pass --tokens\n");
         return false;
     }
     if (gguf_get_arr_type(ctx, kt) != GGUF_TYPE_STRING || gguf_get_arr_type(ctx, km) != GGUF_TYPE_STRING ||
         gguf_get_arr_type(ctx, kg) != GGUF_TYPE_INT32) {
-        std::fprintf(stderr, "vla(cosmos3_edge): the tokenizer arrays have unexpected types\n");
+        std::fprintf(stderr, "vla(cosmos3_policy): the tokenizer arrays have unexpected types\n");
         return false;
     }
     const size_t n = gguf_get_arr_n(ctx, kt);
     if (n == 0 || gguf_get_arr_n(ctx, kg) != n) {
-        std::fprintf(stderr, "vla(cosmos3_edge): the token and token-type arrays disagree\n");
+        std::fprintf(stderr, "vla(cosmos3_policy): the token and token-type arrays disagree\n");
         return false;
     }
     int cp_of_byte[256];
@@ -1549,15 +1549,15 @@ bool Cosmos3Prompt::load(const gguf_reader & g) {
     for (size_t i = 0; i < nm; i++)
         rank_.emplace(gguf_get_arr_str(ctx, km, i), (int32_t) i);
 
-    view_description_ = g.str("cosmos3_edge.caption.view_description");
-    aspect_ratio_     = g.str("cosmos3_edge.caption.aspect_ratio");
-    fps_              = g.f32("cosmos3_edge.caption.fps");
-    use_state_        = g.u32("cosmos3_edge.caption.use_state") != 0;
-    chunk_            = (int) g.u32("cosmos3_edge.chunk_size");
-    canvas_h_         = (int) g.u32("cosmos3_edge.canvas_h");
-    canvas_w_         = (int) g.u32("cosmos3_edge.canvas_w");
+    view_description_ = g.str("cosmos3_policy.caption.view_description");
+    aspect_ratio_     = g.str("cosmos3_policy.caption.aspect_ratio");
+    fps_              = g.f32("cosmos3_policy.caption.fps");
+    use_state_        = g.u32("cosmos3_policy.caption.use_state") != 0;
+    chunk_            = (int) g.u32("cosmos3_policy.chunk_size");
+    canvas_h_         = (int) g.u32("cosmos3_policy.canvas_h");
+    canvas_w_         = (int) g.u32("cosmos3_policy.canvas_w");
     if (fps_ <= 0.0 || chunk_ <= 0 || aspect_ratio_.empty()) {
-        std::fprintf(stderr, "vla(cosmos3_edge): the caption settings of the GGUF are incomplete\n");
+        std::fprintf(stderr, "vla(cosmos3_policy): the caption settings of the GGUF are incomplete\n");
         return false;
     }
     return true;

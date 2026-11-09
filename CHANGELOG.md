@@ -6,23 +6,23 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 
-- **New model: Cosmos3-Edge** (`lerobot/Cosmos3-Edge-Policy-LIBERO`, a world-action model: a 28-layer
+- **New model: Cosmos3 Policy** (`lerobot/Cosmos3-Edge-Policy-LIBERO`, a world-action model: a 28-layer
   Mixture-of-Transformers denoises 4 latent video frames and a 16-step action chunk together, 30 UniPC
-  steps). `src/models/cosmos3_edge.cpp` writes the Wan2.2 VAE encoder and the two-stream Nemotron 3 backbone
+  steps). `src/models/cosmos3_policy.cpp` writes the Wan2.2 VAE encoder and the two-stream Nemotron 3 backbone
   as ggml graphs after lerobot's `policies/cosmos3`, runs the UniPC solver on the host, and composes the
   canvas the model expects (two views side by side, bicubic with antialias, reflection padding).
   The same file builds the prompt from the instruction (JSON caption, chat template,
   a byte-level BPE read from the GGUF; ASCII text only) and decodes rot6d to LIBERO commands, so
-  `vla-cli --text ... --libero` works. `scripts/convert_cosmos3_edge_to_gguf.py` reads the checkpoint's
+  `vla-cli --text ... --libero` works. `scripts/convert_cosmos3_policy_to_gguf.py` reads the checkpoint's
   safetensors (encoder, both streams, the LIBERO domain's action projections, statistics, tokenizer).
   Against lerobot's policy in bf16 on the same inputs the chunk agrees to 2.2e-3 (CUDA) and 2.6e-3 (CPU) on one
   prompt and 1.8e-2 on another, within what the bf16 reference's own rounding allows. Captions, token ids
   and the action decode match lerobot and Hugging Face on every LIBERO task. `vla-server`
-  serves it unchanged, and `eval/client/vla_cpp_client.py` has a `cosmos3_edge` preset (tokens from the caption
+  serves it unchanged, and `eval/client/vla_cpp_client.py` has a `cosmos3_policy` preset (tokens from the caption
   and chat template, with the caption settings read from the server's GGUF through `--gguf`, rot6d decoded to
   LIBERO commands); a request to the server returned the same bits as a
-  direct call (CPU), and `eval/run_libero.sh -m cosmos3_edge` solved a libero_spatial episode through it (CPU, one
-  episode). Only CPU and CUDA were tried, the server on CPU only. See `docs/MODELS.md#cosmos3-edge-world-action-model` for the build, the input contract
+  direct call (CPU), and `eval/run_libero.sh -m cosmos3_policy` solved a libero_spatial episode through it (CPU, one
+  episode). Only CPU and CUDA were tried, the server on CPU only. See `docs/MODELS.md#cosmos3-policy-world-action-model` for the build, the input contract
   and what is and is not checked.
 - **Hexagon NPU on the Qualcomm Dragonwing IQ-10 (Linux).**
   `scripts/build_linux_hexagon.sh` cross-builds vla.cpp with `GGML_HEXAGON=ON`

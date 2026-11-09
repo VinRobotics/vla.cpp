@@ -97,7 +97,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--gguf", type=str, default=None,
-        help="[cosmos3_edge] the GGUF vla-server runs: the caption settings (view description, fps, canvas, ...) "
+        help="[cosmos3_policy] the GGUF vla-server runs: the caption settings (view description, fps, canvas, ...) "
              "are read from it, so the prompt is the one the server's model was converted for.",
     )
     parser.add_argument(

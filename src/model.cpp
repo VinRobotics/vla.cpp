@@ -81,7 +81,7 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
         try_str("vla_jepa.architecture",   arch_str) ||
         try_str("vla_adapter.architecture", arch_str) ||
         try_str("turbovla.architecture",  arch_str) ||
-        try_str("cosmos3_edge.architecture", arch_str) ||
+        try_str("cosmos3_policy.architecture", arch_str) ||
         try_str("act.architecture",       arch_str)) {
         if      (arch_str == "smolvla")    {
             *out = Arch::SMOLVLA;
@@ -139,8 +139,8 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
             *out = Arch::ACT;
             ok = true;
         }
-        else if (arch_str == "cosmos3_edge") {
-            *out = Arch::COSMOS3_EDGE;
+        else if (arch_str == "cosmos3_policy") {
+            *out = Arch::COSMOS3_POLICY;
             ok = true;
         }
     }
@@ -327,9 +327,9 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
             std::printf("vla: arch = act\n");
             impl = act_create(mmproj_path, ckpt_path, config_path, opts);
             break;
-        case Arch::COSMOS3_EDGE:
-            std::printf("vla: arch = cosmos3_edge\n");
-            impl = cosmos3_edge_create(mmproj_path, ckpt_path, config_path, opts);
+        case Arch::COSMOS3_POLICY:
+            std::printf("vla: arch = cosmos3_policy\n");
+            impl = cosmos3_policy_create(mmproj_path, ckpt_path, config_path, opts);
             break;
     }
     if (!impl)

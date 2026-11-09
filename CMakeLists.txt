@@ -259,7 +259,7 @@ add_library(vla_core ${VLA_CORE_LIB_TYPE}
     src/models/turbovla.cpp
     src/models/act.cpp
     src/models/octo.cpp
-    src/models/cosmos3_edge.cpp
+    src/models/cosmos3_policy.cpp
     src/tokenizer.cpp
 )
 target_include_directories(vla_core

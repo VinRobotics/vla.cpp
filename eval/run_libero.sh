@@ -38,7 +38,7 @@ Usage: $(basename "$0") -i <MODELS_ROOT> [-o <OUTPUT_ROOT>] [-n <N_EPISODES>] [-
   -m MODEL         which model to run: smol | pi0 | pi05 | bit | evo1 |
                                        vla_adapter | openvla_oft |
                                        gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 |
-                                       octo | turbovla | vla_jepa | cosmos3_edge | all
+                                       octo | turbovla | vla_jepa | cosmos3_policy | all
                    (default: all)
   -h               show this help
 
@@ -49,10 +49,10 @@ Env overrides: BIND_ADDR, CLIENT_ADDR, BITVLA_TOKENIZER, GR00T_N1_6_TOKENIZER,
                SERVER_BIN (prebuilt vla-server; setting it skips the build),
                VLA_JEPA_PYTHON (python for the vla_jepa client; it needs LIBERO and
                                 transformers>=5.4, default is the LIBERO venv),
-               COSMOS3_EDGE_PYTHON (python for the cosmos3_edge client, which needs LIBERO and a
+               COSMOS3_POLICY_PYTHON (python for the cosmos3_policy client, which needs LIBERO and a
                                 transformers that reads the policy's tokenizer, default is the LIBERO venv),
-               COSMOS3_EDGE_TOKENIZER (the policy's tokenizer/ directory, default nvidia/Cosmos3-Edge
-                                from the Hub), COSMOS3_EDGE_RECV_TIMEOUT_MS (client wait per chunk, default 300000),
+               COSMOS3_POLICY_TOKENIZER (the policy's tokenizer/ directory, default nvidia/Cosmos3 Policy
+                                from the Hub), COSMOS3_POLICY_RECV_TIMEOUT_MS (client wait per chunk, default 300000),
                VLA_FIXED_NOISE_SEED (client-side noise, for paired A/B runs)
 EOF
 }
@@ -78,9 +78,9 @@ done
 shift $((OPTIND - 1))
 
 case "${MODEL}" in
-    smol|pi0|pi05|bit|evo1|vla_adapter|openvla_oft|gr00t_n1_5|gr00t_n1_6|gr00t_n1_7|octo|turbovla|vla_jepa|cosmos3_edge|all) ;;
+    smol|pi0|pi05|bit|evo1|vla_adapter|openvla_oft|gr00t_n1_5|gr00t_n1_6|gr00t_n1_7|octo|turbovla|vla_jepa|cosmos3_policy|all) ;;
     *)
-        echo "ERROR: -m must be one of: smol | pi0 | pi05 | bit | evo1 | vla_adapter | openvla_oft | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | octo | turbovla | vla_jepa | cosmos3_edge | all (got '${MODEL}')" >&2
+        echo "ERROR: -m must be one of: smol | pi0 | pi05 | bit | evo1 | vla_adapter | openvla_oft | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | octo | turbovla | vla_jepa | cosmos3_policy | all (got '${MODEL}')" >&2
         exit 1
         ;;
 esac
@@ -117,9 +117,9 @@ TASK_IDS="${TASK_IDS:-0 1 2 3 4 5 6 7 8 9}"
 PALIGEMMA_TOKENIZER="${PALIGEMMA_TOKENIZER:-}"
 VENV_PY="${REPO_ROOT}/eval/sim/libero/libero_uv/.venv/bin/python"
 VLA_JEPA_PYTHON="${VLA_JEPA_PYTHON:-${VENV_PY}}"
-COSMOS3_EDGE_PYTHON="${COSMOS3_EDGE_PYTHON:-${VENV_PY}}"
-COSMOS3_EDGE_TOKENIZER="${COSMOS3_EDGE_TOKENIZER:-}"
-COSMOS3_EDGE_RECV_TIMEOUT_MS="${COSMOS3_EDGE_RECV_TIMEOUT_MS:-300000}"
+COSMOS3_POLICY_PYTHON="${COSMOS3_POLICY_PYTHON:-${VENV_PY}}"
+COSMOS3_POLICY_TOKENIZER="${COSMOS3_POLICY_TOKENIZER:-}"
+COSMOS3_POLICY_RECV_TIMEOUT_MS="${COSMOS3_POLICY_RECV_TIMEOUT_MS:-300000}"
 CLIENT="${REPO_ROOT}/eval/client/run_sim_client_direct.py"
 BIND_ADDR="${BIND_ADDR:-tcp://*:5555}"
 CLIENT_ADDR="${CLIENT_ADDR:-tcp://localhost:5555}"
@@ -154,7 +154,7 @@ N_ACTION_STEPS_GR00T_N1_7="${N_ACTION_STEPS_GR00T_N1_7:-16}" # N1.7 H4 closeout 
 N_ACTION_STEPS_OCTO="${N_ACTION_STEPS_OCTO:-4}"
 N_ACTION_STEPS_TURBOVLA="${N_ACTION_STEPS_TURBOVLA:-12}"
 N_ACTION_STEPS_VLA_JEPA="${N_ACTION_STEPS_VLA_JEPA:-7}"
-N_ACTION_STEPS_COSMOS3_EDGE="${N_ACTION_STEPS_COSMOS3_EDGE:-16}" # Cosmos3-Edge executes the whole 16-action chunk
+N_ACTION_STEPS_COSMOS3_POLICY="${N_ACTION_STEPS_COSMOS3_POLICY:-16}" # Cosmos3 Policy executes the whole 16-action chunk
 
 mkdir -p "${OUTPUT_ROOT}"
 OUTPUT_ROOT="$(cd "${OUTPUT_ROOT}" && pwd)"
@@ -183,9 +183,9 @@ if [[ ! -x "${SERVER_BIN}" ]]; then
     echo "ERROR: ${SERVER_BIN} not found after build." >&2
     exit 1
 fi
-# The cosmos3_edge client may run in another python that has LIBERO (COSMOS3_EDGE_PYTHON), as vla_jepa's may.
+# The cosmos3_policy client may run in another python that has LIBERO (COSMOS3_POLICY_PYTHON), as vla_jepa's may.
 need_libero_venv=1
-if [[ "${MODEL}" == cosmos3_edge && "${COSMOS3_EDGE_PYTHON}" != "${VENV_PY}" && -x "${COSMOS3_EDGE_PYTHON}" ]]; then
+if [[ "${MODEL}" == cosmos3_policy && "${COSMOS3_POLICY_PYTHON}" != "${VENV_PY}" && -x "${COSMOS3_POLICY_PYTHON}" ]]; then
     need_libero_venv=0
 fi
 if (( need_libero_venv )) && [[ ! -x "${VENV_PY}" ]]; then
@@ -329,16 +329,16 @@ run_model() {
     if [[ "${arch}" == vla_jepa ]]; then
         client_py="${VLA_JEPA_PYTHON}"
     fi
-    # cosmos3_edge: the tokenizer is the policy's (nvidia/Cosmos3-Edge on the Hub unless a local copy is given), the
+    # cosmos3_policy: the tokenizer is the policy's (nvidia/Cosmos3 Policy on the Hub unless a local copy is given), the
     # caption settings are read from the GGUF the server runs, and a chunk takes seconds on a GPU but about a minute
     # on a CPU, so the client waits longer than its 30 s default.
-    if [[ "${arch}" == cosmos3_edge ]]; then
-        client_py="${COSMOS3_EDGE_PYTHON}"
+    if [[ "${arch}" == cosmos3_policy ]]; then
+        client_py="${COSMOS3_POLICY_PYTHON}"
         client_extra+=(--gguf "${server_args[0]}")
-        if [[ -n "${COSMOS3_EDGE_TOKENIZER}" ]]; then
-            client_extra+=(--tokenizer "${COSMOS3_EDGE_TOKENIZER}")
+        if [[ -n "${COSMOS3_POLICY_TOKENIZER}" ]]; then
+            client_extra+=(--tokenizer "${COSMOS3_POLICY_TOKENIZER}")
         fi
-        client_extra+=(--recv-timeout-ms "${COSMOS3_EDGE_RECV_TIMEOUT_MS}")
+        client_extra+=(--recv-timeout-ms "${COSMOS3_POLICY_RECV_TIMEOUT_MS}")
     fi
 
     # bitvla auto-loads tokenizer + dataset_statistics.json from the GGUF repo on
@@ -576,16 +576,16 @@ if should_run vla_jepa; then
     fi
 fi
 
-# cosmos3_edge: the GGUF of scripts/convert_cosmos3_edge_to_gguf.py (docs/MODELS.md#cosmos3-edge-world-action-model), not
+# cosmos3_policy: the GGUF of scripts/convert_cosmos3_policy_to_gguf.py (docs/MODELS.md#cosmos3-policy-world-action-model), not
 # published yet, so a missing one is skipped instead of failing a sweep over all models.
-if should_run cosmos3_edge; then
-    cosmos3_gguf="${MODELS_ROOT}/cosmos3-edge-libero-gguf/cosmos3-edge-libero-bf16.gguf"
+if should_run cosmos3_policy; then
+    cosmos3_gguf="${MODELS_ROOT}/cosmos3-policy-libero-gguf/cosmos3-policy-libero-bf16.gguf"
     if [[ ! -f "${cosmos3_gguf}" ]]; then
-        echo "[skip] cosmos3_edge: ${cosmos3_gguf} not found"
+        echo "[skip] cosmos3_policy: ${cosmos3_gguf} not found"
     else
-        run_model cosmos3_edge \
-            "${MODELS_ROOT}/cosmos3-edge-libero-gguf" \
-            "${N_ACTION_STEPS_COSMOS3_EDGE}" \
+        run_model cosmos3_policy \
+            "${MODELS_ROOT}/cosmos3-policy-libero-gguf" \
+            "${N_ACTION_STEPS_COSMOS3_POLICY}" \
             "" \
             "${cosmos3_gguf}"
     fi

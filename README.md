@@ -102,7 +102,7 @@ Use [ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) and follow [t
 | [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | Y | - | Y |
 | [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | Y | Y | Y | Y | Y |
 | [ACT](https://hf.co/ravediamond/act-aloha-sim-transfer-cube-gguf) | Y | Y | Y | ~ | Y | ~ | ~ |
-| [Cosmos3-Edge](docs/MODELS.md#cosmos3-edge-world-action-model) (WAM)  | ~ | ~ | - | - | - | - | - |
+| [Cosmos3 Policy](docs/MODELS.md#cosmos3-policy-world-action-model) (WAM)  | ~ | ~ | - | - | - | - | - |
 
 Legend: `Y` = supported (released and benchmarked), `~` = in progress, `-` = planned.
 

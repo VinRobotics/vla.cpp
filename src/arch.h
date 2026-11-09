@@ -73,7 +73,7 @@ enum class Arch {
     VLA_JEPA,   // LeRobot Qwen3-VL-2B-Instruct+V-JEPÀ+DiT-B FM.
     TURBOVLA,   // TurboVLA (DINOv3 + BERT + VL Fusion + ACT decoder).
     ACT,        // LeRobot ACT (ResNet + transformer encoder-decoder, no language).
-    COSMOS3_EDGE,// NVIDIA Cosmos3-Edge world-action model (Nemotron MoT + Wan2.2 VAE, UniPC).
+    COSMOS3_POLICY,// NVIDIA Cosmos3 Policy world-action model (Nemotron MoT + Wan2.2 VAE, UniPC).
 };
 
 /**
@@ -253,10 +253,10 @@ std::unique_ptr<ModelArchBase> act_create(const std::string& mmproj_path,
                                           const Options& opts);
 
 /**
- * @brief Build a Cosmos3-Edge model (LIBERO). The VAE is baked into @p ckpt_path; the graphs are generated.
+ * @brief Build a Cosmos3 Policy model (LIBERO). The VAE is baked into @p ckpt_path; the graphs are generated.
  * @copydetails smolvla_create
  */
-std::unique_ptr<ModelArchBase> cosmos3_edge_create(const std::string& mmproj_path,
+std::unique_ptr<ModelArchBase> cosmos3_policy_create(const std::string& mmproj_path,
                                                    const std::string& ckpt_path,
                                                    const std::string& config_path,
                                                    const Options& opts);
