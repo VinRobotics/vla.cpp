@@ -27,7 +27,7 @@
 #include "model.h"
 #include "options.h"
 #include "serving/hf_fetch.h"
-#include "models/cosmos3_edge_prompt.h"
+#include "models/cosmos3_edge.h"
 #include "tokenizer.h"
 
 #define STB_IMAGE_IMPLEMENTATION

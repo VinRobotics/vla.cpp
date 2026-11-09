@@ -27,7 +27,7 @@ tokenizer/. Only what inference needs is written:
 - the timestep embedding, in f32 as the policy keeps it;
 - the latent statistics of the VAE, the action quantiles of the unnormalizer, the canvas layout of the policy's
   cameras, the caption settings of the prompt step and the byte-level BPE tokenizer (llama.cpp's
-  `tokenizer.ggml.*` keys), so `vla-cli --text` builds the prompt itself (src/models/cosmos3_edge_prompt.cpp).
+  `tokenizer.ggml.*` keys), so `vla-cli --text` builds the prompt itself (src/models/cosmos3_edge.cpp).
 
 GEMM weights keep the checkpoint's bf16 (the engine casts them to its matmul type at load), norms and biases
 are f32.

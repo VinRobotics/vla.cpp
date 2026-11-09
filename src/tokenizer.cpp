@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #include "tokenizer.h"
-#include "models/cosmos3_edge_prompt.h"
+#include "models/cosmos3_edge.h"
 
 #ifdef VLA_USE_SPM
 #include "sentencepiece_processor.h"

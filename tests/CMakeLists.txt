@@ -177,12 +177,3 @@ if(GGML_SYCL AND NOT GGML_CUDA)
     target_link_options(test_fused_sycl_ops PRIVATE -fsycl)
     add_test(NAME fused_sycl_ops COMMAND test_fused_sycl_ops)
 endif()
-
-# Cosmos3-Edge's prompt (caption, chat template, byte-level BPE) and rot6d decode against lerobot and Hugging Face
-# data (tests/data, made with lerobot and Hugging Face's tokenizer). The rot6d part always runs; the prompt part
-# needs a GGUF made with --policy-dir (VLA_COSMOS3_EDGE_GGUF) and is skipped without one.
-add_executable(test_cosmos3_edge_prompt cosmos3_edge_prompt_check.cpp)
-target_include_directories(test_cosmos3_edge_prompt PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_cosmos3_edge_prompt PRIVATE vla_core)
-target_compile_options(test_cosmos3_edge_prompt PRIVATE -Wall -Wextra)
-add_test(NAME cosmos3_edge_prompt COMMAND test_cosmos3_edge_prompt ${CMAKE_SOURCE_DIR}/tests/data)

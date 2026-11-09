@@ -11,7 +11,7 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   steps). `src/models/cosmos3_edge.cpp` writes the Wan2.2 VAE encoder and the two-stream Nemotron 3 backbone
   as ggml graphs after lerobot's `policies/cosmos3`, runs the UniPC solver on the host, and composes the
   canvas the model expects (two views side by side, bicubic with antialias, reflection padding).
-  `src/models/cosmos3_edge_prompt.cpp` builds the prompt from the instruction (JSON caption, chat template,
+  The same file builds the prompt from the instruction (JSON caption, chat template,
   a byte-level BPE read from the GGUF; ASCII text only) and decodes rot6d to LIBERO commands, so
   `vla-cli --text ... --libero` works. `scripts/convert_cosmos3_edge_to_gguf.py` reads the checkpoint's
   safetensors (encoder, both streams, the LIBERO domain's action projections, statistics, tokenizer).

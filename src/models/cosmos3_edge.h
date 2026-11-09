@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Cosmos3-Edge outside the graphs: the prompt (lerobot's Cosmos3PromptProcessorStep and
+// Cosmos3-Edge outside the graphs (src/models/cosmos3_edge.cpp): the prompt (lerobot's Cosmos3PromptProcessorStep and
 // Cosmos3TokenizerProcessorStep) and the LIBERO action decode (Cosmos3LiberoActionProcessorStep).
 //
 //  * The prompt is the JSON caption of the task in the chat template of the understanding stream, then the
 //    end-of-turn token and <|vision_start|>. The tokenizer is the model's byte-level BPE (131,072 tokens),
 //    read from the GGUF (`tokenizer.ggml.*`, the keys llama.cpp uses). It handles ASCII text only: its
 //    pre-tokenizer splits on Unicode letter classes, which are not implemented here, so other text is refused.
-//    Checked against Hugging Face's tokenizer and llama.cpp's (pre-tokenizer "tekken") on every LIBERO task.
 //  * rot6d -> axis-angle follows the lerobot step: the two columns and their cross product form a matrix that
 //    is projected onto SO(3), then converted to a rotation vector, in double precision.
 

@@ -139,8 +139,7 @@ transformers), `COSMOS3_EDGE_TOKENIZER` the local `tokenizer/` directory.
   synthetic velocity field. One chunk takes 4.3 s on the 3060 (VAE 0.11 s, prompt 0.11 s, 30 steps 4.1 s) and
   74 to 103 s on a 12-thread CPU.
 - *The prompt.* For the 40 LIBERO tasks and five edge cases the caption is byte-identical to lerobot's and
-  the ids to Hugging Face's, and 550 random ASCII and special-token texts tokenize identically
-  (`test_cosmos3_edge_prompt`, data in `tests/data`). llama.cpp's BPE (`b11223`, pre-tokenizer `tekken`, which uses
+  the ids to Hugging Face's, and 550 random ASCII and special-token texts tokenize identically. llama.cpp's BPE (`b11223`, pre-tokenizer `tekken`, which uses
   a rewritten approximation of the model's regex) gave the same ids on 607 of 607 texts, so the in-tree tokenizer
   was cross-checked against both. It implements the ASCII letter classes only, hence the ASCII limit.
 - *The action decode.* rot6d to axis-angle matches lerobot's to 7e-7 on 62 rows.
