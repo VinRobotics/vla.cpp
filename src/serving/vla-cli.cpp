@@ -134,6 +134,7 @@ const char * arch_slug(Arch a) {
         case Arch::TURBOVLA:    return "turbovla";
         case Arch::ACT:         return "act";
         case Arch::COSMOS3_POLICY: return "cosmos3_policy";
+        case Arch::COMPILED:    return "compiled";
     }
     return "";
 }
@@ -337,19 +338,25 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "vla-cli: cannot detect the arch of %s\n", ckpt.c_str());
         return 1;
     }
-    // ACT reads no instruction; every other arch needs one.
-    const bool takes_lang = arch != Arch::ACT;
+    // ACT reads no instruction; every other built-in arch needs one. A compiled
+    // program says in its manifest, which predict() checks after the load.
+    const bool takes_lang = arch != Arch::ACT && arch != Arch::COMPILED;
     if (takes_lang && tokens_s.empty() && text_s.empty()) {
         usage(argv[0]);
         return 1;
     }
-    if (!takes_lang && (!tokens_s.empty() || !text_s.empty())) {
+    if (arch == Arch::ACT && (!tokens_s.empty() || !text_s.empty())) {
         std::fprintf(stderr, "vla-cli: %s takes no instruction; drop --text/--tokens\n", arch_slug(arch));
         return 1;
     }
     if (libero && arch != Arch::COSMOS3_POLICY) {
         std::fprintf(stderr, "vla-cli: --libero decodes the 10-wide rot6d action of Cosmos3 Policy only; %s is %s\n",
                      ckpt.c_str(), arch_slug(arch));
+        return 1;
+    }
+    if (arch == Arch::COMPILED && !text_s.empty()) {
+        std::fprintf(stderr, "vla-cli: a compiled program carries no tokenizer; tokenize the instruction "
+                             "yourself and pass --tokens\n");
         return 1;
     }
     // Validate the cheap args before loading the model.

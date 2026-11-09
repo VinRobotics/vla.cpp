@@ -83,7 +83,7 @@ variables are in [docs/USAGE.md](docs/USAGE.md).
 
 Models (rows) against platforms (columns).
 Per-device latency and memory are in [docs/benchmark/](docs/benchmark).
-Use [ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) and follow [the instruction](docs/ARCHITECTURE.md#adding-an-architecture) to add a new model.
+A model not listed here runs without a vla.cpp change: compile it with [ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) and serve the GGUF ([docs/COMPILED.md](docs/COMPILED.md)).
 
 
 | Model | CPU (x86-64 / ARM) | [CUDA (NVIDIA)](docs/backend/cuda.md) | [ROCm (AMD)](docs/backend/rocm.md) | [SYCL (Intel)](docs/backend/sycl.md) | [Metal (Apple)](docs/backend/metal.md) | [OpenVINO (Intel)](docs/backend/ov.md) | [Hexagon (Qualcomm)](docs/backend/hexagon.md) |

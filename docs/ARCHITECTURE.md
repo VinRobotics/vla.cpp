@@ -13,7 +13,9 @@ map; the source is the detail.
 - `src/model.cpp` - loads a checkpoint, detects the architecture from its GGUF keys
   (or safetensors namespace), and dispatches to the matching factory.
 - `src/models/*.cpp` - one translation unit per architecture. Each owns its ggml
-  contexts, vision tower, weights, and compute graph.
+  contexts, vision tower, weights, and compute graph. `compiled.cpp` is the one
+  that owns no graph: it runs a GGUF written by ggml-compiler through its
+  runtime, from the `vla` manifest in `compiled_manifest.h` ([COMPILED.md](COMPILED.md)).
 - `src/gguf_reader.h` - the shared GGUF reader (metadata, tensor bytes,
   on-demand embedding rows). `src/loader.h` uploads weights at the resident dtype.
 - `src/layers/` - ggml building blocks: linear, attention, FFN, norms, RoPE,
@@ -92,40 +94,34 @@ reproduce ggml's output bit for bit ([backend/cuda.md](backend/cuda.md#the-bit-e
 
 ## Adding an architecture
 
-[ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) makes the graph
-implementation easier: compile the model's PyTorch inference path into ggml C++
-source, with one graph builder per stage and a GGUF containing weights and the
-compiled computation. Its
+New models are not hand-written into this tree. Compile the policy with
+[ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) into a GGUF that
+carries its weights, its op graphs and a `vla` serving manifest, and the
+`compiled` arch (`src/models/compiled.cpp`) serves it through ggml-compiler's
+runtime, built here against this tree's ggml. `vla-server`, `vla-cli`,
+`vla-bench` and `libvla` run it unchanged; every backend vla.cpp builds is
+available to it. [COMPILED.md](COMPILED.md) is the guide; ggml-compiler's
 [export guide](https://github.com/khanhnd61-vr/ggml-compiler/blob/main/docs/EXPORT.md)
 and [examples](https://github.com/khanhnd61-vr/ggml-compiler/tree/main/examples)
 cover ACT, SmolVLA, pi0/pi0.5, GR00T N1.7 and Diffusion Policy.
 
 1. Wrap the reference model in an `export.py:program` function returning a
-   `ggml_compiler.Program`. Define tensor inputs and outputs, fix deployment
-   shapes, and split iterative policies into an encoder/prefix stage and a
-   reusable denoising step. Record preprocessing, normalization, noise inputs,
-   and any prompt or embodiment specialization.
-2. Generate the ggml C++ source and GGUF:
+   `ggml_compiler.Program`: tensor inputs and outputs, fixed deployment
+   shapes, iterative policies split into a prefix stage and a reusable
+   denoising step, and the manifest (`ggml_compiler.vla`) naming each input's
+   role and preprocessing.
+2. Compile and verify:
 
    ```bash
-   ggml-compiler compile export.py:program --out out/new_model \
-     --emit gguf,cpp --name new_model
+   ggml-compiler compile export.py:program --out out/new_model --emit gguf
    ggml-compiler verify out/new_model/model.gguf --backend cpu
-   ggml-compiler verify out/new_model/model.gguf --backend cuda
    ```
 
-   Also compare the staged PyTorch inference with the original policy. The
-   compiler's `verify` checks against the staged reference saved at compile
-   time; build the emitted C++ checker to compare its graph builders with the
-   compiler runtime.
-3. Integrate the validated computation into a vla.cpp architecture. Adapt the
-   generated graph builders to vla.cpp's weight loader, graph lifecycle, and
-   prediction interface, including the policy's preprocessing and action units.
-   The generated C++ uses ggml-compiler's runtime/build API; its GGUF is not
-   automatically loadable by `vla-cli`. Check ggml version compatibility and
-   validate each target backend before marking it supported.
+3. `vla-server out/new_model/model.gguf`.
 
-For registration, extend the `Arch` enum, declare a `*_create` factory in `arch.h`, implement it under
-`src/models/`, wire detection and dispatch in `src/model.cpp`, and add a converter in
-`scripts/`. Reuse `gguf_reader.h`, `loader.h`, `layers/` and `modules/` rather than
-copying them. [CONTRIBUTING.md](../CONTRIBUTING.md) lists the exact sites.
+A hand-written arch is still how a model gets vla.cpp's own kernels (fused
+CUDA nodes, FoldQuant) and per-backend tuning. For one, extend the `Arch` enum,
+declare a `*_create` factory in `arch.h`, implement it under `src/models/`, wire
+detection and dispatch in `src/model.cpp`, and add a converter in `scripts/`.
+Reuse `gguf_reader.h`, `loader.h`, `layers/` and `modules/` rather than copying
+them. [CONTRIBUTING.md](../CONTRIBUTING.md) lists the exact sites.

@@ -14,6 +14,15 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   `scripts/convert_cosmos3_policy_to_gguf.py` converts the checkpoint. Agrees with lerobot's policy in bf16 to
   2e-3 to 2e-2 on the action chunk; the client preset `cosmos3_policy` and `eval/run_libero.sh -m cosmos3_policy`
   serve it. CPU and CUDA only.
+- **Models compiled by ggml-compiler.** A GGUF written by `ggml-compiler
+  compile` that carries a `vla` serving manifest loads as the `compiled` arch
+  and serves through `vla-server`, `vla-cli`, `vla-bench` and `libvla` with no
+  model-specific code: the manifest names each program input's role (camera,
+  instruction, state, noise) and preprocessing, and the actions output with its
+  statistics. ggml-compiler's runtime is built in-tree against vla.cpp's own
+  ggml (`VLA_COMPILED`, default ON), so compiled models run on every backend
+  vla.cpp builds. First version: fixed shapes, one entry point, token ids from
+  the client. [docs/COMPILED.md](docs/COMPILED.md).
 - **Hexagon NPU on the Qualcomm Dragonwing IQ-10 (Linux).**
   `scripts/build_linux_hexagon.sh` cross-builds vla.cpp with `GGML_HEXAGON=ON`
   in Qualcomm's toolchain container, `vla-server` included. On the IQ-10 (v81,

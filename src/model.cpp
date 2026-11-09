@@ -87,6 +87,10 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
             *out = Arch::SMOLVLA;
             ok = true;
         }
+        else if (arch_str == "ggml_compiler") {
+            *out = Arch::COMPILED;
+            ok = true;
+        }
         else if (arch_str == "pi0")        {
             *out = Arch::PI0;
             ok = true;
@@ -254,7 +258,8 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
                           : arch == Arch::VLA_ADAPTER ? "vla_adapter"
                           : arch == Arch::OPENVLA_OFT ? "openvla_oft"
                           : arch == Arch::TURBOVLA    ? "turbovla"
-                          : arch == Arch::ACT         ? "act" : nullptr;
+                          : arch == Arch::ACT         ? "act"
+                          : arch == Arch::COMPILED    ? "compiled" : nullptr;
         if (name) {
             std::fprintf(stderr, "vla(%s): num_steps is not supported\n", name);
             return nullptr;
@@ -330,6 +335,16 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
         case Arch::COSMOS3_POLICY:
             std::printf("vla: arch = cosmos3_policy\n");
             impl = cosmos3_policy_create(mmproj_path, ckpt_path, config_path, opts);
+            break;
+        case Arch::COMPILED:
+            std::printf("vla: arch = compiled (ggml-compiler)\n");
+#ifdef VLA_COMPILED
+            impl = compiled_create(mmproj_path, ckpt_path, config_path, opts);
+#else
+            std::fprintf(stderr, "vla: %s was written by ggml-compiler; this build has VLA_COMPILED=OFF\n",
+                         ckpt_path.c_str());
+            return nullptr;
+#endif
             break;
     }
     if (!impl)
