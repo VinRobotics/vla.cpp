@@ -179,17 +179,10 @@ if(GGML_SYCL AND NOT GGML_CUDA)
 endif()
 
 # Cosmos3-Edge's prompt (caption, chat template, byte-level BPE) and rot6d decode against lerobot and Hugging Face
-# data (tests/data, made by tests/py/make_cosmos3_edge_fixtures.py). The rot6d part always runs; the prompt part
+# data (tests/data, made with lerobot and Hugging Face's tokenizer). The rot6d part always runs; the prompt part
 # needs a GGUF made with --policy-dir (VLA_COSMOS3_EDGE_GGUF) and is skipped without one.
 add_executable(test_cosmos3_edge_prompt cosmos3_edge_prompt_check.cpp)
 target_include_directories(test_cosmos3_edge_prompt PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_cosmos3_edge_prompt PRIVATE vla_core)
 target_compile_options(test_cosmos3_edge_prompt PRIVATE -Wall -Wextra)
 add_test(NAME cosmos3_edge_prompt COMMAND test_cosmos3_edge_prompt ${CMAKE_SOURCE_DIR}/tests/data)
-
-# A C shim over the same code for the closed-loop LIBERO harness (ggml/eval_ggml.py in the model's repo), which
-# runs the C++ prompt and action decode in place of lerobot's. Test-only: not installed.
-add_library(cosmos3_edge_pyshim SHARED cosmos3_edge_pyshim.cpp)
-target_include_directories(cosmos3_edge_pyshim PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(cosmos3_edge_pyshim PRIVATE vla_core)
-target_compile_options(cosmos3_edge_pyshim PRIVATE -Wall -Wextra)

@@ -16,8 +16,7 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   `vla-cli --text ... --libero` works. `scripts/convert_cosmos3_edge_to_gguf.py` reads the checkpoint's
   safetensors (encoder, both streams, the LIBERO domain's action projections, statistics, tokenizer).
   Against lerobot's policy in bf16 on the same inputs the chunk agrees to 2.2e-3 (CUDA) and 2.6e-3 (CPU) on one
-  prompt and 1.8e-2 on another, within what the bf16 reference's own rounding allows (an f32-arithmetic
-  reference, `tests/py/cosmos3_edge_reference.py --dtype f32-stream`, is there to settle it). Captions, token ids
+  prompt and 1.8e-2 on another, within what the bf16 reference's own rounding allows. Captions, token ids
   and the action decode match lerobot and Hugging Face on every LIBERO task. `vla-server`
   serves it unchanged, and `eval/client/vla_cpp_client.py` has a `cosmos3_edge` preset (tokens from the caption
   and chat template, with the caption settings read from the server's GGUF through `--gguf`, rot6d decoded to

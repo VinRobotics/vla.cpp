@@ -29,8 +29,8 @@
 // Input contract (docs/MODELS.md): two camera views in the order [third person, wrist], composed into the
 // 192x320 canvas here exactly as lerobot's Cosmos3VideoCanvasProcessorStep does (or one canvas the caller
 // composed); the prompt as token ids, which src/models/cosmos3_edge_prompt.cpp builds from the instruction
-// (vla-cli --text); `Inputs::noise` the 16x10 action noise (the video noise is drawn here, or read from
-// VLA_COSMOS3_VIDEO_NOISE). cosmos3_libero_action (the prompt file) decodes the chunk to LIBERO commands.
+// (vla-cli --text); `Inputs::noise` the 16x10 action noise (the video noise is drawn here from a seed that
+// follows it). cosmos3_libero_action (the prompt file) decodes the chunk to LIBERO commands.
 
 #include "arch.h"
 #include "backend.h"
@@ -481,10 +481,7 @@ struct Cosmos3EdgeModelArch : public ModelArchBase {
     struct StepIO {
         ggml_tensor *xv = nullptr, *xa = nullptr, *tsin = nullptr;
         ggml_tensor *vv = nullptr, *va = nullptr;
-        // Debugging (VLA_COSMOS3_DUMP_DIR): the stream's input embeddings, layer 0's rotated queries and output.
-        ggml_tensor *dbg_emb = nullptr, *dbg_q0 = nullptr, *dbg_h0 = nullptr;
     };
-    std::string dump_dir;  // VLA_COSMOS3_DUMP_DIR: intermediate tensors of a call, for tests/py/cosmos3_edge_debug.py
     graph_cache<int, VaeIO>        vae_graph;
     graph_cache<int64_t, PrefixIO> prefix_graph;  // keyed by the prompt length
     graph_cache<int64_t, StepIO>   step_graph;
@@ -500,8 +497,7 @@ struct Cosmos3EdgeModelArch : public ModelArchBase {
         ggml_tensor *              cos = nullptr, *sin = nullptr;
     } kv;
 
-    std::string video_noise_file;
-    uint64_t    calls = 0;
+    uint64_t calls = 0;
 
     bool load_config(gguf_reader & g);
     bool load_weights(gguf_reader & g);
@@ -965,8 +961,6 @@ ggml_cgraph * Cosmos3EdgeModelArch::build_step(ggml_context * C, StepIO & io, in
     // Actions: action2llm of the embodiment, the modality embedding, the timestep embedding.
     ggml_tensor * ae = ggml_add(C, ggml_add(C, lin(C, a2l_w, a2l_b, io.xa), act_embed), temb);  // [hidden, chunk]
     ggml_tensor * h  = ggml_concat(C, ve, ae, 1);  // [hidden, n_gen]
-    if (!dump_dir.empty())
-        io.dbg_emb = h;
 
     for (int64_t i = 0; i < n_layers; i++) {
         const LayerW & L = layers[(size_t) i];
@@ -986,10 +980,6 @@ ggml_cgraph * Cosmos3EdgeModelArch::build_step(ggml_context * C, StepIO & io, in
         h = ggml_add(C, h, lin(C, L.gen.o, nullptr, attend(C, q, K, V, nullptr, n_gen)));
         x = rms_norm(C, h, L.gen.ffn_norm, rms_eps);
         h = ggml_add(C, h, lin(C, L.gen.down, nullptr, ggml_sqr(C, ggml_relu(C, lin(C, L.gen.up, nullptr, x)))));
-        if (i == 0 && !dump_dir.empty()) {
-            io.dbg_q0 = q;
-            io.dbg_h0 = h;
-        }
     }
     h = rms_norm(C, h, gen_out_norm, rms_eps);
     ggml_tensor * hv = ggml_view_2d(C, h, hidden, n_video, h->nb[1], 0);
@@ -1002,24 +992,7 @@ ggml_cgraph * Cosmos3EdgeModelArch::build_step(ggml_context * C, StepIO & io, in
     ggml_cgraph * gf = ggml_new_graph_custom(C, 8192, false);
     ggml_build_forward_expand(gf, io.vv);
     ggml_build_forward_expand(gf, io.va);
-    for (ggml_tensor * t : { io.dbg_emb, io.dbg_q0, io.dbg_h0 })
-        if (t) {
-            ggml_set_output(t);
-            ggml_build_forward_expand(gf, t);
-        }
     return gf;
-}
-
-// Debugging: a device tensor to <dump_dir>/<name>.f32, in ggml's layout (innermost dim first).
-void dump_tensor(const std::string & dir, const char * name, ggml_tensor * t) {
-    if (!t)
-        return;
-    std::vector<float> v((size_t) ggml_nelements(t));
-    ggml_backend_tensor_get(t, v.data(), 0, ggml_nbytes(t));
-    if (FILE * f = std::fopen((dir + "/" + name + ".f32").c_str(), "wb")) {
-        std::fwrite(v.data(), sizeof(float), v.size(), f);
-        std::fclose(f);
-    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1108,13 +1081,6 @@ std::vector<float> Cosmos3EdgeModelArch::predict(const Inputs & in) {
     std::vector<float> canvas;
     if (!make_canvas(in.images, in.n_images, layout, canvas))
         return {};
-    // Debugging: the canvas as the VAE reads it (CHW floats in uint8 levels), to compare with lerobot's.
-    if (const char * dump = std::getenv("VLA_COSMOS3_DUMP_CANVAS")) {
-        if (FILE * f = std::fopen(dump, "wb")) {
-            std::fwrite(canvas.data(), sizeof(float), canvas.size(), f);
-            std::fclose(f);
-        }
-    }
     if (!in.lang_tokens || in.n_lang <= 0) {
         std::fprintf(stderr, "%s: no prompt tokens (build them with the lerobot prompt and tokenizer steps)\n", kTag);
         return {};
@@ -1131,8 +1097,7 @@ std::vector<float> Cosmos3EdgeModelArch::predict(const Inputs & in) {
         return {};
     }
 
-    // Action noise from the caller; the video noise is drawn here from a seed that follows it, or read from a
-    // file of (frames-1)*ppf x patch_dim floats (VLA_COSMOS3_VIDEO_NOISE: for comparing with another implementation).
+    // Action noise from the caller; the video noise is drawn here from a seed that follows it.
     std::vector<float> an((size_t) (chunk * adim), 0.f);
     uint64_t           seed = 1469598103934665603ull;  // FNV-1a over the action noise, else a fixed seed
     if (in.noise) {
@@ -1151,16 +1116,7 @@ std::vector<float> Cosmos3EdgeModelArch::predict(const Inputs & in) {
         seed = rng();  // the video noise follows the action noise just drawn
     }
     std::vector<float> vn((size_t) ((frames - 1) * ppf * patch_dim));
-    if (!video_noise_file.empty()) {
-        FILE * f = std::fopen(video_noise_file.c_str(), "rb");
-        if (!f || std::fread(vn.data(), sizeof(float), vn.size(), f) != vn.size()) {
-            std::fprintf(stderr, "%s: cannot read %zu floats from %s\n", kTag, vn.size(), video_noise_file.c_str());
-            if (f)
-                std::fclose(f);
-            return {};
-        }
-        std::fclose(f);
-    } else {
+    {
         std::mt19937_64 rng(seed);
         std::normal_distribution<float> nd(0.f, 1.f);
         for (float & x : vn)
@@ -1218,12 +1174,6 @@ std::vector<float> Cosmos3EdgeModelArch::predict(const Inputs & in) {
                     const int64_t d     = ((y % latent_patch) * latent_patch + x % latent_patch) * z_dim + c;
                     xv[(size_t) (patch * patch_dim + d)] = z;
                 }
-        if (const char * dump = std::getenv("VLA_COSMOS3_DUMP_Z0")) {
-            if (FILE * f = std::fopen(dump, "wb")) {
-                std::fwrite(xv.data(), sizeof(float), (size_t) (ppf * patch_dim), f);
-                std::fclose(f);
-            }
-        }
     }
     // The 4 predicted frames start as pure noise (noise level 1), the condition frame stays clean.
     std::memcpy(&xv[(size_t) (ppf * patch_dim)], vn.data(), sizeof(float) * vn.size());
@@ -1258,12 +1208,6 @@ std::vector<float> Cosmos3EdgeModelArch::predict(const Inputs & in) {
             std::fprintf(stderr, "%s: prefix compute failed\n", kTag);
             return {};
         }
-        if (!dump_dir.empty()) {
-            dump_tensor(dump_dir, "kv_k0", kv.k[0]);
-            dump_tensor(dump_dir, "kv_v0", kv.v[0]);
-            dump_tensor(dump_dir, "kv_k_last", kv.k.back());
-            dump_tensor(dump_dir, "kv_v_last", kv.v.back());
-        }
     }
     const double t3 = now_ms();
 
@@ -1291,13 +1235,6 @@ std::vector<float> Cosmos3EdgeModelArch::predict(const Inputs & in) {
         }
         ggml_backend_tensor_get(io.vv, vv.data(), 0, ggml_nbytes(io.vv));
         ggml_backend_tensor_get(io.va, va.data(), 0, ggml_nbytes(io.va));
-        if (k == 0 && !dump_dir.empty()) {
-            dump_tensor(dump_dir, "step0_emb", io.dbg_emb);
-            dump_tensor(dump_dir, "step0_q0", io.dbg_q0);
-            dump_tensor(dump_dir, "step0_h0", io.dbg_h0);
-            dump_tensor(dump_dir, "step0_vv", io.vv);
-            dump_tensor(dump_dir, "step0_va", io.va);
-        }
         // mask_velocity: the condition frame has no velocity.
         std::fill(vv.begin(), vv.begin() + (ptrdiff_t) (ppf * patch_dim), 0.f);
         solver.step(k, sv, vv, xv);
@@ -1345,10 +1282,6 @@ std::unique_ptr<ModelArchBase> cosmos3_edge_create(const std::string & mmproj_pa
     }
     if (!m->load_config(g) || !resolve_num_steps("cosmos3_edge", opts, m->steps))
         return nullptr;
-    if (const char * f = std::getenv("VLA_COSMOS3_VIDEO_NOISE"))
-        m->video_noise_file = f;
-    if (const char * d = std::getenv("VLA_COSMOS3_DUMP_DIR"))
-        m->dump_dir = d;
 
     const Backend b = backend_init(kTag, m->n_threads);
     if (!b.handle)

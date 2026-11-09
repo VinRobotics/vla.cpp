@@ -96,8 +96,7 @@ antialias, composed side by side and fit into the 192x320 canvas the way lerobot
 composed itself. The instruction goes in as `--text`, which builds the JSON caption and the chat template of
 `Cosmos3PromptProcessorStep` and tokenizes it with the model's byte-level BPE from the GGUF; or as `--tokens`
 ids from lerobot. The text must be ASCII; anything else is refused. `noise` is the 16x10 action noise (random
-if omitted, or `VLA_COSMOS3_SEED`); the video noise is drawn here from a seed that follows it
-(`VLA_COSMOS3_VIDEO_NOISE=<file of 200x192 floats>` replaces it).
+if omitted, or `VLA_COSMOS3_SEED`); the video noise is drawn here from a seed that follows it.
 
 **Output.** The 16x10 chunk in dataset units, `[dpos(3), rot6d(6), gripper]`. `vla-cli --libero` prints the
 LIBERO command `[dpos(3), axis-angle(3), gripper]` instead (lerobot's `Cosmos3LiberoActionProcessorStep`);
@@ -131,16 +130,14 @@ transformers), `COSMOS3_EDGE_TOKENIZER` the local `tokenizer/` directory.
 **What was checked** (bf16 GGUF; CPU and CUDA on an RTX 3060):
 
 - *The engine*, against lerobot's policy run in bf16 (the configuration of its LIBERO numbers) on the same views,
-  tokens and noise (`tests/py/cosmos3_edge_reference.py` writes the case, `tests/py/cosmos3_edge_parity.py`
-  compares): on a 152-token prompt the 16x10 chunk agrees to a scaled error of 2.2e-3 on CUDA and 2.6e-3 on CPU,
-  on a 150-token prompt to 1.8e-2 (CUDA). The bf16 reference carries rounding of that order itself (its latent
-  differs from the engine's f32 one by 1e-2), so the second figure is not yet separated into engine and
-  reference error: `cosmos3_edge_reference.py --dtype f32-stream` (f32 arithmetic on the bf16 values, which
-  is what the engine computes) was written for that and has not been run to completion. Stage by stage at the
-  first step (`tests/py/cosmos3_edge_debug.py`): the prompt keys and values, the generation stream's
-  embeddings, layer 0's queries and output and both velocities agree to 5e-3 to 1e-2, the reference's precision.
-  The host UniPC port agrees with diffusers' scheduler to 5e-7 on a synthetic velocity field. One chunk takes
-  4.3 s on the 3060 (VAE 0.11 s, prompt 0.11 s, 30 steps 4.1 s) and 74 to 103 s on a 12-thread CPU.
+  tokens and noise: on a 152-token prompt the 16x10 chunk agrees to a scaled error of 2.2e-3 on CUDA and 2.6e-3
+  on CPU, on a 150-token prompt to 1.8e-2 (CUDA). The bf16 reference carries rounding of that order itself (its
+  latent differs from the engine's f32 one by 1e-2), so the second figure is not yet separated into engine and
+  reference error; an f32 reference run is what settles it. Stage by stage at the first step, the prompt keys
+  and values, the generation stream's embeddings, layer 0's queries and output and both velocities agree to
+  5e-3 to 1e-2, the reference's precision. The host UniPC port agrees with diffusers' scheduler to 5e-7 on a
+  synthetic velocity field. One chunk takes 4.3 s on the 3060 (VAE 0.11 s, prompt 0.11 s, 30 steps 4.1 s) and
+  74 to 103 s on a 12-thread CPU.
 - *The prompt.* For the 40 LIBERO tasks and five edge cases the caption is byte-identical to lerobot's and
   the ids to Hugging Face's, and 550 random ASCII and special-token texts tokenize identically
   (`test_cosmos3_edge_prompt`, data in `tests/data`). llama.cpp's BPE (`b11223`, pre-tokenizer `tekken`, which uses
@@ -150,12 +147,11 @@ transformers), `COSMOS3_EDGE_TOKENIZER` the local `tokenizer/` directory.
 - *The canvas.* The C++ canvas matches torch's CPU result to within one pixel of 184,320 on random images. It
   differs from the canvas lerobot makes on a GPU in 33 to 38 pixels, by one level each, as torch's own CPU and
   CUDA results do; the actions on the two canvases differ by less than the engine-reference gap above.
-- *The server* (CPU, an earlier revision of the engine, `tests/py/cosmos3_edge_server_check.py`). A request for
-  one case returned exactly what a direct `libvla` call returned on the same inputs, the client built the same
-  150 token ids as the case's, its numpy rot6d decode matched lerobot's to 7e-7, and `get_action` returned a
-  whole chunk of 16 finite LIBERO commands. Through `eval/run_libero.sh -m cosmos3_edge -s libero_spatial` (task
-  0, one episode, CPU) the episode was solved. The engine has been rewritten since; the server path itself is
-  unchanged.
+- *The server* (CPU, an earlier revision of the engine). A request for one case returned exactly what a direct
+  `libvla` call returned on the same inputs, the client built the same 150 token ids as the case's, its numpy
+  rot6d decode matched lerobot's to 7e-7, and `get_action` returned a whole chunk of 16 finite LIBERO commands.
+  Through `eval/run_libero.sh -m cosmos3_edge -s libero_spatial` (task 0, one episode, CPU) the episode was
+  solved. The engine has been rewritten since; the server path itself is unchanged.
 
 Not checked with the hand-written engine: the closed loop on LIBERO (an earlier revision of this port, with
 graphs generated from the same PyTorch path, solved 19 of 20 libero_spatial episodes and reached 96.45% over all
