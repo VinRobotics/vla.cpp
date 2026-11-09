@@ -435,6 +435,54 @@ def test_cosmos3_edge_converter_program():
         raise AssertionError("a program that is not Cosmos3-Edge's was accepted")
 
 
+def test_cosmos3_edge_converter_tokenizer(tmp_path):
+    """add_tokenizer takes the specials of tokenizer_config.json as strings, AddedToken dicts or null, and skips
+    one that is not a token, instead of indexing the vocabulary with them."""
+    _stub_deps()
+    sys.path.insert(0, str(SCRIPTS))
+    import json
+    import convert_cosmos3_edge_to_gguf as c
+
+    vocab = {"a": 0, "b": 1, "<s>": 2, "<|im_end|>": 3, "ab": 4}
+    (tmp_path / "tokenizer.json").write_text(json.dumps({
+        "model": {"type": "BPE", "ignore_merges": True, "vocab": vocab, "merges": [["a", "b"]]},
+        "added_tokens": [{"id": 2, "content": "<s>", "special": True}, {"id": 3, "content": "<|im_end|>", "special": False}],
+    }))
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps({
+        "unk_token": None,                                      # a byte-level BPE needs none
+        "bos_token": {"content": "<s>", "special": True},       # an AddedToken dict
+        "eos_token": "<|im_end|>",
+        "pad_token": "<pad>",                                   # not a token of this vocabulary
+    }))
+
+    class W:
+        def __init__(self): self.kv = {}
+        def add_string(self, k, v): self.kv[k] = v
+        def add_uint32(self, k, v): self.kv[k] = v
+        def add_bool(self, k, v): self.kv[k] = v
+        def add_array(self, k, v): self.kv[k] = list(v)
+
+    w = W()
+    c.add_tokenizer(w, tmp_path)
+    assert w.kv["tokenizer.ggml.tokens"] == ["a", "b", "<s>", "<|im_end|>", "ab"]
+    assert w.kv["tokenizer.ggml.token_type"] == [1, 1, 3, 4, 1]   # no unknown token marked
+    assert w.kv["tokenizer.ggml.merges"] == ["a b"]
+    assert w.kv["tokenizer.ggml.bos_token_id"] == 2 and w.kv["tokenizer.ggml.eos_token_id"] == 3
+    assert "tokenizer.ggml.unknown_token_id" not in w.kv and "tokenizer.ggml.padding_token_id" not in w.kv
+
+    # An added token outside the vocabulary has no byte-level spelling for the C++ to read: refused by name.
+    (tmp_path / "tokenizer.json").write_text(json.dumps({
+        "model": {"type": "BPE", "ignore_merges": True, "vocab": vocab, "merges": []},
+        "added_tokens": [{"id": 5, "content": "<extra>", "special": True}],
+    }))
+    try:
+        c.add_tokenizer(W(), tmp_path)
+    except SystemExit as e:
+        assert "<extra>" in str(e)
+    else:
+        raise AssertionError("an added token outside the vocabulary was accepted")
+
+
 def test_quantize_skip_names():
     import importlib
     Q = importlib.import_module("quantize_gguf")

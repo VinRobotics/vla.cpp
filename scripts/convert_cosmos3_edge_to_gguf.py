@@ -147,8 +147,23 @@ def add_tokenizer(writer, tok_dir: Path) -> None:
         raise SystemExit("the vocabulary has gaps")
     types = [1] * len(tokens)  # llama.cpp: 1 normal, 2 unknown, 3 control, 4 user defined
     for a in d["added_tokens"]:
+        if a["id"] >= len(tokens):  # the C++ reads the vocabulary's spellings; a token outside it has none
+            raise SystemExit(f"added token {a['content']!r} (id {a['id']}) is not in the vocabulary of {len(tokens)}")
         types[a["id"]] = 3 if a["special"] else 4
-    types[vocab[cfg["unk_token"]]] = 2
+    # The specials of tokenizer_config.json: a string, an AddedToken dict or null (a byte-level BPE needs no
+    # unknown token); one that is not a token is left out rather than guessed.
+    ids = dict(vocab)
+    ids.update((a["content"], a["id"]) for a in d["added_tokens"])
+
+    def special_id(name: str) -> int | None:
+        t = cfg.get(name)
+        if isinstance(t, dict):
+            t = t.get("content")
+        return ids.get(t) if isinstance(t, str) else None
+
+    unk = special_id("unk_token")
+    if unk is not None:
+        types[unk] = 2
     merges = [" ".join(x) if isinstance(x, list) else x for x in m["merges"]]
     writer.add_string("tokenizer.ggml.model", "gpt2")
     writer.add_string("tokenizer.ggml.pre", "tekken")
@@ -157,7 +172,9 @@ def add_tokenizer(writer, tok_dir: Path) -> None:
     writer.add_array("tokenizer.ggml.merges", merges)
     for key, name in (("bos_token_id", "bos_token"), ("eos_token_id", "eos_token"), ("unknown_token_id", "unk_token"),
                       ("padding_token_id", "pad_token")):
-        writer.add_uint32(f"tokenizer.ggml.{key}", vocab[cfg[name]])
+        i = special_id(name)
+        if i is not None:
+            writer.add_uint32(f"tokenizer.ggml.{key}", i)
     writer.add_bool("tokenizer.ggml.add_bos_token", False)
     print(f"tokenizer: {len(tokens)} tokens, {len(merges)} merges, {sum(t in (3, 4) for t in types)} special")
 
