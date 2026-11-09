@@ -29,7 +29,7 @@ case say so in the commit message and back it with a LIBERO sweep.
 
 `VLA_IMG_SIZE` must match the model or `predict` returns empty: 512 for
 SmolVLA, 448 for Evo-1, 256 for GR00T N1.7 and VLA-JEPA, 256 with 2 views for
-TurboVLA, 224 for the rest. Other knobs: `VLA_BENCH_ITERS` (timing),
+TurboVLA and Cosmos3-Edge, 224 for the rest. Other knobs: `VLA_BENCH_ITERS` (timing),
 `VLA_TIMING=phase`, `VLA_EXTRA_TOKEN` / `VLA_EXTRA_COUNT` (VLA-JEPA needs its
 `<embodied>` tokens; Octo needs exactly 16 tokens, so
 `VLA_EXTRA_TOKEN=0 VLA_EXTRA_COUNT=10`), `VLA_OCTO_UNNORM_DATASET` (Octo, e.g.
