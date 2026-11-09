@@ -23,7 +23,9 @@
 //   init(z0, video_noise, action_noise) -> the 8 values the denoising loop carries
 //   step(carries, K/V, ..., 10 scalars) x 30                     one UniPC update, the scalars per step
 //   finish(xa)                       -> actions              de-normalized (q01/q99), rot6d
-// Values that cross stages stay in one device buffer; a graph writes its outputs into it with ggml_cpy.
+// Values that cross stages stay in one device buffer; a graph writes its outputs into it with ggml_cpy. The
+// step graph ends by copying its outputs back into the carries it read, so a denoising step is one graph
+// compute and one upload of its 10 scalars, with no other host round trip.
 //
 // The input contract is the one of the compiled program (see docs/MODELS.md): two camera views, in the
 // order [third person, wrist], composed into the 192x320 canvas here exactly as lerobot's
@@ -70,7 +72,7 @@ constexpr int kLayers       = 28;
 constexpr int kPrefixOuts   = kLayers * 2 + 3;  // K and V per layer, bias, cos, sin
 constexpr int kScalars      = 10;   // t sigma E A B C D Fc Gc Hc
 constexpr int kStageCount   = 5;
-constexpr int kExpectedTensors = 649;
+constexpr int kGraphNodes   = 16384;  // the cap of one stage graph; the largest (step) has about 2,200 nodes
 
 enum StageId { VAE = 0, PREFIX = 1, INIT = 2, STEP = 3, FINISH = 4 };
 
@@ -290,7 +292,8 @@ struct Cosmos3EdgeModelArch : public ModelArchBase {
     std::vector<ggml_tensor *> prefix_out;  // kPrefixOuts
     ggml_tensor *              carry_in[kCarries]  = {};
     ggml_tensor *              carry_out[kCarries] = {};
-    ggml_tensor *              scalar[kScalars]    = {};
+    ggml_tensor *              scalars_cur         = nullptr;  // [kScalars] of the current step
+    ggml_tensor *              scalar[kScalars]    = {};       // its elements, the step graph's parameters
     ggml_tensor *              actions_out         = nullptr;
 
     std::vector<float> step_scalars;  // [steps][kScalars]
@@ -356,11 +359,8 @@ bool Cosmos3EdgeModelArch::load_weights(gguf_reader & g) {
         W[name] = t;
         names.push_back(name);
     }
-    if ((int) names.size() != kExpectedTensors) {
-        std::fprintf(stderr, "vla(cosmos3_edge): %zu weight tensors, the graphs were generated for %d; "
-                             "regenerate them with scripts/port_cosmos3_graphs.py\n", names.size(), kExpectedTensors);
-        return false;
-    }
+    // Whether these are the weights the graphs were generated for is checked by the builders: a weight they
+    // look up and do not find fails the stage by name.
     buf_w = alloc_weights(ctx_w, backend);
     if (!buf_w) {
         std::fprintf(stderr, "vla(cosmos3_edge): cannot allocate the weights (%zu tensors)\n", names.size());
@@ -383,7 +383,9 @@ bool Cosmos3EdgeModelArch::build_stage(StageId id, int (*fn)(graphs::ggml_compil
                                        std::vector<ggml_tensor *> params, size_t n_out,
                                        std::vector<ggml_tensor *> & outs) {
     Stage & s = stage[id];
-    ggml_init_params p = { (size_t) 96 << 20, nullptr, true };
+    // Metadata only (no_alloc): room for the graph's tensors and the graph itself, as act.cpp sizes its arena.
+    ggml_init_params p = { ggml_tensor_overhead() * (size_t) kGraphNodes + ggml_graph_overhead_custom(kGraphNodes, false),
+                           nullptr, true };
     s.ctx = ggml_init(p);
     if (!s.ctx)
         return false;
@@ -416,13 +418,15 @@ bool Cosmos3EdgeModelArch::build_all() {
     mask   = state(GGML_TYPE_F32, prompt_len, 1);
     vnoise = state(GGML_TYPE_F32, vn_dim, vn_tokens, 1);
     anoise = state(GGML_TYPE_F32, adim, horizon, 1);
-    for (auto & t : scalar)
-        t = state(GGML_TYPE_F32, 1);
+    // The 10 scalars of a step are one tensor, uploaded once per step; the graph reads them as 1-element views.
+    scalars_cur = state(GGML_TYPE_F32, kScalars);
+    for (int j = 0; j < kScalars; j++)
+        scalar[j] = ggml_view_1d(ctx_s, scalars_cur, 1, (size_t) j * sizeof(float));
 
     // Each stage: build, give every output a persistent home, add the copies to the graph.
     auto finish_graph = [&](StageId id, const std::vector<ggml_tensor *> & outs, const std::vector<ggml_tensor *> & dsts) {
         Stage & s = stage[id];
-        s.gf      = ggml_new_graph_custom(s.ctx, 16384, false);
+        s.gf      = ggml_new_graph_custom(s.ctx, kGraphNodes, false);
         for (size_t i = 0; i < outs.size(); i++)
             ggml_build_forward_expand(s.gf, ggml_cpy(s.ctx, outs[i], dsts[i]));
     };
@@ -460,6 +464,11 @@ bool Cosmos3EdgeModelArch::build_all() {
             carry_out[i] = state_like(outs[(size_t) i]);
         }
         finish_graph(STEP, outs, std::vector<ggml_tensor *>(carry_out, carry_out + kCarries));
+        // Then the carries of the next step: the outputs copied back into the tensors the step read. These
+        // are the last nodes of the graph, after every output is written, and a backend runs a graph's nodes
+        // in order, so the loop needs no device-to-device copies from the host.
+        for (int i = 0; i < kCarries; i++)
+            ggml_build_forward_expand(stage[STEP].gf, ggml_cpy(stage[STEP].ctx, carry_out[i], carry_in[i]));
     }
 
     // finish reads xa, the second carry.
@@ -574,13 +583,10 @@ std::vector<float> Cosmos3EdgeModelArch::predict(const Inputs & in) {
     if (!run(PREFIX) || !run(INIT))
         return {};
     const double t3 = now_ms();
-    for (int k = 0; k < steps; k++) {
-        for (int j = 0; j < kScalars; j++)
-            ggml_backend_tensor_set(scalar[j], &step_scalars[(size_t) k * kScalars + (size_t) j], 0, sizeof(float));
+    for (int k = 0; k < steps; k++) {  // the step graph writes the next carries itself
+        ggml_backend_tensor_set(scalars_cur, &step_scalars[(size_t) k * kScalars], 0, ggml_nbytes(scalars_cur));
         if (!run(STEP))
             return {};
-        for (int i = 0; i < kCarries; i++)
-            ggml_backend_tensor_copy(carry_out[i], carry_in[i]);
     }
     const double t4 = now_ms();
     if (!run(FINISH))

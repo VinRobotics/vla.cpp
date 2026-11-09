@@ -192,7 +192,6 @@ def main() -> int:
         "video_noise_tokens": video_tok, "video_noise_dim": video_dim,
         "num_steps": n_steps, "chunk_size": horizon, "action_dim": action_dim,
         "max_action_dim": 64, "n_scalars": len(SCALARS), "n_layers": 28,
-        "n_tensors_expected": len(reader.tensors),
     })
     writer.add_string(KV("scalars"), json.dumps(list(SCALARS)))
     writer.add_string(KV("tensor_names"), string_of(reader, "ggml_compiler.tensor_names"))
