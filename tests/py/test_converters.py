@@ -387,6 +387,54 @@ def test_act_converter_remap():
     assert "model.encoder.norm.weight" not in tensors.keys_read
 
 
+def _cosmos3_edge_program(**over):
+    prog = {
+        "stages": [{"name": n} for n in ("vae_encode", "prefix", "init", "step", "finish")],
+        "inputs": [{"name": n} for n in ("canvas", "input_ids", "attention_mask", "video_noise", "action_noise")],
+        "values": [
+            {"name": "canvas", "ne": [320, 192, 3, 1]},
+            {"name": "input_ids", "ne": [192, 1]},
+            {"name": "video_noise", "ne": [192, 200, 1]},
+            {"name": "action_noise", "ne": [10, 16, 1]},
+        ],
+        "driver": [
+            {"op": "call", "stage": "vae_encode"},
+            {"op": "loop", "n": 3, "scalars": [
+                {"value": v, "values": [float(k), float(k) + 0.5, float(k) + 0.25]}
+                for k, v in enumerate(("t", "sigma", "E", "A", "B", "C", "D", "Fc", "Gc", "Hc"))
+            ]},
+        ],
+    }
+    prog.update(over)
+    return prog
+
+
+def test_cosmos3_edge_converter_program():
+    _stub_deps()
+    sys.path.insert(0, str(SCRIPTS))
+    import convert_cosmos3_edge_to_gguf as c
+
+    info = c.parse_program(_cosmos3_edge_program())
+    # sizes come from the compiler's ggml-order shapes (innermost first)
+    assert (info["canvas_h"], info["canvas_w"], info["prompt_len"]) == (192, 320, 192)
+    assert (info["video_tok"], info["video_dim"], info["horizon"], info["action_dim"]) == (200, 192, 16, 10)
+    # the table is [step][scalar]: row k holds step k's ten values, in the order of c.SCALARS
+    assert info["n_steps"] == 3 and len(info["table"]) == 3
+    assert info["table"][0] == [float(j) for j in range(10)]
+    assert info["table"][1] == [j + 0.5 for j in range(10)]
+
+    for bad in (
+        _cosmos3_edge_program(stages=[{"name": "prefix"}]),
+        _cosmos3_edge_program(inputs=[{"name": "canvas"}]),
+        _cosmos3_edge_program(driver=[]),
+    ):
+        try:
+            c.parse_program(bad)
+        except SystemExit:
+            continue
+        raise AssertionError("a program that is not Cosmos3-Edge's was accepted")
+
+
 def test_quantize_skip_names():
     import importlib
     Q = importlib.import_module("quantize_gguf")

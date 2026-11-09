@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "tokenizer.h"
+#include "models/cosmos3_edge_prompt.h"
 
 #ifdef VLA_USE_SPM
 #include "sentencepiece_processor.h"
@@ -148,6 +149,19 @@ bool tokenize_prompt(const std::string& ckpt_path, const char * arch, const std:
     if (!g.open(ckpt_path))
         return false;
     const std::string a = arch;
+
+    if (a == "cosmos3_edge") {  // the task goes into a JSON caption, then a byte-level BPE; no SentencePiece
+        Cosmos3Prompt prompt;
+        std::string   err;
+        if (!prompt.load(g))
+            return false;
+        if (!prompt.tokens(text, ids, err)) {
+            std::fprintf(stderr, "vla(cosmos3_edge): cannot tokenize the instruction: %s\n", err.c_str());
+            return false;
+        }
+        attention_mask.clear();
+        return true;
+    }
 
     if (a == "octo") {
         if (!spm_encode(g, arch, text, ids))

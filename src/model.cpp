@@ -81,6 +81,7 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
         try_str("vla_jepa.architecture",   arch_str) ||
         try_str("vla_adapter.architecture", arch_str) ||
         try_str("turbovla.architecture",  arch_str) ||
+        try_str("cosmos3_edge.architecture", arch_str) ||
         try_str("act.architecture",       arch_str)) {
         if      (arch_str == "smolvla")    {
             *out = Arch::SMOLVLA;
@@ -136,6 +137,10 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
         }
         else if (arch_str == "act")       {
             *out = Arch::ACT;
+            ok = true;
+        }
+        else if (arch_str == "cosmos3_edge") {
+            *out = Arch::COSMOS3_EDGE;
             ok = true;
         }
     }
@@ -249,7 +254,8 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
                           : arch == Arch::VLA_ADAPTER ? "vla_adapter"
                           : arch == Arch::OPENVLA_OFT ? "openvla_oft"
                           : arch == Arch::TURBOVLA    ? "turbovla"
-                          : arch == Arch::ACT         ? "act" : nullptr;
+                          : arch == Arch::ACT         ? "act"
+                          : arch == Arch::COSMOS3_EDGE ? "cosmos3_edge" : nullptr;
         if (name) {
             std::fprintf(stderr, "vla(%s): num_steps is not supported\n", name);
             return nullptr;
@@ -321,6 +327,10 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
         case Arch::ACT:
             std::printf("vla: arch = act\n");
             impl = act_create(mmproj_path, ckpt_path, config_path, opts);
+            break;
+        case Arch::COSMOS3_EDGE:
+            std::printf("vla: arch = cosmos3_edge\n");
+            impl = cosmos3_edge_create(mmproj_path, ckpt_path, config_path, opts);
             break;
     }
     if (!impl)
