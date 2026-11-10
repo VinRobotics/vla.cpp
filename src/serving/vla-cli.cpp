@@ -134,6 +134,7 @@ const char * arch_slug(Arch a) {
         case Arch::TURBOVLA:    return "turbovla";
         case Arch::ACT:         return "act";
         case Arch::COSMOS3_POLICY: return "cosmos3_policy";
+        case Arch::MOLMOACT2:      return "molmoact2";
     }
     return "";
 }
@@ -256,7 +257,7 @@ void usage(const char * prog) {
         "  --tokens   language token ids, comma-separated, if you tokenized already\n"
         "             (ACT reads no instruction: pass neither --text nor --tokens)\n"
         "  --state    proprioception floats, comma-separated (default zeros); pi05\n"
-        "             --text needs it, since the state is part of the prompt\n"
+        "             and molmoact2 --text need it, since the state is part of the prompt\n"
         "  --pretty   print one action row (max_action_dim values) per line\n"
         "  --libero   Cosmos3 Policy only: print LIBERO commands [dpos(3), axis-angle(3), gripper] instead of rot6d rows\n"
         "  --config   policy config.json; its \"runtime\" block sets the flags below,\n"
