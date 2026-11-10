@@ -40,8 +40,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   run on the HMX: OpenVLA-OFT's LM, Octo's block transformer, Evo-1's DiT
   cross-attention and GR00T's DiT (OpenVLA-OFT 35% faster, Evo-1 29%, Octo
   29%, GR00T N1.5 11%); VLA-Adapter's LM only for V. Fidelity is measured
-  against a CPU-only build of the same commit. GR00T N1.5 and N1.6 are above
-  the bar on a served LIBERO observation, as the CPU is at F16. See
+  against a CPU-only build of the same commit. GR00T N1.6 keeps its SigLIP2
+  tower in F32 weights and its first three blocks' matmuls on the CPU, which
+  brings it within the bar on a served LIBERO observation (8.9e-4, 7% slower);
+  GR00T N1.5 stays above it there, as the CPU is at F16. See
   `docs/backend/hexagon.md` for the build, the skel install and the numbers.
 - **ROCm/HIP backend for VLA inference.** `-DGGML_HIP=ON` selects ggml's HIP
   backend without compiling vla.cpp's CUDA-only kernels. On Linux `gfx1200`

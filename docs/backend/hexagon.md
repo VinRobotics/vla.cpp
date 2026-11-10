@@ -149,6 +149,16 @@ VLA-JEPA's LM does the same: with flash attention a served LIBERO observation
 lands 6.2e-3 from the reference, without it 2.2e-3, at a cost of 683 to 810 ms
 with two views.
 
+The HMX also multiplies with F16 activations whatever the weight type. In GR00T
+N1.6's SigLIP2 tower that rounding grows from the first blocks: a served LIBERO
+observation landed 1.0e-2 from the reference, and F32 weights alone left it at
+5.4e-3. On Hexagon the tower and its projector keep F32 weights and the first
+three blocks' matmuls run on the CPU (`fallback_keep_on_cpu()`): 8.9e-4, at 682
+to 734 ms. GR00T N1.5 spreads the same rounding over the whole model: with F32
+weights, running its vision tower, LM, VL self-attention or DiT on the CPU
+leaves it at 1.1e-2 to 1.3e-2 each, and only every matmul on the CPU, with
+flash attention off, brings it under the bar (1.8e-3).
+
 The softmax takes rows of up to 32 elements or a multiple of 32. Where a
 sequence can grow without changing its result, vla.cpp pads it to
 `gemm_width()` on Hexagon rather than send every layer's softmax to the CPU:
@@ -165,7 +175,7 @@ tower takes two camera views that way: its action chunk lands 0.16 from the CPU
 reference. The wrapper runs those matmuls on the CPU. On Hexagon `linear()` in
 `src/layers/linear.h` multiplies a contiguous batch as one 2D matrix of rows
 instead, the same product, so most of them never reach the rule: GR00T N1.6
-with two views lands 7.5e-4 from the reference, and the matmuls of TurboVLA's
+with two views lands 5.0e-4 from the reference, and the matmuls of TurboVLA's
 DINOv3, which takes its two views as a batch, run on the NPU.
 
 A copy that transposes the innermost dim, such as the `CONT` of a permuted V
@@ -382,7 +392,7 @@ differ from the benchmark's for VLA-JEPA, VLA-Adapter, OpenVLA-OFT and Octo:
 | π0.5 | 2 | 4.8e-4 |
 | Evo-1 | 1 | 6.2e-4 |
 | GR00T N1.5 | 1 | 1.9e-3 |
-| GR00T N1.6 | 1 | 1.3e-3 |
+| GR00T N1.6 | 1 | 9.4e-4 |
 | GR00T N1.7 | 1 | 2.0e-3 |
 | VLA-JEPA | 2 | 2.1e-3 |
 | VLA-Adapter | 2 | 3.9e-4 |
@@ -391,7 +401,7 @@ differ from the benchmark's for VLA-JEPA, VLA-Adapter, OpenVLA-OFT and Octo:
 | TurboVLA | 2 | 3.7e-4 |
 | ACT | 1 | 6.1e-4 |
 
-GR00T N1.6 with two views is 7.5e-4. At the benchmark's single view VLA-JEPA is
+GR00T N1.6 with two views is 5.0e-4. At the benchmark's single view VLA-JEPA is
 1.8e-3, VLA-Adapter 4.8e-4 and OpenVLA-OFT 1.8e-4. ACT takes its one 640x480
 view, the benchmark's input.
 
@@ -414,7 +424,7 @@ requests carrying one fixed 640x480 view and a fixed 14-dim state.
 | π0.5 | 3.7e-4 | |
 | Evo-1 | 1.1e-3 | |
 | GR00T N1.5 | 1.2e-2 | 2.8e-2 |
-| GR00T N1.6 | 1.0e-2 | 9.0e-3 |
+| GR00T N1.6 | 8.9e-4 | |
 | GR00T N1.7 | 2.0e-3 | |
 | π0 | 5.8e-4 | |
 | VLA-JEPA | 2.2e-3 | |
@@ -424,11 +434,10 @@ requests carrying one fixed 640x480 view and a fixed 14-dim state.
 | TurboVLA | 8.5e-4 | |
 | ACT | 1.0e-3 | |
 
-GR00T N1.5 and N1.6 are above the bar on this input, and so is the CPU itself
-with F16 weights: N1.5 lands closer to the reference than the CPU at F16, N1.6
-slightly further (1.0e-2 against 9.0e-3). They are sensitive to 16-bit precision
-rather than miscomputed. Running them with F32 weights on the NPU has not been
-tried yet.
+GR00T N1.5 is above the bar on this input, and so is the CPU itself with F16
+weights (2.8e-2). It is sensitive to 16-bit precision rather than miscomputed:
+F32 weights on the NPU leave it at 1.2e-2, since the HMX rounds the activations
+(see above).
 
 ## IQ-10, imagined
 
