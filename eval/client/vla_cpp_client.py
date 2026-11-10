@@ -71,6 +71,14 @@ ARCH_PRESETS = {
 
     # Single-camera LIBERO finetune, image-only observations, so no state.
     "octo": {"image_size": 256, "tokenizer": "t5-base", "max_state_dim": 0, "max_length": 16},
+
+    # MolmoAct2 (allenai/MolmoAct2-LIBERO): the robot state goes into the prompt as discrete tokens, so the
+    # client needs the checkpoint's norm_stats.json and config.json (read from the --tokenizer repo or dir,
+    # or --stats-json for the stats). Views go up as uint8 at their own size; the server resizes to 378.
+    # The tokenizer is a stock Qwen2 one, so no remote code. Its tokenizer_config.json lists
+    # extra_special_tokens, which some transformers releases reject; the added tokens are in tokenizer.json.
+    "molmoact2": {"image_size": 0, "tokenizer": "allenai/MolmoAct2-LIBERO", "max_state_dim": 8,
+                  "max_length": 1024, "tokenizer_kwargs": {"extra_special_tokens": {}}},
 }
 
 BITVLA_N_PATCHES_PER_VIEW = 256
@@ -225,6 +233,12 @@ def _minmax_norm(x: np.ndarray, lo: np.ndarray, hi: np.ndarray, mask: np.ndarray
     out[..., mask] = 2.0 * (x[..., mask] - lo[mask]) / (hi[mask] - lo[mask]) - 1.0
     return out
 
+try:  # imported as client.vla_cpp_client (eval/ on sys.path) or as a top-level module
+    from .molmoact2_prompt import Molmoact2Prompt
+except ImportError:
+    from molmoact2_prompt import Molmoact2Prompt
+
+
 class VlaCppClient:
 
     DEFAULT_RECV_TIMEOUT_MS = 30_000
@@ -291,7 +305,8 @@ class VlaCppClient:
               f"{' (trust_remote_code=True)' if trust_remote else ''}"
               f"{' (use_fast=False)' if not use_fast else ''}", flush=True)
         self.tok = AutoTokenizer.from_pretrained(
-            tokenizer_name, trust_remote_code=trust_remote, use_fast=use_fast)
+            tokenizer_name, trust_remote_code=trust_remote, use_fast=use_fast,
+            **preset.get("tokenizer_kwargs", {}))
 
         if arch == "gr00t_n1_6":
             ct_path = Path(tokenizer_name) / "chat_template.json"
@@ -741,6 +756,13 @@ class VlaCppClient:
             print(f"vla-cpp-direct[arch=vla_jepa]: Qwen3-VL processor + MEAN_STD state / "
                   f"MIN_MAX action stats via {sdir}", flush=True)
 
+        self._molmoact2 = None
+        if arch == "molmoact2":
+            tag = os.environ.get("VLA_MOLMOACT2_NORM_TAG", "libero")
+            self._molmoact2 = Molmoact2Prompt.load(tokenizer_name, stats_json, tag)
+            print(f"vla-cpp-direct[arch=molmoact2]: norm tag {tag} ({self._molmoact2.mode}), "
+                  f"{self._molmoact2.state_dim}-D state as {self._molmoact2.n_bins} bins", flush=True)
+
     def ping(self) -> bool:
 
         return True
@@ -786,6 +808,8 @@ class VlaCppClient:
             return self._predict_chunk_pi05(observations)
         if self.arch == "vla_jepa":
             return self._predict_chunk_vla_jepa(observations)
+        if self.arch == "molmoact2":
+            return self._predict_chunk_molmoact2(observations)
 
         images_f32: list[np.ndarray] = []
         for key in self.image_keys:
@@ -1068,6 +1092,58 @@ class VlaCppClient:
                    .reshape(resp.chunk_size, resp.action_dim))
         return self._vlajepa_action_unnorm(chunk)
 
+    def _predict_chunk_molmoact2(self, observations: dict[str, Any]) -> np.ndarray:
+        # The views go up as uint8 at their own size: the server reproduces the processor's resize to 378.
+        images_u8: list[np.ndarray] = []
+        for key in self.image_keys:
+            if key not in observations:
+                raise KeyError(f"image key '{key}' missing; got {list(observations.keys())}")
+            img = observations[key]
+            if isinstance(img, torch.Tensor):
+                img = img.numpy()
+            img = np.asarray(img)
+            if img.ndim != 3 or img.shape[0] != 3:
+                raise ValueError(f"{key}: expected CHW [3, H, W], got {img.shape}")
+            hwc = np.transpose(img, (1, 2, 0))
+            if hwc.dtype != np.uint8:
+                hwc = np.clip(np.rint(hwc.astype(np.float32) * 255.0), 0, 255).astype(np.uint8)
+            images_u8.append(np.ascontiguousarray(hwc))
+
+        s = observations["observation.state"]
+        if isinstance(s, torch.Tensor):
+            s = s.numpy()
+        s = np.asarray(s, dtype=np.float32).reshape(-1)
+        task = observations.get("task", "")
+        if isinstance(task, bytes):
+            task = task.decode()
+        lang = self._molmoact2.ids(self.tok, task, s, len(images_u8))
+        if len(lang) > self.max_length:
+            raise ValueError(f"MolmoAct2 prompt is {len(lang)} tokens, more than --max-length {self.max_length}")
+
+        req = self.pb.PredictRequest()
+        req.request_id = self._step
+        self._step += 1
+        for img in images_u8:
+            ip = req.images.add()
+            ip.encoding = self.pb.Image.RGB_U8
+            ip.height = img.shape[0]
+            ip.width = img.shape[1]
+            ip.data = img.tobytes()
+        req.lang_tokens.extend(int(t) for t in lang)
+        state_padded = np.zeros(self.max_state_dim, dtype=np.float32)   # the state is in the prompt
+        state_padded[: min(s.shape[0], self.max_state_dim)] = s[: self.max_state_dim]
+        req.state.extend(state_padded.tolist())
+
+        self._maybe_add_fixed_noise(req)
+        self.sock.send(req.SerializeToString())
+        resp = self.pb.PredictResponse()
+        resp.ParseFromString(self.sock.recv())
+        if resp.error:
+            raise RuntimeError(f"vla-server error: {resp.error}")
+        self._last_response = resp
+        return (np.array(resp.action_chunk, dtype=np.float32)
+                  .reshape(resp.chunk_size, resp.action_dim))
+
     def _predict_chunk_pi05(self, observations: dict[str, Any]) -> np.ndarray:
         if self._pi05_state_q01 is None:
             raise RuntimeError("arch=pi05 needs state stats; pass --stats-json "
@@ -1142,7 +1218,7 @@ class VlaCppClient:
     _EVO1_MAX_TEXT_LENGTH   = 1024
     _FIXED_NOISE_ARCHS = {
         "smolvla", "pi0", "pi05", "evo1", "gr00t_n1_5", "gr00t_n1_6", "gr00t_n1_7",
-        "vla_jepa", "octo",
+        "vla_jepa", "octo", "molmoact2",
     }
 
     def _maybe_add_fixed_noise(self, req) -> None:

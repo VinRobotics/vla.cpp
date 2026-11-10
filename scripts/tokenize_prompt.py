@@ -20,8 +20,9 @@
 
 vla-cli --text calls this so the quickstart does not need raw ids. The prompt
 templates are the ones eval/client/vla_cpp_client.py sends, so the ids match
-the eval client token for token. pi05 puts the robot state in the prompt and
-needs --state; --stats defaults to the LIBERO stats the eval client uses.
+the eval client token for token. pi05 and molmoact2 put the robot state in the
+prompt and need --state; --stats defaults to the LIBERO stats the eval client
+uses (molmoact2: the checkpoint's norm_stats.json).
 --views is the number of camera images for the archs whose prompt has image
 slots.
 """
@@ -45,10 +46,11 @@ TOKENIZERS = {
     "gr00t_n1_6":  "vrfai/gr00tn1d6-libero-gguf",
     "gr00t_n1_7":  "nvidia/Cosmos-Reason2-2B",
     "turbovla":    "bert-base-uncased",
+    "molmoact2":   "allenai/MolmoAct2-LIBERO",
 }
 TRUST_REMOTE_CODE = {"evo1", "gr00t_n1_5"}
 MAX_LENGTH = {"smolvla": 48, "pi0": 48, "pi05": 200, "turbovla": 21}
-VIEWS = {"evo1": 3, "bitvla": 2, "vla_jepa": 2, "gr00t_n1_5": 2, "gr00t_n1_6": 2, "gr00t_n1_7": 2}
+VIEWS = {"evo1": 3, "bitvla": 2, "vla_jepa": 2, "gr00t_n1_5": 2, "gr00t_n1_6": 2, "gr00t_n1_7": 2, "molmoact2": 2}
 
 BITVLA_PROMPT = "What action should the robot take to {}?"
 VLA_ADAPTER_PROMPT = (
@@ -90,8 +92,20 @@ def pi05_prompt(text: str, state: str, stats: str) -> str:
     return f"Task: {cleaned}, State: {' '.join(map(str, disc.tolist()))};\nAction: "
 
 
+def molmoact2_ids(tok, text: str, state: str, stats: str, repo: str, views: int) -> list:
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "eval" / "client" / "molmoact2_prompt.py"
+    spec = importlib.util.spec_from_file_location("molmoact2_prompt", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    s = [float(x) for x in state.replace(",", " ").split()]
+    return mod.Molmoact2Prompt.load(repo, stats or None).ids(tok, text, s, views)
+
+
 def token_ids(arch: str, text: str, tok, args) -> list:
     views = args.views
+    if arch == "molmoact2":
+        return molmoact2_ids(tok, text, args.state, args.stats, args.tokenizer or TOKENIZERS[arch], views)
     if arch in ("smolvla", "pi0"):
         text = text if text.endswith("\n") else text + "\n"
     if arch == "pi05":
@@ -150,8 +164,10 @@ def load_tokenizer(arch: str, name: str):
         proc.tokenizer.add_tokens(["<|embodied_action|>"], special_tokens=True)
         return proc
     from transformers import AutoTokenizer
+    # molmoact2's tokenizer_config.json lists extra_special_tokens, which some releases reject.
+    extra = {"extra_special_tokens": {}} if arch == "molmoact2" else {}
     tok = AutoTokenizer.from_pretrained(name, trust_remote_code=arch in TRUST_REMOTE_CODE,
-                                        use_fast=arch != "evo1")
+                                        use_fast=arch != "evo1", **extra)
     if arch == "gr00t_n1_6":
         path = Path(name) / "chat_template.json"
         if not path.exists():
@@ -167,13 +183,15 @@ def main() -> int:
     ap.add_argument("--text", required=True)
     ap.add_argument("--tokenizer", help="override the HuggingFace tokenizer id or a local dir")
     ap.add_argument("--views", type=int, help="camera images the prompt has slots for")
-    ap.add_argument("--state", help="pi05: robot state, comma-separated floats (--state=-0.1,... if it starts with -)")
+    ap.add_argument("--state", help="pi05, molmoact2: robot state, comma-separated floats "
+                                    "(--state=-0.1,... if it starts with -)")
     ap.add_argument("--stats", help="pi05: stats.json with observation.state q01/q99 "
-                                    "(default: lerobot/libero meta/stats.json)")
+                                    "(default: lerobot/libero meta/stats.json); molmoact2: norm_stats.json "
+                                    "(default: the checkpoint's)")
     args = ap.parse_args()
 
-    if args.arch == "pi05" and not args.state:
-        return fail("pi05 puts the robot state in the prompt, so it needs --state f,f,...")
+    if args.arch in ("pi05", "molmoact2") and not args.state:
+        return fail(f"{args.arch} puts the robot state in the prompt, so it needs --state f,f,...")
     if args.views is None:
         args.views = VIEWS.get(args.arch, 1)
     if args.views < 1:
