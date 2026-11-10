@@ -63,7 +63,7 @@ void Qwen3LM::declare(WeightLoader & L, const char * prefix, const FqModuleSpec 
 }
 
 ggml_tensor * Qwen3LM::block(ggml_context * C, const Qwen3LayerW & w, ggml_tensor * h,
-                             ggml_tensor * pos, ggml_tensor * mask, int64_t seq) const {
+                             ggml_tensor * pos, ggml_tensor * mask, int64_t seq, Qwen3KV * kv) const {
     const int64_t hd   = cfg.head_dim;
     const int64_t n_q  = cfg.n_q;
     const int64_t n_kv = cfg.n_kv;
@@ -100,6 +100,11 @@ ggml_tensor * Qwen3LM::block(ggml_context * C, const Qwen3LayerW & w, ggml_tenso
         qr = rope(C, cfg.rope, rms_norm(C, qh, w.q_norm, cfg.rms_eps), pos);
         kr = rope(C, cfg.rope, rms_norm(C, kh, w.k_norm, cfg.rms_eps), pos);
         Q  = ggml_cont(C, ggml_permute(C, qr, 0, 2, 1, 3));
+    }
+    if (kv) {
+        GGML_ASSERT(kr && vh && "Qwen3KV needs the plain q/k path and float V");
+        kv->k = kr;
+        kv->v = vh;
     }
 
     ggml_tensor * att;

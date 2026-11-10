@@ -38,6 +38,13 @@ struct Qwen3LayerW {
     FqLinear fq_q, fq_k, fq_v, fq_o, fq_gate, fq_up, fq_down;
 };
 
+// One layer's attention keys after q/k-norm and RoPE, and its values, both
+// [head_dim, n_kv, seq]: what an action head that cross-attends to the LM's KV
+// cache reads (MolmoAct2). Only the plain path keeps them in this layout.
+struct Qwen3KV {
+    ggml_tensor * k = nullptr, * v = nullptr;
+};
+
 struct Qwen3Cfg {
     int64_t  hidden   = 2048;
     int64_t  layers   = 16;
@@ -60,8 +67,9 @@ struct Qwen3LM {
     // null otherwise (every site is then a float GEMM and the graph is unchanged).
     void declare(WeightLoader & L, const char * prefix, const FqModuleSpec * fq = nullptr);
 
+    // kv, when given, receives the layer's K and V (see Qwen3KV).
     ggml_tensor * block(ggml_context * C, const Qwen3LayerW & w, ggml_tensor * h,
-                        ggml_tensor * pos, ggml_tensor * mask, int64_t seq) const;
+                        ggml_tensor * pos, ggml_tensor * mask, int64_t seq, Qwen3KV * kv = nullptr) const;
 
     ggml_tensor * build(ggml_context * C, ggml_tensor * h,
                         ggml_tensor * pos, ggml_tensor * mask, int64_t seq) const;

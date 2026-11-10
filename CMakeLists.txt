@@ -260,6 +260,7 @@ add_library(vla_core ${VLA_CORE_LIB_TYPE}
     src/models/act.cpp
     src/models/octo.cpp
     src/models/cosmos3_policy.cpp
+    src/models/molmoact2.cpp
     src/tokenizer.cpp
 )
 target_include_directories(vla_core
@@ -271,8 +272,10 @@ target_include_directories(vla_core
 target_link_libraries(vla_core PUBLIC ggml)
 # The FoldQuant CPU reference must match the CUDA and SYCL kernels bit for bit,
 # so no FMA contraction on either side (aarch64 GCC contracts by default; under
-# icpx, after the project-wide -fp-model=precise, which would allow it).
-set_source_files_properties(src/foldquant.cpp src/foldquant_ref.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+# icpx, after the project-wide -fp-model=precise, which would allow it). MolmoAct2's
+# resize rounds float sums to uint8 the way PyTorch's unfused CPU kernel does.
+set_source_files_properties(src/foldquant.cpp src/foldquant_ref.cpp src/models/molmoact2.cpp
+                            PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 if(VLA_SPM)
     target_include_directories(vla_core PRIVATE ${sentencepiece_SOURCE_DIR}/src)
     target_link_libraries(vla_core PRIVATE sentencepiece-static ${VLA_SPM_PROTOBUF})
