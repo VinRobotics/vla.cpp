@@ -15,8 +15,9 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   builds it (`eval/client/molmoact2_prompt.py`): preset `molmoact2`, `scripts/tokenize_prompt.py --arch
   molmoact2` for `vla-cli --text`, and `eval/run_libero.sh -m molmoact2`. On the checkpoint's sample,
   f32 weights match the reference run with bf16-rounded weights to
-  7.7e-6 on the action chunk; the bf16 weights are 1.7e-3 (CPU), 1.4e-3 (CUDA, RTX 3060, 446 ms; 381 ms
-  and 5.2e-4 with `--weight-dtype f16`) and 5.6e-4 (Metal, M4, 1.9 s) from the fp32 reference. A LIBERO
+  7.7e-6 on the action chunk; the bf16 weights are 1.7e-3 (CPU), 1.4e-3 (CUDA, RTX 3060, 446 ms) and 5.6e-4
+  (Metal, M4, 1.9 s) from the fp32 reference. Fastest flags: `--weight-dtype f16 --flash-attn`, 328 ms on the
+  RTX 3060 at 9.2e-4 (`--weight-dtype f16` alone: 381 ms, 5.2e-4). GGUF: `vrfai/molmoact2-libero-gguf`. A LIBERO
   smoke run (task 0 of each suite, 3 episodes each, 10-action chunks) succeeds 12/12; no full sweep yet.
 - **New model: Cosmos3 Policy** (`lerobot/Cosmos3-Edge-Policy-LIBERO`, a world-action model: a 28-layer
   Mixture-of-Transformers denoises 4 latent video frames and a 16-step action chunk together, 30 UniPC
