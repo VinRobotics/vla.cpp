@@ -27,6 +27,7 @@
 #include "model.h"
 #include "options.h"
 #include "serving/hf_fetch.h"
+#include "models/cosmos3_policy.h"
 #include "tokenizer.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -132,6 +133,7 @@ const char * arch_slug(Arch a) {
         case Arch::OCTO:        return "octo";
         case Arch::TURBOVLA:    return "turbovla";
         case Arch::ACT:         return "act";
+        case Arch::COSMOS3_POLICY: return "cosmos3_policy";
     }
     return "";
 }
@@ -256,6 +258,7 @@ void usage(const char * prog) {
         "  --state    proprioception floats, comma-separated (default zeros); pi05\n"
         "             --text needs it, since the state is part of the prompt\n"
         "  --pretty   print one action row (max_action_dim values) per line\n"
+        "  --libero   Cosmos3 Policy only: print LIBERO commands [dpos(3), axis-angle(3), gripper] instead of rot6d rows\n"
         "  --config   policy config.json; its \"runtime\" block sets the flags below,\n"
         "             and flags given here win\n"
         "%s",
@@ -268,6 +271,7 @@ int main(int argc, char ** argv) {
     std::string mmproj, ckpt, hf, tokens_s, state_s, text_s, config_path;
     std::vector<std::string> image_paths;
     bool pretty = false;
+    bool libero = false;
     Options opts;
     std::string opt_err;
 
@@ -289,6 +293,7 @@ int main(int argc, char ** argv) {
         else if (a == "--text")    text_s = need("--text");
         else if (a == "--state")   state_s = need("--state");
         else if (a == "--pretty")  pretty = true;
+        else if (a == "--libero")  libero = true;
         else if (a == "--config")  config_path = need("--config");
         else if (opts.parse_arg(argc, argv, i, opt_err)) continue;
         else if (!opt_err.empty()) {
@@ -342,6 +347,11 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "vla-cli: %s takes no instruction; drop --text/--tokens\n", arch_slug(arch));
         return 1;
     }
+    if (libero && arch != Arch::COSMOS3_POLICY) {
+        std::fprintf(stderr, "vla-cli: --libero decodes the 10-wide rot6d action of Cosmos3 Policy only; %s is %s\n",
+                     ckpt.c_str(), arch_slug(arch));
+        return 1;
+    }
     // Validate the cheap args before loading the model.
     std::vector<int32_t> lang;
     std::vector<int32_t> attn;   // Octo only; empty leaves Inputs::attention_mask null.
@@ -350,7 +360,7 @@ int main(int argc, char ** argv) {
     if (!parse_floats(state_s, state))
         return 1;
     if (!text_s.empty()) {
-        if (has_spm_tokenizer(ckpt, arch_slug(arch))) {
+        if (arch == Arch::COSMOS3_POLICY || has_spm_tokenizer(ckpt, arch_slug(arch))) {
             if (!tokenize_prompt(ckpt, arch_slug(arch), text_s, state, lang, attn))
                 return 1;
             for (size_t i=0; i<lang.size(); ++i)
@@ -379,6 +389,11 @@ int main(int argc, char ** argv) {
         return 1;
     }
     const Config & cfg = model_config(m);
+    if (libero && cfg.max_action_dim != 10) {
+        std::fprintf(stderr, "vla-cli: --libero needs 10-wide actions, this model returns %lld\n", (long long) cfg.max_action_dim);
+        model_free(m);
+        return 1;
+    }
 
     if (!state.empty() && (int64_t) state.size() != cfg.max_state_dim)
         std::fprintf(stderr, "vla-cli: --state has %zu values, model expects %lld; padding or truncating\n",
@@ -415,7 +430,17 @@ int main(int argc, char ** argv) {
         return 2;
     }
 
-    const int64_t cols = cfg.max_action_dim > 0 ? cfg.max_action_dim : 1;
+    int64_t cols = cfg.max_action_dim > 0 ? cfg.max_action_dim : 1;
+    if (libero) {  // checked above: Cosmos3 Policy, 10 columns
+        std::vector<float> cmd;
+        for (size_t r = 0; r + 10 <= act.size(); r += 10) {
+            float row[7];
+            cosmos3_libero_action(&act[r], row);
+            cmd.insert(cmd.end(), row, row + 7);
+        }
+        act  = std::move(cmd);
+        cols = 7;
+    }
     if (pretty) {
         for (size_t i=0; i<act.size(); ++i)
             std::printf("%.6g%c", act[i], ((int64_t) (i+1)%cols == 0) ? '\n' : ' ');

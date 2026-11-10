@@ -6,6 +6,14 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 
+- **New model: Cosmos3 Policy** (`lerobot/Cosmos3-Edge-Policy-LIBERO`, a world-action model: a 28-layer
+  Mixture-of-Transformers denoises 4 latent video frames and a 16-step action chunk together, 30 UniPC
+  steps). `src/models/cosmos3_policy.cpp` follows lerobot's `policies/cosmos3`: the Wan2.2 VAE encoder and the
+  two-stream backbone as ggml graphs, the UniPC solver on the host, the canvas, the prompt (JSON caption, chat
+  template, byte-level BPE from the GGUF) and the rot6d decode for `vla-cli --text ... --libero`.
+  `scripts/convert_cosmos3_policy_to_gguf.py` converts the checkpoint. Agrees with lerobot's policy in bf16 to
+  2e-3 to 2e-2 on the action chunk; the client preset `cosmos3_policy` and `eval/run_libero.sh -m cosmos3_policy`
+  serve it. CPU and CUDA only.
 - **Hexagon NPU on the Qualcomm Dragonwing IQ-10 (Linux).**
   `scripts/build_linux_hexagon.sh` cross-builds vla.cpp with `GGML_HEXAGON=ON`
   in Qualcomm's toolchain container, `vla-server` included. On the IQ-10 (v81,
