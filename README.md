@@ -103,6 +103,7 @@ Use [ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) and follow [t
 | [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | Y | Y | Y | Y | Y |
 | [ACT](https://hf.co/ravediamond/act-aloha-sim-transfer-cube-gguf) | Y | Y | Y | ~ | Y | ~ | ~ |
 | [Cosmos3 Policy](https://hf.co/vrfai/cosmos3-policy-libero-gguf)   | ~ | ~ | - | - | - | - | - |
+| [MolmoAct2](https://hf.co/allenai/MolmoAct2-LIBERO)            | ~ | ~ | - | - | ~ | - | - |
 
 Legend: `Y` = supported (released and benchmarked), `~` = in progress, `-` = planned.
 

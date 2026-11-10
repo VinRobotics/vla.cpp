@@ -6,6 +6,18 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Added
 
+- **New model: MolmoAct2** (`allenai/MolmoAct2-LIBERO`: SigLIP-so400m at 378 px with 2x2 attention
+  pooling, a 36-layer Qwen3-style LM, and a 36-block flow-matching expert that cross-attends to each LM
+  layer's keys and values; 10 Euler steps). `src/models/molmoact2.cpp` follows the checkpoint's
+  `modeling_molmoact2.py` (`predict_action`, continuous actions); `Qwen3LM::block` can now hand back a
+  layer's K/V. `scripts/convert_molmoact2_to_gguf.py` streams the 22 GB fp32 checkpoint into a 9.6 GB
+  bf16 GGUF with one norm tag's statistics baked in. The robot state is part of the prompt, so the client
+  builds it (`eval/client/molmoact2_prompt.py`): preset `molmoact2`, `scripts/tokenize_prompt.py --arch
+  molmoact2` for `vla-cli --text`, and `eval/run_libero.sh -m molmoact2`. On the checkpoint's sample,
+  f32 weights match the reference run with bf16-rounded weights to
+  7.7e-6 on the action chunk; the bf16 weights are 1.7e-3 (CPU), 1.4e-3 (CUDA, RTX 3060, 446 ms; 381 ms
+  and 5.2e-4 with `--weight-dtype f16`) and 5.6e-4 (Metal, M4, 1.9 s) from the fp32 reference. A LIBERO
+  smoke run (task 0 of each suite, 3 episodes each, 10-action chunks) succeeds 12/12; no full sweep yet.
 - **New model: Cosmos3 Policy** (`lerobot/Cosmos3-Edge-Policy-LIBERO`, a world-action model: a 28-layer
   Mixture-of-Transformers denoises 4 latent video frames and a 16-step action chunk together, 30 UniPC
   steps). `src/models/cosmos3_policy.cpp` follows lerobot's `policies/cosmos3`: the Wan2.2 VAE encoder and the
