@@ -20,7 +20,8 @@
 //   predict_check <ckpt.gguf> [mmproj.gguf] [n_images]
 //   env: VLA_IMG_SIZE (input width, default 224), VLA_IMG_H (height, default the
 //        width), VLA_BENCH_ITERS (>0 = time it),
-//        VLA_TIMING=phase, VLA_EXTRA_TOKEN / VLA_EXTRA_COUNT
+//        VLA_TIMING=phase, VLA_EXTRA_TOKEN / VLA_EXTRA_COUNT,
+//        VLA_CHECK_SEED (input variant, default 0), VLA_CHECK_TOKENS (default 6)
 
 #include "model.h"
 #include "options.h"
@@ -70,29 +71,37 @@ int main(int argc, char** argv) {
     const char* isz = std::getenv("VLA_IMG_SIZE");
     const char* ih  = std::getenv("VLA_IMG_H");
     const int W = isz ? std::atoi(isz) : 224, H = ih ? std::atoi(ih) : W;
+    const char * seed_env = std::getenv("VLA_CHECK_SEED");
+    const uint32_t input_seed = seed_env ? (uint32_t) std::strtoul(seed_env, nullptr, 10) : 0;
     std::vector<std::vector<uint8_t>> imgbuf(n_images, std::vector<uint8_t>((size_t)3 * W * H));
     std::vector<ImageView> views(n_images);
     for (int v = 0; v < n_images; ++v) {
         for (int y = 0; y < H; ++y)
         for (int x = 0; x < W; ++x)
         for (int c = 0; c < 3; ++c)
-            imgbuf[v][((size_t)y * W + x) * 3 + c] = (uint8_t)((x + 2 * y + 40 * c + 17 * v) & 0xFF);
+            imgbuf[v][((size_t)y * W + x) * 3 + c] = (uint8_t)((x + 2 * y + 40 * c + 17 * v + 13 * input_seed) & 0xFF);
         views[v] = ImageView{ imgbuf[v].data(), W, H, PixelFormat::U8 };
     }
 
     // VLA-JEPA needs its <embodied> tokens; the others ignore the extras.
     std::vector<int32_t> lang = {1, 100, 200, 300, 400, 2};
+    if (const char * tokens = std::getenv("VLA_CHECK_TOKENS")) {
+        const int count = std::atoi(tokens);
+        if (count <= 0) { model_free(m); return 1; }
+        lang.resize((size_t) count);
+        for (int i = 0; i < count; ++i) lang[i] = 1 + (i % 100);
+    }
     if (const char* tok = std::getenv("VLA_EXTRA_TOKEN")) {
         const char* cnt = std::getenv("VLA_EXTRA_COUNT");
         lang.insert(lang.end(), (size_t)(cnt ? std::atoi(cnt) : 1), (int32_t)std::atoi(tok));
     }
     std::vector<float>   state((size_t)cfg.max_state_dim, 0.0f);
-    for (int i = 0; i < (int)cfg.real_state_dim; ++i) state[i] = 0.01f * (float)(i + 1);
+    for (int i = 0; i < (int)cfg.real_state_dim; ++i) state[i] = 0.01f * (float)(i + 1) + 0.001f * input_seed;
 
     const size_t noise_n = (size_t)cfg.max_action_dim * (size_t)cfg.n_suffix;
     std::vector<float> noise(noise_n);
     for (size_t i = 0; i < noise_n; ++i)
-        noise[i] = 0.001f * (float)((i * 2654435761u) % 1000) - 0.5f;
+        noise[i] = 0.001f * (float)((i * 2654435761u + input_seed * 2246822519u) % 1000) - 0.5f;
 
     Inputs in{};
     in.images        = views.data();

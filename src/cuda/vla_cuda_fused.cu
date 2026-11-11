@@ -2298,8 +2298,44 @@ extern "C" bool vla_cuda_fused_forward(ggml_tensor * dst, void * stream_v) {
 
 namespace vla {
 
-void cuda_register_fused_ops() {
+bool cuda_register_fused_ops(const char * arch, int device) {
+    cudaDeviceProp prop{};
+    cudaError_t err = cudaGetDeviceProperties(&prop, device);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "vla(%s): fused CUDA ops disabled: device query: %s (%d); using plain CUDA\n",
+                     arch, cudaGetErrorString(err), (int) err);
+        cudaGetLastError();
+        return false;
+    }
+    // This archive includes cp.async and TF32/BF16 MMA kernels requiring
+    // Ampere. A usable ggml CUDA backend alone does not imply their support.
+    if (prop.major < 8) {
+        std::printf("vla(%s): fused CUDA ops disabled: device %d sm_%d%d requires sm_80+; using plain CUDA\n",
+                    arch, device, prop.major, prop.minor);
+        return false;
+    }
+    // Also detect builds lacking a compatible image for this device, even
+    // when the hardware has the necessary instructions.
+    cudaFuncAttributes attr{};
+    int previous = 0;
+    err = cudaGetDevice(&previous);
+    if (err == cudaSuccess) {
+        err = cudaSetDevice(device);
+        if (err == cudaSuccess) {
+            err = cudaFuncGetAttributes(&attr, k_bias_res);
+            const cudaError_t restored = cudaSetDevice(previous);
+            if (err == cudaSuccess) err = restored;
+        }
+    }
+    if (err != cudaSuccess) {
+        std::fprintf(stderr,
+                     "vla(%s): fused CUDA ops disabled: device %d sm_%d%d kernel image: %s (%d); using plain CUDA\n",
+                     arch, device, prop.major, prop.minor, cudaGetErrorString(err), (int) err);
+        cudaGetLastError();
+        return false;
+    }
     cuda_ext_add_handler(vla_cuda_fused_forward);
+    return true;
 }
 
 }  // namespace vla

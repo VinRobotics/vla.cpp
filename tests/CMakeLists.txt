@@ -147,6 +147,11 @@ endif()
 # The fused CUDA nodes (layers/fused_ops.h) against the ggml chains they
 # replace, bit for bit. Skips itself (exit 0) when no CUDA device is present.
 if(GGML_CUDA)
+    add_executable(test_fused_cuda_availability test_fused_cuda_availability.cpp)
+    target_link_libraries(test_fused_cuda_availability PRIVATE vla_core CUDA::cudart)
+    target_compile_options(test_fused_cuda_availability PRIVATE -Wall -Wextra)
+    add_test(NAME fused_cuda_availability COMMAND test_fused_cuda_availability)
+
     add_executable(test_fused_cuda_ops test_fused_cuda_ops.cpp)
     target_include_directories(test_fused_cuda_ops PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(test_fused_cuda_ops PRIVATE vla_core vla_cuda_ops ggml)

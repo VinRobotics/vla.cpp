@@ -286,6 +286,24 @@ if(GGML_CUDA)
     target_compile_definitions(vla_core PUBLIC GGML_USE_CUDA)
 
     enable_language(CUDA)
+
+    # Some kernels need a minimum architecture. Build them for the requested
+    # architectures that reach it, or for the minimum when none do, so an sm_75
+    # or Pascal build still links.
+    function(vla_cuda_min_arch target min)
+        set(archs "")
+        foreach(arch ${CMAKE_CUDA_ARCHITECTURES})
+            string(REGEX MATCH "^[0-9]+" number "${arch}")
+            if(NOT number OR number GREATER_EQUAL min)
+                list(APPEND archs ${arch})
+            endif()
+        endforeach()
+        if(NOT archs)
+            set(archs ${min})
+        endif()
+        set_target_properties(${target} PROPERTIES CUDA_ARCHITECTURES "${archs}")
+    endfunction()
+
     add_library(bitvla_cuda_kernels STATIC
         src/kernels/bitvla/bitnet_kernels.cu
         src/kernels/bitvla/bitvla_lm_cuda.cu
@@ -296,6 +314,7 @@ if(GGML_CUDA)
     # relocatable device code of both CUDA libraries together, and CUDA 12.x
     # rejects the mix because only bitvla compiles with --use_fast_math:
     # "nvlink fatal: Cicc option values for '-ftz' do not match".
+    vla_cuda_min_arch(bitvla_cuda_kernels 75)  # ldmatrix
     set_target_properties(bitvla_cuda_kernels PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
@@ -321,6 +340,7 @@ if(GGML_CUDA)
         src/kernels/foldquant/fq_gemm_i8.cu
         src/kernels/foldquant/fq_gemm_mma.cu
     )
+    vla_cuda_min_arch(vla_fq_kernels 80)  # cp.async, mma
     set_target_properties(vla_fq_kernels PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
@@ -364,6 +384,7 @@ if(GGML_CUDA)
     # which ggml builds with -use_fast_math (ftz, approximate div/tanh), and no
     # other archive here does.
     add_library(vla_cuda_fused STATIC src/cuda/vla_cuda_fused.cu)
+    vla_cuda_min_arch(vla_cuda_fused 80)  # cp.async, mma
     set_target_properties(vla_cuda_fused PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON

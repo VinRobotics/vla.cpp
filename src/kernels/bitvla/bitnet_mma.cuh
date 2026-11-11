@@ -77,12 +77,20 @@ struct Segs {
     bool frag = false;   ///< weights in the fragment layout (repack_frag)
 };
 
+// cp.async and mma need sm_80. Older images keep the symbols but trap, because
+// bitlinear_mma_enabled() never dispatches this path on those devices.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#define BITVLA_ASM_SM80(...) asm volatile(__VA_ARGS__)
+#else
+#define BITVLA_ASM_SM80(...) asm volatile("trap;")
+#endif
+
 __device__ __forceinline__ void cp_async16(void * smem, const void * gmem, bool pred) {
     const unsigned sa = (unsigned) __cvta_generic_to_shared(smem);
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" :: "r"(sa), "l"(gmem), "r"(pred ? 16 : 0));
+    BITVLA_ASM_SM80("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" :: "r"(sa), "l"(gmem), "r"(pred ? 16 : 0));
 }
-__device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-template <int N> __device__ __forceinline__ void cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N)); }
+__device__ __forceinline__ void cp_async_commit() { BITVLA_ASM_SM80("cp.async.commit_group;\n" ::); }
+template <int N> __device__ __forceinline__ void cp_async_wait() { BITVLA_ASM_SM80("cp.async.wait_group %0;\n" :: "n"(N)); }
 
 __device__ __forceinline__ void ldmatrix_x4(unsigned (&r)[4], const void * smem) {
     const unsigned sa = (unsigned) __cvta_generic_to_shared(smem);
@@ -96,7 +104,7 @@ __device__ __forceinline__ unsigned decode_codes(unsigned w, int i) {
 }
 
 __device__ __forceinline__ void mma_s8u8(int (&c)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
-    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.u8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+    BITVLA_ASM_SM80("mma.sync.aligned.m16n8k32.row.col.s32.s8.u8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
                  : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
