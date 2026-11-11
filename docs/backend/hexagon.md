@@ -430,6 +430,26 @@ slightly further (1.0e-2 against 9.0e-3). They are sensitive to 16-bit precision
 rather than miscomputed. Running them with F32 weights on the NPU has not been
 tried yet.
 
+### Q8_0 weights
+
+`scripts/quantize_gguf.py --type Q8_0` packs a checkpoint's weights to Q8_0.
+Three flags shape a file for the NPU:
+
+- `--pad-m32` zero-pads in the file the FFN widths that are not a multiple of
+  32. The HMX takes no other width for a packed weight, and the loader pads an
+  FFN at load only when its weights are float.
+- `--dit` also packs the DiT's weight matrices, except adaLN and the time
+  embedding.
+- `--keep-float REGEX` leaves the weights whose name matches REGEX float.
+
+```bash
+python scripts/quantize_gguf.py --in gr00tn1d6-libero.gguf --out gr00tn1d6-q8_0.gguf \
+    --type Q8_0 --vision --pad-m32 --dit
+```
+
+Latency, memory and fidelity per configuration:
+[benchmark/qualcomm-iq10.md](../benchmark/qualcomm-iq10.md#q8_0-weights).
+
 ## IQ-10, imagined
 
 Nothing about a second-generation part is knowable from this repository, so what

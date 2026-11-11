@@ -408,6 +408,28 @@ def test_quantize_skip_names():
     assert Q.eligible("vis.d.blk.0.qkv.weight", (64, 64), "Q8_0", Q.SKIP)
 
 
+
+def test_quantize_dit_keep_float_pad():
+    import importlib
+    import re
+    Q = importlib.import_module("quantize_gguf")
+    default = Q.SKIP + Q.SKIP_VISION
+    dit = ["aex.dit.0.attn_q.weight", "aex.dit.0.ff0.weight", "aex.dit.proj_out1.weight",
+           "ah.dit.3.attn_o.weight"]
+    for n in dit:
+        assert not Q.eligible(n, (64, 64), "Q8_0", default), n
+        assert Q.eligible(n, (64, 64), "Q8_0", default, dit=True), n
+    for n in ("aex.dit.0.adaln.weight", "aex.dit.time_emb.l1.weight", "ah.act_enc.l2.weight"):
+        assert not Q.eligible(n, (64, 64), "Q8_0", default, dit=True), n
+    keep = re.compile(r"^vlm\.blk\.0\.")
+    assert not Q.eligible("vlm.blk.0.attn_q.weight", (64, 64), "Q8_0", default, keep=keep)
+    assert Q.eligible("vlm.blk.1.attn_q.weight", (64, 64), "Q8_0", default, keep=keep)
+    t = lambda n, s: types.SimpleNamespace(name=n, shape=s)
+    r = types.SimpleNamespace(tensors=[t("vit.blk.0.fc1.weight", [1152, 4304]),
+                                       t("vit.blk.0.fc2.weight", [4304, 1152]),
+                                       t("lm.blk.0.fc1.weight", [2048, 8192])])
+    assert Q.ffn_pads(r) == {"vit.blk.0": (4304, 4320)}
+
 def test_find_sidecar():
     import tempfile
     from gguf_common import find_sidecar
