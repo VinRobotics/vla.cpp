@@ -13,7 +13,7 @@ ran at `d0e5d00`, PR #35 merged with main `f464653` (same llama.cpp pin), with
 fixed-input checks against the CPU build in
 [backend/rocm.md](../backend/rocm.md). The Qualcomm Dragonwing IQ-10 row ran at
 `bd166b8` (same llama.cpp pin). The Quadro T2000 row ran at `4a542ed`
-(same llama.cpp pin) with a local patch for fused-kernel compatibility. Each report
+with the sm_75 changes of PR #82 (same llama.cpp pin). Each report
 lists the device, the build, each model's configuration, latency and peak memory
 at the defaults, and the fastest runtime flags for that device.
 
@@ -36,7 +36,7 @@ means the model does not fit or fails there; each report says which and why.
 | [Intel Arc B390 iGPU (SYCL)](core-ultra-x7-358h.md) | 15.5 | n/r | 25.0 | 102.1 | 62.6 | 101.2 | 106.1 | 178.4 | N/A | 61.7 | 269.3 | 275.2 | 434.9 | 270.4 |
 | [Intel Arc B390 iGPU (OpenVINO)](core-ultra-x7-358h.md) | N/A | n/r | 28.5 | 116.3 | 170.2 | 106.0 | 122.8 | 131.4 | N/A | 213.1 | 620.5 | 232.5 | 1262.5 | 566.0 |
 | [Intel Arc A380 (SYCL)](arc-a380.md) | 60.5 | n/r | 103.5 | 355.9 | 408.9 | 472.0 | 646.0 | 615.3 | N/A | 734.5 | 921.9 | 945.6 | - | 1047.3 |
-| [Quadro T2000 (CUDA)](t2000.md) | 23.2 | n/r | 104.9 | 2330.4 | 513.2 | - | n/r | n/r | 1286.3 | 531.9 | n/r | n/r | n/r | 1114.8 |
+| [Quadro T2000 (CUDA)](t2000.md) | 23.2 | 48.3 | 104.9 | 2330.4 | 513.2 | - | n/r | n/r | 1286.3 | 531.9 | n/r | n/r | n/r | 1114.8 |
 | [Snapdragon X Hexagon NPU](snapdragon-x-hexagon.md) | 239.7 | n/r | 2280.8 | 821.0 | 4072.1 | 2755.7 | 2940.0 | 1400.2 | N/A | 1239.3 | 5730.0 | 9321.7 | - | 7208.6 |
 | [Qualcomm Dragonwing IQ-10 Hexagon NPU](qualcomm-iq10.md) | 81.7 | 147.8 | 184.6 | 489.7 | 664.0 | 530.2 | 680.9 | 739.6 | N/A | 583.3 | 1117.6 | 1114.0 | 1117.7 | 1653.5 |
 | [Intel AI Boost NPU (OpenVINO)](core-ultra-x7-358h.md) | N/A | n/r | 23.5 | 90.7 | 126.7 | 134.0 | 161.1 | 144.9 | N/A | 161.3 | 438.3 | 430.2 | 405.8 | 256.3 |
