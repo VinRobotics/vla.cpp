@@ -44,7 +44,14 @@ static bool bitlinear_use_wide() {
 // bitnet_mma.cuh kernels: same bits as the ladder kernels. VLA_BITVLA_MMA=0
 // restores the ladder kernels and the original LM/ViT layer code.
 bool bitlinear_mma_enabled() {
-    static const bool on = vla::env_flag("VLA_BITVLA_MMA", true);
+    static const bool on = [] {
+        int device = 0;
+        cudaDeviceProp prop{};
+        const bool supported = cudaGetDevice(&device) == cudaSuccess &&
+            cudaGetDeviceProperties(&prop, device) == cudaSuccess && prop.major >= 8;
+        if (!supported) std::fprintf(stderr, "vla(bitvla): selecting CUDA ladder kernels (MMA requires sm_80+)\n");
+        return supported && vla::env_flag("VLA_BITVLA_MMA", true);
+    }();
     return on;
 }
 

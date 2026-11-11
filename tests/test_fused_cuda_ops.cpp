@@ -330,7 +330,7 @@ int main() {
     }
     vla::cuda_register_foldquant_ops();
     if (!vla::enable_fused_ops("test", true)) {
-        std::printf("fused_cuda_ops: fused ops disabled (VLA_FUSED_OPS=0), skipping\n");
+        std::printf("fused_cuda_ops: disabled or unavailable on this device, skipping\n");
         ggml_backend_free(backend);
         return 0;
     }
