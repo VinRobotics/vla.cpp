@@ -66,6 +66,12 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   brings it within the bar on a served LIBERO observation (8.9e-4, 7% slower);
   GR00T N1.5 stays above it there, as the CPU is at F16. See
   `docs/backend/hexagon.md` for the build, the skel install and the numbers.
+- **Q8_0 files for the Hexagon NPU.** `scripts/quantize_gguf.py` gains
+  `--pad-m32` (zero-pads FFN widths that are not a multiple of 32, which the HMX
+  needs for a packed weight), `--dit` (also packs the DiT's weight matrices
+  except adaLN and the time embedding) and `--keep-float REGEX` (leaves the
+  matching weights float). `docs/benchmark/qualcomm-iq10.md` reports latency,
+  memory and fidelity on the IQ-10 for each Q8_0 configuration of the 13 models.
 - **ROCm/HIP backend for VLA inference.** `-DGGML_HIP=ON` selects ggml's HIP
   backend without compiling vla.cpp's CUDA-only kernels. On Linux `gfx1200`
   (Radeon RX 9060 XT) with ROCm 7.14 and llama.cpp `b11223`, every arch except
