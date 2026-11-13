@@ -116,7 +116,7 @@ these, and they compute something else:
 | `ADD`/`MUL`/... | `src1` broadcast over one dim but not a higher one | Refused, runs on the CPU |
 | `IM2COL` | Wrong unless kernel = stride > 1 and no padding | Refused, runs on the CPU |
 | `CPY` F32→F16 | Reads back wrong on the host | Copies feeding a CPU op run on the CPU |
-| `REPEAT` | Reads stale cache lines of a source written by DMA earlier in the same op batch | Refused unless the source is a weight, runs on the CPU |
+| `REPEAT` | Reads stale cache lines of a source written by DMA earlier in the same op batch | Refused, runs on the CPU |
 | fused `MUL_MAT+ADD`, `RMS_NORM+MUL` | ~10x the error of the unfused ops | `GGML_HEXAGON_OPFUSION=0` by default |
 
 Each one flips the gripper channel, or comes close, on some checkpoint. The
@@ -129,9 +129,11 @@ Two more ops are claimed and then refused at run time. On buffers mapped above
 4 GB of DSP address space, which the IQ-10 under Linux hands out, the NPU runs
 `CONCAT` only as the dim-1 contiguous DMA copy and answers any other concat with
 `NO_SUPPORT`, and the host aborts on the first predict. The wrapper sends those
-concats to the CPU. A `CPY` or a `PAD` that reads a weight gets the same answer
-(VLA-Adapter casts its F16 action queries to F32 in the graph, ACT zero-pads its
-stem kernel), and also runs on the CPU.
+concats to the CPU. A `CPY`, a `PAD` or a `REPEAT` that reads a weight gets the
+same answer (VLA-Adapter casts its F16 action queries to F32 in the graph, ACT
+zero-pads its stem kernel, TurboVLA fills its 21 text rows with its text
+projection bias after an instruction that runs BERT over fewer tokens), and
+also runs on the CPU.
 
 The experts' KV concats (π0, π0.5, SmolVLA) were such concats: along the token
 dim of contiguous [head dim, heads, tokens] tensors, once per layer per denoise

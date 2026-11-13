@@ -382,13 +382,17 @@ bool accel_runs(FallbackCtx * fc, const ggml_tensor * t, const char ** why) {
         *why = "cannot run (NO_SUPPORT) a weight-reading";
         return false;
     }
-    if (fc->hexagon && t->op == GGML_OP_REPEAT && !is_weight(t->src[0])) {
+    if (fc->hexagon && t->op == GGML_OP_REPEAT) {
         // The NPU's REPEAT reads its source through the data cache, which is
         // invalidated only between op batches, while the op that wrote the
         // source used DMA, so within one batch it can read stale lines.
         // TurboVLA repeats its ViT prefix [768,5] over two views: max|delta|
         // 0.19 and different on every run, 3.1e-4 with the repeat on the CPU.
-        *why = "can read stale data in a";
+        // A repeat that reads a weight is answered with NO_SUPPORT instead, as
+        // for CPY and PAD: TurboVLA fills its 21 text rows with text_proj.bias
+        // [256] after an instruction that runs BERT over 11 or 14 tokens, and
+        // the host aborts.
+        *why = "cannot run (stale reads, NO_SUPPORT on a weight) a";
         return false;
     }
     if (fc->hexagon && t->op == GGML_OP_CONT && t->src[0]->nb[0] != ggml_type_size(t->src[0]->type) &&
