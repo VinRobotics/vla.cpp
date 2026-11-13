@@ -82,6 +82,7 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
         try_str("vla_adapter.architecture", arch_str) ||
         try_str("turbovla.architecture",  arch_str) ||
         try_str("cosmos3_policy.architecture", arch_str) ||
+        try_str("molmoact2.architecture", arch_str) ||
         try_str("act.architecture",       arch_str)) {
         if      (arch_str == "smolvla")    {
             *out = Arch::SMOLVLA;
@@ -141,6 +142,10 @@ bool detect_arch_gguf(const std::string& path, Arch* out) {
         }
         else if (arch_str == "cosmos3_policy") {
             *out = Arch::COSMOS3_POLICY;
+            ok = true;
+        }
+        else if (arch_str == "molmoact2") {
+            *out = Arch::MOLMOACT2;
             ok = true;
         }
     }
@@ -330,6 +335,10 @@ Model* model_load(const std::string& mmproj_path, const std::string& ckpt_path,
         case Arch::COSMOS3_POLICY:
             std::printf("vla: arch = cosmos3_policy\n");
             impl = cosmos3_policy_create(mmproj_path, ckpt_path, config_path, opts);
+            break;
+        case Arch::MOLMOACT2:
+            std::printf("vla: arch = molmoact2\n");
+            impl = molmoact2_create(mmproj_path, ckpt_path, config_path, opts);
             break;
     }
     if (!impl)

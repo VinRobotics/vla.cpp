@@ -38,7 +38,8 @@ Usage: $(basename "$0") -i <MODELS_ROOT> [-o <OUTPUT_ROOT>] [-n <N_EPISODES>] [-
   -m MODEL         which model to run: smol | pi0 | pi05 | bit | evo1 |
                                        vla_adapter | openvla_oft |
                                        gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 |
-                                       octo | turbovla | vla_jepa | cosmos3_policy | all
+                                       octo | turbovla | vla_jepa | cosmos3_policy |
+                                       molmoact2 | all
                    (default: all)
   -h               show this help
 
@@ -53,6 +54,8 @@ Env overrides: BIND_ADDR, CLIENT_ADDR, BITVLA_TOKENIZER, GR00T_N1_6_TOKENIZER,
                                 transformers that reads the policy's tokenizer, default is the LIBERO venv),
                COSMOS3_POLICY_TOKENIZER (the policy's tokenizer/ directory, default nvidia/Cosmos3 Policy
                                 from the Hub), COSMOS3_POLICY_RECV_TIMEOUT_MS (client wait per chunk, default 300000),
+               MOLMOACT2_TOKENIZER (the MolmoAct2 snapshot dir: tokenizer, config.json and
+                                norm_stats.json; default allenai/MolmoAct2-LIBERO from the Hub),
                VLA_FIXED_NOISE_SEED (client-side noise, for paired A/B runs)
 EOF
 }
@@ -78,9 +81,9 @@ done
 shift $((OPTIND - 1))
 
 case "${MODEL}" in
-    smol|pi0|pi05|bit|evo1|vla_adapter|openvla_oft|gr00t_n1_5|gr00t_n1_6|gr00t_n1_7|octo|turbovla|vla_jepa|cosmos3_policy|all) ;;
+    smol|pi0|pi05|bit|evo1|vla_adapter|openvla_oft|gr00t_n1_5|gr00t_n1_6|gr00t_n1_7|octo|turbovla|vla_jepa|cosmos3_policy|molmoact2|all) ;;
     *)
-        echo "ERROR: -m must be one of: smol | pi0 | pi05 | bit | evo1 | vla_adapter | openvla_oft | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | octo | turbovla | vla_jepa | cosmos3_policy | all (got '${MODEL}')" >&2
+        echo "ERROR: -m must be one of: smol | pi0 | pi05 | bit | evo1 | vla_adapter | openvla_oft | gr00t_n1_5 | gr00t_n1_6 | gr00t_n1_7 | octo | turbovla | vla_jepa | cosmos3_policy | molmoact2 | all (got '${MODEL}')" >&2
         exit 1
         ;;
 esac
@@ -120,6 +123,7 @@ VLA_JEPA_PYTHON="${VLA_JEPA_PYTHON:-${VENV_PY}}"
 COSMOS3_POLICY_PYTHON="${COSMOS3_POLICY_PYTHON:-${VENV_PY}}"
 COSMOS3_POLICY_TOKENIZER="${COSMOS3_POLICY_TOKENIZER:-}"
 COSMOS3_POLICY_RECV_TIMEOUT_MS="${COSMOS3_POLICY_RECV_TIMEOUT_MS:-300000}"
+MOLMOACT2_TOKENIZER="${MOLMOACT2_TOKENIZER:-}"
 CLIENT="${REPO_ROOT}/eval/client/run_sim_client_direct.py"
 BIND_ADDR="${BIND_ADDR:-tcp://*:5555}"
 CLIENT_ADDR="${CLIENT_ADDR:-tcp://localhost:5555}"
@@ -155,6 +159,7 @@ N_ACTION_STEPS_OCTO="${N_ACTION_STEPS_OCTO:-4}"
 N_ACTION_STEPS_TURBOVLA="${N_ACTION_STEPS_TURBOVLA:-12}"
 N_ACTION_STEPS_VLA_JEPA="${N_ACTION_STEPS_VLA_JEPA:-7}"
 N_ACTION_STEPS_COSMOS3_POLICY="${N_ACTION_STEPS_COSMOS3_POLICY:-16}" # Cosmos3 Policy executes the whole 16-action chunk
+N_ACTION_STEPS_MOLMOACT2="${N_ACTION_STEPS_MOLMOACT2:-10}"   # norm_stats.json n_action_steps for the libero tag
 
 mkdir -p "${OUTPUT_ROOT}"
 OUTPUT_ROOT="$(cd "${OUTPUT_ROOT}" && pwd)"
@@ -353,6 +358,9 @@ run_model() {
     # Eagle tokenizer in the model dir (override via GR00T_N1_6_TOKENIZER).
     if [[ "${arch}" == "gr00t_n1_6" ]]; then
         client_extra+=(--tokenizer "${GR00T_N1_6_TOKENIZER:-${model_dir}}")
+    fi
+    if [[ "${arch}" == molmoact2 && -n "${MOLMOACT2_TOKENIZER}" ]]; then
+        client_extra+=(--tokenizer "${MOLMOACT2_TOKENIZER}")
     fi
     if [[ ( "${arch}" == pi0 || "${arch}" == pi05 ) && -n "${PALIGEMMA_TOKENIZER}" ]]; then
         client_extra+=(--tokenizer "${PALIGEMMA_TOKENIZER}")
@@ -588,6 +596,21 @@ if should_run cosmos3_policy; then
             "${N_ACTION_STEPS_COSMOS3_POLICY}" \
             "" \
             "${cosmos3_gguf}"
+    fi
+fi
+
+# molmoact2: the GGUF of scripts/convert_molmoact2_to_gguf.py, not published yet, so a missing one is
+# skipped. The client reads the tokenizer, config.json and norm_stats.json from MOLMOACT2_TOKENIZER.
+if should_run molmoact2; then
+    molmoact2_gguf="${MODELS_ROOT}/molmoact2-libero-gguf/molmoact2-libero-bf16.gguf"
+    if [[ ! -f "${molmoact2_gguf}" ]]; then
+        echo "[skip] molmoact2: ${molmoact2_gguf} not found"
+    else
+        run_model molmoact2 \
+            "${MODELS_ROOT}/molmoact2-libero-gguf" \
+            "${N_ACTION_STEPS_MOLMOACT2}" \
+            "" \
+            "${molmoact2_gguf}"
     fi
 fi
 

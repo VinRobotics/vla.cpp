@@ -74,6 +74,7 @@ enum class Arch {
     TURBOVLA,   // TurboVLA (DINOv3 + BERT + VL Fusion + ACT decoder).
     ACT,        // LeRobot ACT (ResNet + transformer encoder-decoder, no language).
     COSMOS3_POLICY,// NVIDIA Cosmos3 Policy world-action model (Nemotron MoT + Wan2.2 VAE, UniPC).
+    MOLMOACT2,  // Ai2 MolmoAct2 (SigLIP + Qwen3-style LM + per-layer KV flow-matching expert).
 };
 
 /**
@@ -260,6 +261,15 @@ std::unique_ptr<ModelArchBase> cosmos3_policy_create(const std::string& mmproj_p
                                                    const std::string& ckpt_path,
                                                    const std::string& config_path,
                                                    const Options& opts);
+
+/**
+ * @brief Build a MolmoAct2 model. Vision is baked into @p ckpt_path.
+ * @copydetails smolvla_create
+ */
+std::unique_ptr<ModelArchBase> molmoact2_create(const std::string& mmproj_path,
+                                                const std::string& ckpt_path,
+                                                const std::string& config_path,
+                                                const Options& opts);
 
 /**
  * @brief Inspect a GGUF and identify the architecture tag.

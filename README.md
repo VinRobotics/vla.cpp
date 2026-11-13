@@ -101,7 +101,7 @@ Use [ggml-compiler](https://github.com/khanhnd61-vr/ggml-compiler) and follow [t
 | [VLA-JEPA](https://hf.co/vrfai/vla-jepa-libero)                | Y | Y | Y | Y | Y | Y | Y |
 | [Octo-Small](https://hf.co/vrfai/octo-small-libero-gguf)       | Y | Y | Y | Y | Y | - | Y |
 | [TurboVLA](https://hf.co/vrfai/turbovla-libero-gguf)           | Y | Y | Y | Y | Y | Y | Y |
-| [ACT](https://hf.co/ravediamond/act-aloha-sim-transfer-cube-gguf) | Y | Y | Y | ~ | Y | ~ | ~ |
+| [MolmoAct2](https://hf.co/vrfai/molmoact2-libero-gguf)        | ~ | ~ | - | - | ~ | - | - |
 | [Cosmos3 Policy](https://hf.co/vrfai/cosmos3-policy-libero-gguf)   | ~ | ~ | - | - | - | - | - |
 
 Legend: `Y` = supported (released and benchmarked), `~` = in progress, `-` = planned.
@@ -185,7 +185,7 @@ Licensed under the [Apache License, Version 2.0](LICENSE.md).
 
 Supported VLA models:
 
-- [ACT](https://arxiv.org/abs/2304.13705) - Zhao et al.
+- [MolmoAct2](https://github.com/allenai/molmoact2) - Haoquan Fang et al., Ai2.
 - [SmolVLA](https://huggingface.co/lerobot/smolvla_base) - Hugging Face LeRobot team.
 - [π0,π0.5](https://github.com/Physical-Intelligence/openpi) - Physical Intelligence.
 - [BitVLA](https://github.com/ustcwhy/BitVLA) - Hongyu Wang et al.

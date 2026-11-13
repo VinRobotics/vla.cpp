@@ -22,6 +22,7 @@ WSL2 as in [wsl.md](wsl.md).
 
 | GPU family | Example cards | `CUDA_ARCHITECTURE` |
 |---|---|---|
+| Turing | Quadro T2000, RTX 20-series | `75` |
 | Ampere (Jetson) | Orin Nano, Orin NX | `87` |
 | Ampere (consumer) | RTX 30-series, A40 | `86` |
 | Ada Lovelace | RTX 40-series, L40 | `89` |
@@ -73,8 +74,13 @@ Per-device latency is in [docs/benchmark/](../benchmark): RTX 3060, 3090,
 
 ## The bit-exact fast path
 
+Fused CUDA ops require sm_80+ and a compatible kernel image in the build.
+The runtime checks both before creating fused nodes. On Turing, defaults
+automatically use the plain ggml CUDA graph; `VLA_FUSED_OPS=0` is unnecessary.
+BitVLA uses its CUDA ladder kernels there instead of the Ampere MMA path.
+
 At the default precision (F32 activations, the checkpoint's BF16 or
-F32 weights, no flash attention), every architecture runs a faster path that
+F32 weights, no flash attention), supported devices run a faster path that
 returns **the same bits** as the plain ggml graph. Nothing about the model's
 arithmetic changes: no lower precision, no reordered sums. Success rates
 measured at the defaults therefore carry over unchanged.
