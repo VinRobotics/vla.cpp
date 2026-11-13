@@ -102,6 +102,20 @@ public:
     ggml_type gemm_type() const {
         return gemm_;
     }
+
+    // GEMM weights declared while this lives take type t instead of the
+    // loader's; the previous type comes back when it goes out of scope.
+    class GemmScope {
+    public:
+        GemmScope(WeightLoader & L, ggml_type t) : L_(L), prev_(L.gemm_) { L.gemm_ = t; }
+        ~GemmScope() { L_.gemm_ = prev_; }
+        GemmScope(const GemmScope &)             = delete;
+        GemmScope & operator=(const GemmScope &) = delete;
+    private:
+        WeightLoader & L_;
+        ggml_type      prev_;
+    };
+
     bool      ok()        const {
         return ok_;
     }

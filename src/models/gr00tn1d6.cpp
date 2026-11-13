@@ -274,14 +274,32 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
 
     WeightLoader L("gr00tn1d6", g, m->ctx_weights, m->matmul_type);
 
-    m->vit.declare(L, "vit", m->vit_layers, /*patch_embd_is_gemm=*/true);
+    // Where the matrix unit multiplies with F16 activations (Hexagon), the
+    // rounding in SigLIP2's first blocks grows through the tower: a served
+    // LIBERO observation lands 1.0e-2 from the CPU F32 reference on the
+    // Dragonwing IQ-10. Unless --weight-dtype is given, the tower and its
+    // projector keep F32 weights there and the first three blocks' matmuls run
+    // on the CPU: 8.9e-4, 7% slower. Weights packed in the file stay packed
+    // and on the NPU.
+    const bool precise_vit = vla::hmx_f16_activations() && !opts.weight_dtype.has_value();
+    {
+        WeightLoader::GemmScope vit_type(L, precise_vit ? GGML_TYPE_F32 : L.gemm_type());
+        m->vit.declare(L, "vit", m->vit_layers, /*patch_embd_is_gemm=*/true);
 
-    m->mm_ln_w  = L.f32 ("mm.ln.weight");
-    m->mm_ln_b  = L.f32 ("mm.ln.bias");
-    m->mm_fc1_w = L.gemm("mm.fc1.weight");
-    m->mm_fc1_b = L.f32 ("mm.fc1.bias");
-    m->mm_fc2_w = L.gemm("mm.fc2.weight");
-    m->mm_fc2_b = L.f32 ("mm.fc2.bias");
+        m->mm_ln_w  = L.f32 ("mm.ln.weight");
+        m->mm_ln_b  = L.f32 ("mm.ln.bias");
+        m->mm_fc1_w = L.gemm("mm.fc1.weight");
+        m->mm_fc1_b = L.f32 ("mm.fc1.bias");
+        m->mm_fc2_w = L.gemm("mm.fc2.weight");
+        m->mm_fc2_b = L.f32 ("mm.fc2.bias");
+    }
+    if (precise_vit)
+        for (size_t i = 0; i < 3 && i < m->vit.enc.blk.size(); ++i) {
+            const EncBlockW & w = m->vit.enc.blk[i];
+            for (ggml_tensor * t : {w.Wq, w.Wk, w.Wv, w.Wqkv, w.Wo, w.Wfc1, w.Wfc2})
+                if (t && t->type == GGML_TYPE_F32)
+                    vla::keep_matmul_on_cpu(t);
+        }
 
     m->lm.declare(L, "vlm", fq.present ? &fq.llm : nullptr);
 
