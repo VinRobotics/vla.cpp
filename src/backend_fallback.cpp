@@ -314,7 +314,7 @@ bool concat_is_dma_row_copy(const ggml_tensor * t) {
 // op it claims and computes differently from the CPU reference is refused here.
 bool accel_runs(FallbackCtx * fc, const ggml_tensor * t, const char ** why) {
     *why = "rejects";
-    if (t->op == GGML_OP_MUL_MAT && kept_on_cpu(t->src[0])) {
+    if (fc->hexagon && t->op == GGML_OP_MUL_MAT && kept_on_cpu(t->src[0])) {
         *why = "leaves to the CPU a registered weight's";
         return false;
     }

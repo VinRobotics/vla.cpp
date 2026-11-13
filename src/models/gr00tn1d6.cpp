@@ -279,7 +279,8 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
     // LIBERO observation lands 1.0e-2 from the CPU F32 reference on the
     // Dragonwing IQ-10. Unless --weight-dtype is given, the tower and its
     // projector keep F32 weights there and the first three blocks' matmuls run
-    // on the CPU: 8.9e-4, 7% slower.
+    // on the CPU: 8.9e-4, 7% slower. Weights packed in the file stay packed
+    // and on the NPU.
     const bool precise_vit = vla::hmx_f16_activations() && !opts.weight_dtype.has_value();
     {
         WeightLoader::GemmScope vit_type(L, precise_vit ? GGML_TYPE_F32 : L.gemm_type());
@@ -296,7 +297,7 @@ std::unique_ptr<ModelArchBase> gr00t_n1_6_create(const std::string& mmproj_path,
         for (size_t i = 0; i < 3 && i < m->vit.enc.blk.size(); ++i) {
             const EncBlockW & w = m->vit.enc.blk[i];
             for (ggml_tensor * t : {w.Wq, w.Wk, w.Wv, w.Wqkv, w.Wo, w.Wfc1, w.Wfc2})
-                if (t)
+                if (t && t->type == GGML_TYPE_F32)
                     vla::keep_matmul_on_cpu(t);
         }
 

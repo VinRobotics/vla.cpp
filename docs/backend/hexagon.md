@@ -154,7 +154,8 @@ N1.6's SigLIP2 tower that rounding grows from the first blocks: a served LIBERO
 observation landed 1.0e-2 from the reference, and F32 weights alone left it at
 5.4e-3. On Hexagon the tower and its projector keep F32 weights and the first
 three blocks' matmuls run on the CPU (`fallback_keep_on_cpu()`): 8.9e-4, at 682
-to 734 ms. GR00T N1.5 spreads the same rounding over the whole model: with F32
+to 734 ms. Any `--weight-dtype` turns this off, and weights packed in the file
+(Q8_0) stay on the NPU. GR00T N1.5 spreads the same rounding over the whole model: with F32
 weights, running its vision tower, LM, VL self-attention or DiT on the CPU
 leaves it at 1.1e-2 to 1.3e-2 each, and only every matmul on the CPU, with
 flash attention off, brings it under the bar (1.8e-3).
