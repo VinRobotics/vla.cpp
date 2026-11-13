@@ -155,325 +155,337 @@ except:
 | Date | 2026-11-10 to 2026-11-13 (UTC+07) |
 | Runtime flags | defaults |
 
-Each configuration packs the weights of the one before it, plus:
+A Q8_0 level puts more of the model in Q8_0 than the level above it. Embeddings,
+the output head, norms, patch embeddings and position tables stay float at every
+level. Weights not in Q8_0 load as they do in the F16 configuration
+(`--weight-dtype f16`, the default).
 
-| Config | `quantize_gguf.py` flags | Packs |
+| Q8_0 level | `quantize_gguf.py` flags | Weights in Q8_0 |
 |---|---|---|
-| F16 | - | none: the shipped file, loaded as F16 (`--weight-dtype f16`, the default) |
-| default | `--type Q8_0` | the 2-D weights outside the vision tower and the action head. Embeddings, the output head, norms, patch embeddings and position tables stay float in every configuration |
-| vision, unpadded | `--vision` | the vision tower |
-| vision | `--vision --pad-m32` | the vision tower, with FFN widths that are not a multiple of 32 zero-padded (SigLIP's 4304 to 4320 in π0, π0.5, GR00T N1.5 and N1.6, VLA-Adapter and OpenVLA-OFT) |
-| vision + DiT | `--vision --pad-m32 --dit` | the DiT's weight matrices, except adaLN and the time embedding |
-| ..., keep-float (*kind*, *n*) | the flags of the named configuration plus `--keep-float REGEX` | that configuration with *n* weights left float |
+| F16 | - | none: the shipped file |
+| base | `--type Q8_0` | the 2-D weights outside the vision tower and the action head |
+| base + vision, unpadded | `--type Q8_0 --vision` | base, plus the vision tower |
+| base + vision | `--type Q8_0 --vision --pad-m32` | base, plus the vision tower with FFN widths that are not a multiple of 32 zero-padded (SigLIP's 4304 to 4320 in π0, π0.5, GR00T N1.5 and N1.6, VLA-Adapter and OpenVLA-OFT) |
+| base + vision + DiT | `--type Q8_0 --vision --pad-m32 --dit` | base + vision, plus the DiT's weight matrices except adaLN and the time embedding |
+| *level*, *n* kept F16 (*kind* list) | the level's flags plus `--keep-float REGEX` | the level, except *n* weights that `REGEX` keeps F16 |
 
-Each configuration runs six checks, max|Δ| of the action chunk against the
-CPU-only build at F32: *fixed*, on fixed inputs as in
-[Fidelity](../backend/hexagon.md#fidelity), and *obs0* to *obs4*, five LIBERO
-observations served as in [Serving](../backend/hexagon.md#serving). obs*k* shifts
-the views' color pattern and draws their noise from seed *k*, moves the
+Each configuration runs six checks: max|Δ| of the action chunk against the
+CPU-only build at F32, on *fixed*, the fixed inputs of
+[Fidelity](../backend/hexagon.md#fidelity), and on *obs0* to *obs4*, five LIBERO
+observations served as in [Serving](../backend/hexagon.md#serving). obs*k*
+shifts the views' color pattern and draws their noise from seed *k*, moves the
 end-effector by 0.02·*k* on each axis and takes task prompt *k* mod 4 of four
-LIBERO prompts. A check passes when max|Δ| is at most 2.9e-3, or at most 1.1
-times F16 where F16 is above 2.9e-3. A configuration's score is the largest
-ratio of a check's max|Δ| to its threshold; it passes at 1 or less.
+LIBERO prompts; obs0 is the observation of
+[Serving](../backend/hexagon.md#serving). A check passes when max|Δ| is at most
+its threshold: 2.9e-3, or 1.1 times the F16 max|Δ| on that check where that is
+above 2.9e-3. For each check, max|Δ| divided by the threshold gives a ratio; a
+configuration's score is its largest ratio, so it passes all checks at a score
+of 1 or less.
 
-The `--keep-float` lists come from a greedy search over the weights a level puts
-in Q8_0: groups of blocks (a quarter of a stack, attention or FFN), most
-sensitive first, then single blocks are left float until the score is at most 1,
-and float blocks are then returned to Q8_0 while it stays there. *fixed* and
-*served* lists search on one check, fixed or obs0, and *union* leaves both
-float. *all checks* lists search on fixed and obs0 to obs2, then must pass obs3
-and obs4; an observation that fails joins the search, once. Each level gets
-1.75 h. A lower level is searched only when the level above finds no list, and
-none is searched when every weight of the level in Q8_0 scores above 10. Mean
-latency and System RAM follow the TEMPLATE protocol.
+The `--keep-float` lists come from a greedy search on one Q8_0 level. Groups of
+blocks (a quarter of a stack, attention or FFN), most sensitive first, and then
+single blocks are kept F16 until the score is at most 1; the F16 blocks are then
+returned to Q8_0 while the score stays at most 1. The list's
+*kind* names the checks it was searched on: *fixed-input* (fixed), *obs0*,
+*fixed-input + obs0* (both lists' weights kept F16), and *six-check*. A
+six-check list is searched on fixed, obs0, obs1 and obs2, then checked on obs3
+and obs4; an observation that fails joins the search, once. A six-check search
+runs on the level with the most in Q8_0 first, gets 1.75 h per level, and moves
+to the next level only when it finds no list. A level is not searched when all
+of it in Q8_0 scores above 10. Mean latency and System RAM follow the TEMPLATE
+protocol.
 
 ### Configuration per model
 
-The fastest Q8_0 configuration that passes all checks and has a recorded
-`--keep-float` list, against F16. *Q8_0 weights* counts the weights in Q8_0 out
-of those the level can pack; the rest stay float. A configuration passes at a
-score of 1 or less. A model fails when no configuration passes; the table then
-gives the best score its searches reached, or, for a model no search ran on, its
-lowest score with every weight of a level in Q8_0 (a level scoring above 10 is
-not searched).
+Per model, the fastest Q8_0 configuration that passes all checks and has a
+recorded `--keep-float` list, against F16.
 
-| Model | Q8_0 result | Q8_0 level | Q8_0 weights | F16 ms | Q8_0 ms | vs F16 | F16 RAM MiB | Q8_0 RAM MiB | vs F16 |
+- *Weights in Q8_0* counts the weights in Q8_0 out of those the level can put in
+  Q8_0; *n kept F16* is the number `--keep-float` keeps out.
+- A model fails when no configuration passes; its row gives the best score its
+  searches reached, or, where no search ran, the score with all of base in Q8_0.
+
+| Model | Q8_0 result | Q8_0 configuration | Weights in Q8_0 | F16 ms | Q8_0 ms | vs F16 | F16 System RAM MiB | Q8_0 System RAM MiB | vs F16 |
 |---|---|---|--:|--:|--:|--:|--:|--:|--:|
-| π0 | passes all checks | vision | 281 of 289 | 1123.3 | 937.7 | -16.5% | 5662 | 3326 | -41.3% |
-| π0.5 | passes all checks | vision | 108 of 289 | 1107.8 | 1061.2 | -4.2% | 5980 | 5095 | -14.8% |
-| Octo-Small | passes all checks | vision | 119 of 123 | 84.1 | 81.5 | -3.1% | 725 | 407 | -43.9% |
-| ACT | passes all checks | default | 35 of 35 | 152.5 | 150.9 | -1.0% | 469 | 405 | -13.6% |
-| TurboVLA | passes all checks | default | 121 of 133 | 190.2 | 189.7 | -0.3% | 1079 | 881 | -18.4% |
-| Evo-1 | passes all checks | default | 34 of 100 | 1659.0 | 1657.4 | -0.1% | 1582 | 1494 | -5.6% |
-| OpenVLA-OFT | fails: best search score 1.03 | - | - | 1125.2 | - | - | 15266 | - | - |
-| VLA-Adapter | fails: best search score 1.03 | - | - | 669.2 | - | - | 3569 | - | - |
-| GR00T N1.5 | fails: best search score 1.23 | - | - | 529.3 | - | - | 3659 | - | - |
-| GR00T N1.6 | fails: best search score 1.33 | - | - | 682.6 | - | - | 4929 | - | - |
-| GR00T N1.7 | fails: best search score 1.40 | - | - | 744.9 | - | - | 5108 | - | - |
-| SmolVLA | fails: not searched; lowest score 44, every weight of the default level in Q8_0 | - | - | 584.0 | - | - | 1226 | - | - |
-| VLA-JEPA | fails: not searched; lowest score 36, every weight of the default level in Q8_0 | - | - | 496.8 | - | - | 4018 | - | - |
+| π0 | passes all checks | base + vision, 8 kept F16 | 281 of 289 | 1123.3 | 937.7 | -16.5% | 5662 | 3326 | -41.3% |
+| π0.5 | passes all checks | base + vision, 181 kept F16 | 108 of 289 | 1107.8 | 1061.2 | -4.2% | 5980 | 5095 | -14.8% |
+| Octo-Small | passes all checks | base + vision, 4 kept F16 | 119 of 123 | 84.1 | 81.5 | -3.1% | 725 | 407 | -43.9% |
+| ACT | passes all checks | base | 35 of 35 | 152.5 | 150.9 | -1.0% | 469 | 405 | -13.6% |
+| TurboVLA | passes all checks | base, 12 kept F16 | 121 of 133 | 190.2 | 189.7 | -0.3% | 1079 | 881 | -18.4% |
+| Evo-1 | passes all checks | base, 66 kept F16 | 34 of 100 | 1659.0 | 1657.4 | -0.1% | 1582 | 1494 | -5.6% |
+| OpenVLA-OFT | fails: best score 1.03 | - | - | 1125.2 | - | - | 15266 | - | - |
+| VLA-Adapter | fails: best score 1.03 | - | - | 669.2 | - | - | 3569 | - | - |
+| GR00T N1.5 | fails: best score 1.23 | - | - | 529.3 | - | - | 3659 | - | - |
+| GR00T N1.6 | fails: best score 1.33 | - | - | 682.6 | - | - | 4929 | - | - |
+| GR00T N1.7 | fails: best score 1.40 | - | - | 744.9 | - | - | 5108 | - | - |
+| SmolVLA | fails: not searched, score 44 with all of base in Q8_0 | - | - | 584.0 | - | - | 1226 | - | - |
+| VLA-JEPA | fails: not searched, score 36 with all of base in Q8_0 | - | - | 496.8 | - | - | 4018 | - | - |
 
 Flags for `python scripts/quantize_gguf.py --in <checkpoint> --out <file>`:
 
 ```bash
+# π0
+--type Q8_0 --vision --pad-m32 --keep-float '^vlm\.blk\.[04]\.attn_[qkvo]\.'
+# π0.5
+--type Q8_0 --vision --pad-m32 --keep-float '^vit\.blk\.(0|2|3|4|5|6|14|17|18|19|20)\.|^vit\.blk\.(7|8|9|12|13|21|23|24|25)\.attn_|^vlm\.blk\.(9|10|11|12|13|14)\.|^vlm\.blk\.(0|1|2|3|4|15|16)\.ffn_|^vlm\.blk\.[5-8]\.attn_'
 # Octo-Small
 --type Q8_0 --vision --pad-m32 --keep-float '^octo\.blk\.(1\.attn_(qkv|o)|6\.ffn_(up|down))\.'
 # ACT
 --type Q8_0
 # TurboVLA
 --type Q8_0 --keep-float '^text\.encoder\.layer\.[02]\.'
-# π0.5
---type Q8_0 --vision --pad-m32 --keep-float '^vit\.blk\.(0|2|3|4|5|6|14|17|18|19|20)\.|^vit\.blk\.(7|8|9|12|13|21|23|24|25)\.attn_|^vlm\.blk\.(9|10|11|12|13|14)\.|^vlm\.blk\.(0|1|2|3|4|15|16)\.ffn_|^vlm\.blk\.[5-8]\.attn_'
-# π0
---type Q8_0 --vision --pad-m32 --keep-float '^vlm\.blk\.[04]\.attn_[qkvo]\.'
 # Evo-1
 --type Q8_0 --keep-float '^vlm\.blk\.([2-9]|10)\.|^vlm\.blk\.13\.ffn_'
 ```
 
 ### Per model
 
-Each model has two tables. The first gives every Q8_0 configuration: mean
-latency, System RAM, and max|Δ| against the CPU-only build at F32 for each check
-(*fixed*, *obs0* to *obs4*); *passes* counts the checks at or under their
-threshold. The second lists every *all checks* search on that model, in the
-order run, from the score with every weight of the level in Q8_0 to the result
-and the hours it took. A search that finds no list gives its best score.
+Each model has two tables. The first gives every Q8_0 configuration measured,
+with mean latency, System RAM, max|Δ| on each of the six checks, and how many
+checks pass. The second gives every six-check search on the model, in the order
+run: the score with all of the level in Q8_0, the search, the check on obs3 and
+obs4, the search again when that check fails, the result and the hours it took.
+A search that finds no list gives its best score.
 
 #### Octo-Small
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 84.1 | - | 725 | - | 5.0e-4 | 1.4e-4 | 4.7e-4 | 3.3e-4 | 1.4e-4 | 6.3e-4 | 6 / 6 |
-| default | 81.6 | -3.0% | 405 | -44.1% | 2.5e-3 | 2.0e-3 | 4.4e-3 | 2.4e-3 | 1.8e-3 | 4.9e-3 | 4 / 6 |
-| vision | 83.5 | -0.7% | 402 | -44.6% | 1.9e-3 | 1.9e-3 | 4.2e-3 | 3.2e-3 | 1.7e-3 | 4.9e-3 | 3 / 6 |
-| vision, keep-float (all checks, 14) | 83.8 | -0.4% | 425 | -41.4% | 2.7e-3 | 1.9e-3 | 2.4e-3 | 2.0e-3 | 7.5e-4 | 1.5e-3 | 6 / 6 |
-| vision, keep-float (all checks, 4) | 81.5 | -3.1% | 407 | -43.9% | 1.0e-3 | 1.7e-3 | 2.7e-3 | 1.6e-3 | 1.2e-3 | 2.5e-3 | 6 / 6 |
+| base | 81.6 | -3.0% | 405 | -44.1% | 2.5e-3 | 2.0e-3 | 4.4e-3 | 2.4e-3 | 1.8e-3 | 4.9e-3 | 4 / 6 |
+| base + vision | 83.5 | -0.7% | 402 | -44.6% | 1.9e-3 | 1.9e-3 | 4.2e-3 | 3.2e-3 | 1.7e-3 | 4.9e-3 | 3 / 6 |
+| base + vision, 14 kept F16 (six-check list) | 83.8 | -0.4% | 425 | -41.4% | 2.7e-3 | 1.9e-3 | 2.4e-3 | 2.0e-3 | 7.5e-4 | 1.5e-3 | 6 / 6 |
+| base + vision, 4 kept F16 (six-check list) | 81.5 | -3.1% | 407 | -43.9% | 1.0e-3 | 1.7e-3 | 2.7e-3 | 1.6e-3 | 1.2e-3 | 2.5e-3 | 6 / 6 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| vision | 1.68 | list found | obs4 fails (3.6e-3) | list found | passes, 14 weights float | 0.5 |
-| vision | 1.68 | list found | obs4 fails (4.4e-3) | list found | passes, 4 weights float | 0.5 |
+| base + vision | 1.68 | list found (score ≤ 1) | obs4 fails: 3.6e-3 > threshold | list found (score ≤ 1) | passes: 14 weights kept F16 | 0.5 |
+| base + vision | 1.68 | list found (score ≤ 1) | obs4 fails: 4.4e-3 > threshold | list found (score ≤ 1) | passes: 4 weights kept F16 | 0.5 |
 
-The 14-weight list comes from the first search, which kept a group float even
-when that raised the score; the 4-weight list from the second, which does not.
+The 14-weight list comes from the first search, which kept a group F16 even when
+that raised the score; the 4-weight list comes from the second, which keeps a
+group F16 only when that lowers the score.
 
 #### ACT
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 152.5 | - | 469 | - | 6.1e-4 | 1.0e-3 | 9.0e-4 | 5.7e-4 | 7.2e-4 | 7.6e-4 | 6 / 6 |
-| default | 150.9 | -1.0% | 405 | -13.6% | 2.1e-3 | 2.4e-3 | 2.7e-3 | 2.0e-3 | 2.3e-3 | 2.0e-3 | 6 / 6 |
+| base | 150.9 | -1.0% | 405 | -13.6% | 2.1e-3 | 2.4e-3 | 2.7e-3 | 2.0e-3 | 2.3e-3 | 2.0e-3 | 6 / 6 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| default | 0.93 | not run: every weight in Q8_0 passes | - | - | passes, no weight float | - |
+| base | 0.93 | not searched: all in Q8_0 passes | - | - | passes: no weight kept F16 | - |
 
 ACT takes no prompt: its obs*k* shifts the view and the 14-dim state the same
-way.
+way. ACT has no vision tower to put in Q8_0 (its ResNet stays float), so base is
+its only level.
 
 #### TurboVLA
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 190.2 | - | 1079 | - | 3.7e-4 | 8.5e-4 | crash | crash | crash | 6.3e-4 | 3 / 3 |
-| default | 186.5 | -1.9% | 814 | -24.6% | 1.3e-2 | 4.2e-3 | crash | crash | crash | 1.7e-3 | 1 / 3 |
-| vision | 185.7 | -2.4% | 485 | -55.1% | 1.4e-2 | 8.3e-3 | crash | crash | crash | 5.7e-3 | 0 / 3 |
-| vision, keep-float (fixed, 32) | 185.8 | -2.3% | 611 | -43.4% | 2.6e-3 | 6.9e-3 | crash | crash | crash | 4.2e-3 | 1 / 3 |
-| default, keep-float (all checks, 12) | 189.7 | -0.3% | 881 | -18.4% | 1.5e-3 | 2.7e-3 | crash | crash | crash | 1.6e-3 | 3 / 3 |
+| base | 186.5 | -1.9% | 814 | -24.6% | 1.3e-2 | 4.2e-3 | crash | crash | crash | 1.7e-3 | 1 / 3 |
+| base + vision | 185.7 | -2.4% | 485 | -55.1% | 1.4e-2 | 8.3e-3 | crash | crash | crash | 5.7e-3 | 0 / 3 |
+| base + vision, 32 kept F16 (fixed-input list) | 185.8 | -2.3% | 611 | -43.4% | 2.6e-3 | 6.9e-3 | crash | crash | crash | 4.2e-3 | 1 / 3 |
+| base, 12 kept F16 (six-check list) | 189.7 | -0.3% | 881 | -18.4% | 1.5e-3 | 2.7e-3 | crash | crash | crash | 1.6e-3 | 3 / 3 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| vision | 4.86 | no list within 1.75 h (best 1.02) | - | - | no list | 1.8 |
-| default | 4.48 | list found on fixed, obs0, obs4 | not run: crash | - | passes, 12 weights float | 0.1 |
+| base + vision | 4.86 | no list within 1.75 h (best 1.02) | - | - | no list | 1.8 |
+| base | 4.48 | list found on fixed, obs0, obs4 (score ≤ 1) | not run: crash | - | passes: 12 weights kept F16 | 0.1 |
 
 obs1 to obs3 crash the Hexagon server at F16 too (`ggml-hex: HTP0 synchronize
-failed : dsp-error NO-SUPPORT` in `TurboVlaModelArch::predict`), so TurboVLA has
-three checks, and its *all checks* list searches on all three.
+failed : dsp-error NO-SUPPORT` in `TurboVlaModelArch::predict`). TurboVLA
+therefore has three checks (fixed, obs0, obs4), and its six-check list searches
+on those three.
 
 #### VLA-JEPA
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 496.8 | - | 4018 | - | 2.1e-3 | 2.2e-3 | 1.1e-3 | 1.4e-3 | 2.8e-3 | 3.4e-4 | 6 / 6 |
-| default | 432.1 | -13.0% | 2718 | -32.4% | 1.4e-2 | 1.0e-1 | 1.8e-2 | 6.4e-2 | 6.9e-2 | 9.9e-3 | 0 / 6 |
-| vision | 411.6 | -17.1% | 2350 | -41.5% | 1.5e-2 | 1.6e-1 | 1.5e-2 | 5.3e-2 | 5.4e-2 | 1.0e-2 | 0 / 6 |
-| vision + DiT | 393.5 | -20.8% | 2288 | -43.1% | 1.3e-2 | 1.3e-1 | 1.6e-2 | 5.5e-2 | 5.5e-2 | 1.0e-2 | 0 / 6 |
-| vision + DiT, keep-float (fixed, 233) | 461.4 | -7.1% | 3614 | -10.1% | 2.9e-3 | 8.3e-3 | 2.5e-3 | 5.8e-3 | 3.3e-3 | 2.5e-3 | 3 / 6 |
-| vision + DiT, keep-float (served, 143) | 436.6 | -12.1% | 3117 | -22.4% | 8.4e-3 | 2.1e-3 | 3.8e-3 | 6.1e-3 | 2.2e-2 | 2.9e-3 | 2 / 6 |
-| vision + DiT, keep-float (union, 244) | 461.6 | -7.1% | 3679 | -8.4% | 3.7e-3 | 5.1e-3 | 2.8e-3 | 3.2e-3 | 3.1e-3 | 2.4e-3 | 2 / 6 |
+| base | 432.1 | -13.0% | 2718 | -32.4% | 1.4e-2 | 1.0e-1 | 1.8e-2 | 6.4e-2 | 6.9e-2 | 9.9e-3 | 0 / 6 |
+| base + vision | 411.6 | -17.1% | 2350 | -41.5% | 1.5e-2 | 1.6e-1 | 1.5e-2 | 5.3e-2 | 5.4e-2 | 1.0e-2 | 0 / 6 |
+| base + vision + DiT | 393.5 | -20.8% | 2288 | -43.1% | 1.3e-2 | 1.3e-1 | 1.6e-2 | 5.5e-2 | 5.5e-2 | 1.0e-2 | 0 / 6 |
+| base + vision + DiT, 233 kept F16 (fixed-input list) | 461.4 | -7.1% | 3614 | -10.1% | 2.9e-3 | 8.3e-3 | 2.5e-3 | 5.8e-3 | 3.3e-3 | 2.5e-3 | 3 / 6 |
+| base + vision + DiT, 143 kept F16 (obs0 list) | 436.6 | -12.1% | 3117 | -22.4% | 8.4e-3 | 2.1e-3 | 3.8e-3 | 6.1e-3 | 2.2e-2 | 2.9e-3 | 2 / 6 |
+| base + vision + DiT, 244 kept F16 (fixed-input + obs0 list) | 461.6 | -7.1% | 3679 | -8.4% | 3.7e-3 | 5.1e-3 | 2.8e-3 | 3.2e-3 | 3.1e-3 | 2.4e-3 | 2 / 6 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| vision + DiT | 43.20 | not run: score above 10 | - | - | no list | - |
-| vision | 54.82 | not run: score above 10 | - | - | no list | - |
-| default | 35.67 | not run: score above 10 | - | - | no list | - |
+| base + vision + DiT | 43.20 | not searched: score above 10 | - | - | no list | - |
+| base + vision | 54.82 | not searched: score above 10 | - | - | no list | - |
+| base | 35.67 | not searched: score above 10 | - | - | no list | - |
 
 #### GR00T N1.5
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 529.3 | - | 3659 | - | 1.9e-3 | 1.2e-2 | 4.1e-3 | 3.8e-3 | 3.1e-2 | 1.2e-2 | 6 / 6 |
-| default | 500.2 | -5.5% | 3148 | -14.0% | 5.1e-3 | 8.0e-2 | 2.1e-2 | 4.3e-2 | 9.8e-2 | 6.5e-2 | 0 / 6 |
-| vision | 481.1 | -9.1% | 2754 | -24.7% | 7.2e-3 | 4.6e-2 | 4.9e-2 | 1.2e-1 | 1.4e-1 | 5.2e-2 | 0 / 6 |
-| vision + DiT | 399.2 | -24.6% | 2339 | -36.1% | 8.4e-3 | 3.6e-2 | 9.7e-2 | 1.3e-1 | 1.6e-1 | 6.5e-2 | 0 / 6 |
-| vision + DiT, keep-float (fixed, 191) | 449.0 | -15.2% | 3061 | -16.3% | 2.7e-3 | 2.8e-2 | 3.5e-2 | 5.1e-2 | 5.4e-2 | 6.2e-2 | 1 / 6 |
-| vision + DiT, keep-float (served, 223) | 472.9 | -10.7% | 3172 | -13.3% | 6.8e-3 | 9.1e-3 | 2.7e-2 | 1.2e-2 | 3.0e-2 | 1.6e-2 | 2 / 6 |
-| vision + DiT, keep-float (union, 272) | 491.2 | -7.2% | 3413 | -6.7% | 3.3e-3 | 1.1e-2 | 1.1e-2 | 1.2e-2 | 3.5e-2 | 1.7e-2 | 1 / 6 |
+| base | 500.2 | -5.5% | 3148 | -14.0% | 5.1e-3 | 8.0e-2 | 2.1e-2 | 4.3e-2 | 9.8e-2 | 6.5e-2 | 0 / 6 |
+| base + vision | 481.1 | -9.1% | 2754 | -24.7% | 7.2e-3 | 4.6e-2 | 4.9e-2 | 1.2e-1 | 1.4e-1 | 5.2e-2 | 0 / 6 |
+| base + vision + DiT | 399.2 | -24.6% | 2339 | -36.1% | 8.4e-3 | 3.6e-2 | 9.7e-2 | 1.3e-1 | 1.6e-1 | 6.5e-2 | 0 / 6 |
+| base + vision + DiT, 191 kept F16 (fixed-input list) | 449.0 | -15.2% | 3061 | -16.3% | 2.7e-3 | 2.8e-2 | 3.5e-2 | 5.1e-2 | 5.4e-2 | 6.2e-2 | 1 / 6 |
+| base + vision + DiT, 223 kept F16 (obs0 list) | 472.9 | -10.7% | 3172 | -13.3% | 6.8e-3 | 9.1e-3 | 2.7e-2 | 1.2e-2 | 3.0e-2 | 1.6e-2 | 2 / 6 |
+| base + vision + DiT, 272 kept F16 (fixed-input + obs0 list) | 491.2 | -7.2% | 3413 | -6.7% | 3.3e-3 | 1.1e-2 | 1.1e-2 | 1.2e-2 | 3.5e-2 | 1.7e-2 | 1 / 6 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| vision | 29.16 | no list: no group or block brings the score below 1.77 | - | - | no list | 3.0 |
-| default | 10.44 | list found | both fail (4.0e-2, 3.2e-2) | no list (best 1.23) | no list | 1.8 |
-| vision + DiT | 30.86 | no list within 4 h (best 1.84) | - | - | no list | 4.1 |
+| base + vision | 29.16 | no list: no group or block brings the score below 1.77 | - | - | no list | 3.0 |
+| base | 10.44 | list found (score ≤ 1) | both fail: 4.0e-2, 3.2e-2 > threshold | no list (best 1.23) | no list | 1.8 |
+| base + vision + DiT | 30.86 | no list within 4 h (best 1.84) | - | - | no list | 4.1 |
 
 Searched with 4 h per level, before levels scoring above 10 were skipped.
 
 #### SmolVLA
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 584.0 | - | 1226 | - | 7.4e-4 | 1.9e-3 | 2.9e-2 | 1.9e-1 | 5.6e-2 | 2.5e-1 | 6 / 6 |
-| default | 569.0 | -2.6% | 919 | -25.0% | 1.2e-2 | 1.3e-2 | 1.4e+0 | 1.3e-1 | 2.2e-2 | 5.3e-1 | 2 / 6 |
-| vision | 561.0 | -3.9% | 848 | -30.8% | 3.4e-2 | 1.6e-2 | 1.7e+0 | 1.1e-1 | 8.5e-2 | 4.4e-1 | 1 / 6 |
-| vision, keep-float (fixed, 58) | 564.2 | -3.4% | 896 | -26.9% | 2.0e-3 | 1.6e-2 | 1.6e+0 | 2.4e-1 | 2.6e-1 | 9.6e-1 | 1 / 6 |
+| base | 569.0 | -2.6% | 919 | -25.0% | 1.2e-2 | 1.3e-2 | 1.4e+0 | 1.3e-1 | 2.2e-2 | 5.3e-1 | 2 / 6 |
+| base + vision | 561.0 | -3.9% | 848 | -30.8% | 3.4e-2 | 1.6e-2 | 1.7e+0 | 1.1e-1 | 8.5e-2 | 4.4e-1 | 1 / 6 |
+| base + vision, 58 kept F16 (fixed-input list) | 564.2 | -3.4% | 896 | -26.9% | 2.0e-3 | 1.6e-2 | 1.6e+0 | 2.4e-1 | 2.6e-1 | 9.6e-1 | 1 / 6 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| vision | 53.74 | not run: score above 10 | - | - | no list | - |
-| default | 44.12 | not run: score above 10 | - | - | no list | - |
+| base + vision | 53.74 | not searched: score above 10 | - | - | no list | - |
+| base | 44.12 | not searched: score above 10 | - | - | no list | - |
 
 On obs1 to obs4 the gripper channel switches sign within the chunk, and a shift
 in when it switches sets max|Δ|, at F16 too.
 
 #### VLA-Adapter
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 669.2 | - | 3569 | - | 3.9e-4 | 3.9e-4 | 1.2e-3 | 6.6e-4 | 4.7e-4 | 3.3e-4 | 6 / 6 |
-| default | 653.5 | -2.3% | 3200 | -10.3% | 4.3e-3 | 6.3e-3 | 1.4e-2 | 9.6e-3 | 8.0e-3 | 8.2e-3 | 0 / 6 |
-| vision | 623.4 | -6.8% | 2555 | -28.4% | 3.1e-3 | 6.0e-3 | 1.5e-2 | 8.9e-3 | 7.7e-3 | 7.1e-3 | 0 / 6 |
-| vision, keep-float (fixed, 8) | 622.7 | -6.9% | 2516 | -29.5% | 2.8e-3 | 6.3e-3 | 1.4e-2 | 6.9e-3 | 8.5e-3 | 6.4e-3 | 1 / 6 |
-| vision, keep-float (served, 40) | 627.7 | -6.2% | 2494 | -30.1% | 2.9e-3 | 2.9e-3 | 1.5e-2 | 6.6e-3 | 8.0e-3 | 5.3e-3 | 2 / 6 |
+| base | 653.5 | -2.3% | 3200 | -10.3% | 4.3e-3 | 6.3e-3 | 1.4e-2 | 9.6e-3 | 8.0e-3 | 8.2e-3 | 0 / 6 |
+| base + vision | 623.4 | -6.8% | 2555 | -28.4% | 3.1e-3 | 6.0e-3 | 1.5e-2 | 8.9e-3 | 7.7e-3 | 7.1e-3 | 0 / 6 |
+| base + vision, 8 kept F16 (fixed-input list) | 622.7 | -6.9% | 2516 | -29.5% | 2.8e-3 | 6.3e-3 | 1.4e-2 | 6.9e-3 | 8.5e-3 | 6.4e-3 | 1 / 6 |
+| base + vision, 40 kept F16 (obs0 list) | 627.7 | -6.2% | 2494 | -30.1% | 2.9e-3 | 2.9e-3 | 1.5e-2 | 6.6e-3 | 8.0e-3 | 5.3e-3 | 2 / 6 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| vision | 5.24 | no list within 1.75 h (best 1.03) | - | - | no list | 1.8 |
-| default | 4.90 | list found | both fail (4.3e-3, 5.0e-3) | score 0.82 only with every LM block float; time ran out while packing back | no list | 1.8 |
+| base + vision | 5.24 | no list within 1.75 h (best 1.03) | - | - | no list | 1.8 |
+| base | 4.90 | list found (score ≤ 1) | both fail: 4.3e-3, 5.0e-3 > threshold | score 0.82 only with every LM block kept F16; time ran out returning blocks to Q8_0 | no list | 1.8 |
 
 #### GR00T N1.6
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 682.6 | - | 4929 | - | 1.3e-3 | 1.0e-2 | 1.2e-3 | 1.2e-3 | 1.1e-3 | 1.8e-3 | 6 / 6 |
-| default | 644.5 | -5.6% | 3959 | -19.7% | 7.2e-3 | 3.4e-2 | 8.1e-3 | 9.2e-3 | 1.5e-2 | 8.3e-3 | 0 / 6 |
-| vision, unpadded | 817.3 | +19.7% | 3738 | -24.2% | 7.1e-3 | 2.5e-2 | - | - | - | - | 0 / 2 |
-| vision | 622.5 | -8.8% | 3588 | -27.2% | 8.0e-3 | 2.9e-2 | 2.1e-2 | 1.0e-2 | 2.5e-2 | 2.2e-2 | 0 / 6 |
-| vision + DiT | 462.2 | -32.3% | 2777 | -43.7% | 8.1e-3 | 2.9e-2 | 2.0e-2 | 1.0e-2 | 2.5e-2 | 2.2e-2 | 0 / 6 |
-| vision + DiT, keep-float (fixed, 57) | 482.3 | -29.3% | 3076 | -37.6% | 2.8e-3 | 3.6e-2 | 1.7e-2 | 1.2e-2 | 2.2e-2 | 2.2e-2 | 1 / 6 |
-| vision + DiT, keep-float (served, 3) | 464.0 | -32.0% | 2800 | -43.2% | 7.6e-3 | 9.2e-3 | 1.2e-2 | 1.1e-2 | 1.6e-2 | 2.8e-2 | 1 / 6 |
-| vision + DiT, keep-float (union, 60) | 480.7 | -29.6% | 3114 | -36.8% | 3.0e-3 | 8.6e-3 | 7.1e-3 | 7.9e-3 | 1.3e-2 | 3.3e-2 | 1 / 6 |
+| base | 644.5 | -5.6% | 3959 | -19.7% | 7.2e-3 | 3.4e-2 | 8.1e-3 | 9.2e-3 | 1.5e-2 | 8.3e-3 | 0 / 6 |
+| base + vision, unpadded | 817.3 | +19.7% | 3738 | -24.2% | 7.1e-3 | 2.5e-2 | - | - | - | - | 0 / 2 |
+| base + vision | 622.5 | -8.8% | 3588 | -27.2% | 8.0e-3 | 2.9e-2 | 2.1e-2 | 1.0e-2 | 2.5e-2 | 2.2e-2 | 0 / 6 |
+| base + vision + DiT | 462.2 | -32.3% | 2777 | -43.7% | 8.1e-3 | 2.9e-2 | 2.0e-2 | 1.0e-2 | 2.5e-2 | 2.2e-2 | 0 / 6 |
+| base + vision + DiT, 57 kept F16 (fixed-input list) | 482.3 | -29.3% | 3076 | -37.6% | 2.8e-3 | 3.6e-2 | 1.7e-2 | 1.2e-2 | 2.2e-2 | 2.2e-2 | 1 / 6 |
+| base + vision + DiT, 3 kept F16 (obs0 list) | 464.0 | -32.0% | 2800 | -43.2% | 7.6e-3 | 9.2e-3 | 1.2e-2 | 1.1e-2 | 1.6e-2 | 2.8e-2 | 1 / 6 |
+| base + vision + DiT, 60 kept F16 (fixed-input + obs0 list) | 480.7 | -29.6% | 3114 | -36.8% | 3.0e-3 | 8.6e-3 | 7.1e-3 | 7.9e-3 | 1.3e-2 | 3.3e-2 | 1 / 6 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| vision + DiT | 8.63 | no list within 1.75 h (best 1.68) | - | - | no list | 1.8 |
-| vision | 8.57 | no list within 1.75 h (best 1.33) | - | - | no list | 1.8 |
-| default | 5.12 | list found | both fail (4.5e-3, 4.7e-3) | no list within 1.75 h (best 1.55) | no list | 1.8 |
+| base + vision + DiT | 8.63 | no list within 1.75 h (best 1.68) | - | - | no list | 1.8 |
+| base + vision | 8.57 | no list within 1.75 h (best 1.33) | - | - | no list | 1.8 |
+| base | 5.12 | list found (score ≤ 1) | both fail: 4.5e-3, 4.7e-3 > threshold | no list within 1.75 h (best 1.55) | no list | 1.8 |
 
-*vision, unpadded* ran fixed and obs0 only.
+*base + vision, unpadded* ran fixed and obs0 only.
 
 #### GR00T N1.7
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 744.9 | - | 5108 | - | 2.0e-3 | 2.0e-3 | 2.8e-3 | 1.3e-3 | 1.5e-3 | 6.2e-4 | 6 / 6 |
-| default | 703.5 | -5.6% | 4356 | -14.7% | 1.1e-2 | 2.0e-2 | 1.0e-2 | 2.2e-2 | 1.7e-2 | 2.2e-2 | 0 / 6 |
-| vision | 688.4 | -7.6% | 3996 | -21.8% | 2.0e-2 | 2.2e-2 | 1.1e-2 | 1.7e-2 | 1.9e-2 | 1.8e-2 | 0 / 6 |
-| vision + DiT | 536.1 | -28.0% | 3151 | -38.3% | 2.8e-2 | 2.1e-2 | 1.0e-2 | 1.7e-2 | 1.7e-2 | 1.7e-2 | 0 / 6 |
-| vision + DiT, keep-float (fixed, 185) | 606.0 | -18.6% | 4051 | -20.7% | 2.6e-3 | 5.3e-3 | 5.6e-3 | 5.0e-3 | 2.0e-3 | 2.2e-3 | 3 / 6 |
-| vision + DiT, keep-float (served, 157) | 579.8 | -22.2% | 3870 | -24.2% | 4.2e-2 | 2.8e-3 | 3.6e-3 | 1.8e-3 | 1.6e-3 | 3.3e-3 | 3 / 6 |
-| vision + DiT, keep-float (union, 233) | 614.4 | -17.5% | 4249 | -16.8% | 3.9e-3 | 6.5e-3 | 3.0e-3 | 3.0e-3 | 1.4e-3 | 1.2e-3 | 3 / 6 |
+| base | 703.5 | -5.6% | 4356 | -14.7% | 1.1e-2 | 2.0e-2 | 1.0e-2 | 2.2e-2 | 1.7e-2 | 2.2e-2 | 0 / 6 |
+| base + vision | 688.4 | -7.6% | 3996 | -21.8% | 2.0e-2 | 2.2e-2 | 1.1e-2 | 1.7e-2 | 1.9e-2 | 1.8e-2 | 0 / 6 |
+| base + vision + DiT | 536.1 | -28.0% | 3151 | -38.3% | 2.8e-2 | 2.1e-2 | 1.0e-2 | 1.7e-2 | 1.7e-2 | 1.7e-2 | 0 / 6 |
+| base + vision + DiT, 185 kept F16 (fixed-input list) | 606.0 | -18.6% | 4051 | -20.7% | 2.6e-3 | 5.3e-3 | 5.6e-3 | 5.0e-3 | 2.0e-3 | 2.2e-3 | 3 / 6 |
+| base + vision + DiT, 157 kept F16 (obs0 list) | 579.8 | -22.2% | 3870 | -24.2% | 4.2e-2 | 2.8e-3 | 3.6e-3 | 1.8e-3 | 1.6e-3 | 3.3e-3 | 3 / 6 |
+| base + vision + DiT, 233 kept F16 (fixed-input + obs0 list) | 614.4 | -17.5% | 4249 | -16.8% | 3.9e-3 | 6.5e-3 | 3.0e-3 | 3.0e-3 | 1.4e-3 | 1.2e-3 | 3 / 6 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| vision + DiT | 9.76 | no list within 1.75 h (best 1.40) | - | - | no list | 1.8 |
-| vision | 7.48 | no list within 1.75 h (best 2.07) | - | - | no list | 1.8 |
-| default | 7.65 | no list: no block brings the score below 1.45 | - | - | no list | 0.6 |
+| base + vision + DiT | 9.76 | no list within 1.75 h (best 1.40) | - | - | no list | 1.8 |
+| base + vision | 7.48 | no list within 1.75 h (best 2.07) | - | - | no list | 1.8 |
+| base | 7.65 | no list: no block brings the score below 1.45 | - | - | no list | 0.6 |
 
 #### π0.5
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 1107.8 | - | 5980 | - | 4.8e-4 | 3.7e-4 | 6.0e-4 | 5.5e-3 | 8.9e-4 | 3.9e-4 | 6 / 6 |
-| default | 971.0 | -12.3% | 3997 | -33.2% | 4.9e-4 | 1.9e-3 | 5.0e-3 | 1.7e-2 | 3.9e-3 | 3.5e-3 | 2 / 6 |
-| vision, unpadded | 1320.2 | +19.2% | 3760 | -37.1% | 8.5e-4 | 2.7e-3 | - | - | - | - | 2 / 2 |
-| vision | 941.3 | -15.0% | 3676 | -38.5% | 9.2e-4 | 2.8e-3 | 8.0e-3 | 1.7e-2 | 1.0e-2 | 4.9e-3 | 2 / 6 |
-| vision, keep-float (all checks, 109) | 1041.3 | -6.0% | 4785 | -20.0% | 7.9e-4 | 1.4e-3 | 2.7e-3 | 4.7e-3 | 2.7e-3 | 1.2e-3 | 6 / 6 |
-| vision, keep-float (all checks, 181) | 1061.2 | -4.2% | 5095 | -14.8% | 6.0e-4 | 8.5e-4 | 2.8e-3 | 6.0e-3 | 2.5e-3 | 1.1e-3 | 6 / 6 |
+| base | 971.0 | -12.3% | 3997 | -33.2% | 4.9e-4 | 1.9e-3 | 5.0e-3 | 1.7e-2 | 3.9e-3 | 3.5e-3 | 2 / 6 |
+| base + vision, unpadded | 1320.2 | +19.2% | 3760 | -37.1% | 8.5e-4 | 2.7e-3 | - | - | - | - | 2 / 2 |
+| base + vision | 941.3 | -15.0% | 3676 | -38.5% | 9.2e-4 | 2.8e-3 | 8.0e-3 | 1.7e-2 | 1.0e-2 | 4.9e-3 | 2 / 6 |
+| base + vision, 109 kept F16 (six-check list) | 1041.3 | -6.0% | 4785 | -20.0% | 7.9e-4 | 1.4e-3 | 2.7e-3 | 4.7e-3 | 2.7e-3 | 1.2e-3 | 6 / 6 |
+| base + vision, 181 kept F16 (six-check list) | 1061.2 | -4.2% | 5095 | -14.8% | 6.0e-4 | 8.5e-4 | 2.8e-3 | 6.0e-3 | 2.5e-3 | 1.1e-3 | 6 / 6 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| vision | 3.53 | list found | both fail (8.9e-3, 3.5e-3) | list found | passes, 109 weights float | 4.8 |
-| vision | 3.53 | list found | obs3 fails (6.4e-3) | list found | passes, 181 weights float | 5.6 |
-| default | 2.75 | not run: vision has a list | - | - | - | - |
+| base + vision | 3.53 | list found (score ≤ 1) | both fail: 8.9e-3, 3.5e-3 > threshold | list found (score ≤ 1) | passes: 109 weights kept F16 | 4.8 |
+| base + vision | 3.53 | list found (score ≤ 1) | obs3 fails: 6.4e-3 > threshold | list found (score ≤ 1) | passes: 181 weights kept F16 | 5.6 |
+| base | 2.75 | not searched: base + vision has a list | - | - | - | - |
 
-*vision, unpadded* ran fixed and obs0 only. Both π0.5 searches ran without the
-time limit. The 109-weight list comes from the first, which kept a group float
-even when that raised the score, and was not recorded; the configuration per
-model uses the 181-weight list from the second.
+*base + vision, unpadded* ran fixed and obs0 only. Both π0.5 searches ran
+without the time limit. The 109-weight list comes from the first search, which
+kept a group F16 even when that raised the score; that list was not recorded, so
+the configuration per model uses the 181-weight list from the second search.
 
 #### π0
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 1123.3 | - | 5662 | - | 7.7e-4 | 5.8e-4 | 4.7e-4 | 5.1e-4 | 5.8e-4 | 6.1e-4 | 6 / 6 |
-| default | 978.8 | -12.9% | 3723 | -34.2% | 1.8e-2 | 1.7e-3 | 6.2e-4 | 6.6e-4 | 8.8e-4 | 1.4e-3 | 5 / 6 |
-| vision | 937.6 | -16.5% | 3337 | -41.1% | 1.6e-2 | 1.7e-3 | 5.6e-4 | 7.2e-4 | 5.4e-4 | 1.5e-3 | 5 / 6 |
-| default, keep-float (fixed, 8) | 978.8 | -12.9% | 3711 | -34.5% | 1.4e-3 | 5.2e-4 | 6.1e-4 | 6.6e-4 | 5.3e-4 | 7.4e-4 | 6 / 6 |
-| vision, keep-float (all checks, 8) | 937.7 | -16.5% | 3326 | -41.3% | 1.0e-3 | 5.6e-4 | 6.1e-4 | 6.7e-4 | 4.6e-4 | 1.0e-3 | 6 / 6 |
+| base | 978.8 | -12.9% | 3723 | -34.2% | 1.8e-2 | 1.7e-3 | 6.2e-4 | 6.6e-4 | 8.8e-4 | 1.4e-3 | 5 / 6 |
+| base + vision | 937.6 | -16.5% | 3337 | -41.1% | 1.6e-2 | 1.7e-3 | 5.6e-4 | 7.2e-4 | 5.4e-4 | 1.5e-3 | 5 / 6 |
+| base, 8 kept F16 (fixed-input list) | 978.8 | -12.9% | 3711 | -34.5% | 1.4e-3 | 5.2e-4 | 6.1e-4 | 6.6e-4 | 5.3e-4 | 7.4e-4 | 6 / 6 |
+| base + vision, 8 kept F16 (six-check list) | 937.7 | -16.5% | 3326 | -41.3% | 1.0e-3 | 5.6e-4 | 6.1e-4 | 6.7e-4 | 4.6e-4 | 1.0e-3 | 6 / 6 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| vision | 5.55 | list found | both pass (4.6e-4, 1.0e-3) | not needed | passes, 8 weights float | 0.8 |
-| default | 6.21 | not run: vision has a list | - | - | - | - |
+| base + vision | 5.55 | list found (score ≤ 1) | both pass: 4.6e-4, 1.0e-3 | not needed | passes: 8 weights kept F16 | 0.8 |
+| base | 6.21 | not searched: base + vision has a list | - | - | - | - |
 
 #### OpenVLA-OFT
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 1125.2 | - | 15266 | - | 3.1e-4 | 7.5e-4 | 5.6e-4 | 4.3e-4 | 6.8e-4 | 5.6e-4 | 6 / 6 |
-| default | 845.7 | -24.8% | 9403 | -38.4% | 5.9e-4 | 3.5e-3 | 5.1e-3 | 4.4e-3 | 4.9e-3 | 3.8e-3 | 1 / 6 |
-| vision | 812.5 | -27.8% | 8821 | -42.2% | 7.9e-4 | 3.2e-3 | 5.8e-3 | 4.5e-3 | 3.9e-3 | 6.0e-3 | 1 / 6 |
-| vision, keep-float (served, 12) | 821.4 | -27.0% | 8959 | -41.3% | 7.9e-4 | 2.5e-3 | 4.3e-3 | 3.4e-3 | 2.8e-3 | 5.4e-3 | 3 / 6 |
+| base | 845.7 | -24.8% | 9403 | -38.4% | 5.9e-4 | 3.5e-3 | 5.1e-3 | 4.4e-3 | 4.9e-3 | 3.8e-3 | 1 / 6 |
+| base + vision | 812.5 | -27.8% | 8821 | -42.2% | 7.9e-4 | 3.2e-3 | 5.8e-3 | 4.5e-3 | 3.9e-3 | 6.0e-3 | 1 / 6 |
+| base + vision, 12 kept F16 (obs0 list) | 821.4 | -27.0% | 8959 | -41.3% | 7.9e-4 | 2.5e-3 | 4.3e-3 | 3.4e-3 | 2.8e-3 | 5.4e-3 | 3 / 6 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| vision | 2.08 | no list within 1.75 h (best 1.35) | - | - | no list | 1.8 |
-| default | 1.76 | list found | obs3 fails (3.4e-3) | no list within 1.75 h (best 1.03) | no list | 1.8 |
+| base + vision | 2.08 | no list within 1.75 h (best 1.35) | - | - | no list | 1.8 |
+| base | 1.76 | list found (score ≤ 1) | obs3 fails: 3.4e-3 > threshold | no list within 1.75 h (best 1.03) | no list | 1.8 |
 
 #### Evo-1
 
-| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+| Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | F16 | 1659.0 | - | 1582 | - | 6.2e-4 | 1.1e-3 | 9.7e-4 | 4.6e-4 | 4.5e-4 | 9.8e-4 | 6 / 6 |
-| default | 1655.4 | -0.2% | 1459 | -7.8% | 5.4e-3 | 1.2e-2 | 7.2e-3 | 4.0e-3 | 3.4e-3 | 6.1e-3 | 0 / 6 |
-| vision | 1638.8 | -1.2% | 1121 | -29.1% | 6.3e-3 | 1.4e-2 | 5.9e-3 | 4.3e-3 | 4.8e-3 | 6.4e-3 | 0 / 6 |
-| vision, keep-float (fixed, 25) | 1634.5 | -1.5% | 1171 | -26.0% | 2.4e-3 | 1.1e-2 | 5.8e-3 | 3.3e-3 | 4.7e-3 | 3.6e-3 | 1 / 6 |
-| default, keep-float (all checks, 66) | 1657.4 | -0.1% | 1494 | -5.6% | 1.4e-3 | 2.1e-3 | 2.5e-3 | 2.7e-3 | 2.2e-3 | 2.3e-3 | 6 / 6 |
+| base | 1655.4 | -0.2% | 1459 | -7.8% | 5.4e-3 | 1.2e-2 | 7.2e-3 | 4.0e-3 | 3.4e-3 | 6.1e-3 | 0 / 6 |
+| base + vision | 1638.8 | -1.2% | 1121 | -29.1% | 6.3e-3 | 1.4e-2 | 5.9e-3 | 4.3e-3 | 4.8e-3 | 6.4e-3 | 0 / 6 |
+| base + vision, 25 kept F16 (fixed-input list) | 1634.5 | -1.5% | 1171 | -26.0% | 2.4e-3 | 1.1e-2 | 5.8e-3 | 3.3e-3 | 4.7e-3 | 3.6e-3 | 1 / 6 |
+| base, 66 kept F16 (six-check list) | 1657.4 | -0.1% | 1494 | -5.6% | 1.4e-3 | 2.1e-3 | 2.5e-3 | 2.7e-3 | 2.2e-3 | 2.3e-3 | 6 / 6 |
 
-| Q8_0 level | Score, every weight of the level in Q8_0 | Search on fixed, obs0 to obs2 | Check on obs3, obs4 | Search again on all checks | Result | Hours |
+| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
 |---|--:|---|---|---|---|--:|
-| vision | 4.74 | no list within 1.75 h (score 0.95 before refining) | - | - | no list | 1.8 |
-| default | 4.23 | list found | both pass (2.2e-3, 2.3e-3) | not needed | passes, 66 weights float | 1.3 |
+| base + vision | 4.74 | time ran out at 1.75 h with a list at score 0.95 not yet refined | - | - | no list | 1.8 |
+| base | 4.23 | list found (score ≤ 1) | both pass: 2.2e-3, 2.3e-3 | not needed | passes: 66 weights kept F16 | 1.3 |
 
 ### HMX use and the CPU-only build
 
-A per-op profile of the default, vision and vision + DiT files puts every Q8_0
-matmul on the HMX. The loader zero-pads a 4304-wide FFN to 4320 at load only
-when its weights are float, so without `--pad-m32` the vision tower's FFNs of
-π0.5 and GR00T N1.6 keep their 4304 width (rows *vision, unpadded*).
+A per-op profile of the base, base + vision and base + vision + DiT files puts
+every Q8_0 matmul on the HMX. The loader zero-pads a 4304-wide FFN to 4320 at
+load only when its weights are float, so without `--pad-m32` the vision tower's
+FFNs of π0.5 and GR00T N1.6 keep their 4304 width (rows *base + vision,
+unpadded*).
 
-Fixed-input deviation of the default configuration on the NPU and on the
-CPU-only build, against the CPU-only build at F32:
+Fixed-input max|Δ| of base, against the CPU-only build at F32, run on the NPU
+and on the CPU-only build:
 
 | Model | NPU | CPU-only build |
 |---|--:|--:|
