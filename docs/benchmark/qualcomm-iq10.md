@@ -152,7 +152,7 @@ except:
 | | |
 |---|---|
 | Commit | `71cdb09` |
-| Date | 2026-11-11 10:10 to 11:49 (UTC+07) for latency, memory and served fidelity; fixed-input fidelity 2026-11-10 |
+| Date | 2026-11-10 to 2026-11-13 (UTC+07) |
 | Runtime flags | defaults |
 
 Each configuration packs the weights of the one before it, plus:
@@ -166,83 +166,237 @@ Each configuration packs the weights of the one before it, plus:
 | vision + DiT | `--vision --pad-m32 --dit` | the DiT's weight matrices, except adaLN and the time embedding |
 | ..., keep-float (*kind*, *n*) | the flags of the named configuration plus `--keep-float REGEX` | that configuration with *n* weights left float |
 
-The `--keep-float` lists come from a greedy search: each group of blocks (a
-quarter of a stack, attention or FFN) is packed alone and measured, the groups
-that move the action chunk most are left float until the deviation is under the
-target, then blocks are packed back one at a time while it stays under. *fixed*
-uses the fixed-input deviation and *served* the served one, with a target of
-2.9e-3; GR00T N1.5 and N1.6 take 1.1 times their F16 served deviation instead
-(1.3e-2, 1.1e-2). *union* leaves both lists float.
+Each configuration runs six checks, max|Δ| of the action chunk against the
+CPU-only build at F32: *fixed*, on fixed inputs as in
+[Fidelity](../backend/hexagon.md#fidelity), and *obs0* to *obs4*, five LIBERO
+observations served as in [Serving](../backend/hexagon.md#serving). obs*k* shifts
+the views' color pattern and draws their noise from seed *k*, moves the
+end-effector by 0.02·*k* on each axis and takes task prompt *k* mod 4 of four
+LIBERO prompts. A check passes when max|Δ| is at most 2.9e-3, or at most 1.1
+times F16 where F16 is above 2.9e-3. A configuration's score is the largest
+ratio of a check's max|Δ| to its threshold; it passes at 1 or less.
 
-`fixed max|Δ|` is measured as in [Fidelity](../backend/hexagon.md#fidelity) and
-`served max|Δ|` as in [Serving](../backend/hexagon.md#serving), against the
-CPU-only build at F32.
+The `--keep-float` lists come from a greedy search over the weights a level
+packs: groups of blocks (a quarter of a stack, attention or FFN), most sensitive
+first, then single blocks are left float until the score is at most 1, and float
+blocks are then packed back while it stays there. *fixed* and *served* lists
+search on one check, fixed or obs0, and *union* leaves both float. *all checks*
+lists search on fixed and obs0 to obs2, then must pass obs3 and obs4; an
+observation that fails joins the search, once. Each level gets 1.75 h. A lower
+level is searched only when the level above finds no list, and none is searched
+when packing every weight scores above 10. Mean latency and System RAM follow the
+TEMPLATE protocol.
 
-| Model | Config | Q8_0 / all tensors | min ms | mean ms | p50 ms | p90 ms | vision ms | Peak RSS MiB | System RAM MiB | mean vs F16 | RAM vs F16 | fixed max\|Δ\| | served max\|Δ\| |
-|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| Octo-Small | F16 | - | 81.5 | 84.1 | 82.3 | 88.3 | 20.7 | 252 | 725 | - | - | 5.0e-4 | 1.4e-4 |
-| Octo-Small | default | 121 / 318 | 79.5 | 81.6 | 80.7 | 85.5 | 20.4 | 258 | 405 | -3.0% | -44.1% | 2.5e-3 | 2.0e-3 |
-| Octo-Small | vision | 123 / 318 | 80.2 | 83.5 | 81.1 | 90.3 | 21.6 | 258 | 402 | -0.7% | -44.6% | 1.9e-3 | 1.9e-3 |
-| ACT | F16 | - | 147.0 | 152.5 | 152.3 | 156.0 | - | 194 | 469 | - | - | 6.1e-4 | 1.0e-3 |
-| ACT | default | 35 / 147 | 145.9 | 150.9 | 150.9 | 152.8 | - | 192 | 405 | -1.0% | -13.6% | 2.1e-3 | 2.4e-3 |
-| TurboVLA | F16 | - | 186.6 | 190.2 | 189.1 | 195.3 | - | 248 | 1079 | - | - | 3.7e-4 | 8.5e-4 |
-| TurboVLA | default | 133 / 657 | 184.8 | 186.5 | 186.4 | 188.2 | - | 248 | 814 | -1.9% | -24.6% | 1.3e-2 | 4.2e-3 |
-| TurboVLA | vision | 208 / 657 | 182.6 | 185.7 | 184.1 | 190.7 | - | 245 | 485 | -2.4% | -55.1% | 1.4e-2 | 8.3e-3 |
-| TurboVLA | vision, keep-float (fixed, 32) | 176 / 657 | 181.2 | 185.8 | 183.6 | 191.4 | - | 245 | 611 | -2.3% | -43.4% | 2.6e-3 | 6.9e-3 |
-| VLA-JEPA | F16 | - | 489.1 | 496.8 | 494.6 | 506.4 | 197.8 | 184 | 4018 | - | - | 2.1e-3 | 2.2e-3 |
-| VLA-JEPA | default | 196 / 873 | 425.6 | 432.1 | 430.3 | 437.5 | 199.1 | 184 | 2718 | -13.0% | -32.4% | 1.4e-2 | 1.0e-1 |
-| VLA-JEPA | vision | 300 / 873 | 404.8 | 411.6 | 410.8 | 416.8 | 178.4 | 96 | 2350 | -17.1% | -41.5% | 1.5e-2 | 1.6e-1 |
-| VLA-JEPA | vision + DiT | 396 / 873 | 387.0 | 393.5 | 392.9 | 400.2 | 179.2 | 97 | 2288 | -20.8% | -43.1% | 1.3e-2 | 1.3e-1 |
-| VLA-JEPA | vision + DiT, keep-float (fixed, 233) | 163 / 873 | 456.6 | 461.4 | 459.9 | 467.7 | 185.0 | 184 | 3614 | -7.1% | -10.1% | 2.9e-3 | 8.3e-3 |
-| VLA-JEPA | vision + DiT, keep-float (served, 143) | 253 / 873 | 430.1 | 436.6 | 434.2 | 444.7 | 182.3 | 184 | 3117 | -12.1% | -22.4% | 8.4e-3 | 2.1e-3 |
-| VLA-JEPA | vision + DiT, keep-float (union, 244) | 152 / 873 | 452.6 | 461.6 | 460.7 | 469.3 | 185.3 | 184 | 3679 | -7.1% | -8.4% | 3.7e-3 | 5.1e-3 |
-| GR00T N1.5 | F16 | - | 527.3 | 529.3 | 528.9 | 531.3 | 138.7 | 161 | 3659 | - | - | 1.9e-3 | 1.2e-2 |
-| GR00T N1.5 | default | 85 / 887 | 499.5 | 500.2 | 500.0 | 501.3 | 138.3 | 161 | 3148 | -5.5% | -14.0% | 5.1e-3 | 8.0e-2 |
-| GR00T N1.5 | vision | 247 / 887 | 479.1 | 481.1 | 479.7 | 483.8 | 118.8 | 161 | 2754 | -9.1% | -24.7% | 7.2e-3 | 4.6e-2 |
-| GR00T N1.5 | vision + DiT | 345 / 887 | 398.7 | 399.2 | 399.1 | 399.5 | 117.9 | 161 | 2339 | -24.6% | -36.1% | 8.4e-3 | 3.6e-2 |
-| GR00T N1.5 | vision + DiT, keep-float (fixed, 191) | 154 / 887 | 448.3 | 449.0 | 448.7 | 450.0 | 131.8 | 162 | 3061 | -15.2% | -16.3% | 2.7e-3 | 2.8e-2 |
-| GR00T N1.5 | vision + DiT, keep-float (served, 223) | 122 / 887 | 471.7 | 472.9 | 472.6 | 474.0 | 133.1 | 161 | 3172 | -10.7% | -13.3% | 6.8e-3 | 9.1e-3 |
-| GR00T N1.5 | vision + DiT, keep-float (union, 272) | 73 / 887 | 489.0 | 491.2 | 489.7 | 494.8 | 135.1 | 161 | 3413 | -7.2% | -6.7% | 3.3e-3 | 1.1e-2 |
-| SmolVLA | F16 | - | 583.4 | 584.0 | 583.8 | 584.1 | 229.9 | 146 | 1226 | - | - | 7.4e-4 | 1.9e-3 |
-| SmolVLA | default | 225 / 791 | 568.2 | 569.0 | 568.6 | 569.8 | 228.8 | 104 | 919 | -2.6% | -25.0% | 1.2e-2 | 1.3e-2 |
-| SmolVLA | vision | 297 / 791 | 560.4 | 561.0 | 560.9 | 561.6 | 221.3 | 104 | 848 | -3.9% | -30.8% | 3.4e-2 | 1.6e-2 |
-| SmolVLA | vision, keep-float (fixed, 58) | 239 / 791 | 563.5 | 564.2 | 564.1 | 564.5 | 222.9 | 104 | 896 | -3.4% | -26.9% | 2.0e-3 | 1.6e-2 |
-| VLA-Adapter | F16 | - | 664.7 | 669.2 | 666.6 | 677.5 | 257.6 | 872 | 3569 | - | - | 3.9e-4 | 3.9e-4 |
-| VLA-Adapter | default | 171 / 1455 | 649.4 | 653.5 | 651.8 | 658.0 | 256.6 | 872 | 3200 | -2.3% | -10.3% | 4.3e-3 | 6.3e-3 |
-| VLA-Adapter | vision | 367 / 1455 | 617.9 | 623.4 | 622.1 | 629.0 | 226.5 | 852 | 2555 | -6.8% | -28.4% | 3.1e-3 | 6.0e-3 |
-| VLA-Adapter | vision, keep-float (fixed, 8) | 359 / 1455 | 618.2 | 622.7 | 622.6 | 626.9 | 226.5 | 852 | 2516 | -6.9% | -29.5% | 2.8e-3 | 6.3e-3 |
-| VLA-Adapter | vision, keep-float (served, 40) | 327 / 1455 | 623.6 | 627.7 | 625.5 | 632.3 | 227.1 | 849 | 2494 | -6.2% | -30.1% | 2.9e-3 | 2.9e-3 |
-| GR00T N1.6 | F16 | - | 681.0 | 682.6 | 682.3 | 684.1 | 145.0 | 146 | 4929 | - | - | 1.3e-3 | 1.0e-2 |
-| GR00T N1.6 | default | 114 / 1094 | 643.4 | 644.5 | 643.9 | 646.6 | 144.2 | 134 | 3959 | -5.6% | -19.7% | 7.2e-3 | 3.4e-2 |
-| GR00T N1.6 | vision, unpadded | 249 / 1094 | 815.6 | 817.3 | 817.3 | 818.5 | 316.7 | 134 | 3738 | +19.7% | -24.2% | 7.1e-3 | 2.5e-2 |
-| GR00T N1.6 | vision | 276 / 1094 | 621.6 | 622.5 | 622.1 | 623.2 | 124.2 | 134 | 3588 | -8.8% | -27.2% | 8.0e-3 | 2.9e-2 |
-| GR00T N1.6 | vision + DiT | 470 / 1094 | 461.4 | 462.2 | 461.9 | 462.9 | 124.2 | 116 | 2777 | -32.3% | -43.7% | 8.1e-3 | 2.9e-2 |
-| GR00T N1.6 | vision + DiT, keep-float (fixed, 57) | 413 / 1094 | 481.7 | 482.3 | 482.2 | 482.7 | 125.5 | 146 | 3076 | -29.3% | -37.6% | 2.8e-3 | 3.6e-2 |
-| GR00T N1.6 | vision + DiT, keep-float (served, 3) | 467 / 1094 | 463.2 | 464.0 | 463.6 | 465.0 | 124.3 | 146 | 2800 | -32.0% | -43.2% | 7.6e-3 | 9.2e-3 |
-| GR00T N1.6 | vision + DiT, keep-float (union, 60) | 410 / 1094 | 480.1 | 480.7 | 480.5 | 481.2 | 125.2 | 147 | 3114 | -29.6% | -36.8% | 3.0e-3 | 8.6e-3 |
-| GR00T N1.7 | F16 | - | 740.1 | 744.9 | 745.0 | 749.0 | 196.9 | 190 | 5108 | - | - | 2.0e-3 | 2.0e-3 |
-| GR00T N1.7 | default | 112 / 1030 | 699.0 | 703.5 | 701.5 | 709.3 | 196.1 | 190 | 4356 | -5.6% | -14.7% | 1.1e-2 | 2.0e-2 |
-| GR00T N1.7 | vision | 216 / 1030 | 683.3 | 688.4 | 686.0 | 694.1 | 179.5 | 190 | 3996 | -7.6% | -21.8% | 2.0e-2 | 2.2e-2 |
-| GR00T N1.7 | vision + DiT | 410 / 1030 | 528.8 | 536.1 | 534.6 | 542.1 | 181.6 | 191 | 3151 | -28.0% | -38.3% | 2.8e-2 | 2.1e-2 |
-| GR00T N1.7 | vision + DiT, keep-float (fixed, 185) | 225 / 1030 | 599.2 | 606.0 | 605.4 | 611.7 | 186.9 | 191 | 4051 | -18.6% | -20.7% | 2.6e-3 | 5.3e-3 |
-| GR00T N1.7 | vision + DiT, keep-float (served, 157) | 253 / 1030 | 573.7 | 579.8 | 578.0 | 590.8 | 187.3 | 190 | 3870 | -22.2% | -24.2% | 4.2e-2 | 2.8e-3 |
-| GR00T N1.7 | vision + DiT, keep-float (union, 233) | 177 / 1030 | 609.4 | 614.4 | 614.1 | 619.1 | 188.2 | 190 | 4249 | -17.5% | -16.8% | 3.9e-3 | 6.5e-3 |
-| π0.5 | F16 | - | 1106.0 | 1107.8 | 1107.0 | 1111.5 | 277.0 | 284 | 5980 | - | - | 4.8e-4 | 3.7e-4 |
-| π0.5 | default | 127 / 819 | 969.3 | 971.0 | 969.8 | 974.7 | 277.3 | 126 | 3997 | -12.3% | -33.2% | 4.9e-4 | 1.9e-3 |
-| π0.5 | vision, unpadded | 262 / 819 | 1318.2 | 1320.2 | 1318.9 | 1324.5 | 621.0 | 126 | 3760 | +19.2% | -37.1% | 8.5e-4 | 2.7e-3 |
-| π0.5 | vision | 289 / 819 | 939.6 | 941.3 | 940.8 | 943.1 | 236.7 | 103 | 3676 | -15.0% | -38.5% | 9.2e-4 | 2.8e-3 |
-| π0 | F16 | - | 1118.9 | 1123.3 | 1123.7 | 1125.3 | 276.9 | 284 | 5662 | - | - | 7.7e-4 | 5.8e-4 |
-| π0 | default | 127 / 780 | 976.4 | 978.8 | 977.8 | 981.2 | 277.0 | 126 | 3723 | -12.9% | -34.2% | 1.8e-2 | 1.7e-3 |
-| π0 | vision | 289 / 780 | 935.7 | 937.6 | 937.3 | 938.8 | 235.9 | 103 | 3337 | -16.5% | -41.1% | 1.6e-2 | 1.7e-3 |
-| π0 | default, keep-float (fixed, 8) | 119 / 780 | 977.0 | 978.8 | 978.3 | 980.2 | 276.9 | 126 | 3711 | -12.9% | -34.5% | 1.4e-3 | 5.2e-4 |
-| OpenVLA-OFT | F16 | - | 1122.2 | 1125.2 | 1125.0 | 1127.6 | 262.7 | 844 | 15266 | - | - | 3.1e-4 | 7.5e-4 |
-| OpenVLA-OFT | default | 227 / 958 | 843.5 | 845.7 | 844.8 | 848.9 | 259.5 | 844 | 9403 | -24.8% | -38.4% | 5.9e-4 | 3.5e-3 |
-| OpenVLA-OFT | vision | 423 / 958 | 810.1 | 812.5 | 810.6 | 816.4 | 228.7 | 833 | 8821 | -27.8% | -42.2% | 7.9e-4 | 3.2e-3 |
-| OpenVLA-OFT | vision, keep-float (served, 12) | 411 / 958 | 818.7 | 821.4 | 820.4 | 824.8 | 230.0 | 839 | 8959 | -27.0% | -41.3% | 7.9e-4 | 2.5e-3 |
-| Evo-1 | F16 | - | 1640.1 | 1659.0 | 1653.3 | 1675.4 | 818.6 | 318 | 1582 | - | - | 6.2e-4 | 1.1e-3 |
-| Evo-1 | default | 100 / 636 | 1643.5 | 1655.4 | 1653.6 | 1660.8 | 820.1 | 312 | 1459 | -0.2% | -7.8% | 5.4e-3 | 1.2e-2 |
-| Evo-1 | vision | 196 / 636 | 1620.6 | 1638.8 | 1639.0 | 1645.7 | 808.1 | 312 | 1121 | -1.2% | -29.1% | 6.3e-3 | 1.4e-2 |
-| Evo-1 | vision, keep-float (fixed, 25) | 171 / 636 | 1624.7 | 1634.5 | 1632.9 | 1647.6 | 803.5 | 319 | 1171 | -1.5% | -26.0% | 2.4e-3 | 1.1e-2 |
+### Configuration per model
+
+The fastest configuration that passes all checks, or F16 where none does:
+
+| Model | Configuration | mean ms | vs F16 | System RAM MiB | vs F16 |
+|---|---|--:|--:|--:|--:|
+| Octo-Small | vision, keep-float (all checks, 4) | 81.5 | -3.1% | 407 | -43.9% |
+| ACT | default | 150.9 | -1.0% | 405 | -13.6% |
+| TurboVLA | default, keep-float (all checks, 12) | 189.7 | -0.3% | 881 | -18.4% |
+| VLA-JEPA | F16 | 496.8 | - | 4018 | - |
+| GR00T N1.5 | F16 | 529.3 | - | 3659 | - |
+| SmolVLA | F16 | 584.0 | - | 1226 | - |
+| VLA-Adapter | F16 | 669.2 | - | 3569 | - |
+| GR00T N1.6 | F16 | 682.6 | - | 4929 | - |
+| GR00T N1.7 | F16 | 744.9 | - | 5108 | - |
+| π0.5 | vision, keep-float (all checks, 181) | 1061.2 | -4.2% | 5095 | -14.8% |
+| π0 | vision, keep-float (all checks, 8) | 937.7 | -16.5% | 3326 | -41.3% |
+| OpenVLA-OFT | F16 | 1125.2 | - | 15266 | - |
+| Evo-1 | default, keep-float (all checks, 66) | 1657.4 | -0.1% | 1494 | -5.6% |
+
+Flags for `python scripts/quantize_gguf.py --in <checkpoint> --out <file>`:
+
+```bash
+# Octo-Small
+--type Q8_0 --vision --pad-m32 --keep-float '^octo\.blk\.(1\.attn_(qkv|o)|6\.ffn_(up|down))\.'
+# ACT
+--type Q8_0
+# TurboVLA
+--type Q8_0 --keep-float '^text\.encoder\.layer\.[02]\.'
+# π0.5
+--type Q8_0 --vision --pad-m32 --keep-float '^vit\.blk\.(0|2|3|4|5|6|14|17|18|19|20)\.|^vit\.blk\.(7|8|9|12|13|21|23|24|25)\.attn_|^vlm\.blk\.(9|10|11|12|13|14)\.|^vlm\.blk\.(0|1|2|3|4|15|16)\.ffn_|^vlm\.blk\.[5-8]\.attn_'
+# π0
+--type Q8_0 --vision --pad-m32 --keep-float '^vlm\.blk\.[04]\.attn_[qkvo]\.'
+# Evo-1
+--type Q8_0 --keep-float '^vlm\.blk\.([2-9]|10)\.|^vlm\.blk\.13\.ffn_'
+```
+
+### Per model
+
+#### Octo-Small
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 84.1 | - | 725 | - | 5.0e-4 | 1.4e-4 | 4.7e-4 | 3.3e-4 | 1.4e-4 | 6.3e-4 | 6 / 6 |
+| default | 81.6 | -3.0% | 405 | -44.1% | 2.5e-3 | 2.0e-3 | 4.4e-3 | 2.4e-3 | 1.8e-3 | 4.9e-3 | 4 / 6 |
+| vision | 83.5 | -0.7% | 402 | -44.6% | 1.9e-3 | 1.9e-3 | 4.2e-3 | 3.2e-3 | 1.7e-3 | 4.9e-3 | 3 / 6 |
+| vision, keep-float (all checks, 4) | 81.5 | -3.1% | 407 | -43.9% | 1.0e-3 | 1.7e-3 | 2.7e-3 | 1.6e-3 | 1.2e-3 | 2.5e-3 | 6 / 6 |
+
+#### ACT
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 152.5 | - | 469 | - | 6.1e-4 | 1.0e-3 | 9.0e-4 | 5.7e-4 | 7.2e-4 | 7.6e-4 | 6 / 6 |
+| default | 150.9 | -1.0% | 405 | -13.6% | 2.1e-3 | 2.4e-3 | 2.7e-3 | 2.0e-3 | 2.3e-3 | 2.0e-3 | 6 / 6 |
+
+ACT takes no prompt: its obs*k* shifts the view and the 14-dim state the same
+way. Packing every weight passes all six checks; no list was searched.
+
+#### TurboVLA
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 190.2 | - | 1079 | - | 3.7e-4 | 8.5e-4 | crash | crash | crash | 6.3e-4 | 3 / 3 |
+| default | 186.5 | -1.9% | 814 | -24.6% | 1.3e-2 | 4.2e-3 | crash | crash | crash | 1.7e-3 | 1 / 3 |
+| vision | 185.7 | -2.4% | 485 | -55.1% | 1.4e-2 | 8.3e-3 | crash | crash | crash | 5.7e-3 | 0 / 3 |
+| vision, keep-float (fixed, 32) | 185.8 | -2.3% | 611 | -43.4% | 2.6e-3 | 6.9e-3 | crash | crash | crash | 4.2e-3 | 1 / 3 |
+| default, keep-float (all checks, 12) | 189.7 | -0.3% | 881 | -18.4% | 1.5e-3 | 2.7e-3 | crash | crash | crash | 1.6e-3 | 3 / 3 |
+
+obs1 to obs3 crash the Hexagon server at F16 too (`ggml-hex: HTP0 synchronize
+failed : dsp-error NO-SUPPORT` in `TurboVlaModelArch::predict`), so TurboVLA has
+three checks, and its *all checks* list searches on all three. At the vision
+level no list passed within the time limit (best score 1.02).
+
+#### VLA-JEPA
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 496.8 | - | 4018 | - | 2.1e-3 | 2.2e-3 | 1.1e-3 | 1.4e-3 | 2.8e-3 | 3.4e-4 | 6 / 6 |
+| default | 432.1 | -13.0% | 2718 | -32.4% | 1.4e-2 | 1.0e-1 | 1.8e-2 | 6.4e-2 | 6.9e-2 | 9.9e-3 | 0 / 6 |
+| vision | 411.6 | -17.1% | 2350 | -41.5% | 1.5e-2 | 1.6e-1 | 1.5e-2 | 5.3e-2 | 5.4e-2 | 1.0e-2 | 0 / 6 |
+| vision + DiT | 393.5 | -20.8% | 2288 | -43.1% | 1.3e-2 | 1.3e-1 | 1.6e-2 | 5.5e-2 | 5.5e-2 | 1.0e-2 | 0 / 6 |
+| vision + DiT, keep-float (fixed, 233) | 461.4 | -7.1% | 3614 | -10.1% | 2.9e-3 | 8.3e-3 | 2.5e-3 | 5.8e-3 | 3.3e-3 | 2.5e-3 | 3 / 6 |
+| vision + DiT, keep-float (served, 143) | 436.6 | -12.1% | 3117 | -22.4% | 8.4e-3 | 2.1e-3 | 3.8e-3 | 6.1e-3 | 2.2e-2 | 2.9e-3 | 2 / 6 |
+| vision + DiT, keep-float (union, 244) | 461.6 | -7.1% | 3679 | -8.4% | 3.7e-3 | 5.1e-3 | 2.8e-3 | 3.2e-3 | 3.1e-3 | 2.4e-3 | 2 / 6 |
+
+Packing every weight scores 43 (vision + DiT), 55 (vision) and 36 (default); no
+list was searched.
+
+#### GR00T N1.5
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 529.3 | - | 3659 | - | 1.9e-3 | 1.2e-2 | 4.1e-3 | 3.8e-3 | 3.1e-2 | 1.2e-2 | 6 / 6 |
+| default | 500.2 | -5.5% | 3148 | -14.0% | 5.1e-3 | 8.0e-2 | 2.1e-2 | 4.3e-2 | 9.8e-2 | 6.5e-2 | 0 / 6 |
+| vision | 481.1 | -9.1% | 2754 | -24.7% | 7.2e-3 | 4.6e-2 | 4.9e-2 | 1.2e-1 | 1.4e-1 | 5.2e-2 | 0 / 6 |
+| vision + DiT | 399.2 | -24.6% | 2339 | -36.1% | 8.4e-3 | 3.6e-2 | 9.7e-2 | 1.3e-1 | 1.6e-1 | 6.5e-2 | 0 / 6 |
+| vision + DiT, keep-float (fixed, 191) | 449.0 | -15.2% | 3061 | -16.3% | 2.7e-3 | 2.8e-2 | 3.5e-2 | 5.1e-2 | 5.4e-2 | 6.2e-2 | 1 / 6 |
+| vision + DiT, keep-float (served, 223) | 472.9 | -10.7% | 3172 | -13.3% | 6.8e-3 | 9.1e-3 | 2.7e-2 | 1.2e-2 | 3.0e-2 | 1.6e-2 | 2 / 6 |
+| vision + DiT, keep-float (union, 272) | 491.2 | -7.2% | 3413 | -6.7% | 3.3e-3 | 1.1e-2 | 1.1e-2 | 1.2e-2 | 3.5e-2 | 1.7e-2 | 1 / 6 |
+
+Searched with 4 h per level, before levels scoring above 10 were skipped; no
+list passed. Best scores: 1.84 (vision + DiT), 1.77 (vision), 1.23 (default).
+
+#### SmolVLA
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 584.0 | - | 1226 | - | 7.4e-4 | 1.9e-3 | 2.9e-2 | 1.9e-1 | 5.6e-2 | 2.5e-1 | 6 / 6 |
+| default | 569.0 | -2.6% | 919 | -25.0% | 1.2e-2 | 1.3e-2 | 1.4e+0 | 1.3e-1 | 2.2e-2 | 5.3e-1 | 2 / 6 |
+| vision | 561.0 | -3.9% | 848 | -30.8% | 3.4e-2 | 1.6e-2 | 1.7e+0 | 1.1e-1 | 8.5e-2 | 4.4e-1 | 1 / 6 |
+| vision, keep-float (fixed, 58) | 564.2 | -3.4% | 896 | -26.9% | 2.0e-3 | 1.6e-2 | 1.6e+0 | 2.4e-1 | 2.6e-1 | 9.6e-1 | 1 / 6 |
+
+Packing every weight scores 54 (vision) and 44 (default); no list was searched.
+On obs1 to obs4 the gripper channel switches sign within the chunk, and a shift
+in when it switches sets max|Δ|, at F16 too.
+
+#### VLA-Adapter
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 669.2 | - | 3569 | - | 3.9e-4 | 3.9e-4 | 1.2e-3 | 6.6e-4 | 4.7e-4 | 3.3e-4 | 6 / 6 |
+| default | 653.5 | -2.3% | 3200 | -10.3% | 4.3e-3 | 6.3e-3 | 1.4e-2 | 9.6e-3 | 8.0e-3 | 8.2e-3 | 0 / 6 |
+| vision | 623.4 | -6.8% | 2555 | -28.4% | 3.1e-3 | 6.0e-3 | 1.5e-2 | 8.9e-3 | 7.7e-3 | 7.1e-3 | 0 / 6 |
+| vision, keep-float (fixed, 8) | 622.7 | -6.9% | 2516 | -29.5% | 2.8e-3 | 6.3e-3 | 1.4e-2 | 6.9e-3 | 8.5e-3 | 6.4e-3 | 1 / 6 |
+| vision, keep-float (served, 40) | 627.7 | -6.2% | 2494 | -30.1% | 2.9e-3 | 2.9e-3 | 1.5e-2 | 6.6e-3 | 8.0e-3 | 5.3e-3 | 2 / 6 |
+
+No list passed within the time limit. At the vision level the best score is
+1.03. At the default level the retry on all six checks reached 0.82 only with
+every LM block float, and the time limit ran out while blocks were packed back.
+
+#### GR00T N1.6
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 682.6 | - | 4929 | - | 1.3e-3 | 1.0e-2 | 1.2e-3 | 1.2e-3 | 1.1e-3 | 1.8e-3 | 6 / 6 |
+| default | 644.5 | -5.6% | 3959 | -19.7% | 7.2e-3 | 3.4e-2 | 8.1e-3 | 9.2e-3 | 1.5e-2 | 8.3e-3 | 0 / 6 |
+| vision, unpadded | 817.3 | +19.7% | 3738 | -24.2% | 7.1e-3 | 2.5e-2 | - | - | - | - | 0 / 2 |
+| vision | 622.5 | -8.8% | 3588 | -27.2% | 8.0e-3 | 2.9e-2 | 2.1e-2 | 1.0e-2 | 2.5e-2 | 2.2e-2 | 0 / 6 |
+| vision + DiT | 462.2 | -32.3% | 2777 | -43.7% | 8.1e-3 | 2.9e-2 | 2.0e-2 | 1.0e-2 | 2.5e-2 | 2.2e-2 | 0 / 6 |
+| vision + DiT, keep-float (fixed, 57) | 482.3 | -29.3% | 3076 | -37.6% | 2.8e-3 | 3.6e-2 | 1.7e-2 | 1.2e-2 | 2.2e-2 | 2.2e-2 | 1 / 6 |
+| vision + DiT, keep-float (served, 3) | 464.0 | -32.0% | 2800 | -43.2% | 7.6e-3 | 9.2e-3 | 1.2e-2 | 1.1e-2 | 1.6e-2 | 2.8e-2 | 1 / 6 |
+| vision + DiT, keep-float (union, 60) | 480.7 | -29.6% | 3114 | -36.8% | 3.0e-3 | 8.6e-3 | 7.1e-3 | 7.9e-3 | 1.3e-2 | 3.3e-2 | 1 / 6 |
+
+*vision, unpadded* ran fixed and obs0 only. No list passed within the time
+limit. Best scores: 1.68 (vision + DiT), 1.33 (vision), 1.55 (default).
+
+#### GR00T N1.7
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 744.9 | - | 5108 | - | 2.0e-3 | 2.0e-3 | 2.8e-3 | 1.3e-3 | 1.5e-3 | 6.2e-4 | 6 / 6 |
+| default | 703.5 | -5.6% | 4356 | -14.7% | 1.1e-2 | 2.0e-2 | 1.0e-2 | 2.2e-2 | 1.7e-2 | 2.2e-2 | 0 / 6 |
+| vision | 688.4 | -7.6% | 3996 | -21.8% | 2.0e-2 | 2.2e-2 | 1.1e-2 | 1.7e-2 | 1.9e-2 | 1.8e-2 | 0 / 6 |
+| vision + DiT | 536.1 | -28.0% | 3151 | -38.3% | 2.8e-2 | 2.1e-2 | 1.0e-2 | 1.7e-2 | 1.7e-2 | 1.7e-2 | 0 / 6 |
+| vision + DiT, keep-float (fixed, 185) | 606.0 | -18.6% | 4051 | -20.7% | 2.6e-3 | 5.3e-3 | 5.6e-3 | 5.0e-3 | 2.0e-3 | 2.2e-3 | 3 / 6 |
+| vision + DiT, keep-float (served, 157) | 579.8 | -22.2% | 3870 | -24.2% | 4.2e-2 | 2.8e-3 | 3.6e-3 | 1.8e-3 | 1.6e-3 | 3.3e-3 | 3 / 6 |
+| vision + DiT, keep-float (union, 233) | 614.4 | -17.5% | 4249 | -16.8% | 3.9e-3 | 6.5e-3 | 3.0e-3 | 3.0e-3 | 1.4e-3 | 1.2e-3 | 3 / 6 |
+
+No list passed within the time limit. Best scores: 1.40 (vision + DiT), 2.07
+(vision), 1.45 (default).
+
+#### π0.5
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 1107.8 | - | 5980 | - | 4.8e-4 | 3.7e-4 | 6.0e-4 | 5.5e-3 | 8.9e-4 | 3.9e-4 | 6 / 6 |
+| default | 971.0 | -12.3% | 3997 | -33.2% | 4.9e-4 | 1.9e-3 | 5.0e-3 | 1.7e-2 | 3.9e-3 | 3.5e-3 | 2 / 6 |
+| vision, unpadded | 1320.2 | +19.2% | 3760 | -37.1% | 8.5e-4 | 2.7e-3 | - | - | - | - | 2 / 2 |
+| vision | 941.3 | -15.0% | 3676 | -38.5% | 9.2e-4 | 2.8e-3 | 8.0e-3 | 1.7e-2 | 1.0e-2 | 4.9e-3 | 2 / 6 |
+| vision, keep-float (all checks, 181) | 1061.2 | -4.2% | 5095 | -14.8% | 6.0e-4 | 8.5e-4 | 2.8e-3 | 6.0e-3 | 2.5e-3 | 1.1e-3 | 6 / 6 |
+
+*vision, unpadded* ran fixed and obs0 only. The *all checks* list was searched
+without the time limit, in 5.6 h; the default level was not searched.
+
+#### π0
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 1123.3 | - | 5662 | - | 7.7e-4 | 5.8e-4 | 4.7e-4 | 5.1e-4 | 5.8e-4 | 6.1e-4 | 6 / 6 |
+| default | 978.8 | -12.9% | 3723 | -34.2% | 1.8e-2 | 1.7e-3 | 6.2e-4 | 6.6e-4 | 8.8e-4 | 1.4e-3 | 5 / 6 |
+| vision | 937.6 | -16.5% | 3337 | -41.1% | 1.6e-2 | 1.7e-3 | 5.6e-4 | 7.2e-4 | 5.4e-4 | 1.5e-3 | 5 / 6 |
+| default, keep-float (fixed, 8) | 978.8 | -12.9% | 3711 | -34.5% | 1.4e-3 | 5.2e-4 | 6.1e-4 | 6.6e-4 | 5.3e-4 | 7.4e-4 | 6 / 6 |
+| vision, keep-float (all checks, 8) | 937.7 | -16.5% | 3326 | -41.3% | 1.0e-3 | 5.6e-4 | 6.1e-4 | 6.7e-4 | 4.6e-4 | 1.0e-3 | 6 / 6 |
+
+The default level was not searched.
+
+#### OpenVLA-OFT
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 1125.2 | - | 15266 | - | 3.1e-4 | 7.5e-4 | 5.6e-4 | 4.3e-4 | 6.8e-4 | 5.6e-4 | 6 / 6 |
+| default | 845.7 | -24.8% | 9403 | -38.4% | 5.9e-4 | 3.5e-3 | 5.1e-3 | 4.4e-3 | 4.9e-3 | 3.8e-3 | 1 / 6 |
+| vision | 812.5 | -27.8% | 8821 | -42.2% | 7.9e-4 | 3.2e-3 | 5.8e-3 | 4.5e-3 | 3.9e-3 | 6.0e-3 | 1 / 6 |
+| vision, keep-float (served, 12) | 821.4 | -27.0% | 8959 | -41.3% | 7.9e-4 | 2.5e-3 | 4.3e-3 | 3.4e-3 | 2.8e-3 | 5.4e-3 | 3 / 6 |
+
+No list passed within the time limit. Best scores: 1.35 (vision), 1.03
+(default).
+
+#### Evo-1
+
+| Config | mean ms | vs F16 | System RAM MiB | vs F16 | fixed | obs0 | obs1 | obs2 | obs3 | obs4 | passes |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 1659.0 | - | 1582 | - | 6.2e-4 | 1.1e-3 | 9.7e-4 | 4.6e-4 | 4.5e-4 | 9.8e-4 | 6 / 6 |
+| default | 1655.4 | -0.2% | 1459 | -7.8% | 5.4e-3 | 1.2e-2 | 7.2e-3 | 4.0e-3 | 3.4e-3 | 6.1e-3 | 0 / 6 |
+| vision | 1638.8 | -1.2% | 1121 | -29.1% | 6.3e-3 | 1.4e-2 | 5.9e-3 | 4.3e-3 | 4.8e-3 | 6.4e-3 | 0 / 6 |
+| vision, keep-float (fixed, 25) | 1634.5 | -1.5% | 1171 | -26.0% | 2.4e-3 | 1.1e-2 | 5.8e-3 | 3.3e-3 | 4.7e-3 | 3.6e-3 | 1 / 6 |
+| default, keep-float (all checks, 66) | 1657.4 | -0.1% | 1494 | -5.6% | 1.4e-3 | 2.1e-3 | 2.5e-3 | 2.7e-3 | 2.2e-3 | 2.3e-3 | 6 / 6 |
+
+At the vision level a list scored 0.95 on the search set, but the time limit ran
+out before it was refined and checked on obs3 and obs4.
 
 A per-op profile of the default, vision and vision + DiT files puts every Q8_0
 matmul on the HMX. The loader zero-pads a 4304-wide FFN to 4320 at load only

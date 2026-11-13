@@ -71,7 +71,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   needs for a packed weight), `--dit` (also packs the DiT's weight matrices
   except adaLN and the time embedding) and `--keep-float REGEX` (leaves the
   matching weights float). `docs/benchmark/qualcomm-iq10.md` reports latency,
-  memory and fidelity on the IQ-10 for each Q8_0 configuration of the 13 models.
+  memory and fidelity on the IQ-10 for each Q8_0 configuration of the 13 models,
+  checked on fixed inputs and five served observations, and the configuration
+  per model that passes all checks: π0, π0.5, Octo-Small, ACT, TurboVLA and
+  Evo-1 have one; the other seven stay at F16.
 - **ROCm/HIP backend for VLA inference.** `-DGGML_HIP=ON` selects ggml's HIP
   backend without compiling vla.cpp's CUDA-only kernels. On Linux `gfx1200`
   (Radeon RX 9060 XT) with ROCm 7.14 and llama.cpp `b11223`, every arch except
