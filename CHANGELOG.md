@@ -35,8 +35,9 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   of the CPU build on fixed inputs and serve through `eval/client`. Concats the
   NPU refuses on buffers above 4 GB of DSP address space, copies that read a
   weight (also answered `NO_SUPPORT`; VLA-Adapter), matmuls of a 2D weight
-  against a batch, which it computes wrong, and repeats of a computed tensor,
-  which can read stale cache lines (TurboVLA), run on the CPU, and GR00T N1.7's
+  against a batch, which it computes wrong, and repeats (TurboVLA: a computed
+  tensor can be read from stale cache lines, a weight is answered `NO_SUPPORT`
+  for an instruction pinned below 21 tokens) run on the CPU, and GR00T N1.7's
   LM leaves flash attention (F16 scores on the HMX) unless `--flash-attn` is
   given. Three matmuls that the HMX does not take move onto it: SigLIP's
   4304-wide MLP is zero-padded to 4320 at load, π0.5's SigLIP takes flash
