@@ -75,6 +75,11 @@ def bf16_to_f32(u8: np.ndarray) -> np.ndarray:
     return (u16 << 16).view(np.float32)
 
 
+def f32_to_bf16(a: np.ndarray) -> np.ndarray:
+    # Exact for values bf16_to_f32 produced: their low 16 bits are zero.
+    return (np.ascontiguousarray(a, np.float32).view(np.uint32) >> 16).astype(np.uint16)
+
+
 def to_f32(t) -> np.ndarray:
     # C-order array with the ggml ne axes reversed (ne0 is the last axis).
     shape = tuple(int(x) for x in t.shape[::-1])
@@ -132,7 +137,8 @@ def main() -> None:
     ap.add_argument("--pad-m32", action="store_true",
                     help="zero-pad FFN widths that are not a multiple of 32 (fc1 rows and bias, "
                          "fc2 columns): Hexagon's matrix unit takes no other width for a packed "
-                         "weight. The output is unchanged")
+                         "weight. The zeros leave the product unchanged, but fc2's rows then "
+                         "split into blocks of 32, so fc2 is packed too")
     args = ap.parse_args()
     keep = re.compile(args.keep_float) if args.keep_float else None
     skip = SKIP if args.vision else SKIP + SKIP_VISION
@@ -166,7 +172,9 @@ def main() -> None:
                 bytes_out += int(packed.nbytes)
                 n_q += 1
             else:
-                w.add_tensor(t.name, arr, raw_dtype=gguf.GGMLQuantizationType.F32)
+                if t.tensor_type == gguf.GGMLQuantizationType.BF16:
+                    arr = f32_to_bf16(arr)
+                w.add_tensor(t.name, arr, raw_dtype=t.tensor_type)
                 bytes_out += int(arr.nbytes)
             continue
         f32 = to_f32(t) if eligible(t.name, t.shape, args.type, skip, args.dit, keep) else None
