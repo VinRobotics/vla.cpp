@@ -451,16 +451,18 @@ Three flags shape a file for the NPU:
   unchanged, but `fc2`'s rows then split into blocks of 32, so it is packed too.
 - `--dit` also packs the DiT's weight matrices, except adaLN and the time
   embedding.
-- `--keep-float REGEX` leaves the weights whose name matches REGEX float.
+- `--keep-float REGEX` keeps the weights whose name matches REGEX out of Q8_0;
+  they load as F16.
 
-Q8_0 moves most models' actions past the 2.9e-3 bar. Within it on both fixed
-and served inputs are Octo-Small and ACT, π0.5 with or without `--vision`, and
-π0, OpenVLA-OFT and VLA-Adapter only with some weights left float. π0.5 with
-`--vision --pad-m32` is 15% faster than F16 and takes 38% less system RAM:
+Q8_0 moves most models' actions past the 2.9e-3 bar. Checked on fixed inputs and
+five served LIBERO observations (three checks for TurboVLA), Q8_0 passes for π0,
+π0.5, Octo-Small, ACT, TurboVLA and Evo-1, all but ACT with some weights kept
+F16 by `--keep-float`; no Q8_0 configuration passes for the other seven. π0 with
+its list is 16.5% faster than F16 and takes 41% less system RAM:
 
 ```bash
-python scripts/quantize_gguf.py --in pi05-libero.gguf --out pi05-libero-q8_0.gguf \
-    --type Q8_0 --vision --pad-m32
+python scripts/quantize_gguf.py --in pi0-libero-finetuned-v044.gguf --out pi0-q8_0.gguf \
+    --type Q8_0 --vision --pad-m32 --keep-float '^vlm\.blk\.[04]\.attn_[qkvo]\.'
 ```
 
 Latency, memory and fidelity per configuration:
