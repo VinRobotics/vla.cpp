@@ -189,23 +189,26 @@ TEMPLATE protocol.
 
 ### Configuration per model
 
-The fastest configuration that passes all checks, or F16 where none does:
+The fastest Q8_0 configuration that passes all checks, against F16. *Q8_0
+weights* counts the weights packed out of those the level can pack; the rest
+stay float. Where no configuration passes, the table gives the best search
+score, or the score with every weight packed where the search was skipped.
 
-| Model | Configuration | mean ms | vs F16 | System RAM MiB | vs F16 |
-|---|---|--:|--:|--:|--:|
-| Octo-Small | vision, keep-float (all checks, 4) | 81.5 | -3.1% | 407 | -43.9% |
-| ACT | default | 150.9 | -1.0% | 405 | -13.6% |
-| TurboVLA | default, keep-float (all checks, 12) | 189.7 | -0.3% | 881 | -18.4% |
-| VLA-JEPA | F16 | 496.8 | - | 4018 | - |
-| GR00T N1.5 | F16 | 529.3 | - | 3659 | - |
-| SmolVLA | F16 | 584.0 | - | 1226 | - |
-| VLA-Adapter | F16 | 669.2 | - | 3569 | - |
-| GR00T N1.6 | F16 | 682.6 | - | 4929 | - |
-| GR00T N1.7 | F16 | 744.9 | - | 5108 | - |
-| π0.5 | vision, keep-float (all checks, 181) | 1061.2 | -4.2% | 5095 | -14.8% |
-| π0 | vision, keep-float (all checks, 8) | 937.7 | -16.5% | 3326 | -41.3% |
-| OpenVLA-OFT | F16 | 1125.2 | - | 15266 | - |
-| Evo-1 | default, keep-float (all checks, 66) | 1657.4 | -0.1% | 1494 | -5.6% |
+| Model | Q8_0 level | Q8_0 weights | F16 ms | Q8_0 ms | vs F16 | F16 RAM MiB | Q8_0 RAM MiB | vs F16 |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| π0 | vision | 281 of 289 | 1123.3 | 937.7 | -16.5% | 5662 | 3326 | -41.3% |
+| π0.5 | vision | 108 of 289 | 1107.8 | 1061.2 | -4.2% | 5980 | 5095 | -14.8% |
+| Octo-Small | vision | 119 of 123 | 84.1 | 81.5 | -3.1% | 725 | 407 | -43.9% |
+| ACT | default | 35 of 35 | 152.5 | 150.9 | -1.0% | 469 | 405 | -13.6% |
+| TurboVLA | default | 121 of 133 | 190.2 | 189.7 | -0.3% | 1079 | 881 | -18.4% |
+| Evo-1 | default | 34 of 100 | 1659.0 | 1657.4 | -0.1% | 1582 | 1494 | -5.6% |
+| OpenVLA-OFT | none passes (best 1.03) | - | 1125.2 | - | - | 15266 | - | - |
+| VLA-Adapter | none passes (best 1.03) | - | 669.2 | - | - | 3569 | - | - |
+| GR00T N1.5 | none passes (best 1.23) | - | 529.3 | - | - | 3659 | - | - |
+| GR00T N1.6 | none passes (best 1.33) | - | 682.6 | - | - | 4929 | - | - |
+| GR00T N1.7 | none passes (best 1.40) | - | 744.9 | - | - | 5108 | - | - |
+| SmolVLA | none passes (fully packed: 44) | - | 584.0 | - | - | 1226 | - | - |
+| VLA-JEPA | none passes (fully packed: 36) | - | 496.8 | - | - | 4018 | - | - |
 
 Flags for `python scripts/quantize_gguf.py --in <checkpoint> --out <file>`:
 
