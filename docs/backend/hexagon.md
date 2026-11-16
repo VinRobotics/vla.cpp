@@ -455,7 +455,7 @@ Three flags shape a file for the NPU:
   they load as F16.
 
 Q8_0 moves most models' actions past the 2.9e-3 bar. Checked on fixed inputs and
-five served LIBERO observations (three checks for TurboVLA), Q8_0 passes for π0,
+five served LIBERO observations, Q8_0 passes for π0,
 π0.5, Octo-Small, ACT, TurboVLA and Evo-1, all but ACT with some weights kept
 F16 by `--keep-float`; no Q8_0 configuration passes for the other seven. π0 with
 its list is 16.5% faster than F16 and takes 41% less system RAM:

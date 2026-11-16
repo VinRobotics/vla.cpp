@@ -151,7 +151,7 @@ except:
 
 | | |
 |---|---|
-| Commit | `71cdb09` |
+| Commit | `71cdb09`; TurboVLA `511a0c3` (main `d1fe64b` with the `REPEAT` fix of #85) |
 | Date | 2026-11-10 to 2026-11-13 (UTC+07) |
 | Runtime flags | defaults |
 
@@ -211,7 +211,7 @@ recorded `--keep-float` list, against F16.
 | π0.5 | passes all checks | base + vision, 181 kept F16 | 108 of 289 | 1107.8 | 1061.2 | -4.2% | 5980 | 5095 | -14.8% |
 | Octo-Small | passes all checks | base + vision, 4 kept F16 | 119 of 123 | 84.1 | 81.5 | -3.1% | 725 | 407 | -43.9% |
 | ACT | passes all checks | base | 35 of 35 | 152.5 | 150.9 | -1.0% | 469 | 405 | -13.6% |
-| TurboVLA | passes all checks | base, 12 kept F16 | 121 of 133 | 190.2 | 189.7 | -0.3% | 1079 | 881 | -18.4% |
+| TurboVLA | passes all checks | base, 22 kept F16 | 111 of 133 | 192.2 | 188.9 | -1.7% | 1007 | 818 | -18.8% |
 | Evo-1 | passes all checks | base, 66 kept F16 | 34 of 100 | 1659.0 | 1657.4 | -0.1% | 1582 | 1494 | -5.6% |
 | OpenVLA-OFT | fails: best score 1.03 | - | - | 1125.2 | - | - | 15266 | - | - |
 | VLA-Adapter | fails: best score 1.03 | - | - | 669.2 | - | - | 3569 | - | - |
@@ -233,7 +233,7 @@ Flags for `python scripts/quantize_gguf.py --in <checkpoint> --out <file>`:
 # ACT
 --type Q8_0
 # TurboVLA
---type Q8_0 --keep-float '^text\.encoder\.layer\.[02]\.'
+--type Q8_0 --keep-float '^text\.encoder\.layer\.[0-2]\.|^text\.encoder\.layer\.[35]\.(intermediate|output)\.dense\.'
 # Evo-1
 --type Q8_0 --keep-float '^vlm\.blk\.([2-9]|10)\.|^vlm\.blk\.13\.ffn_'
 ```
@@ -285,21 +285,25 @@ its only level.
 
 | Q8_0 configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| F16 | 190.2 | - | 1079 | - | 3.7e-4 | 8.5e-4 | crash | crash | crash | 6.3e-4 | 3 / 3 |
-| base | 186.5 | -1.9% | 814 | -24.6% | 1.3e-2 | 4.2e-3 | crash | crash | crash | 1.7e-3 | 1 / 3 |
-| base + vision | 185.7 | -2.4% | 485 | -55.1% | 1.4e-2 | 8.3e-3 | crash | crash | crash | 5.7e-3 | 0 / 3 |
-| base + vision, 32 kept F16 (fixed-input list) | 185.8 | -2.3% | 611 | -43.4% | 2.6e-3 | 6.9e-3 | crash | crash | crash | 4.2e-3 | 1 / 3 |
-| base, 12 kept F16 (six-check list) | 189.7 | -0.3% | 881 | -18.4% | 1.5e-3 | 2.7e-3 | crash | crash | crash | 1.6e-3 | 3 / 3 |
+| F16 | 192.2 | - | 1007 | - | 3.7e-4 | 8.5e-4 | 3.3e-4 | 6.2e-4 | 6.8e-4 | 6.3e-4 | 6 / 6 |
+| base | 190.5 | -0.9% | 732 | -27.3% | 1.3e-2 | 4.2e-3 | 3.1e-3 | 1.2e-3 | 5.6e-3 | 1.7e-3 | 2 / 6 |
+| base + vision | 185.9 | -3.3% | 485 | -51.8% | 1.4e-2 | 8.3e-3 | 8.1e-3 | 7.5e-3 | 2.1e-2 | 5.7e-3 | 0 / 6 |
+| base + vision, 32 kept F16 (fixed-input list) | 184.4 | -4.1% | 580 | -42.4% | 2.6e-3 | 6.9e-3 | 5.8e-3 | 4.2e-3 | 1.4e-2 | 4.2e-3 | 1 / 6 |
+| base, 12 kept F16 (three-check list) | 189.8 | -1.2% | 774 | -23.1% | 1.5e-3 | 2.7e-3 | 2.4e-3 | 1.6e-3 | 6.5e-3 | 1.6e-3 | 5 / 6 |
+| base, 22 kept F16 (six-check list) | 188.9 | -1.7% | 818 | -18.8% | 1.5e-3 | 2.8e-3 | 1.8e-3 | 1.6e-3 | 2.6e-3 | 1.8e-3 | 6 / 6 |
 
-| Q8_0 level | Score, all of the level in Q8_0 | Search on fixed, obs0, obs1, obs2 | Check on obs3, obs4 | Search again on all six | Result | Hours |
-|---|--:|---|---|---|---|--:|
-| base + vision | 4.86 | no list within 1.75 h (best 1.02) | - | - | no list | 1.8 |
-| base | 4.48 | list found on fixed, obs0, obs4 (score ≤ 1) | not run: crash | - | passes: 12 weights kept F16 | 0.1 |
+| Run | Q8_0 level | Score, all of the level in Q8_0 | Search | Check on obs3, obs4 | Search again on all six | Result | Hours |
+|---|---|--:|---|---|---|---|--:|
+| before #85: three checks | base + vision | 4.86 | on fixed, obs0, obs4: no list within 1.75 h (best 1.02) | - | - | no list | 1.8 |
+| before #85: three checks | base | 4.48 | on fixed, obs0, obs4: list found, 12 kept F16 | - | - | the three-check list; with #85 it fails obs3 (6.5e-3) | 0.1 |
+| with #85: six checks | base + vision | 7.10 | on fixed, obs0, obs1, obs2: no list within 1.75 h (best 1.01) | - | - | no list | 1.8 |
+| with #85: six checks | base | 4.48 | on fixed, obs0, obs1, obs2: list found, the same 12 kept F16 | fails obs3 (6.5e-3) | list found, 22 kept F16 | passes: the six-check list | 0.4 |
 
-obs1 to obs3 crash the Hexagon server at F16 too (`ggml-hex: HTP0 synchronize
-failed : dsp-error NO-SUPPORT` in `TurboVlaModelArch::predict`). TurboVLA
-therefore has three checks (fixed, obs0, obs4), and its six-check list searches
-on those three.
+The first two searches ran before #85: obs1 to obs3 then crashed the Hexagon
+server at F16 too (`ggml-hex: HTP0 synchronize failed : dsp-error NO-SUPPORT`
+on a `REPEAT` of `text_proj.bias`), so they searched on the three checks that
+ran, and their list is the *three-check list*. Every row of the first table is
+measured with the fix (`511a0c3`).
 
 #### VLA-JEPA
 
