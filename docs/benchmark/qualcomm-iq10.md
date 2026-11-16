@@ -187,7 +187,8 @@ blocks (a quarter of a stack, attention or FFN), most sensitive first, and then
 single blocks are kept F16 until the score is at most 1; the F16 blocks are then
 returned to Q8_0 while the score stays at most 1. The list's
 *kind* names the checks it was searched on: *fixed-input* (fixed), *obs0*,
-*fixed-input + obs0* (both lists' weights kept F16), and *six-check*. A
+*fixed-input + obs0* (both lists' weights kept F16), *three-check* (fixed, obs0
+and obs4; TurboVLA before #85) and *six-check*. A
 six-check list is searched on fixed, obs0, obs1 and obs2, then checked on obs3
 and obs4; an observation that fails joins the search, once. A six-check search
 runs on the level with the most in Q8_0 first, gets 1.75 h per level, and moves
