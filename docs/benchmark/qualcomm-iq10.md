@@ -505,6 +505,113 @@ and on the CPU-only build:
 | VLA-Adapter | 4.4e-3 | 6.2e-3 |
 | TurboVLA | 1.3e-2 | 2.1e-2 |
 
+## Q4_0 weights
+
+This section packs some weights to ggml's block-32 Q4_0 (4.5 bits per weight,
+against Q8_0's 8.5). `quantize_gguf.py --type-for REGEX=Q4_0` packs the weights
+whose name matches REGEX as Q4_0 and the rest as `--type`, so one file can hold
+Q8_0, Q4_0 and float weights. The checks, the threshold and the score are those
+of [Q8_0 weights](#q8_0-weights). The setup is the one above, except:
+
+| | |
+|---|---|
+| Commit | `511a0c3` (main `d1fe64b` with the `REPEAT` fix of #85), with `--type-for` |
+| Date | 2026-11-16 to 2026-11-17 (UTC+07) |
+
+On the NPU, Q4_0 is not faster than Q8_0 (π0 at base + vision: 936.5 ms
+against 938.7 ms with Q8_0; Octo-Small 82.3 against 84.5; ACT 154.5 against
+152.7), so what it can gain over Q8_0 is System RAM.
+
+### Which models
+
+Q4_0 was tried on models whose Q8_0 configuration passes all checks. Two kinds
+of run:
+
+- *whole level*: all of a level in Q4_0, the way the Q8_0 levels start;
+- *from Q8_0*: the model's Q8_0 configuration, with groups of its Q8_0 weights
+  moved to Q4_0 while all six checks pass.
+
+| Model | Q8_0 configuration score | Q4_0 runs | Why |
+|---|--:|---|---|
+| π0 | 0.36 | whole level; from Q8_0 | the most headroom under the threshold; 3319 MiB of System RAM with Q8_0 |
+| Octo-Small | 0.92 | whole level; from Q8_0 | the largest System RAM cut by Q8_0 (-42%); 4 of its 123 weights kept F16 |
+| TurboVLA | 0.97 | from Q8_0 | 111 of its 133 weights in Q8_0; 818 MiB of System RAM with Q8_0 |
+| ACT | 0.93 | whole level | Q4_0 on every weight it can pack saves 14 MiB over Q8_0, at max\|Δ\| 2.6e-2 on fixed |
+| π0.5 | 0.98 | none | 181 of its 289 weights are already kept F16, and the score is 0.02 under the threshold |
+| Evo-1 | 0.94 | none | 66 of its 100 weights are kept F16, and its Q8_0 configuration saves 88 MiB over F16 |
+| the other seven | - | none | no Q8_0 configuration passes |
+
+### Whole level and from Q8_0, per model
+
+#### π0
+
+| Configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 1113.5 | - | 5568 | - | 7.7e-4 | 5.8e-4 | 4.7e-4 | 5.1e-4 | 5.8e-4 | 6.1e-4 | 6 / 6 |
+| Q8_0: base + vision, 8 kept F16 | 938.7 | -15.7% | 3319 | -40.4% | 1.1e-3 | 5.6e-4 | 6.1e-4 | 6.7e-4 | 4.6e-4 | 1.0e-3 | 6 / 6 |
+| Q4_0: base | 981.1 | -11.9% | 2724 | -51.1% | 2.0e-2 | 8.6e-3 | 1.3e-2 | 1.3e-2 | 8.0e-3 | 1.6e-2 | 0 / 6 |
+| Q4_0: base + vision | 936.5 | -15.9% | 2159 | -61.2% | 2.3e-2 | 1.0e-2 | 1.3e-2 | 1.3e-2 | 7.9e-3 | 1.6e-2 | 0 / 6 |
+| Q4_0: base + vision, the Q8_0 configuration's 8 kept F16 | 937.9 | -15.8% | 2178 | -60.9% | 1.2e-2 | 1.3e-2 | 1.1e-2 | 6.2e-3 | 5.3e-3 | 1.1e-2 | 0 / 6 |
+| Q8_0 configuration, 123 of its 281 Q8_0 weights in Q4_0 | 941.0 | -15.5% | 2563 | -54.0% | 1.1e-3 | 1.7e-3 | 1.1e-3 | 1.0e-3 | 9.1e-4 | 1.4e-3 | 6 / 6 |
+
+#### Octo-Small
+
+| Configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 86.0 | - | 704 | - | 5.0e-4 | 1.4e-4 | 4.7e-4 | 3.3e-4 | 1.4e-4 | 6.3e-4 | 6 / 6 |
+| Q8_0: base + vision, 4 kept F16 | 84.5 | -1.7% | 407 | -42.2% | 1.0e-3 | 1.7e-3 | 2.7e-3 | 1.6e-3 | 1.2e-3 | 2.5e-3 | 6 / 6 |
+| Q4_0: base | 83.7 | -2.7% | 352 | -50.0% | 8.2e-2 | 6.8e-2 | 4.1e-2 | 1.3e-1 | 4.0e-2 | 1.0e-1 | 0 / 6 |
+| Q4_0: base + vision | 82.3 | -4.3% | 351 | -50.1% | 7.9e-2 | 7.1e-2 | 5.0e-2 | 1.4e-1 | 4.1e-2 | 1.0e-1 | 0 / 6 |
+
+#### ACT
+
+| Configuration | mean ms | vs F16 | System RAM MiB | vs F16 | max\|Δ\| fixed | max\|Δ\| obs0 | max\|Δ\| obs1 | max\|Δ\| obs2 | max\|Δ\| obs3 | max\|Δ\| obs4 | checks passed |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| F16 | 151.1 | - | 468 | - | 6.1e-4 | 1.0e-3 | 9.0e-4 | 5.7e-4 | 7.2e-4 | 7.6e-4 | 6 / 6 |
+| Q8_0: base | 152.7 | +1.1% | 404 | -13.7% | 2.1e-3 | 2.4e-3 | 2.7e-3 | 2.0e-3 | 2.3e-3 | 2.0e-3 | 6 / 6 |
+| Q4_0: base | 154.5 | +2.3% | 390 | -16.7% | 2.6e-2 | 6.3e-2 | 4.5e-2 | 3.7e-2 | 3.4e-2 | 3.6e-2 | 0 / 6 |
+
+ACT's base already holds every weight it packs; base + vision adds none.
+
+### Searches from Q8_0
+
+A search starts from the Q8_0 configuration and its groups of Q8_0 weights (a
+quarter of a stack, attention or FFN, as in the Q8_0 search):
+
+1. each group alone in Q4_0, scored on fixed only; the search stops if no group
+   passes;
+2. the groups that pass, all at once in Q4_0, scored on fixed, obs0, obs1 and
+   obs2; if that fails, the groups one at a time, the lowest fixed max|Δ| first,
+   each kept only if the score stays at most 1;
+3. the result checked on obs3 and obs4; the last-added groups are dropped until
+   both pass.
+
+| Model | Groups | Step 1: groups that pass alone | Step 2 | Step 3: obs3, obs4 | Result | Hours |
+|---|--:|---|---|---|---|--:|
+| π0 | 17 | 11 (scores 0.19 to 0.94; the other 6: 1.13 to 4.03) | all 11 at once: 2.41; one at a time: 8 kept, 3 dropped | both pass: 9.1e-4, 1.4e-3 | passes: 123 of 281 Q8_0 weights in Q4_0 | 0.5 |
+| Octo-Small | 17 | none (scores 1.31 to 14.41) | - | - | no group in Q4_0 | 0.1 |
+| TurboVLA | 19 | 8 (scores 0.47 to 0.92) | all 8 at once: 6.19; one at a time: 1 kept (0.92), 7 dropped | obs3 fails: 3.0e-3 > threshold; the group is dropped | no group in Q4_0 | 0.1 |
+
+TurboVLA's first search put weights of one fusion layer that the loader fuses
+into one matrix in different groups. A file with only some of them in Q4_0
+fails to load (`vl_fusion.0.values_v.weight does not match
+vl_fusion.0.v_proj.weight for fusing`), so 8 of its 23 groups scored no result.
+The row above is the second search, which keeps each fusion layer in one group.
+A search of π0 from base + vision in Q4_0, keeping weights F16 until the
+score is at most 1, was stopped while scoring its starting point, in favor of
+the search from Q8_0.
+
+### Result
+
+π0 is the one model with a Q4_0 configuration that passes all checks: 2563 MiB
+of System RAM, 756 MiB (23%) under its Q8_0 configuration, at the same latency.
+
+```bash
+# π0
+--type Q8_0 --vision --pad-m32 --keep-float '^vlm\.blk\.[04]\.attn_[qkvo]\.' \
+--type-for '^vit\.blk\.([7-9]|1[0-9]|2[0-6])\.fc[12]\.|^vit\.blk\.(1[4-9]|20)\.attn_[qkvo]\.|^vlm\.blk\.([5-9]|1[0-7])\.ffn_|^vlm\.blk\.1[4-7]\.attn_[qkvo]\.=Q4_0'
+```
+
 ## Not run
 
 - **BitVLA**: N/A off CUDA. The only published GGUF is int2-packed, and only

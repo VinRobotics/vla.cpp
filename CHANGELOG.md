@@ -75,6 +75,10 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   checked on fixed inputs and five served observations, and the configuration
   per model that passes all checks: π0, π0.5, Octo-Small, ACT, TurboVLA and
   Evo-1 have one; the other seven stay at F16.
+  `scripts/quantize_gguf.py --type-for REGEX=TYPE` packs matching weights as
+  another type, so one file can mix Q8_0, Q4_0 and float weights. On the IQ-10,
+  π0's Q8_0 configuration with 123 weights moved to Q4_0 passes all checks at
+  23% less system RAM; Octo-Small and TurboVLA have no weight group that does.
 - **ROCm/HIP backend for VLA inference.** `-DGGML_HIP=ON` selects ggml's HIP
   backend without compiling vla.cpp's CUDA-only kernels. On Linux `gfx1200`
   (Radeon RX 9060 XT) with ROCm 7.14 and llama.cpp `b11223`, every arch except

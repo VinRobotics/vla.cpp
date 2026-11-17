@@ -453,6 +453,9 @@ Three flags shape a file for the NPU:
   embedding.
 - `--keep-float REGEX` keeps the weights whose name matches REGEX out of Q8_0;
   they load as F16.
+- `--type-for REGEX=TYPE` packs the weights whose name matches REGEX as TYPE,
+  for example Q4_0, instead of `--type`. Weights the loader fuses into one
+  matrix must get the same type.
 
 Q8_0 moves most models' actions past the 2.9e-3 bar. Checked on fixed inputs and
 five served LIBERO observations, Q8_0 passes for π0,
@@ -467,6 +470,19 @@ python scripts/quantize_gguf.py --in pi0-libero-finetuned-v044.gguf --out pi0-q8
 
 Latency, memory and fidelity per configuration:
 [benchmark/qualcomm-iq10.md](../benchmark/qualcomm-iq10.md#q8_0-weights).
+
+Q4_0 is not faster than Q8_0 on the NPU; it can only cut memory. From π0's Q8_0
+configuration, 123 of its 281 Q8_0 weights move to Q4_0 with all six checks
+still passing, for 23% less system RAM at the same latency; no group of
+Octo-Small's or TurboVLA's Q8_0 weights does:
+
+```bash
+python scripts/quantize_gguf.py --in pi0-libero-finetuned-v044.gguf --out pi0-q8_0-q4_0.gguf \
+    --type Q8_0 --vision --pad-m32 --keep-float '^vlm\.blk\.[04]\.attn_[qkvo]\.' \
+    --type-for '^vit\.blk\.([7-9]|1[0-9]|2[0-6])\.fc[12]\.|^vit\.blk\.(1[4-9]|20)\.attn_[qkvo]\.|^vlm\.blk\.([5-9]|1[0-7])\.ffn_|^vlm\.blk\.1[4-7]\.attn_[qkvo]\.=Q4_0'
+```
+
+[benchmark/qualcomm-iq10.md](../benchmark/qualcomm-iq10.md#q4_0-weights) has every Q4_0 run.
 
 ## IQ-10, imagined
 
