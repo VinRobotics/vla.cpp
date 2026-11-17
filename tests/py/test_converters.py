@@ -430,6 +430,21 @@ def test_quantize_dit_keep_float_pad():
                                        t("lm.blk.0.fc1.weight", [2048, 8192])])
     assert Q.ffn_pads(r) == {"vit.blk.0": (4304, 4320)}
 
+
+def test_quantize_type_for():
+    import importlib
+    Q = importlib.import_module("quantize_gguf")
+    tf = Q.parse_type_for([r"^vlm\.blk\.1\.=Q4_0", r"^vlm\.blk\.=Q8_0"])
+    assert Q.pick_type("vlm.blk.1.attn_q.weight", tf, "Q8_0") == "Q4_0"
+    assert Q.pick_type("vlm.blk.2.attn_q.weight", tf, "Q4_0") == "Q8_0"
+    assert Q.pick_type("lm.blk.1.attn_q.weight", tf, "Q5_0") == "Q5_0"
+    for bad in ("Q4_0", "^vlm=F16", "=Q4_0"):
+        try:
+            Q.parse_type_for([bad])
+            raise AssertionError(f"{bad!r} must exit")
+        except SystemExit:
+            pass
+
 def test_find_sidecar():
     import tempfile
     from gguf_common import find_sidecar
