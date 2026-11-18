@@ -39,7 +39,9 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 
-#if defined(GGML_USE_CUDA) && !defined(GGML_USE_HIP)
+#if defined(GGML_USE_HIP)
+#include <hip/hip_runtime.h>
+#elif defined(GGML_USE_CUDA)
 #include <cuda_runtime.h>
 #endif
 
@@ -47,6 +49,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -91,11 +95,19 @@ int64_t down2(int64_t n, int64_t k, int64_t pad) {
     return (n + 2*pad - k) / 2 + 1;
 }
 
-// ggml-cuda's direct convolution is an implicit GEMM only where it has MMA
-// (Turing and newer). Before that, Volta's Jetson Xavier included, it falls back
-// to a naive kernel several times slower than im2col.
-bool cuda_conv_has_mma() {
-#if defined(GGML_USE_CUDA) && !defined(GGML_USE_HIP)
+// ggml-cuda's direct convolution is an implicit GEMM only where it has MMA:
+// Turing and newer on CUDA, RDNA 3 and newer (WMMA) on HIP. Elsewhere, Volta's
+// Jetson Xavier and RDNA 2 included, it falls back to a naive kernel several
+// times slower than im2col.
+bool conv_has_mma() {
+#if defined(GGML_USE_HIP)
+    // gcnArchName is "gfx1151", possibly with a ":sramecc-" style suffix; the
+    // digits are hex and RDNA 3 starts at gfx1100.
+    hipDeviceProp_t prop;
+    return hipGetDeviceProperties(&prop, backend_device_index()) == hipSuccess &&
+           std::strncmp(prop.gcnArchName, "gfx", 3) == 0 &&
+           std::strtoul(prop.gcnArchName + 3, nullptr, 16) >= 0x1100;
+#elif defined(GGML_USE_CUDA)
     int major = 0, minor = 0;
     const int dev = backend_device_index();
     return cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
@@ -122,10 +134,10 @@ struct ActModelArch : public ModelArchBase {
     ggml_context *        ctx_weights = nullptr;
     ggml_backend_buffer_t weight_buf  = nullptr;
     ggml_type             mt          = GGML_TYPE_F32;
-    // CUDA (Turing+) runs the ResNet as ggml's direct convolution on F16
-    // kernels: an implicit GEMM on tensor cores with F32 accumulation and no
-    // im2col buffer. Elsewhere the kernels stay F32 and go through im2col, which
-    // is the faster of the two on CPU.
+    // CUDA (Turing+) and HIP (RDNA 3+) run the ResNet as ggml's direct
+    // convolution on F16 kernels: an implicit GEMM on tensor cores or WMMA with
+    // F32 accumulation and no im2col buffer. Elsewhere the kernels stay F32 and
+    // go through im2col, which is the faster of the two on CPU.
     bool                  conv_direct = false;
 
     int64_t dim = 512, heads = 8, ff = 3200, enc_layers = 4, dec_layers = 1, chunk = 100;
@@ -554,7 +566,7 @@ std::unique_ptr<ModelArchBase> act_create(const std::string& mmproj_path,
         return nullptr;
     m->backend = b.handle;
     // An explicit --weight-dtype f32 keeps the convolutions F32 too.
-    m->conv_direct = b.is_cuda && cuda_conv_has_mma() && opts.weight_dtype.value_or(GGML_TYPE_F16) != GGML_TYPE_F32;
+    m->conv_direct = (b.is_cuda || b.is_hip) && conv_has_mma() && opts.weight_dtype.value_or(GGML_TYPE_F16) != GGML_TYPE_F32;
 
     if (!load_weights(*m, g))
         return nullptr;
