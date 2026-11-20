@@ -392,7 +392,7 @@ bool accel_runs(FallbackCtx * fc, const ggml_tensor * t, const char ** why) {
         // for CPY and PAD: TurboVLA fills its 21 text rows with text_proj.bias
         // [256] after an instruction that runs BERT over 11 or 14 tokens, and
         // the host aborts.
-        *why = "cannot run (stale reads, NO_SUPPORT on a weight) a";
+        *why = is_weight(t->src[0]) ? "cannot run (NO_SUPPORT) a weight-reading" : "can read stale data in a";
         return false;
     }
     if (fc->hexagon && t->op == GGML_OP_CONT && t->src[0]->nb[0] != ggml_type_size(t->src[0]->type) &&
