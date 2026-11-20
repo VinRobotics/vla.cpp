@@ -318,6 +318,15 @@ struct SmolVLAModelArch : public ModelArchBase {
     graph_cache<int, MainIO> main_graph;
 
     std::vector<ggml_tensor *> time_bcasts;
+
+    // Hexagon: action_time_mlp_in without the per-step feature concat, which
+    // the NPU refuses and every denoise step would round-trip through the CPU.
+    // W_at1a is its action half; at1_step[s] is its time half applied to step
+    // s's time embedding, plus b_at1.
+    ggml_context *             ctx_at   = nullptr;
+    ggml_backend_buffer_t      at_buf   = nullptr;
+    ggml_tensor *              W_at1a   = nullptr;
+    std::vector<ggml_tensor *> at1_step;
 };
 
 namespace {
@@ -1472,12 +1481,50 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
                                     0, tile.size()*sizeof(float));
         }
     }
+#ifdef GGML_USE_HEXAGON
+    if (m->W_at1->type == GGML_TYPE_F32 && m->b_at1->type == GGML_TYPE_F32) {
+        const int64_t H = cfg.expert_h;
+        const ggml_init_params ap = { ggml_tensor_overhead() * (size_t) (cfg.num_steps + 2), nullptr, true };
+        m->ctx_at = ggml_init(ap);
+        if (!m->ctx_at) { std::fprintf(stderr, "vla(smolvla): ggml_init (action-time) failed\n"); return nullptr; }
+        m->W_at1a = ggml_new_tensor_2d(m->ctx_at, GGML_TYPE_F32, H, H);
+        m->at1_step.resize((size_t) cfg.num_steps);
+        for (auto & t : m->at1_step)
+            t = ggml_new_tensor_1d(m->ctx_at, GGML_TYPE_F32, H);
+        m->at_buf = alloc_weights(m->ctx_at, m->backend);
+        if (!m->at_buf) { std::fprintf(stderr, "vla(smolvla): alloc (action-time) failed\n"); return nullptr; }
+        std::vector<float> W((size_t) (2 * H * H)), b((size_t) H), wa((size_t) (H * H)), bt((size_t) H);
+        ggml_backend_tensor_get(m->W_at1, W.data(), 0, ggml_nbytes(m->W_at1));
+        ggml_backend_tensor_get(m->b_at1, b.data(), 0, ggml_nbytes(m->b_at1));
+        for (int64_t o = 0; o < H; ++o)
+            std::memcpy(wa.data() + o * H, W.data() + o * 2 * H, (size_t) H * sizeof(float));
+        ggml_backend_tensor_set(m->W_at1a, wa.data(), 0, wa.size() * sizeof(float));
+        const float dt = -1.f/static_cast<float>(cfg.num_steps);
+        for (int step = 0; step < cfg.num_steps; ++step) {
+            const auto te = sinusoidal_time_emb(1.0 + double(step) * double(dt), H, cfg.min_period, cfg.max_period);
+            for (int64_t o = 0; o < H; ++o) {
+                double acc = b[(size_t) o];
+                for (int64_t i = 0; i < H; ++i)
+                    acc += double(W[(size_t) (o * 2 * H + H + i)]) * double(te[(size_t) i]);
+                bt[(size_t) o] = (float) acc;
+            }
+            ggml_backend_tensor_set(m->at1_step[(size_t) step], bt.data(), 0, bt.size() * sizeof(float));
+        }
+    }
+#endif
 
     return m;
 }
 }
 
 namespace {
+// action_time_mlp_in over [action_emb; the step's time embedding].
+ggml_tensor * action_time_in(SmolVLAModelArch * m, ggml_context * ctx, ggml_tensor * action_emb, int step) {
+    if (m->W_at1a)
+        return linear(ctx, m->W_at1a, m->at1_step[(size_t) step], action_emb);
+    return linear(ctx, m->W_at1, m->b_at1, ggml_concat(ctx, action_emb, m->time_bcasts[step], 0));
+}
+
 void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::MainIO & io,
                  int n_views, int64_t n_lang, bool kv_leaves) {
     Config cfg = m->cfg;
@@ -1536,8 +1583,7 @@ void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::Mai
         ggml_tensor * x_t = io.x0;
         for (int step=0; step<cfg.num_steps; ++step) {
             ggml_tensor * action_emb     = linear(ctx, m->W_ain, m->b_ain, x_t);
-            ggml_tensor * action_time_in = ggml_concat(ctx, action_emb, m->time_bcasts[step], 0);
-            ggml_tensor * mlp1           = linear(ctx, m->W_at1, m->b_at1, action_time_in);
+            ggml_tensor * mlp1           = action_time_in(m, ctx, action_emb, step);
             ggml_tensor * hs             = linear(ctx, m->W_at2, m->b_at2, ggml_silu(ctx, mlp1));
             for (int li=0; li<cfg.n_layers; ++li) {
                 const LayerW & w = m->expert_layers[li];
@@ -1591,8 +1637,7 @@ void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::Mai
     ggml_tensor * x_t = io.x0;
     for (int step=0; step<cfg.num_steps; ++step) {
         ggml_tensor * action_emb     = linear(ctx, m->W_ain, m->b_ain, x_t);
-        ggml_tensor * action_time_in = ggml_concat(ctx, action_emb, m->time_bcasts[step], 0);
-        ggml_tensor * mlp1           = linear(ctx, m->W_at1, m->b_at1, action_time_in);
+        ggml_tensor * mlp1           = action_time_in(m, ctx, action_emb, step);
         ggml_tensor * h              = linear(ctx, m->W_at2, m->b_at2, ggml_silu(ctx, mlp1));
         for (int li=0; li<cfg.n_layers; ++li) {
             if (expert_self_attn(cfg, li)) {
@@ -1614,6 +1659,10 @@ void build_graph(SmolVLAModelArch * m, ggml_context * ctx, SmolVLAModelArch::Mai
 }
 
 SmolVLAModelArch::~SmolVLAModelArch() {
+    if (at_buf)
+        ggml_backend_buffer_free(at_buf);
+    if (ctx_at)
+        ggml_free(ctx_at);
     if (q8_buf)
         ggml_backend_buffer_free(q8_buf);
     if (ctx_q8)
