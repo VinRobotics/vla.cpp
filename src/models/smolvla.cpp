@@ -330,16 +330,29 @@ namespace {
 // 96/100 for explicit attention. evo1 showed the same ~4-5 pp drop, so the
 // default stays on the accuracy-preserving path.
 
-// One pre-norm SigLIP encoder block (SmolVLM2 tower), same graph as the other
-// in-tree models. Bidirectional attention, F32 score accumulation, tanh GELU.
-ggml_tensor * build_siglip_layer(ggml_context * C, const EncCfg & c, const EncBlockW & w,
-                                 ggml_tensor * x, int64_t seq) {
+// Self-attention of one SigLIP block over its normed input n1: [hidden, seq].
+ggml_tensor * siglip_attention(ggml_context * C, const EncCfg & c, const EncBlockW & w, ggml_tensor * n1,
+                               int64_t seq) {
     const float scale = 1.0f/std::sqrt((float) c.head_dim);
-    ggml_tensor * n1 = layer_norm(C, x, w.ln1w, w.ln1b, c.ln_eps);
+#ifdef GGML_USE_HEXAGON
+    if (vla::flash_attn_enabled()) {
+        // The NPU's flash attention reads Q and the F16 K/V through strides, so
+        // the heads stay views of the projections: no copy into the head layout,
+        // and K/V are cast while contiguous.
+        const auto heads = [&](ggml_tensor * p) {
+            return ggml_permute(C, ggml_reshape_3d(C, p, c.head_dim, c.heads, seq), 0, 2, 1, 3);
+        };
+        ggml_tensor * fa = ggml_flash_attn_ext(C, heads(linear(C, w.Wq, w.bq, n1)),
+                                               heads(vla::fa_kv(C, linear(C, w.Wk, w.bk, n1))),
+                                               heads(vla::fa_kv(C, linear(C, w.Wv, w.bv, n1))), nullptr, scale,
+                                               0.0f, 0.0f);
+        ggml_prec_set_acc(fa, GGML_PREC_F32);
+        return ggml_reshape_2d(C, fa, c.hidden, seq);
+    }
+#endif
     ggml_tensor * Q = to_heads(C, linear(C, w.Wq, w.bq, n1), c.head_dim, c.heads, seq);
     ggml_tensor * K = to_heads(C, linear(C, w.Wk, w.bk, n1), c.head_dim, c.heads, seq);
     ggml_tensor * v = linear(C, w.Wv, w.bv, n1);
-    ggml_tensor * att;
     if (vla::flash_attn_enabled()) {
         // The tower runs 1024 tokens (512/16 grid) over 12 layers, so the
         // explicit path below materialises a 1024x1024 score matrix per head —
@@ -351,11 +364,17 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncCfg & c, const EncBl
         ggml_tensor * V = to_heads(C, v, c.head_dim, c.heads, seq);
         ggml_tensor * fa = ggml_flash_attn_ext(C, Q, vla::fa_kv(C, K), vla::fa_kv(C, V), nullptr, scale, 0.0f, 0.0f);
         ggml_prec_set_acc(fa, GGML_PREC_F32);
-        att = ggml_reshape_2d(C, fa, c.hidden, seq);
-    } else {
-        att = attention(C, Q, K, to_heads_v(C, v, c.head_dim, c.heads, seq), nullptr, scale, c.hidden, seq);
+        return ggml_reshape_2d(C, fa, c.hidden, seq);
     }
-    ggml_tensor * h1 = ggml_add(C, x, linear(C, w.Wo, w.bo, att));
+    return attention(C, Q, K, to_heads_v(C, v, c.head_dim, c.heads, seq), nullptr, scale, c.hidden, seq);
+}
+
+// One pre-norm SigLIP encoder block (SmolVLM2 tower), same graph as the other
+// in-tree models. Bidirectional attention, F32 score accumulation, tanh GELU.
+ggml_tensor * build_siglip_layer(ggml_context * C, const EncCfg & c, const EncBlockW & w,
+                                 ggml_tensor * x, int64_t seq) {
+    ggml_tensor * n1 = layer_norm(C, x, w.ln1w, w.ln1b, c.ln_eps);
+    ggml_tensor * h1 = ggml_add(C, x, linear(C, w.Wo, w.bo, siglip_attention(C, c, w, n1, seq)));
     return ggml_add(C, h1, ffn_gelu(C, w.Wfc1, w.bfc1, w.Wfc2, w.bfc2, layer_norm(C, h1, w.ln2w, w.ln2b, c.ln_eps)));
 }
 
