@@ -34,8 +34,22 @@ void SigLipTower::declare(WeightLoader & L, const char * prefix, int64_t layers,
 }
 
 ggml_tensor * SigLipTower::embed_conv(ggml_context * C, ggml_tensor * pixels, int64_t patch, int64_t grid) const {
-    ggml_tensor * conv = ggml_conv_2d(C, patch_w, pixels, (int)patch, (int)patch, 0, 0, 1, 1);
     const int64_t nv = pixels->ne[3];
+#ifdef GGML_USE_HEXAGON
+    // The weight times the im2col columns lands [hidden, grid*grid(, nv)]
+    // directly. ggml_conv_2d's product is the transpose, and turning it back
+    // takes two large transposing copies, which the NPU runs slowly.
+    {
+        const int64_t K    = patch_w->ne[0] * patch_w->ne[1] * patch_w->ne[2];
+        ggml_tensor * cols = ggml_im2col(C, patch_w, pixels, (int) patch, (int) patch, 0, 0, 1, 1, true, GGML_TYPE_F32);
+        ggml_tensor * flat = ggml_mul_mat(C, ggml_reshape_2d(C, patch_w, K, patch_w->ne[3]),
+                                          ggml_reshape_2d(C, cols, K, cols->ne[1] * cols->ne[2] * cols->ne[3]));
+        if (nv > 1)
+            flat = ggml_reshape_3d(C, flat, enc.cfg.hidden, grid * grid, nv);
+        return ggml_add(C, ggml_add(C, flat, patch_b), pos);
+    }
+#endif
+    ggml_tensor * conv = ggml_conv_2d(C, patch_w, pixels, (int)patch, (int)patch, 0, 0, 1, 1);
     // One view: [hidden, grid*grid]. A batch of views ([W, H, 3, nv] pixels):
     // [hidden, grid*grid, nv], what build(..., nv) takes.
     ggml_tensor * flat = nv == 1
