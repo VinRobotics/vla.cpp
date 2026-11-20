@@ -49,8 +49,9 @@ Four more flags choose what is packed:
 - `--dit` also packs the DiT's weight matrices; adaLN and the time embedding stay float.
 - `--keep-float REGEX` keeps the weights whose name matches REGEX at their source precision.
 - `--type-for REGEX=TYPE` packs the weights whose name matches REGEX as TYPE instead of
-  `--type`, so one file can mix Q8_0, Q4_0 and float weights. Weights the loader fuses
-  into one matrix must get the same type.
+  `--type`, so one file can mix Q8_0, Q4_0 and float weights. It reaches only weights
+  `--type` would pack, so `--keep-float` wins over it. Weights the loader fuses into one
+  matrix must get the same type.
 - `--pad-m32` zero-pads FFN widths that are not a multiple of 32, which Hexagon's matrix
   unit needs for a packed weight.
 

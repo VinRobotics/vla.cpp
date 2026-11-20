@@ -151,7 +151,7 @@ except:
 
 | | |
 |---|---|
-| Commit | `71cdb09`; TurboVLA `511a0c3` (main `d1fe64b` with the `REPEAT` fix of #85) |
+| Commit | `71cdb09`; TurboVLA at main `d1fe64b` plus the `REPEAT` fix of #85 (its branch commit `511a0c3`) |
 | Date | 2026-11-10 to 2026-11-13 (UTC+07) |
 | Runtime flags | defaults |
 
@@ -304,7 +304,7 @@ The first two searches ran before #85: obs1 to obs3 then crashed the Hexagon
 server at F16 too (`ggml-hex: HTP0 synchronize failed : dsp-error NO-SUPPORT`
 on a `REPEAT` of `text_proj.bias`), so they searched on the three checks that
 ran, and their list is the *three-check list*. Every row of the first table is
-measured with the fix (`511a0c3`).
+measured with the fix (#85).
 
 #### VLA-JEPA
 
@@ -515,7 +515,7 @@ of [Q8_0 weights](#q8_0-weights). The setup is the one above, except:
 
 | | |
 |---|---|
-| Commit | `511a0c3` (main `d1fe64b` with the `REPEAT` fix of #85), with `--type-for` |
+| Commit | main `d1fe64b` plus the `REPEAT` fix of #85 (its branch commit `511a0c3`) and `--type-for` |
 | Date | 2026-11-16 to 2026-11-17 (UTC+07) |
 
 On the NPU, Q4_0 is not faster than Q8_0 (π0 at base + vision: 936.5 ms

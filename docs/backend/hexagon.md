@@ -443,7 +443,7 @@ F32 weights on the NPU leave it at 1.2e-2, since the HMX rounds the activations
 ### Q8_0 weights
 
 `scripts/quantize_gguf.py --type Q8_0` packs a checkpoint's weights to Q8_0.
-Three flags shape a file for the NPU:
+Four flags shape a file for the NPU:
 
 - `--pad-m32` zero-pads in the file the FFN widths that are not a multiple of
   32. The HMX takes no other width for a packed weight, and the loader pads an
@@ -454,8 +454,10 @@ Three flags shape a file for the NPU:
 - `--keep-float REGEX` keeps the weights whose name matches REGEX out of Q8_0;
   they load as F16.
 - `--type-for REGEX=TYPE` packs the weights whose name matches REGEX as TYPE,
-  for example Q4_0, instead of `--type`. Weights the loader fuses into one
-  matrix must get the same type.
+  for example Q4_0, instead of `--type`. It reaches only weights `--type` would
+  pack, so `--keep-float` wins over it, and the script warns about a pattern
+  that packs nothing. Weights the loader fuses into one matrix must get the
+  same type.
 
 Q8_0 moves most models' actions past the 2.9e-3 bar. Checked on fixed inputs and
 five served LIBERO observations, Q8_0 passes for π0,
@@ -473,7 +475,8 @@ Latency, memory and fidelity per configuration:
 
 Q4_0 is not faster than Q8_0 on the NPU; it can only cut memory. From π0's Q8_0
 configuration, 123 of its 281 Q8_0 weights move to Q4_0 with all six checks
-still passing, for 23% less system RAM at the same latency; no group of
+still passing, for 23% less system RAM than that configuration (under half of
+F16's) at the same latency; no group of
 Octo-Small's or TurboVLA's Q8_0 weights does:
 
 ```bash
