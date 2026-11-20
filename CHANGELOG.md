@@ -32,13 +32,13 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
   in Qualcomm's toolchain container, `vla-server` included. On the IQ-10 (v81,
   llama.cpp `b11223`) SmolVLA, π0, π0.5, Evo-1, GR00T N1.5 / N1.6 / N1.7,
   VLA-JEPA, VLA-Adapter, OpenVLA-OFT, Octo-Small and TurboVLA run within 2.9e-3
-  of the CPU build on fixed inputs and serve through `eval/client`. Concats the
-  NPU refuses on buffers above 4 GB of DSP address space, copies that read a
-  weight (also answered `NO_SUPPORT`; VLA-Adapter), matmuls of a 2D weight
-  against a batch, which it computes wrong, and repeats of a computed tensor,
-  which can read stale cache lines (TurboVLA), run on the CPU, and GR00T N1.7's
-  LM leaves flash attention (F16 scores on the HMX) unless `--flash-attn` is
-  given. Three matmuls that the HMX does not take move onto it: SigLIP's
+  of the CPU build on fixed inputs and serve through `eval/client`. These run
+  on the CPU: concats the NPU refuses on buffers above 4 GB of DSP address
+  space; copies that read a weight (also answered `NO_SUPPORT`; VLA-Adapter);
+  matmuls of a 2D weight against a batch, which it computes wrong; and repeats,
+  which can read stale cache lines, or are answered `NO_SUPPORT` when they read
+  a weight (TurboVLA). GR00T N1.7's LM leaves flash attention (F16 scores on the
+  HMX) unless `--flash-attn` is given. Three matmuls that the HMX does not take move onto it: SigLIP's
   4304-wide MLP is zero-padded to 4320 at load, π0.5's SigLIP takes flash
   attention, and Evo-1's LM attention takes F16 K/V. GR00T N1.5, N1.6, π0.5 and
   Evo-1 run 27-40% faster, within the bar on fixed inputs. π0.5's VLM and action
