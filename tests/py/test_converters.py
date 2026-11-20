@@ -444,6 +444,10 @@ def test_quantize_type_for():
             raise AssertionError(f"{bad!r} must exit")
         except SystemExit:
             pass
+    tf = Q.parse_type_for([r"^vlm\.blk\.1\.=Q4_0", r"^vit\.=Q4_0", r"^vlm\.blk\.1\.attn=Q5_0"])
+    unused = Q.unused_type_for(tf, ["vlm.blk.1.attn_q.weight", "vlm.blk.2.attn_q.weight"])
+    assert [rx.pattern for rx, _ in unused] == [r"^vit\.", r"^vlm\.blk\.1\.attn"]
+
 
 def test_find_sidecar():
     import tempfile
