@@ -239,6 +239,7 @@ struct LayerW {
     ggml_tensor * Wdown;
     // The fused graph (SmolVLAModelArch::fused_lm): q|k|v (self-attention
     // layers) and gate|up as one weight each; Wq..Wup are then views of them.
+    // Hexagon builds fuse gate|up alone (attn_mlp).
     ggml_tensor * Wqkv = nullptr;
     ggml_tensor * Wgu  = nullptr;
     // W8A8 (SmolVLAModelArch::w8a8_*): INT8 copies of those GEMMs, made after
@@ -733,6 +734,12 @@ ggml_tensor * attn_mlp(ggml_context * ctx, const LayerW & w, ggml_tensor * x_in,
     ggml_tensor * h1 = ggml_add(ctx, x_in, mm_w(ctx, w.Wo, ggml_reshape_2d(ctx, fa, cfg.q_full_dim, seq)));
 
     ggml_tensor * x_norm_mlp = rms_norm(ctx, h1, w.Wln_post, cfg.rms_eps);
+#ifdef GGML_USE_HEXAGON
+    // One gate|up matmul and a SwiGLU: two NPU ops where the split weights take
+    // four, in a step loop where each op costs more to issue than to compute.
+    if (w.Wgu)
+        return ggml_add(ctx, h1, mm_w(ctx, w.Wdown, ggml_swiglu(ctx, mm_w(ctx, w.Wgu, x_norm_mlp))));
+#endif
     ggml_tensor * inter      = ggml_mul(ctx, ggml_silu(ctx, mm_w(ctx, w.Wgate, x_norm_mlp)),
                                         mm_w(ctx, w.Wup, x_norm_mlp));
     return ggml_add(ctx, h1, mm_w(ctx, w.Wdown, inter));
@@ -1206,17 +1213,35 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
         return W;
     };
 
+    // gate|up as one weight: the fused graph's, and on Hexagon attn_mlp's. A
+    // part streamed into a view loads as float, so a stack whose gate the file
+    // packs keeps the two apart.
+    bool fuse_vlm_gu = m->fused_lm, fuse_exp_gu = m->fused_lm;
+#ifdef GGML_USE_HEXAGON
+    {
+        const auto file_float = [&](const char * name) {
+            const ggml_type ft = use_gguf ? gst.file_type(hf_to_gguf(name)) : GGML_TYPE_COUNT;
+            return ft == GGML_TYPE_COUNT || !ggml_is_quantized(ft);
+        };
+        fuse_vlm_gu = file_float("model.vlm_with_expert.vlm.model.text_model.layers.0.mlp.gate_proj.weight");
+        fuse_exp_gu = file_float("model.vlm_with_expert.lm_expert.layers.0.mlp.gate_proj.weight");
+    }
+#endif
+
     m->vlm_layers.resize(cfg.n_layers);
     for (int i=0; i<cfg.n_layers; ++i) {
         LayerW & w = m->vlm_layers[i];
         w.Wln_in   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cfg.hidden);
         if (m->fused_lm) {
             w.Wqkv = fused_weight(cfg.hidden, {{&w.Wq, cfg.q_full_dim}, {&w.Wk, cfg.kv_full_dim}, {&w.Wv, cfg.kv_full_dim}});
-            w.Wgu  = fused_weight(cfg.hidden, {{&w.Wgate, cfg.intermediate}, {&w.Wup, cfg.intermediate}});
         } else {
             w.Wq    = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.q_full_dim);
             w.Wk    = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.kv_full_dim);
             w.Wv    = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.kv_full_dim);
+        }
+        if (fuse_vlm_gu) {
+            w.Wgu  = fused_weight(cfg.hidden, {{&w.Wgate, cfg.intermediate}, {&w.Wup, cfg.intermediate}});
+        } else {
             w.Wgate = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.intermediate);
             w.Wup   = ggml_new_tensor_2d(ctx, wdt, cfg.hidden, cfg.intermediate);
         }
@@ -1255,7 +1280,7 @@ std::unique_ptr<SmolVLAModelArch> smolvla_load_impl(ggml_type weight_dtype,
                 w.Wv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.kv_full_dim, cfg.kv_full_dim);
             }
         }
-        if (m->fused_lm)
+        if (fuse_exp_gu)
             w.Wgu = fused_weight(cfg.expert_h, {{&w.Wgate, cfg.expert_inter}, {&w.Wup, cfg.expert_inter}});
         else {
             w.Wgate = ggml_new_tensor_2d(ctx, wdt, cfg.expert_h, cfg.expert_inter);
