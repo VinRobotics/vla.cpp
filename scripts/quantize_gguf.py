@@ -32,6 +32,7 @@ by scripts/foldquant_fake_export.py; this script refuses such a file.
 
 import argparse
 import re
+import sys
 import numpy as np
 import gguf
 
@@ -102,6 +103,28 @@ def eligible(name: str, shape, qtype: str, skip, dit: bool = False, keep=None) -
     return int(shape[0]) % QK[qtype] == 0  # ne0 is the quantization axis
 
 
+def parse_type_for(specs) -> list:
+    """--type-for REGEX=TYPE arguments as (compiled REGEX, TYPE) pairs, in order."""
+    out = []
+    for spec in specs:
+        rx, sep, tname = spec.rpartition("=")
+        if not sep or not rx or tname not in QK:
+            raise SystemExit(f"--type-for {spec!r}: expected REGEX=TYPE with TYPE one of {', '.join(sorted(QK))}")
+        out.append((re.compile(rx), tname))
+    return out
+
+
+def pick_type(name: str, type_for, default: str) -> str:
+    """The type of the first --type-for whose REGEX matches name, else default."""
+    return next((tname for rx, tname in type_for if rx.search(name)), default)
+
+
+def unused_type_for(type_for, names) -> list:
+    """The --type-for pairs that picked the type of none of the packed names."""
+    used = {next((i for i, (rx, _) in enumerate(type_for) if rx.search(n)), None) for n in names}
+    return [p for i, p in enumerate(type_for) if i not in used]
+
+
 def ffn_pads(r) -> dict:
     """FFN blocks whose width is not a multiple of 32: prefix -> (width, padded)."""
     pads = {}
@@ -134,6 +157,12 @@ def main() -> None:
     ap.add_argument("--keep-float", metavar="REGEX",
                     help="keep the weights whose name matches REGEX at their source precision, "
                          "e.g. '^vlm\\.blk\\.(0|1)\\.' for an LM's first two blocks")
+    ap.add_argument("--type-for", metavar="REGEX=TYPE", action="append", default=[],
+                    help="pack the weights whose name matches REGEX as TYPE instead of --type; "
+                         "repeatable, the first match wins, e.g. '^vlm\\.blk\\.(1|2)\\.ffn_=Q4_0'. "
+                         "It reaches only weights --type would pack: --keep-float and the tensors "
+                         "left float (see --vision, --dit) come first. Weights the loader fuses "
+                         "into one matrix must get the same type")
     ap.add_argument("--pad-m32", action="store_true",
                     help="zero-pad FFN widths that are not a multiple of 32 (fc1 rows and bias, "
                          "fc2 columns): Hexagon's matrix unit takes no other width for a packed "
@@ -141,6 +170,7 @@ def main() -> None:
                          "split into blocks of 32, so fc2 is packed too")
     args = ap.parse_args()
     keep = re.compile(args.keep_float) if args.keep_float else None
+    type_for = parse_type_for(args.type_for)
     skip = SKIP if args.vision else SKIP + SKIP_VISION
 
     r = gguf.GGUFReader(args.src)
@@ -152,13 +182,13 @@ def main() -> None:
 
     copy_kv(r, w)
 
-    qtype = getattr(gguf.GGMLQuantizationType, args.type)
     pads = ffn_pads(r) if args.pad_m32 else {}
     if pads:
         old, new = next(iter(pads.values()))
         print(f"--pad-m32: {len(pads)} FFN blocks, e.g. {old} -> {new}")
     padded = (".fc1.weight", ".fc1.bias", ".fc2.weight")
-    n_q = 0
+    n_q = {}
+    packed_names = []
     bytes_in = bytes_out = 0
     for t in r.tensors:
         src_bytes = int(t.data.nbytes)
@@ -166,23 +196,29 @@ def main() -> None:
         blk = t.name.rsplit(".", 2)[0] if t.name.endswith(padded) else None
         if blk in pads and to_f32(t) is not None:
             arr = pad_ffn(t, *pads[blk])
-            if eligible(t.name, arr.shape[::-1], args.type, skip, args.dit, keep):
+            tname = pick_type(t.name, type_for, args.type)
+            if eligible(t.name, arr.shape[::-1], tname, skip, args.dit, keep):
+                qtype = getattr(gguf.GGMLQuantizationType, tname)
                 packed = gguf.quants.quantize(arr, qtype)
                 w.add_tensor(t.name, packed, raw_dtype=qtype)
                 bytes_out += int(packed.nbytes)
-                n_q += 1
+                n_q[tname] = n_q.get(tname, 0) + 1
+                packed_names.append(t.name)
             else:
                 if t.tensor_type == gguf.GGMLQuantizationType.BF16:
                     arr = f32_to_bf16(arr)
                 w.add_tensor(t.name, arr, raw_dtype=t.tensor_type)
                 bytes_out += int(arr.nbytes)
             continue
-        f32 = to_f32(t) if eligible(t.name, t.shape, args.type, skip, args.dit, keep) else None
+        tname = pick_type(t.name, type_for, args.type)
+        f32 = to_f32(t) if eligible(t.name, t.shape, tname, skip, args.dit, keep) else None
         if f32 is not None:
+            qtype = getattr(gguf.GGMLQuantizationType, tname)
             packed = gguf.quants.quantize(f32, qtype)  # rows are byte-sized; shape inferred
             w.add_tensor(t.name, packed, raw_dtype=qtype)
             bytes_out += int(packed.nbytes)
-            n_q += 1
+            n_q[tname] = n_q.get(tname, 0) + 1
+            packed_names.append(t.name)
         else:
             copy_tensor(w, t)
             bytes_out += src_bytes
@@ -191,9 +227,13 @@ def main() -> None:
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
     w.close()
-    print(f"{args.type}: quantized {n_q}/{len(r.tensors)} tensors, "
+    mix = f" ({', '.join(f'{n} {tn}' for tn, n in sorted(n_q.items()))})" if type_for else ""
+    print(f"{args.type}: quantized {sum(n_q.values())}/{len(r.tensors)} tensors{mix}, "
           f"weights {bytes_in/1e9:.2f} GB -> {bytes_out/1e9:.2f} GB "
           f"({100*bytes_out/bytes_in:.0f}%)")
+    for rx, tname in unused_type_for(type_for, packed_names):
+        print(f"warning: --type-for '{rx.pattern}={tname}' packed no weight (it reaches only weights "
+              "--type would pack, and the first matching --type-for wins)", file=sys.stderr)
 
 
 if __name__ == "__main__":

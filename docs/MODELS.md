@@ -44,6 +44,21 @@ a bigger cut (`--type` also takes `Q4_1`, `Q5_0`, `Q5_1`).
 Embeddings, the output head, norms and the action expert stay float; pass `--vision` to
 pack the vision tower too (smaller, but more accuracy loss).
 
+Four more flags choose what is packed:
+
+- `--dit` also packs the DiT's weight matrices; adaLN and the time embedding stay float.
+- `--keep-float REGEX` keeps the weights whose name matches REGEX at their source precision.
+- `--type-for REGEX=TYPE` packs the weights whose name matches REGEX as TYPE instead of
+  `--type`, so one file can mix Q8_0, Q4_0 and float weights. It reaches only weights
+  `--type` would pack, so `--keep-float` wins over it. Weights the loader fuses into one
+  matrix must get the same type.
+- `--pad-m32` zero-pads FFN widths that are not a multiple of 32, which Hexagon's matrix
+  unit needs for a packed weight.
+
+Which weights a model can pack without moving its actions depends on the model.
+[benchmark/qualcomm-iq10.md](benchmark/qualcomm-iq10.md#q8_0-weights) gives a configuration
+per model, checked on the IQ-10.
+
 ### FoldQuant W8A8 / W4A4
 
 The stock repack keeps the action head float and rounds the LM weights block by

@@ -54,6 +54,9 @@ Notes on the table:
 
 - ACT runs its ALOHA checkpoint on one 640x480 view. Only the IQ-10 report
   measures it; the other rows are `n/r`.
+- The IQ-10 row runs F16 weights, the default there. Its report also measures
+  Q8_0 and Q4_0 files for each model, with their fidelity:
+  [Q8_0 weights](qualcomm-iq10.md#q8_0-weights).
 - The Quadro T2000 row is the default sm_75 build on a GPU without tensor cores.
   GR00T N1.5 does not fit at the defaults there.
 - The RTX 5090 row comes from the PR #32 author and was not re-measured. Its

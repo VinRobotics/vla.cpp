@@ -445,7 +445,7 @@ F32 weights on the NPU leave it at 1.2e-2, since the HMX rounds the activations
 ### Q8_0 weights
 
 `scripts/quantize_gguf.py --type Q8_0` packs a checkpoint's weights to Q8_0.
-Three flags shape a file for the NPU:
+Four flags shape a file for the NPU:
 
 - `--pad-m32` zero-pads in the file the FFN widths that are not a multiple of
   32. The HMX takes no other width for a packed weight, and the loader pads an
@@ -453,20 +453,41 @@ Three flags shape a file for the NPU:
   unchanged, but `fc2`'s rows then split into blocks of 32, so it is packed too.
 - `--dit` also packs the DiT's weight matrices, except adaLN and the time
   embedding.
-- `--keep-float REGEX` leaves the weights whose name matches REGEX float.
+- `--keep-float REGEX` keeps the weights whose name matches REGEX out of Q8_0;
+  they load as F16.
+- `--type-for REGEX=TYPE` packs the weights whose name matches REGEX as TYPE,
+  for example Q4_0, instead of `--type`. It reaches only weights `--type` would
+  pack, so `--keep-float` wins over it, and the script warns about a pattern
+  that packs nothing. Weights the loader fuses into one matrix must get the
+  same type.
 
-Q8_0 moves most models' actions past the 2.9e-3 bar. Within it on both fixed
-and served inputs are Octo-Small and ACT, π0.5 with or without `--vision`, and
-π0, OpenVLA-OFT and VLA-Adapter only with some weights left float. π0.5 with
-`--vision --pad-m32` is 15% faster than F16 and takes 38% less system RAM:
+Q8_0 moves most models' actions past the 2.9e-3 bar. Checked on fixed inputs and
+five served LIBERO observations, Q8_0 passes for π0,
+π0.5, Octo-Small, ACT, TurboVLA and Evo-1, all but ACT with some weights kept
+F16 by `--keep-float`; no Q8_0 configuration passes for the other seven. π0 with
+its list is 16.5% faster than F16 and takes 41% less system RAM:
 
 ```bash
-python scripts/quantize_gguf.py --in pi05-libero.gguf --out pi05-libero-q8_0.gguf \
-    --type Q8_0 --vision --pad-m32
+python scripts/quantize_gguf.py --in pi0-libero-finetuned-v044.gguf --out pi0-q8_0.gguf \
+    --type Q8_0 --vision --pad-m32 --keep-float '^vlm\.blk\.[04]\.attn_[qkvo]\.'
 ```
 
 Latency, memory and fidelity per configuration:
 [benchmark/qualcomm-iq10.md](../benchmark/qualcomm-iq10.md#q8_0-weights).
+
+Q4_0 is not faster than Q8_0 on the NPU; it can only cut memory. From π0's Q8_0
+configuration, 123 of its 281 Q8_0 weights move to Q4_0 with all six checks
+still passing, for 23% less system RAM than that configuration (under half of
+F16's) at the same latency; no group of
+Octo-Small's or TurboVLA's Q8_0 weights does:
+
+```bash
+python scripts/quantize_gguf.py --in pi0-libero-finetuned-v044.gguf --out pi0-q8_0-q4_0.gguf \
+    --type Q8_0 --vision --pad-m32 --keep-float '^vlm\.blk\.[04]\.attn_[qkvo]\.' \
+    --type-for '^vit\.blk\.([7-9]|1[0-9]|2[0-6])\.fc[12]\.|^vit\.blk\.(1[4-9]|20)\.attn_[qkvo]\.|^vlm\.blk\.([5-9]|1[0-7])\.ffn_|^vlm\.blk\.1[4-7]\.attn_[qkvo]\.=Q4_0'
+```
+
+[benchmark/qualcomm-iq10.md](../benchmark/qualcomm-iq10.md#q4_0-weights) has every Q4_0 run.
 
 ## IQ-10, imagined
 
