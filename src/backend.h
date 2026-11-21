@@ -260,14 +260,15 @@ inline int64_t gemm_width(int64_t n) {
  * fallback wrapper refuses it and every tower layer would round-trip its MLP
  * activations through the CPU. The tanh form is exactly
  * x*sigmoid(2*sqrt(2/pi)*(x + 0.044715x^3)), since (1+tanh z)/2 = sigmoid(2z),
- * and HTP implements each of those ops. Elsewhere this is plain ggml_gelu.
+ * and HTP implements each of those ops. Written as x*sigmoid(x*(k + k*0.044715x^2)),
+ * k = 2*sqrt(2/pi), it takes five ops, since SCALE carries the offset. Elsewhere this
+ * is plain ggml_gelu.
  */
 inline ggml_tensor * gelu(ggml_context * ctx, ggml_tensor * x) {
 #ifdef GGML_USE_HEXAGON
-    const float   c  = 0.7978845608028654f;  // sqrt(2/pi)
-    ggml_tensor * x3 = ggml_mul(ctx, ggml_mul(ctx, x, x), x);
-    ggml_tensor * z  = ggml_add(ctx, x, ggml_scale(ctx, x3, 0.044715f));
-    return ggml_mul(ctx, x, ggml_sigmoid(ctx, ggml_scale(ctx, z, 2.0f * c)));
+    const float   k = 1.5957691216057308f;  // 2*sqrt(2/pi)
+    ggml_tensor * t = ggml_scale_bias(ctx, ggml_mul(ctx, x, x), k * 0.044715f, k);
+    return ggml_mul(ctx, x, ggml_sigmoid(ctx, ggml_mul(ctx, x, t)));
 #else
     return ggml_gelu(ctx, x);
 #endif
