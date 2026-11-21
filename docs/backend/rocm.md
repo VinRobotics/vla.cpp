@@ -9,7 +9,7 @@ limits.
 | GPU | Target | ROCm | llama.cpp | Models checked | Latency |
 |---|---|---|---|---|---|
 | Radeon RX 9060 XT, 16 GB | `gfx1200` | 7.14.1 | `b11223` | all 12 archs that load off CUDA, plus ACT | [rx-9060-xt.md](../benchmark/rx-9060-xt.md) |
-| Radeon 8060S (Ryzen AI Max+ 395) | `gfx1151` | 7.14.60850 | `b11223` | SmolVLA, π0.5 | [below](#radeon-8060s-gfx1151-1) |
+| Radeon 8060S (Ryzen AI Max+ 395) | `gfx1151` | 7.14.60850 | `b11223` | SmolVLA, π0.5, ACT | [below](#radeon-8060s-gfx1151-1) |
 
 Other GPUs and ROCm versions have not been measured.
 
@@ -82,6 +82,12 @@ call, and caches its cross-attention K/V as F16. On the RX 9060 XT this took
 SmolVLA's mean from 228.1 to 208.5 ms with byte-identical actions; the F32
 copies raise its peak VRAM from 1541 to 2303 MiB.
 
+ACT runs its ResNet as ggml's direct convolution on F16 kernels where the GPU
+has WMMA (RDNA 3 and newer, `gfx1100` and up), as it does on CUDA from Turing
+on: an implicit GEMM with no im2col buffer. `--weight-dtype f32` keeps the F32
+im2col path, which is also what older Radeon and CDNA targets get. The choice
+is printed at load (`f16 direct convs` or `f32 im2col convs`).
+
 GEMMs go through hipBLAS and rocBLAS, which hands them to hipBLASLt on
 gfx1200. Leave that on: forcing `ROCBLAS_USE_HIPBLASLT=0` made π0 3.5x slower
 (774 vs 222 ms).
@@ -133,8 +139,9 @@ builds.
   kernels.
 - **ACT** (`khanhnd61/act_so101-multi-task-clean`, converted with
   `scripts/convert_act_to_gguf.py`, two 640x480 views) matches CPU to 9.9e-5
-  max abs, on actions spanning ±150. It runs its convolutions as im2col, as on
-  CPU.
+  max abs, on actions spanning ±150. That run used im2col convolutions, which
+  is now `--weight-dtype f32`; the default on this GPU is the direct
+  convolution.
 
 Each local GGUF's SHA-256 matched the one Hugging Face lists. Each run was:
 
@@ -159,6 +166,39 @@ CPU and HIP Release builds each passed all ten first-party CTest cases.
 |---|---:|---|---:|---:|---:|
 | SmolVLA LIBERO | 2 × 512 | BF16 | 1.992e-3 | 2.421e-4 | 0.9999991 |
 | π0.5 LIBERO | 2 × 224 | BF16 | 8.792e-4 | 1.169e-4 | 0.9999998 |
+
+ACT was checked later, on the commit that turns on its direct convolution,
+with ROCm 7.14.0 (HIP 7.14.60850) on Linux 6.18.22, on two checkpoints:
+
+- ALOHA: `ravediamond/act-aloha-sim-transfer-cube-gguf`
+  (`act-aloha-sim-transfer-cube-f32.gguf`, SHA-256
+  `96c8f432f3db2d0cdfbcd74e9db09bc7b80632be49cce2503b4e79ba287c56a7`), one
+  640x480 view, 100 × 14 actions spanning -0.52 to 0.89.
+- SO-101: `khanhnd61/act_so101-multi-task-clean`, converted with
+  `scripts/convert_act_to_gguf.py` as for the RX 9060 XT, two 640x480 views,
+  100 × 6 actions spanning -87 to 150.
+
+The CPU reference runs F32 im2col.
+
+| Checkpoint | ACT convolutions | HIP vs CPU max abs | RMS | Cosine |
+|---|---|---:|---:|---:|
+| ALOHA, 1 view | F16 direct (default) | 2.465e-4 | 5.336e-5 | 0.99999999 |
+| ALOHA, 1 view | F32 im2col (`--weight-dtype f32`) | 4.170e-7 | 7.537e-8 | 1.00000000 |
+| SO-101, 2 views | F16 direct (default) | 3.685e-3 | 1.834e-3 | 1.00000000 |
+| SO-101, 2 views | F32 im2col (`--weight-dtype f32`) | 5.340e-5 | 1.168e-5 | 1.00000000 |
+
+The direct path moves the actions because it rounds the kernels and each
+convolution's input to F16; it accumulates in F32. Two fresh processes per
+checkpoint returned identical bytes. With `--weight-dtype f32` the actions are
+byte-identical to the commit before, as are SmolVLA's and π0.5's on HIP and
+ACT's on CPU.
+
+```bash
+# ALOHA; the SO-101 checkpoint takes 2 views instead of 1
+VLA_IMG_SIZE=640 VLA_IMG_H=480 ./build-rocm/tests/vla_predict_check "$ACT_GGUF" '' 1 > act-hip.txt
+VLA_IMG_SIZE=640 VLA_IMG_H=480 ./build-rocm/tests/vla_predict_check "$ACT_GGUF" '' 1 --weight-dtype f32 > act-hip-im2col.txt
+VLA_IMG_SIZE=640 VLA_IMG_H=480 ./build-cpu/tests/vla_predict_check "$ACT_GGUF" '' 1 > act-cpu.txt
+```
 
 The GGUFs came from `vrfai/smolvla-libero-gguf` (local file
 `smolvla-libero.gguf`, SHA-256
@@ -214,9 +254,8 @@ ACT is not part of the benchmark set; its row is the converted
 `khanhnd61/act_so101-multi-task-clean` checkpoint from the validation above,
 run with `--images 2 --size 640 --height 480`. Its convolutions run as im2col.
 ggml's direct convolution has a WMMA path for RDNA 3 and 4: forcing it for ACT
-measured 15.3 ms, with max abs 4.9e-3 against CPU. Turning it on needs a
-check for WMMA- or MFMA-capable targets, as `cuda_conv_has_mma()` does for
-NVIDIA, and is left for a follow-up.
+measured 15.3 ms, with max abs 4.9e-3 against CPU. It is now the default on
+this GPU; the default has not been re-measured here.
 
 ### Radeon 8060S (gfx1151)
 
@@ -237,8 +276,28 @@ The π0.5 rounds had P50 values 388.1, 389.1 and 389.3 ms; the worst P90 was
 before the SmolVLA change above. Do not compare them as a speedup against an
 older revision without a paired benchmark.
 
-Run each command three times in fresh processes, changing the log path for
-each round:
+ACT, measured on the commit that turns on its direct convolution, in five
+alternating rounds of the two paths (fresh process each, three warmups and 20
+timed calls), with GPU performance level `high` and CPU governor `performance`
+on an otherwise idle host. The checkpoints are the two from the validation
+above. The columns are the median round P50, the worst round P90 and the lowest
+minimum.
+
+| Checkpoint | ACT convolutions | Views × size | P50 | Worst P90 | Min |
+|---|---|---:|---:|---:|---:|
+| ALOHA | F32 im2col (`--weight-dtype f32`, the default before) | 1 × 640x480 | 19.7 | 19.8 | 19.7 |
+| ALOHA | F16 direct (default) | 1 × 640x480 | 11.3 | 11.3 | 11.2 |
+| SO-101 | F32 im2col (`--weight-dtype f32`, the default before) | 2 × 640x480 | 39.7 | 39.8 | 39.5 |
+| SO-101 | F16 direct (default) | 2 × 640x480 | 21.0 | 21.1 | 20.9 |
+
+```bash
+./build-rocm/vla-bench --ckpt "$ACT_GGUF" --images 1 --size 640 --height 480 --warmup 3 --reps 20
+./build-rocm/vla-bench --ckpt "$ACT_GGUF" --images 1 --size 640 --height 480 --warmup 3 --reps 20 --weight-dtype f32
+# SO-101: --images 2
+```
+
+For SmolVLA and π0.5, run each command three times in fresh processes, changing
+the log path for each round:
 
 ```bash
 ./build-rocm/vla-bench --ckpt "$SMOLVLA_GGUF" --images 2 --size 512 \

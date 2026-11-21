@@ -159,6 +159,13 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Changed
 
+- **ACT's direct convolution on ROCm/HIP.** On Radeon GPUs with WMMA (RDNA 3
+  and newer) ACT's ResNet now runs as ggml's direct convolution on F16 kernels,
+  as on CUDA, instead of F32 im2col. On a Radeon 8060S (`gfx1151`) that takes
+  ACT from 19.7 to 11.3 ms on one 640x480 view and from 39.7 to 21.0 ms on
+  two; against the CPU build the actions move by 2.5e-4 (ALOHA, actions within
+  ±1) and 3.7e-3 (SO-101, actions within ±150). `--weight-dtype f32` keeps
+  im2col. See `docs/backend/rocm.md`.
 - **Faster OpenVINO dispatch.** The naive path checks a graph fingerprint before
   its compile cache, π0.5 opts out of the accuracy hint, and π0.5 pads its prompt
   to 16-token buckets, so a LIBERO run no longer compiles one model per prompt

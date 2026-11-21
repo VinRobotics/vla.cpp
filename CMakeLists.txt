@@ -403,6 +403,9 @@ if(GGML_CUDA)
 elseif(GGML_HIP)
     # ggml-hip also exports GGML_USE_CUDA; distinguish HIP from CUDA-only code.
     target_compile_definitions(vla_core PUBLIC GGML_USE_HIP)
+    # act.cpp asks the HIP runtime for the GPU's arch name.
+    find_package(hip REQUIRED)
+    target_link_libraries(vla_core PRIVATE hip::host)
 endif()
 
 if(GGML_SYCL AND NOT GGML_CUDA)
