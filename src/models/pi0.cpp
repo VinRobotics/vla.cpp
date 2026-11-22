@@ -123,7 +123,7 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_ten
         ggml_tensor * att = ggml_reshape_2d(C, fa, c.hidden, seq);
         ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, mm_act(C, w.Wo, as_type(C, att, at), at), w.bo));
         ggml_tensor * n2 = layer_norm(C, h1, w.ln2w, w.ln2b, c.ln_eps);
-        ggml_tensor * ff = ggml_add(C, mm_act(C, w.Wfc2, vla::gelu(C, ggml_add(C, mm_act(C, w.Wfc1, n2, at), w.bfc1)), at), w.bfc2);
+        ggml_tensor * ff = ggml_add(C, mm_act(C, w.Wfc2, ggml_gelu(C, ggml_add(C, mm_act(C, w.Wfc1, n2, at), w.bfc1)), at), w.bfc2);
         return ggml_add(C, h1, ff);
     }
     ggml_tensor * q = as_type(C, ggml_add(C, mm_act(C, w.Wq, n1, at), w.bq), GGML_TYPE_F32);
@@ -145,7 +145,7 @@ ggml_tensor * build_siglip_layer(ggml_context * C, const EncBlockW & w, ggml_ten
     }
     ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, mm_act(C, w.Wo, as_type(C, att, at), at), w.bo));
     ggml_tensor * n2 = layer_norm(C, h1, w.ln2w, w.ln2b, c.ln_eps);
-    ggml_tensor * ff = ggml_add(C, mm_act(C, w.Wfc2, vla::gelu(C, ggml_add(C, mm_act(C, w.Wfc1, n2, at), w.bfc1)), at), w.bfc2);
+    ggml_tensor * ff = ggml_add(C, mm_act(C, w.Wfc2, ggml_gelu(C, ggml_add(C, mm_act(C, w.Wfc1, n2, at), w.bfc1)), at), w.bfc2);
     return ggml_add(C, h1, ff);
 }
 

@@ -114,12 +114,12 @@ these, and they compute something else:
 
 | Op | What goes wrong | Handled by |
 |---|---|---|
-| `GELU` | Runs `x*sigmoid(1.702x)` (GELU_QUICK) | `vla::gelu()` builds the tanh form from correct ops |
+| `GELU` | Runs `x*sigmoid(1.702x)` (GELU_QUICK) | Fixed upstream in `v1.0.0`; before it, `vla::gelu()` built the tanh form from correct ops |
 | `ADD`/`MUL`/... | `src1` broadcast over one dim but not a higher one | Refused, runs on the CPU |
 | `IM2COL` | Wrong unless kernel = stride > 1 and no padding | Refused, runs on the CPU |
 | `CPY` F32→F16 | Reads back wrong on the host | Copies feeding a CPU op run on the CPU |
 | `REPEAT` | Reads stale cache lines of a source written by DMA earlier in the same op batch | Refused, runs on the CPU |
-| fused `MUL_MAT+ADD`, `RMS_NORM+MUL` | ~10x the error of the unfused ops | `GGML_HEXAGON_OPFUSION=0` by default |
+| fused `MUL_MAT+ADD`, `RMS_NORM+MUL` | ~10x the error of the unfused ops | Exact since `v1.0.0` and on; before it, `GGML_HEXAGON_OPFUSION=0` by default |
 
 Each one flips the gripper channel, or comes close, on some checkpoint. The
 earlier warning that a wrong op would be the worse failure than a missing one

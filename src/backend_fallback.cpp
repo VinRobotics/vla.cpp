@@ -318,13 +318,6 @@ bool accel_runs(FallbackCtx * fc, const ggml_tensor * t, const char ** why) {
         *why = "leaves to the CPU a registered weight's";
         return false;
     }
-    if (fc->hexagon && t->op == GGML_OP_UNARY && ggml_get_unary_op(t) == GGML_UNARY_OP_GELU) {
-        // ggml-hexagon maps GELU and GELU_QUICK to one kernel, x*sigmoid(1.702x),
-        // which is GELU_QUICK. ggml_gelu is the tanh form; on SmolVLA's SigLIP
-        // tower the difference flips the gripper channel of the action chunk.
-        *why = "computes GELU as GELU_QUICK for";
-        return false;
-    }
     if (fc->hexagon &&
         (t->op == GGML_OP_ADD || t->op == GGML_OP_SUB || t->op == GGML_OP_MUL || t->op == GGML_OP_DIV) &&
         broadcast_has_gap(t->src[0], t->src[1])) {

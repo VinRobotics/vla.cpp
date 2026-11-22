@@ -254,27 +254,6 @@ inline int64_t gemm_width(int64_t n) {
 }
 
 /**
- * @brief `ggml_gelu` (the tanh form), in ops the compiled-in backend gets right.
- *
- * ggml-hexagon runs GELU as x*sigmoid(1.702x), which is GELU_QUICK, so the
- * fallback wrapper refuses it and every tower layer would round-trip its MLP
- * activations through the CPU. The tanh form is exactly
- * x*sigmoid(2*sqrt(2/pi)*(x + 0.044715x^3)), since (1+tanh z)/2 = sigmoid(2z),
- * and HTP implements each of those ops. Written as x*sigmoid(x*(k + k*0.044715x^2)),
- * k = 2*sqrt(2/pi), it takes five ops, since SCALE carries the offset. Elsewhere this
- * is plain ggml_gelu.
- */
-inline ggml_tensor * gelu(ggml_context * ctx, ggml_tensor * x) {
-#ifdef GGML_USE_HEXAGON
-    const float   k = 1.5957691216057308f;  // 2*sqrt(2/pi)
-    ggml_tensor * t = ggml_scale_bias(ctx, ggml_mul(ctx, x, x), k * 0.044715f, k);
-    return ggml_mul(ctx, x, ggml_sigmoid(ctx, ggml_mul(ctx, x, t)));
-#else
-    return ggml_gelu(ctx, x);
-#endif
-}
-
-/**
  * @brief `ggml_gelu_erf`, in ops the compiled-in backend runs.
  *
  * ggml-hexagon has no GELU_ERF, so every MLP that uses it round-trips its
@@ -307,7 +286,7 @@ inline ggml_tensor * geglu(ggml_context * ctx, ggml_tensor * gate, ggml_tensor *
     if (gate->type == GGML_TYPE_BF16 && up->type == GGML_TYPE_BF16 && fused_ew_registered())
         return fused_geglu(ctx, gate, up);
 #endif
-    return ggml_mul(ctx, gelu(ctx, gate), up);
+    return ggml_mul(ctx, ggml_gelu(ctx, gate), up);
 }
 
 /**
@@ -525,12 +504,9 @@ inline Backend backend_init(const char * tag, int n_threads) {
             std::printf("%s: VLA_DEVICE=%s, not starting the accelerator\n", tag, want);
         } else {
 #ifdef GGML_USE_HEXAGON
-            // Op fusion (MUL_MAT+ADD, RMS_NORM+MUL) takes SmolVLA from 1.6e-3 to
-            // 1.2e-2 max|delta| against the CPU reference, past the 2.9e-3 bar
-            // the other backends are held to. Only a default: an explicit
-            // GGML_HEXAGON_OPFUSION wins. Read at registry init, so set it first.
-            static std::once_flag fuse_once;
-            std::call_once(fuse_once, [] { setenv_default("GGML_HEXAGON_OPFUSION", "0"); });
+            // Op fusion stays at ggml's default, on. It cost SmolVLA 1.2e-2
+            // max|delta| at b11223; since v1.0.0 its output is bit-identical to
+            // GGML_HEXAGON_OPFUSION=0, and SmolVLA runs 7% faster (VENTUNO Q).
             hexagon_default_skel_path();
             ggml_backend_reg_t reg  = ggml_backend_hexagon_reg();
             const char *       what = "Hexagon";
