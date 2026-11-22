@@ -35,7 +35,9 @@
 
 set -euo pipefail
 
-IMAGE="${TOOLCHAIN_IMAGE:-ghcr.io/snapdragon-toolchain/arm64-linux:v0.7}"
+# v0.8: llama.cpp v1.0.0 links the HTP skels against prebuilt libraries
+# for Hexagon tools 21, which v0.7 does not carry.
+IMAGE="${TOOLCHAIN_IMAGE:-ghcr.io/snapdragon-toolchain/arm64-linux:v0.8}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="build-lnx-htp"
 SERVER=1

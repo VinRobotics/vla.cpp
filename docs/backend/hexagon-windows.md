@@ -1,7 +1,7 @@
 # vla.cpp on Snapdragon X (Windows on Arm): Hexagon NPU, Adreno GPU and CPU
 
 Measured 2026-09 against llama.cpp build 11201 (`2145525a4`), passed in with
-`-LlamaDir`. The `b11223` tag that `CMakeLists.txt` pins was not tested.
+`-LlamaDir`. The `v1.0.0` tag that `CMakeLists.txt` pins was not tested on this laptop.
 
 ## Summary
 
@@ -48,7 +48,7 @@ The NPU path needs the same one-off setup as llama.cpp's Hexagon backend: a newe
 |---|---|---|
 | Visual Studio | 2026 (18), MSVC 14.51, ARM64 libraries | Its bundled Clang 22.1.3, CMake and Ninja build everything |
 | Windows SDK / WDK | 10.0.26100 | `inf2cat` and `signtool`, to sign the HTP skels |
-| Hexagon SDK | 6.6.0.0, tools 19.0.07 (`HEXAGON_SDK_ROOT`, `HEXAGON_TOOLS_ROOT`) | Building the HTP skels |
+| Hexagon SDK | 6.7.0.0, tools 21.0.04 (`HEXAGON_SDK_ROOT`, `HEXAGON_TOOLS_ROOT`); llama.cpp v1.0.0 needs tools 21 | Building the HTP skels |
 | OpenCL SDK | 2.3.2 (`OPENCL_SDK_ROOT`) | The Adreno backend |
 | vcpkg | `C:\vcpkg` | protobuf 6.33.4 (triplet `arm64-windows-clangcl`, in this repo), zeromq 4.3.5 and cppzmq (stock `arm64-windows`) for `vla-server` |
 | Python | 3.14.7 ARM64, venv in `.venv` | `transformers` 5.17, `tokenizers`, `gguf`, `numpy`: tokenizing prompts and `scripts/quantize_gguf.py` |
@@ -79,7 +79,7 @@ The build script sets up the Visual Studio shell, the compiler flags llama.cpp's
 
 Each build goes into `build-wos-<backend>`, with every binary and DLL in `build-wos-<backend>\bin`. `-NoServer` skips `vla-server`, SentencePiece and their protobuf and ZeroMQ dependencies, so Octo `--text` needs `--tokens` there.
 
-`-LlamaDir` points the build at an existing llama.cpp checkout through `FETCHCONTENT_SOURCE_DIR_LLAMA`. Without it, the `b11223` pin in `CMakeLists.txt` applies, which was not tested here.
+`-LlamaDir` points the build at an existing llama.cpp checkout through `FETCHCONTENT_SOURCE_DIR_LLAMA`. Without it, the `v1.0.0` pin in `CMakeLists.txt` applies, which was not tested here.
 
 The HTP build also signs `libggml-htp-v*.so` with the certificate and copies the skels and their catalog next to the binaries. At startup the Hexagon backend points `ADSP_LIBRARY_PATH` at the executable's own folder, but only if the variable is unset. If it is already set, for example by a llama.cpp install, the skels it names must come from the same llama.cpp commit.
 

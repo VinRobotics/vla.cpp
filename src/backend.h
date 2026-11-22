@@ -468,9 +468,8 @@ inline Backend backend_init(const char * tag, int n_threads) {
             setenv_default("GGML_OPENVINO_GPU_PRECISION", "f32");
         }
 
-        // ggml exposes OpenVINO as a single device, so VLA_DEVICE does not apply:
-        // the target is chosen by name through GGML_OPENVINO_DEVICE (CPU / GPU /
-        // NPU) and resolved inside ggml.
+        // VLA_DEVICE does not apply: the target is chosen by name through
+        // GGML_OPENVINO_DEVICE (CPU / GPU / NPU) and resolved inside ggml.
         //
         // OpenVINO's blob cache reloads a graph that computes the wrong thing:
         // cold run correct, next run wrong, nothing logged. A warning is no use
@@ -494,10 +493,18 @@ inline Backend backend_init(const char * tag, int n_threads) {
             }
         }
 
-        // ggml falls back to CPU silently when the requested device is missing,
-        // so this line is the request. ggml logs what actually ran.
+        // ggml registers one device per OpenVINO device, and only the one
+        // GGML_OPENVINO_DEVICE selects runs anything; it is the one typed GPU.
+        // A name OpenVINO does not list aborts inside ggml with the list.
         const char * want = std::getenv("GGML_OPENVINO_DEVICE");
-        b.handle = ggml_backend_openvino_init(0);
+        {
+            ggml_backend_reg_t reg = ggml_backend_openvino_reg();
+            for (size_t i = 0; i < ggml_backend_reg_dev_count(reg) && !b.handle; ++i) {
+                if (ggml_backend_dev_type(ggml_backend_reg_dev_get(reg, i)) == GGML_BACKEND_DEVICE_TYPE_GPU) {
+                    b.handle = ggml_backend_openvino_init((int) i);
+                }
+            }
+        }
         b.is_openvino = b.handle != nullptr;
         if (b.handle) {
             std::printf("%s: backend = OPENVINO (asked for %s, see ggml's \"using device\" line)\n",

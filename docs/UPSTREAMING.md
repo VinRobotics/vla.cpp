@@ -1,10 +1,10 @@
 # Upstreaming the ggml-openvino fixes
 
-`scripts/patch_ggml_openvino.py` rewrites nine files inside the fetched llama.cpp
-tree at configure time. Every fix in it is a generic ggml-openvino defect, not a
-vla.cpp workaround: each narrows an assumption that fits llama.cpp's one
-decoder-only graph but is stricter than the ggml contract, or fills a gap in the
-op table. None of them needs to live here.
+`scripts/patch_ggml_openvino.py` rewrites fifteen files inside the fetched
+llama.cpp tree at configure time. The fixes listed below are generic
+ggml-openvino defects, not vla.cpp workarounds: each narrows an assumption that
+fits llama.cpp's one decoder-only graph but is stricter than the ggml contract.
+None of them needs to live here.
 
 Landing them upstream deletes the patch step, lets vla.cpp build against stock
 llama.cpp, and fixes the same bugs for everyone else translating a graph that is
@@ -31,18 +31,16 @@ python3 scripts/upstream_split.py
 | `openvino-multiple-inp-pos` | all ROPE position inputs are renamed to one `inp_pos` parameter | **high**: any graph with more than one position tensor fails shape inference today |
 | `openvino-view-input-rank` | a folded 2-D weight is sliced at full ggml rank | high: `Axis 2 out of the tensor rank range [-2, 1]` on any fused QKV weight |
 | `openvino-concat-rank` | CONCAT cannot broadcast rank | high: same rank-2 constants, different op |
-| `openvino-reshape-op-case` | the KV-cache-flatten guard also swallows `ggml_conv_2d`'s kernel reshape | medium |
 | `openvino-sdpa-kv-f16` | K/V stay F32 while Q is converted | medium: `Mixed input types are not supported` |
 | `openvino-naive-graph-size-env` | the 20-node naive threshold is a `constexpr` | medium: exposes `GGML_OPENVINO_NAIVE_GRAPH_SIZE` |
-| `openvino-gelu-modes` | ggml's tanh `GELU` is mapped onto ov's erf default, and `GELU_ERF` has no entry at all | **high**: wrong activation on every GELU node. Fixing it moved GR00T N1.5 and VLA-JEPA inside the accuracy bar |
-| `openvino-intel-opencl-platform` | the GPU remote context takes the first OpenCL platform | low, but a hard startup abort when it bites |
-| `openvino-imrope-sections` | the IMROPE sector cycle ignores `sections` | low, no measured output change |
 | `openvino-gemm-double-eltwise` | the GPU plugin folds two chained elementwise adds into the preceding GEMM and silently drops the second operand | **highest**: wrong output on GPU with nothing logged, on any graph that adds a tower's features on top of an FFN residual |
 | `openvino-gpu-precision-env` | the GPU plugin's f16 default compounds through a long serial chain in one graph | medium: exposes `GGML_OPENVINO_GPU_PRECISION`, default unchanged |
 | `openvino-permute-op-case` | PERMUTE `op_case` 2 is reached by any permute over a view of a non-leaf, not just llama.cpp's rope'd query | **high**: a DiT cross-attention V comes out with its elements rearranged and nothing is reported |
 
 `RELU`, `NEG` and `SQR` were in the patch too. Upstream added all three in
-`b10729`, so they are not in the series.
+`b10729`, so they are not in the series. Between `b11223` and `v1.0.0` upstream
+also took the GELU modes, the RESHAPE `op_case` guard, the Intel OpenCL platform
+choice and the IMROPE sector bound, which left the series with them.
 
 ## Before submitting
 
@@ -52,8 +50,8 @@ Read `CONTRIBUTING.md` in llama.cpp. The parts that bite:
 - **AI usage must be disclosed**, and using AI to write the PR text itself is
   prohibited outright. Undisclosed use risks a ban. Write the PR bodies yourself.
 - **A modified operator needs `test-backend-ops`.** That covers
-  `openvino-gelu-modes`, `openvino-sdpa-kv-f16`, `openvino-concat-rank`,
-  `openvino-view-input-rank` and `openvino-reshape-op-case`. The others touch the
+  `openvino-sdpa-kv-f16`, `openvino-concat-rank` and
+  `openvino-view-input-rank`. The others touch the
   session and cache layers, which `test-backend-ops` does not reach; those need a
   before/after run on a real graph in the PR body.
 - **A bug fix needs a reproducible case that fails before and passes after.**

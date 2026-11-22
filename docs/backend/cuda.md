@@ -119,7 +119,10 @@ weight summed in int32, which is exact in any order.
   `__fmul_rn` / `__fadd_rn` so the compiler cannot contract two ops into one
   FMA, and use FMA exactly where ggml-cuda's compiled kernels do. The norm and
   softmax kernels keep ggml-cuda's reduction tree: the same block size, the same
-  strided per-thread sums, the same shuffle and shared-memory stages.
+  strided per-thread sums, the same shuffle and shared-memory stages. That tree
+  is tied to the pinned llama.cpp: `v1.0.0` sums aligned `rms_norm` rows as
+  float4s with a block sized from `ncols/4`, and the fused RMSNorm kernels
+  follow it. `test_fused_cuda_ops` is what catches a tag that moves it.
 - **GEMMs and attention** are chosen per shape at first use, on random data:
   every candidate runs next to ggml's own call and is kept only if the outputs
   are identical, on two operand sets. Among the identical ones the fastest is

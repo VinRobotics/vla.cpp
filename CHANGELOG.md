@@ -159,6 +159,18 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Changed
 
+- **llama.cpp `v1.0.0`** (was `b11223`). The Hexagon NPU now runs `GELU_ERF`,
+  ACT's `POOL_2D` and TurboVLA's softmax and flash attention, which went to the
+  CPU before.
+  The OpenVINO patch drops six fixes upstream now has (both GELU modes, the Intel
+  OpenCL platform, the RESHAPE `op_case` guard, the IMROPE bound and the 2D im2col
+  fold, with its `GGML_OPENVINO_FUSE_CONV2D` switch). ggml now lists every
+  OpenVINO device, so `backend_init` opens the one `GGML_OPENVINO_DEVICE` selects,
+  and a device OpenVINO does not list stops the process with the list instead of
+  falling back to the CPU plugin. ggml-cuda's `rms_norm` now sums float4s on
+  aligned rows, so the fused CUDA RMSNorm kernels follow it and stay
+  bit-identical to ggml. Hexagon builds need toolchain image v0.8 (Hexagon tools
+  21, SDK 6.7 on Windows).
 - **Faster OpenVINO dispatch.** The naive path checks a graph fingerprint before
   its compile cache, π0.5 opts out of the accuracy hint, and π0.5 pads its prompt
   to 16-token buckets, so a LIBERO run no longer compiles one model per prompt

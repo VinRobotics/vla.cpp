@@ -43,7 +43,7 @@ def H(rel, key):
     coverage count still read 29/29, because each index was still used once.
     A key that stops matching fails here instead of committing the wrong diff.
     """
-    hits = [i for i, (anchor, _) in enumerate(E[rel]) if key in anchor]
+    hits = [i for i, (anchor, *_) in enumerate(E[rel]) if key in anchor]
     if len(hits) != 1:
         sys.exit(f"upstream_split: key {key!r} matched {len(hits)} hunks in {rel}, expected 1")
     return rel, hits[0]
@@ -82,17 +82,6 @@ PRS = [
   "into 0 and that would send every graph down the LLM builder with nothing said.",
   [H(D+"utils.cpp","bool is_naive(ggml_cgraph")]),
 
- ("openvino-gelu-modes",
-  "openvino: map GELU to tanh and add GELU_ERF",
-  "ggml has two GELUs: GGML_UNARY_OP_GELU is the tanh approximation and\n"
-  "GGML_UNARY_OP_GELU_ERF is the exact one. The table maps GELU onto ov's Gelu,\n"
-  "which defaults to erf, and has no entry for GELU_ERF at all. So the tanh op is\n"
-  "computed as erf, and a graph using the erf op cannot run.\n\n"
-  "Small per node, but a vision tower has dozens and it compounds: on a ggml graph\n"
-  "with a ViT encoder, fixing the mode moved two models from visibly wrong output\n"
-  "to within 1.3e-3 of the CPU-backend reference.",
-  [H(D+"openvino/op_table.cpp","namespace ov {"),H(D+"openvino/op_table.cpp","{\"GGML_UNARY_OP_GELU\",")]),
-
  ("openvino-multiple-inp-pos",
   "openvino: stop distinct position inputs aliasing each other",
   "Every tensor feeding a ROPE's second input is renamed to one graph parameter\n"
@@ -115,16 +104,6 @@ PRS = [
   [H(D+"ggml-decoder.h","get_graph_input_ov_name"),H(D+"ggml-decoder.h","m_cgraph = nullptr"),
    H(D+"ggml-decoder.cpp","is_inp_pos(tensor, op)"),H(D+"ggml-decoder.cpp","compute_op_case(const ggml_tensor"),
    H(D+"openvino/op/rope.cpp","_ff_")]),
-
- ("openvino-reshape-op-case",
-  "openvino: narrow the RESHAPE op_case 3 guard",
-  "Case 3 is the KV-cache flatten, [512,1024,1,1] -> [1,524288,1,1], and it emits a\n"
-  "shape with -1 in dim 2 and 1 in dim 3. Its guard only tests\n"
-  "src->ne[0]*ne[1]*ne[2] == node->ne[1], which also matches the kernel reshape\n"
-  "inside ggml_conv_2d ([16,16,3,768] -> [768,768]) and rewrites it to the wrong\n"
-  "shape. The real case always has node->ne[0] == 1; requiring that sends the conv\n"
-  "kernel to case 6, the plain reshape.",
-  [H(D+"ggml-decoder.cpp","== node->ne[1]")]),
 
  ("openvino-gemm-double-eltwise",
   "openvino: do not stack two elementwise adds on a GEMM",
@@ -173,7 +152,8 @@ PRS = [
   "  Axis 2 out of the tensor rank range [-2, 1].\n\n"
   "Reached by viewing Q, K and V out of one fused attn_in weight. Left-pad the\n"
   "input with leading 1s, which is the shape ggml gave it anyway.",
-  [H(D+"openvino/utils.cpp","openvino/op/transpose.hpp"),H(D+"openvino/utils.cpp","get_view_input_size(input_index)")]),
+  [H(D+"openvino/utils.cpp","#include <memory>"),H(D+"openvino/utils.cpp","openvino/op/transpose.hpp"),
+   H(D+"openvino/utils.cpp","get_view_input_size(input_index)")]),
 
  ("openvino-concat-rank",
   "openvino: align CONCAT input ranks",
@@ -184,18 +164,6 @@ PRS = [
   "shorter input with leading 1s before picking the axis.",
   [H(D+"openvino/op/concat.cpp","openvino/op/concat.hpp"),H(D+"openvino/op/concat.cpp","#include <memory>"),
    H(D+"openvino/op/concat.cpp","rank - 1 - ggml_dim")]),
-
- ("openvino-imrope-sections",
-  "openvino: bound the interleaved-mrope sector cycle by sections",
-  "ggml's IMROPE cycles t/h/w by sector % 3, but only while the sector is inside\n"
-  "3 * sections[k]; past that it falls through to the fourth position stream\n"
-  "(ggml_rope_cache_init in ggml/src/ggml-cpu/ops.cpp). The translator cycled\n"
-  "unconditionally, so with sections {24,20,20,0} and n_dims 128, sectors 61 and 62\n"
-  "took h and w instead of e.\n\n"
-  "No measurable output change on the graphs tested, because the fourth stream\n"
-  "happened to carry the same positions as the first. Submitted because it removes\n"
-  "a divergence from the ggml reference, not because a measurement demanded it.",
-  [H(D+"openvino/utils.cpp","#include <memory>"),H(D+"openvino/utils.cpp","gather_indices(n_dims_half)")]),
 
  ("openvino-gpu-precision-env",
   "openvino: expose the GPU plugin's inference precision",
@@ -208,21 +176,8 @@ PRS = [
   "F32 reference on GPU and 6.5e-5 with this set to f32.\n\n"
   "Exposed rather than forced -- f32 costs roughly 3x -- and defaulted to f16, so\n"
   "existing behaviour is unchanged unless the variable is set.",
-  [H(D+"ggml-openvino-extra.cpp","GGML_OPENVINO_LOG_UNSUPPORTED_OPS"),
-   H(D+"ggml-openvino-extra.cpp","} else if (cache_dir && strlen(cache_dir) > 0) {")]),
+  [H(D+"ggml-openvino-extra.cpp","} else if (cache_dir && strlen(cache_dir) > 0) {")]),
 
- ("openvino-intel-opencl-platform",
-  "openvino: select the Intel OpenCL platform for the GPU remote context",
-  "GGML_OPENVINO_DEVICE=GPU builds an OpenVINO remote context on an OpenCL queue and\n"
-  "takes the first platform the ICD loader reports. With more than one runtime\n"
-  "installed (an NVIDIA card beside the Intel iGPU, POCL, Rusticl) that is whichever\n"
-  "/etc/OpenCL/vendors/*.icd sorted first, and the GPU plugin only accepts an Intel\n"
-  "context. It aborts at startup with \"Incompatible OpenCL runtime: program is not\n"
-  "in expected ELF format\".\n\n"
-  "Select by CL_PLATFORM_VENDOR instead. Single-runtime hosts are unaffected.",
-  [H(D+"ggml-openvino-extra.cpp","#include <optional>"),H(D+"ggml-openvino-extra.cpp","ggml_openvino_device_config::init"),
-   H(D+"ggml-openvino-extra.cpp","cl_int err;"),H(D+"ggml-openvino-extra.cpp","clEnqueueMemFillINTEL_fn"),
-   H(D+"ggml-openvino-extra.cpp","clEnqueueMemcpyINTEL_fn")]),
 ]
 
 def git(*a):
@@ -236,7 +191,7 @@ for branch, subject, body, hunks in PRS:
     git("checkout", "-q", "-B", branch, base)
     for rel, idx in hunks:
         used.add((rel, idx))
-        anchor, repl = E[rel][idx]
+        anchor, repl, *_ = E[rel][idx]
         # The marker is vla.cpp provenance; upstream comments should not carry it.
         repl = repl.replace('vla.cpp: ', '')
         f = REPO / rel

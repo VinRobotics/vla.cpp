@@ -168,7 +168,7 @@ and `vrfai/pi05-libero-gguf` (local file `pi05-libero.gguf`, SHA-256
 These results are from upstream `main@1adf078` merged with this HIP backend,
 on Linux 6.17.0-40 and ggml commit `4da6337`.
 
-To repeat the fixed-input checks, build CPU with the same `b11223` pin and
+To repeat the fixed-input checks, build CPU with the same llama.cpp pin and
 `-DVLA_BUILD_TESTS=ON`, then run the corresponding commands on both builds:
 
 ```bash

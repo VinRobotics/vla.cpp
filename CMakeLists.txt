@@ -100,10 +100,10 @@ elseif(GGML_OPENVINO)
     endif()
 endif()
 # Overridable so a regression can be bisected against another tag in a separate
-# build dir (-DVLA_LLAMA_TAG=b10326) without editing this file. The patch
+# build dir (-DVLA_LLAMA_TAG=b11223) without editing this file. The patch
 # anchors in scripts/patch_ggml_cuda_ext_hook.py and scripts/patch_ggml_openvino.py
 # are checked against the default.
-set(_vla_llama_tag_default "b11223")
+set(_vla_llama_tag_default "v1.0.0")
 set(VLA_LLAMA_TAG "${_vla_llama_tag_default}" CACHE STRING "llama.cpp tag to fetch")
 # A cache entry survives an edit to the line above, so an existing build dir keeps
 # the tag it was first configured with and quietly builds the wrong llama.cpp.

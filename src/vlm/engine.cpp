@@ -59,16 +59,9 @@ struct Engine::Impl {
     const llama_vocab *       vocab  = nullptr;
     mtmd::context_ptr         vision;
     common_chat_templates_ptr tmpls;
-    llama_batch               batch{};
-    int32_t                   n_batch = 2048;
-    bool                      batch_inited = false;
-    bool                      use_jinja    = true;
-
-    ~Impl() {
-        if (batch_inited) {
-            llama_batch_free(batch);
-        }
-    }
+    common_batch              batch;
+    int32_t                   n_batch   = 2048;
+    bool                      use_jinja = true;
 };
 
 Engine::Engine() : impl_(std::make_unique<Impl>()) {}
@@ -128,8 +121,7 @@ bool Engine::load(const LoadParams & lp) {
         return false;
     }
 
-    impl_->batch        = llama_batch_init(1, 0, 1);
-    impl_->batch_inited = true;
+    impl_->batch = common_batch(impl_->lctx);
     return true;
 }
 
@@ -211,7 +203,7 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
 
     std::string prompt;
     try {
-        prompt = common_chat_templates_apply(impl_->tmpls.get(), ti).prompt;
+        prompt = common_chat_templates_apply(impl_->tmpls.get(), ti).prompt.str();
     } catch (const std::exception & e) {
         res.finish_reason = "error";
         res.error         = e.what();
@@ -271,9 +263,9 @@ ChatResult Engine::chat(const std::vector<Message> & messages,
         }
         pending.erase(0, n);
 
-        common_batch_clear(impl_->batch);
-        common_batch_add(impl_->batch, tok, n_past++, {0}, true);
-        const int rc = llama_decode(impl_->lctx, impl_->batch);
+        impl_->batch.clear();
+        impl_->batch.add(tok, n_past++, 0, true);
+        const int rc = llama_process(impl_->lctx, LLAMA_PROCESS_TYPE_DECODE, impl_->batch.get());
         if (rc == 1) {
             break;
         }
