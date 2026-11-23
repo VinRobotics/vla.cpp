@@ -159,6 +159,22 @@ Notable changes to vla.cpp. Format loosely follows [Keep a Changelog](https://ke
 
 ### Changed
 
+- **llama.cpp `v1.0.0`** (was `b11223`). On the Arduino VENTUNO Q's Hexagon NPU
+  (v75, 4 threads) SmolVLA goes from 919 to 724 ms, ACT from 254 to 226 ms,
+  Octo-Small from 169 to 142 ms, TurboVLA from 542 to 225 ms and Evo-1 from 4.56
+  to 3.31 s, each within 2.9e-3 of the CPU build. The NPU now computes GELU as
+  the tanh form, so `vla::gelu()` and its fallback rule are gone; it runs
+  `GELU_ERF`, ACT's `POOL_2D` and TurboVLA's softmax and flash attention, which
+  went to the CPU before; and its op fusion is exact, so vla.cpp leaves it on.
+  The OpenVINO patch drops six fixes upstream now has (both GELU modes, the Intel
+  OpenCL platform, the RESHAPE `op_case` guard, the IMROPE bound and the 2D im2col
+  fold, with its `GGML_OPENVINO_FUSE_CONV2D` switch). ggml now lists every
+  OpenVINO device, so `backend_init` opens the one `GGML_OPENVINO_DEVICE` selects,
+  and a device OpenVINO does not list stops the process with the list instead of
+  falling back to the CPU plugin. ggml-cuda's `rms_norm` now sums float4s on
+  aligned rows, so the fused CUDA RMSNorm kernels follow it and stay
+  bit-identical to ggml. Hexagon builds need toolchain image v0.8 (Hexagon tools
+  21, SDK 6.7 on Windows).
 - **Faster OpenVINO dispatch.** The naive path checks a graph fingerprint before
   its compile cache, π0.5 opts out of the accuracy hint, and π0.5 pads its prompt
   to 16-token buckets, so a LIBERO run no longer compiles one model per prompt

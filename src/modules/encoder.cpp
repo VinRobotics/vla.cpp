@@ -138,7 +138,7 @@ ggml_tensor * EncStack::block(ggml_context * C, const EncBlockW & w, ggml_tensor
         }
         ggml_tensor * h1 = ggml_add(C, x, ggml_add(C, mm_act(C, w.Wo, as_type(C, att, at), at), w.bo));
         ggml_tensor * n2 = layer_norm(C, h1, w.ln2w, w.ln2b, cfg.ln_eps);
-        ggml_tensor * ff = ggml_add(C, mm_act(C, w.Wfc2, gelu(C, ggml_add(C, mm_act(C, w.Wfc1, n2, at), w.bfc1)), at),
+        ggml_tensor * ff = ggml_add(C, mm_act(C, w.Wfc2, ggml_gelu(C, ggml_add(C, mm_act(C, w.Wfc1, n2, at), w.bfc1)), at),
                                     w.bfc2);
         return ggml_add(C, h1, ff);
     }

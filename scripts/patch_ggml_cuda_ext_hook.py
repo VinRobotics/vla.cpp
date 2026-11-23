@@ -21,10 +21,11 @@ ggml header, so a GIT_TAG bump cannot break them.
 
 Why a hook is needed at all
 ---------------------------
-ggml's CUDA backend has no BF16 instantiation for add/mul/unary and asserts F32
-in norm/rms_norm/scale, and ggml_cuda_mul_mat_cublas writes F32 into dst->data
-unconditionally (for a BF16 dst that is both wrong and twice the bytes the
-allocator reserved). There is no way to register kernels for built-in ops from
+ggml's CUDA backend asserts F32 in norm and rms_norm, and
+ggml_cuda_mul_mat_cublas writes F32 into dst->data unconditionally (for a BF16
+dst that is both wrong and twice the bytes the allocator reserved). Since
+llama.cpp v1.0.0 it runs BF16 add, mul, unary and scale itself; the in-tree
+kernels for those still get first refusal through the hook. There is no way to register kernels for built-in ops from
 outside: GGML_OP_CUSTOM is CPU-only. So the backend has to offer one place where
 an external implementation gets first refusal.
 
@@ -40,8 +41,8 @@ What it changes (ggml/src/ggml-cuda/ggml-cuda.cu only)
   4. One call to the second in the ADD/MUL fusion branch of ggml_cuda_try_fuse.
      Fusion happens in ggml_backend_cuda_graph_compute, upstream of
      ggml_cuda_compute_forward, so the hook in (2) never sees a fused node --
-     and ggml_cuda_op_fused_binbcast_impl handles F32/F16 only and GGML_ABORTs
-     on BF16. Without this the choice is a crash or no fusion at all for BF16
+     and ggml_cuda_op_fused_binbcast_impl takes BF16 only with a BF16 dst and
+     GGML_ABORTs on an F32 src0 with a BF16 addend. Without this the choice is a crash or no fusion at all for BF16
      activations, and the unfused path costs ~18 ms/call on evo1.
 
 With the pointer left null this is a no-op, so an unpatched-but-hooked ggml
@@ -52,8 +53,6 @@ Usage: scripts/patch_ggml_cuda_ext_hook.py [<llama-src-dir>]
 
 import pathlib
 import sys
-
-MARKER = "vla.cpp: CUDA extension hook"
 
 HOOK_DECL = (
     """static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst) {
@@ -117,11 +116,13 @@ def main():
     if not path.exists():
         raise SystemExit(f"not a llama.cpp source tree: {src}")
 
-    text = path.read_text()
-    if MARKER in text:
-        return  # idempotent: re-configure over an already-patched tree
-
+    original = path.read_text()
+    text = original
     for old, new, want in ((*HOOK_DECL, 1), (*FUSION_GUARD, 2), (*FUSED_BINBCAST_GUARD, 1)):
+        # Per hunk, not per file, as in the SYCL script: a file-wide marker would
+        # skip a hunk added after the tree was first patched.
+        if new in text:
+            continue
         n = text.count(old)
         if n != want:
             raise SystemExit(
@@ -131,7 +132,8 @@ def main():
             )
         text = text.replace(old, new)
 
-    path.write_text(text)
+    if text != original:
+        path.write_text(text)
 
 
 if __name__ == "__main__":

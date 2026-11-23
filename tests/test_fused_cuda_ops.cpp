@@ -169,7 +169,7 @@ std::vector<Case> cases() {
         }});
     v.push_back({"bias_gelu", {{F, {3072, 33, 1, 1}}, {F, {3072, 1, 1, 1}}},
         [](ggml_context * C, const T & t, bool f) {
-            return f ? vla::fused_bias_gelu(C, t[0], t[1]) : vla::gelu(C, ggml_add(C, t[0], t[1]));
+            return f ? vla::fused_bias_gelu(C, t[0], t[1]) : ggml_gelu(C, ggml_add(C, t[0], t[1]));
         }});
     v.push_back({"bias_gelu_erf", {{F, {4096, 29, 1, 1}}, {F, {4096, 1, 1, 1}}},
         [](ggml_context * C, const T & t, bool f) {

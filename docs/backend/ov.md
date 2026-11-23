@@ -18,7 +18,8 @@ runtime on the configure line.
 >
 > Twenty fixes were needed, eighteen of them inside ggml's OpenVINO backend, which
 > is written against llama.cpp's graphs and had never seen a vision tower or an
-> action expert - see [What had to change](#what-had-to-change).
+> action expert. Six of those are upstream since llama.cpp `v1.0.0`, so twelve are
+> still patched - see [What had to change](#what-had-to-change).
 >
 > Note the baseline: OpenVINO executes the checkpoint's BF16 weights at F32, so
 > compare against `--weight-dtype f32` or you will charge the backend for a
@@ -54,16 +55,17 @@ clinfo -l                               # must enumerate the GPU
 ```
 
 `Number of platforms 0` with `/etc/OpenCL/vendors/intel.icd` present almost
-always means the render group has not taken effect yet. Without it,
-`GGML_OPENVINO_DEVICE=GPU` warns and silently falls back to the CPU plugin.
+always means the render group has not taken effect yet. Without it, OpenVINO
+lists no GPU and `GGML_OPENVINO_DEVICE=GPU` stops at startup with the devices it
+did find.
 
 For the GPU compute runtime and NPU driver packages themselves, follow
 [llama.cpp's OpenVINO notes](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/OPENVINO.md).
 
-The NPU needs two more things its driver packages do not pull in. Neither failure
-is reported as an error - the device simply does not appear and every
-`GGML_OPENVINO_DEVICE=NPU` run lands on the CPU plugin instead
-(`device NPU is not available, fallback to CPU`).
+The NPU needs two more things its driver packages do not pull in. Missing either,
+the driver reports nothing - the device simply does not appear, and
+`GGML_OPENVINO_DEVICE=NPU` stops at startup with
+`GGML_OPENVINO_DEVICE=NPU is not available` and the devices OpenVINO did find.
 
 ```bash
 sudo apt-get install -y libze1   # the Level Zero loader; the driver alone is not enough
@@ -103,7 +105,7 @@ cmake --build build-ov -j$(nproc)
 a pointer back here if the runtime is not on `CMAKE_PREFIX_PATH`.
 
 `scripts/patch_ggml_openvino.py` runs as the FetchContent patch step, so the
-thirteen ggml fixes are applied automatically - there is no manual `git apply`.
+twelve ggml fixes are applied automatically - there is no manual `git apply`.
 The step only runs when FetchContent populates the source dir, so a `build/_deps`
 left over from an older checkout keeps the hunks it was patched with: delete it
 after pulling rather than trusting a reconfigure. The script checks each hunk on
@@ -111,8 +113,10 @@ its own and fails loudly on a tree it cannot bring up to date.
 
 ## Run
 
-`GGML_OPENVINO_DEVICE` picks the target by name (`VLA_DEVICE` does *not* apply -
-ggml exposes OpenVINO as a single device):
+`GGML_OPENVINO_DEVICE` picks the target by OpenVINO's name for it - `CPU` (the
+default), `GPU` or `NPU`; with two GPUs OpenVINO lists `GPU.0` and `GPU.1`, and a
+bare `GPU` is rejected. `VLA_DEVICE` does *not* apply: ggml registers every
+OpenVINO device, but only the selected one takes ops, and vla.cpp opens that one:
 
 ```bash
 GGML_OPENVINO_DEVICE=GPU ./build-ov/vla-server ./weights/smolvla-libero.gguf
@@ -125,10 +129,10 @@ OpenVINO: using device GPU
 vla: backend = OPENVINO (asked for GPU, see ggml's "using device" line)
 ```
 
-The first comes from ggml and is authoritative: an unavailable device logs a
-warning there and falls back to `CPU`, which is still the OpenVINO CPU plugin,
-not ggml's native CPU backend. The second echoes what was requested, so the pair
-tells you whether you got the device you asked for.
+The first comes from ggml, the second echoes what was requested. An unavailable
+device stops the process with the list of devices OpenVINO found. Until llama.cpp
+`v1.0.0` it only warned and fell back to the OpenVINO CPU plugin, so on an older
+pin check that the two lines agree.
 
 OpenVINO compiles each graph on first use, which is slow: up to about 80 s per
 process on the GPU, and on the NPU 1-3 minutes for most archs, 7 for SmolVLA, 9
@@ -243,7 +247,8 @@ and reads as a delta near 2. π0 is the exception; see
 
 ## What had to change
 
-Twenty fixes: two in vla.cpp, eighteen in ggml's OpenVINO backend. Both
+Twenty fixes: two in vla.cpp, eighteen in ggml's OpenVINO backend, six of which
+llama.cpp `v1.0.0` now carries itself. Both
 vla.cpp-side ones are ordinary correctness fixes that happen to be invisible on
 the other backends - `vla_predict_check` on a CPU build of this branch is
 byte-identical to the same build of the base commit, for every model tested.
@@ -271,7 +276,7 @@ larger through a model builder that assumes a decoder-only LLM. The literal path
 is the one that fits a vision tower and an action expert. An explicit setting
 still wins.
 
-The other eighteen are applied to ggml's OpenVINO backend by
+The other twelve are applied to ggml's OpenVINO backend by
 `scripts/patch_ggml_openvino.py` at configure time; its docstring carries the
 per-fix detail. Each narrows an llama.cpp-shaped assumption that is stricter than
 the ggml contract, or fills a gap:
@@ -281,31 +286,30 @@ the ggml contract, or fills a gap:
 | **PERMUTE op_case 2 requires a ROPE** | **assumes any permute of a view is a rope'd query** |
 | **Two elementwise adds never stacked on a GEMM** | **the GPU plugin folds both in as post-ops and drops the second operand** |
 | GPU inference precision exposed | the plugin's F16 default compounds through a denoise loop unrolled in one graph |
-| **GELU translated as tanh, not erf** | **assumes ggml's GELU is the exact erf form** |
-| Intel OpenCL platform selection | assumes the first OpenCL platform is Intel's |
-| RESHAPE `op_case` guard | assumes a reshape flattening dims 0-2 is the KV-cache flatten |
 | SDPA K/V converted with Q | assumes K/V arrive as F16 because the KV cache is |
 | **Position inputs keyed per tensor** | **assumes a graph has exactly one position input** |
 | Folded weights padded to full rank | a 2-D weight becomes a rank-2 constant, but views index it at ggml rank |
 | CONCAT input ranks aligned | same rank-2 constants, and concat cannot broadcast rank |
-| Missing `GELU_ERF` translator | the exact-erf GELU op had no table entry at all, so a graph using it could not run |
 | Naive-path graph cache | that path re-compiled the whole model on every graph_compute, and its `graph_key` is a node count plus tensor names, which two graphs of different shapes can share |
-| Interleaved-mrope sectors bounded | the sector cycle ignored `sections`, so the last few took the wrong stream |
 | Naive-path threshold settable | the 20-node constant is what picks the literal path |
 | **No NPUW for naive graphs on the NPU** | **the NPU config turns on NPUW for llama.cpp's decoder layers, and its partitioning hands the compiler dynamic Reshape inputs** |
 | **An RMSNorm that cannot overflow f16, on the NPU** | **the NPU computes in f16, and a 2048-wide sum of squares overflows once activations reach about 6** |
-| 2D im2col folded into one Convolution | the matcher only knew the 1D chain, so the NPU ran a vision tower's patch embed on its SHAVE cores |
 | NPU compile properties settable | `GGML_OPENVINO_NPU_PROPS="K=V,..."` reaches the compile config, for example `NPU_TURBO=YES` |
 
 The bolded rows are the ones that turned a wrong arch into a correct one:
 PERMUTE op_case 2 for GR00T N1.7, the double-elementwise guard for the Eagle-VLM
-archs on the iGPU, the GELU mode for VLA-JEPA and GR00T N1.5, per-tensor position
-inputs for SmolVLA (which passes three position tensors, so they aliased), no
-NPUW for π0.5, Evo-1, the GR00T models and VLA-JEPA on the NPU, which did not
-compile before, and the f16-safe RMSNorm for the GR00T models and VLA-JEPA,
-which returned NaN there. The 2D im2col fold is a speedup: SmolVLA's 512 px
-views spent 350 ms each in the NPU's patch extraction. The GELU mode and the
-position-input fix are the two worth upstreaming.
+archs on the iGPU, per-tensor position inputs for SmolVLA (which passes three
+position tensors, so they aliased), no NPUW for π0.5, Evo-1, the GR00T models
+and VLA-JEPA on the NPU, which did not compile before, and the f16-safe RMSNorm
+for the GR00T models and VLA-JEPA, which returned NaN there. The position-input
+fix and the naive-path cache are the two worth upstreaming.
+
+Six more fixes were patched here until llama.cpp `v1.0.0`, which has its own:
+GELU as tanh and a `GELU_ERF` translator (they moved VLA-JEPA and GR00T N1.5
+inside the bar), the Intel OpenCL platform (the GPU context now comes from
+OpenVINO's), the RESHAPE `op_case` guard, the IMROPE sector bound, and the 2D
+im2col fold into one Convolution (SmolVLA's 512 px views had spent 350 ms each
+in the NPU's patch extraction).
 
 **Debugging a mistranslation.** The backend writes back true graph outputs and
 nothing else, so an interior tensor is observable only two ways: truncate the
@@ -370,9 +374,10 @@ override. No other arch needs it.
 **The 2D im2col fold costs VLA-Adapter on the CPU plugin.** Folding
 `ggml_conv_2d`'s im2col chain into one Convolution is what made SmolVLA fast on
 the NPU, and on the GPU it is 5-7% faster for VLA-Adapter and OpenVLA-OFT. On the
-CPU plugin it is slower: VLA-Adapter's vision takes 1,100 ms with it and 974 ms
+CPU plugin it is slower: VLA-Adapter's vision took 1,100 ms with it and 974 ms
 without (1,828 against 1,704 ms end to end), measured alternating on the same
-binary. `GGML_OPENVINO_FUSE_CONV2D=0` turns it off.
+binary at `b11223` with vla.cpp's own fold. Since `v1.0.0` the fold is upstream's
+`FuseToConv`, which has no off switch, so `GGML_OPENVINO_FUSE_CONV2D` is gone.
 
 **Do not set `GGML_OPENVINO_CACHE_DIR`.** OpenVINO's on-disk blob cache reloads a
 compiled graph that computes the wrong thing. A cold run against a fresh cache
@@ -385,11 +390,11 @@ several graphs, so one graph gets another's blob - the same class of bug as the
 in-process `graph_key` above, which is now keyed on shapes. In practice, pay the
 compile once per process and leave it unset.
 
-**Every arch now compiles on the NPU, but check every NPU run against the startup
-banner.** An unavailable NPU falls back to the CPU plugin silently and would
-otherwise report excellent numbers that are not NPU numbers at all. A
-partially-failing run still reports a wall-clock time, so do not read a latency
-off a run whose actions did not come out.
+**Every arch now compiles on the NPU, but check every NPU run's actions.** An
+unavailable NPU no longer falls back to the CPU plugin (until llama.cpp `v1.0.0`
+it did, silently, and reported CPU numbers as NPU ones), but a partially-failing
+run still reports a wall-clock time, so do not read a latency off a run whose
+actions did not come out.
 
 At `b10729` the NPU accepted three of the ten archs, and only two of those were
 correct. At `b11223`, with OpenVINO 2026.4 and NPU driver 1.33, all eleven compile

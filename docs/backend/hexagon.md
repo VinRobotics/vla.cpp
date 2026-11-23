@@ -21,7 +21,7 @@ to take once it ran.
 
 ## What "IQ9" and "IQ10" refer to
 
-Two commits, both inside the pinned `b11223` (`4da63377`, 2026-09-27):
+Two commits, both in llama.cpp since `b11223` (`4da63377`, 2026-09-27):
 
 | Commit | Date | What it actually did |
 |---|---|---|
@@ -92,7 +92,7 @@ changed all three conclusions:
 
 - **`RELU` landed upstream**, and the local checkout used here (build 11201) has
   it.
-- **`GELU_ERF` is still missing.** It now runs on the CPU (next point) in every
+- **`GELU_ERF` was missing until llama.cpp `v1.0.0`.** At `b11223` it ran on the CPU (next point) in every
   DINOv2 and SigLIP-so400m tower, and costs what that implies: Evo-1 spends more
   on copies than the NPU saves. An HTP kernel was written and checked on the
   IQ-10 (b11223): more accurate than the CPU's (relative error 1.5e-6 against
@@ -101,7 +101,9 @@ changed all three conclusions:
   VLA-Adapter's and OpenVLA-OFT's DINOv2 MLP and projector build it from ops the
   NPU runs instead (`vla::gelu_erf()`: x*sigmoid(p(x)), p an odd cubic in x
   clamped to [-5, 5], within 2.5e-5 of the exact GELU): VLA-Adapter 740 to
-  705 ms, OpenVLA-OFT 1771 to 1740 ms.
+  705 ms, OpenVLA-OFT 1771 to 1740 ms. `v1.0.0` runs `GELU_ERF` on the NPU
+  itself: Evo-1 goes from 4.56 to 3.31 s on the VENTUNO Q (v75), at 3.75e-4 from
+  the CPU build. GR00T N1.7 has not been re-checked on the IQ-10 with it.
 - **Absent is no longer fatal.** `src/backend_fallback.cpp` wraps the NPU in a
   backend that runs whatever it rejects on the CPU, without touching an arch.
   That also covers ops refused for shape rather than type: softmax rows that are
@@ -112,12 +114,12 @@ these, and they compute something else:
 
 | Op | What goes wrong | Handled by |
 |---|---|---|
-| `GELU` | Runs `x*sigmoid(1.702x)` (GELU_QUICK) | `vla::gelu()` builds the tanh form from correct ops |
+| `GELU` | Runs `x*sigmoid(1.702x)` (GELU_QUICK) | Fixed upstream in `v1.0.0`; before it, `vla::gelu()` built the tanh form from correct ops |
 | `ADD`/`MUL`/... | `src1` broadcast over one dim but not a higher one | Refused, runs on the CPU |
 | `IM2COL` | Wrong unless kernel = stride > 1 and no padding | Refused, runs on the CPU |
 | `CPY` F32→F16 | Reads back wrong on the host | Copies feeding a CPU op run on the CPU |
 | `REPEAT` | Reads stale cache lines of a source written by DMA earlier in the same op batch | Refused, runs on the CPU |
-| fused `MUL_MAT+ADD`, `RMS_NORM+MUL` | ~10x the error of the unfused ops | `GGML_HEXAGON_OPFUSION=0` by default |
+| fused `MUL_MAT+ADD`, `RMS_NORM+MUL` | ~10x the error of the unfused ops | Exact since `v1.0.0` and on; before it, `GGML_HEXAGON_OPFUSION=0` by default |
 
 Each one flips the gripper channel, or comes close, on some checkpoint. The
 earlier warning that a wrong op would be the worse failure than a missing one
@@ -297,7 +299,7 @@ found.
 The upstream path, unchanged, and the thing to get working first - if
 `llama-bench` will not run on the device, nothing downstream matters. Requires
 only Docker on the host; `build.py` pulls
-`ghcr.io/snapdragon-toolchain/arm64-linux:v0.7` itself.
+`ghcr.io/snapdragon-toolchain/arm64-linux:v0.8` itself.
 
 ```bash
 # cross-compile and deploy over SSH in one step
@@ -305,7 +307,7 @@ only Docker on the host; `build.py` pulls
 
 # or by hand, inside the container
 docker run -it --rm -u $(id -u):$(id -g) --volume $(pwd):/workspace \
-    --platform linux/amd64 ghcr.io/snapdragon-toolchain/arm64-linux:v0.7
+    --platform linux/amd64 ghcr.io/snapdragon-toolchain/arm64-linux:v0.8
 [d]/workspace> cp docs/backend/snapdragon/CMakeUserPresets.json .
 [d]/workspace> cmake --preset arm64-linux-snapdragon-release -B build-snapdragon
 [d]/workspace> cmake --build build-snapdragon -j $(nproc)

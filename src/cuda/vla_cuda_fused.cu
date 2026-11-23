@@ -217,6 +217,27 @@ __device__ __forceinline__ T emul_block_sum(int ncols, int lane, T zero, Op op) 
     return warp_sum(mine);
 }
 
+// ggml-cuda's rms_norm (llama.cpp v1.0.0 on) reads float4s when a row is a
+// multiple of 4 columns and every tensor it touches is 16-byte aligned. Each
+// thread then sums whole float4s, x*x + y*y + z*z + w*w, and the block size
+// follows ncols/4. This returns that block size, or 0 for the scalar path
+// (256 threads under 1024 columns, else 1024).
+inline int rms_vec_block(int64_t ncols) {
+    if (ncols <= 0 || ncols % 4 != 0) return 0;
+    const int64_t n4 = ncols / 4;
+    return n4 <= 32 ? 32 : n4 <= 128 ? 128 : n4 <= 256 ? 256 : n4 <= 512 ? 512 : n4 <= 4096 ? 1024 : 0;
+}
+
+// ggml_cuda_is_aligned(t, 16); a null tensor passes.
+inline bool aligned16(const ggml_tensor * t) {
+    return !t || ((uintptr_t) t->data % 16 == 0 && t->nb[1] % 16 == 0 && t->nb[2] % 16 == 0 && t->nb[3] % 16 == 0);
+}
+
+// One float4 of ggml's vectorized rms_norm partial sum, as its statement reads.
+__device__ __forceinline__ void add_sq4(float & acc, const float4 v) {
+    acc += v.x*v.x + v.y*v.y + v.z*v.z + v.w*v.w;
+}
+
 // The epilogue of an emulated rms_norm row: MODE 0 is ggml rms_norm_f32<BS,
 // do_multiply> (scale * x * w); MODE 1 is a plain rms_norm followed by ggml's
 // adaRMS ops, n + n*sc then + sh, each rounded as its own kernel would.
@@ -227,18 +248,25 @@ __device__ __forceinline__ float rms_epilogue(float scale, float xi, const float
     return __fadd_rn(__fadd_rn(n, __fmul_rn(n, p1[col])), p2[col]);
 }
 
-// ggml rms_norm_f32<BS, ...> with one warp per row, then rms_epilogue.
-template <int BS, typename T, int MODE = 0>
+// ggml rms_norm_f32<BS, ...> with one warp per row, then rms_epilogue. VEC is
+// ggml's float4 path (rms_vec_block), which only changes the partial sums.
+template <int BS, typename T, int MODE = 0, bool VEC = false>
 __global__ void k_rms_mul_warp(const float * __restrict__ x, const float * __restrict__ w, T * __restrict__ dst,
                                int ncols, int nrows, float eps, const float * __restrict__ p2 = nullptr) {
     const int row = blockIdx.x*(blockDim.x/WARP)+threadIdx.x/WARP, lane = threadIdx.x%WARP;
     if (row >= nrows) return;
     x   += (int64_t) row*ncols;
     dst += (int64_t) row*ncols;
-    const float tmp = emul_block_sum<BS>(ncols, lane, 0.0f, [&](float & acc, int col) {
-        const float xi = x[col];
-        acc += xi * xi;
-    });
+    float tmp;
+    if constexpr (VEC) {
+        const float4 * x4 = (const float4 *) x;
+        tmp = emul_block_sum<BS>(ncols/4, lane, 0.0f, [&](float & acc, int i) { add_sq4(acc, x4[i]); });
+    } else {
+        tmp = emul_block_sum<BS>(ncols, lane, 0.0f, [&](float & acc, int col) {
+            const float xi = x[col];
+            acc += xi * xi;
+        });
+    }
     const float mean = tmp / ncols;
     const float scale = rsqrtf(mean + eps);
     for (int col = lane; col < ncols; col += WARP)
@@ -266,10 +294,11 @@ __global__ void k_patchify(const P * __restrict__ img, float * __restrict__ out,
     out[i] = __fdiv_rn(__fsub_rn(raw, mean), sd);
 }
 
-// ggml rms_norm_f32<256, mul> per (token, head) row of hd, then rope_multi
-// (IMROPE, no YaRN) on the registers, written in the attention layout.
+// ggml rms_norm_f32<RBS, mul> per (token, head) row of hd (VEC: its float4
+// path, see rms_vec_block), then rope_multi (IMROPE, no YaRN) on the registers,
+// written in the attention layout.
 // One warp per row; lane l owns the rotated pairs (l, l+hd/2), (l+32, l+32+hd/2), ...
-template <typename T>
+template <typename T, int RBS = 256, bool VEC = false>
 __global__ void k_qk_norm_rope(const float * __restrict__ x, const float * __restrict__ w, const int32_t * __restrict__ pos,
                                T * __restrict__ dst, int hd, int heads, int ntok, float eps, float theta_scale,
                                int s0, int s1, int s2, int s3) {
@@ -277,10 +306,16 @@ __global__ void k_qk_norm_rope(const float * __restrict__ x, const float * __res
     if (row >= heads*ntok) return;
     const int h = row%heads, t = row/heads, half = hd/2;
     const float * xr = x+(int64_t) row*hd;
-    const float tmp = emul_block_sum<256>(hd, lane, 0.0f, [&](float & acc, int col) {
-        const float xi = xr[col];
-        acc += xi * xi;
-    });
+    float tmp;
+    if constexpr (VEC) {
+        const float4 * x4 = (const float4 *) xr;
+        tmp = emul_block_sum<RBS>(hd/4, lane, 0.0f, [&](float & acc, int i) { add_sq4(acc, x4[i]); });
+    } else {
+        tmp = emul_block_sum<RBS>(hd, lane, 0.0f, [&](float & acc, int col) {
+            const float xi = xr[col];
+            acc += xi * xi;
+        });
+    }
     const float mean = tmp / hd;
     const float scale = rsqrtf(mean + eps);
     const int sect_dims = s0+s1+s2+s3;
@@ -346,6 +381,46 @@ __global__ void k_rms_mul_reg(const float * __restrict__ x, const float * __rest
     for (int j = 0; j < NPL; ++j) {
         const int col = j*WARP+lane;
         if (col < ncols) st_out(dst, col, rms_epilogue<MODE>(scale, v[j], w, p2, col));
+    }
+}
+
+// k_rms_mul_reg on ggml's float4 path with one float4 per ggml thread (ncols/4
+// <= BS): lane l holds float4 j*32 + l, which is ggml thread j*32 + l's.
+template <int BS, typename T, int MODE = 0>
+__global__ void k_rms_mul_reg4(const float * __restrict__ x, const float * __restrict__ w, T * __restrict__ dst,
+                               int ncols, int nrows, float eps, const float * __restrict__ p2 = nullptr) {
+    constexpr int NW = BS/WARP;
+    const int row = blockIdx.x*(blockDim.x/WARP)+threadIdx.x/WARP, lane = threadIdx.x%WARP;
+    if (row >= nrows) return;
+    x   += (int64_t) row*ncols;
+    dst += (int64_t) row*ncols;
+    const float4 * x4 = (const float4 *) x;
+    const int      n4 = ncols/4;
+    float4 v[NW];
+    float  p[NW];
+#pragma unroll
+    for (int j = 0; j < NW; ++j) {
+        const int i = j*WARP+lane;
+        float tmp = 0.0f;
+        v[j] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (i < n4) {
+            v[j] = x4[i];
+            add_sq4(tmp, v[j]);
+        }
+        p[j] = tmp;
+    }
+    const float sum = NW > 1 ? warp_sum(warp_sums_t<NW>(p, lane, 0.0f)) : warp_sum(p[0]);
+    const float mean = sum / ncols;
+    const float scale = rsqrtf(mean + eps);
+#pragma unroll
+    for (int j = 0; j < NW; ++j) {
+        const int i = j*WARP+lane, col = 4*i;
+        if (i < n4) {
+            st_out(dst, col,   rms_epilogue<MODE>(scale, v[j].x, w, p2, col));
+            st_out(dst, col+1, rms_epilogue<MODE>(scale, v[j].y, w, p2, col+1));
+            st_out(dst, col+2, rms_epilogue<MODE>(scale, v[j].z, w, p2, col+2));
+            st_out(dst, col+3, rms_epilogue<MODE>(scale, v[j].w, w, p2, col+3));
+        }
     }
 }
 
@@ -582,7 +657,8 @@ __device__ __forceinline__ void act_row_pairs(Load load, const float * __restric
 }
 
 // A norm as k_ln_reg / k_rms_mul_reg compute it for rows of 1024 columns or
-// more (ggml's 1024-thread block), then act_row_pairs on the normed values.
+// more (ggml's 1024-thread block; for RMS on ggml's float4 path, rbs > 0, the
+// block rms_vec_block picks), then act_row_pairs on the normed values.
 // ggml thread t sums columns t, t + 1024, ...; warp w here reduces ggml warps
 // w, w + NW, ... with the same butterfly, and warp 0 runs the second stage
 // over the 32 warp sums.
@@ -590,7 +666,7 @@ template <vla::FusedKind NORM, int ABITS, int ROT, int NW>
 __global__ void __launch_bounds__(NW * 32) k_norm_act(const float * __restrict__ x, const float * __restrict__ p1,
                                                        const float * __restrict__ p2, const float * __restrict__ ascale,
                                                        int8_t * __restrict__ blob, int K, int64_t row_bytes, float eps,
-                                                       bool fold_before, float clip, float inv_sqrt_bs) {
+                                                       bool fold_before, float clip, float inv_sqrt_bs, int rbs) {
     constexpr bool RMS = NORM == vla::FusedKind::RmsModulate;
     __shared__ float2 part[WARP];
     __shared__ float2 stat;
@@ -599,13 +675,19 @@ __global__ void __launch_bounds__(NW * 32) k_norm_act(const float * __restrict__
     x += m * K;
     for (int w = warp; w < WARP; w += NW) {
         float2 acc = make_float2(0.0f, 0.0f);
-        for (int col = w*WARP+lane; col < K; col += WARP*WARP) {
-            const float xi = x[col];
-            if (RMS) {
-                acc.x += xi * xi;
-            } else {
-                acc.x += xi;
-                acc.y += xi * xi;
+        if (RMS && rbs) {
+            // ggml's float4 path: block rbs, threads at or past it hold nothing.
+            const float4 * x4 = (const float4 *) x;
+            for (int i = w*WARP+lane; i < K/4; i += rbs) add_sq4(acc.x, x4[i]);
+        } else {
+            for (int col = w*WARP+lane; col < K; col += WARP*WARP) {
+                const float xi = x[col];
+                if (RMS) {
+                    acc.x += xi * xi;
+                } else {
+                    acc.x += xi;
+                    acc.y += xi * xi;
+                }
             }
         }
         if (RMS) acc.x = warp_sum(acc.x);
@@ -650,11 +732,13 @@ bool launch_norm_act_n(const vla::FusedSpec & s, const ggml_tensor * dst, cudaSt
     constexpr int NW = 8;
     const ggml_tensor * x = dst->src[0];
     auto f = [](const ggml_tensor * t) { return t ? (const float *) t->data : nullptr; };
+    // RmsModulate's reference is a plain rms_norm, so only x decides its path.
+    const int rbs = NORM == vla::FusedKind::RmsModulate && aligned16(x) ? rms_vec_block(x->ne[0]) : 0;
     auto go = [&](auto kern) {
         kern<<<(unsigned) dst->ne[1], NW * 32, 0, st>>>((const float *) x->data, f(dst->src[1]), f(dst->src[2]),
                                                        f(dst->src[3]), (int8_t *) dst->data, (int) x->ne[0],
                                                        (int64_t) dst->ne[0], s.eps, s.fold_before != 0, s.clip,
-                                                       s.inv_sqrt_bs);
+                                                       s.inv_sqrt_bs, rbs);
         return true;
     };
     switch (s.rot_block) {
@@ -2135,17 +2219,28 @@ void launch_qkv(const vla::FusedSpec & s, const ggml_tensor * dst, T * out, cuda
 }
 
 // RmsMul (MODE 0) / RmsModulate (MODE 1) with ggml rms_norm_f32's block size:
-// 1024 threads from 1024 columns up, else 256.
+// on its float4 path the one rms_vec_block picks, else 1024 threads from 1024
+// columns up and 256 below. MODE 0's reference fuses the weight into the norm,
+// so the weight's layout counts too; MODE 1's is a plain rms_norm.
 template <int MODE>
 void launch_rms(const ggml_tensor * dst, const vla::FusedSpec & s, cudaStream_t st) {
     const ggml_tensor * a = dst->src[0];
     const float * x = fptr(a), * p1 = fptr(dst->src[1]), * p2 = MODE ? fptr(dst->src[2]) : nullptr;
     const int ncols = (int) a->ne[0], nrows = (int) ggml_nrows(a), g = (nrows+3)/4;
+    const bool vec_ok = aligned16(a) && (MODE == 1 || (aligned16(dst->src[1]) && dst->src[1]->ne[0] == ncols));
+    const int  vbs    = vec_ok ? rms_vec_block(ncols) : 0;
     auto go = [&](auto * o) {
-        if (ncols > 1024 && ncols <= 2048) k_rms_mul_reg<64, 1024, std::remove_pointer_t<decltype(o)>, MODE><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
-        else if (ncols == 1024)            k_rms_mul_reg<32, 1024, std::remove_pointer_t<decltype(o)>, MODE><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
-        else if (ncols < 1024)             k_rms_mul_warp<256, std::remove_pointer_t<decltype(o)>, MODE><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
-        else                               k_rms_mul_warp<1024, std::remove_pointer_t<decltype(o)>, MODE><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
+        using T = std::remove_pointer_t<decltype(o)>;
+        if (vbs == 256 && ncols == 1024)   k_rms_mul_reg4<256, T, MODE><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
+        else if (vbs == 512)               k_rms_mul_reg4<512, T, MODE><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
+        else if (vbs == 32)                k_rms_mul_warp<32,   T, MODE, true><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
+        else if (vbs == 128)               k_rms_mul_warp<128,  T, MODE, true><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
+        else if (vbs == 256)               k_rms_mul_warp<256,  T, MODE, true><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
+        else if (vbs == 1024)              k_rms_mul_warp<1024, T, MODE, true><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
+        else if (ncols > 1024 && ncols <= 2048) k_rms_mul_reg<64, 1024, T, MODE><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
+        else if (ncols == 1024)            k_rms_mul_reg<32, 1024, T, MODE><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
+        else if (ncols < 1024)             k_rms_mul_warp<256, T, MODE><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
+        else                               k_rms_mul_warp<1024, T, MODE><<<g, 128, 0, st>>>(x, p1, o, ncols, nrows, s.eps, p2);
     };
     if (dst->type == GGML_TYPE_BF16) go((__nv_bfloat16 *) dst->data);
     else                             go((float *) dst->data);
@@ -2273,12 +2368,23 @@ extern "C" bool vla_cuda_fused_forward(ggml_tensor * dst, void * stream_v) {
             // ggml computes theta_scale on the host the same way.
             const float theta_scale = powf(s->freq_base, -2.0f / s->hd);
             const int rows = s->heads*s->S, g = (rows+3)/4;
-            if (dst->type == GGML_TYPE_F16)
-                k_qk_norm_rope<<<g, 128, 0, st>>>(fptr(a), fptr(dst->src[1]), (const int32_t *) dst->src[2]->data, (half *) dst->data,
-                                                  s->hd, s->heads, s->S, s->eps, theta_scale, s->sect[0], s->sect[1], s->sect[2], s->sect[3]);
-            else
-                k_qk_norm_rope<<<g, 128, 0, st>>>(fptr(a), fptr(dst->src[1]), (const int32_t *) dst->src[2]->data, out,
-                                                  s->hd, s->heads, s->S, s->eps, theta_scale, s->sect[0], s->sect[1], s->sect[2], s->sect[3]);
+            // ggml's rms_norm runs on [hd, heads, tokens] with the weight fused in.
+            const bool vec_ok = aligned16(a) && aligned16(dst->src[1]) && dst->src[1]->ne[0] == s->hd;
+            const int  vbs    = vec_ok ? rms_vec_block(s->hd) : 0;
+            auto go = [&](auto * o) {
+                using T = std::remove_pointer_t<decltype(o)>;
+                auto run = [&](auto kern) {
+                    kern<<<g, 128, 0, st>>>(fptr(a), fptr(dst->src[1]), (const int32_t *) dst->src[2]->data, o, s->hd,
+                                            s->heads, s->S, s->eps, theta_scale, s->sect[0], s->sect[1], s->sect[2],
+                                            s->sect[3]);
+                };
+                if (vbs == 32)       run(k_qk_norm_rope<T, 32, true>);
+                else if (vbs == 128) run(k_qk_norm_rope<T, 128, true>);
+                else if (vbs == 256) run(k_qk_norm_rope<T, 256, true>);
+                else                 run(k_qk_norm_rope<T, 256>);
+            };
+            if (dst->type == GGML_TYPE_F16) go((half *) dst->data);
+            else                            go(out);
             break;
         }
         case vla::FusedKind::SiluMul: {

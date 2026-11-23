@@ -1,7 +1,7 @@
 # vla.cpp on Snapdragon X (Windows on Arm): Hexagon NPU, Adreno GPU and CPU
 
 Measured 2026-09 against llama.cpp build 11201 (`2145525a4`), passed in with
-`-LlamaDir`. The `b11223` tag that `CMakeLists.txt` pins was not tested.
+`-LlamaDir`. The `v1.0.0` tag that `CMakeLists.txt` pins was not tested on this laptop.
 
 ## Summary
 
@@ -48,7 +48,7 @@ The NPU path needs the same one-off setup as llama.cpp's Hexagon backend: a newe
 |---|---|---|
 | Visual Studio | 2026 (18), MSVC 14.51, ARM64 libraries | Its bundled Clang 22.1.3, CMake and Ninja build everything |
 | Windows SDK / WDK | 10.0.26100 | `inf2cat` and `signtool`, to sign the HTP skels |
-| Hexagon SDK | 6.6.0.0, tools 19.0.07 (`HEXAGON_SDK_ROOT`, `HEXAGON_TOOLS_ROOT`) | Building the HTP skels |
+| Hexagon SDK | 6.7.0.0, tools 21.0.04 (`HEXAGON_SDK_ROOT`, `HEXAGON_TOOLS_ROOT`); llama.cpp v1.0.0 needs tools 21 | Building the HTP skels |
 | OpenCL SDK | 2.3.2 (`OPENCL_SDK_ROOT`) | The Adreno backend |
 | vcpkg | `C:\vcpkg` | protobuf 6.33.4 (triplet `arm64-windows-clangcl`, in this repo), zeromq 4.3.5 and cppzmq (stock `arm64-windows`) for `vla-server` |
 | Python | 3.14.7 ARM64, venv in `.venv` | `transformers` 5.17, `tokenizers`, `gguf`, `numpy`: tokenizing prompts and `scripts/quantize_gguf.py` |
@@ -79,7 +79,7 @@ The build script sets up the Visual Studio shell, the compiler flags llama.cpp's
 
 Each build goes into `build-wos-<backend>`, with every binary and DLL in `build-wos-<backend>\bin`. `-NoServer` skips `vla-server`, SentencePiece and their protobuf and ZeroMQ dependencies, so Octo `--text` needs `--tokens` there.
 
-`-LlamaDir` points the build at an existing llama.cpp checkout through `FETCHCONTENT_SOURCE_DIR_LLAMA`. Without it, the `b11223` pin in `CMakeLists.txt` applies, which was not tested here.
+`-LlamaDir` points the build at an existing llama.cpp checkout through `FETCHCONTENT_SOURCE_DIR_LLAMA`. Without it, the `v1.0.0` pin in `CMakeLists.txt` applies, which was not tested here.
 
 The HTP build also signs `libggml-htp-v*.so` with the certificate and copies the skels and their catalog next to the binaries. At startup the Hexagon backend points `ADSP_LIBRARY_PATH` at the executable's own folder, but only if the variable is unset. If it is already set, for example by a llama.cpp install, the skels it names must come from the same llama.cpp commit.
 
@@ -135,7 +135,7 @@ PyTorch and LIBERO; the smoke test used a 20-line pyzmq client instead.
 | `--weight-dtype f16\|f32\|bf16` | Resident dtype for GEMM weights. New: `f16`, which is also the default on both accelerators. |
 | `--flash-attn on\|off` | On by default in Hexagon builds, off elsewhere |
 | `VLA_FALLBACK_STATS=1` | Print how each graph was split between the accelerator and the CPU |
-| `GGML_HEXAGON_OPFUSION` | Defaults to `0` here (see below); set to `1` to trade precision for speed |
+| `GGML_HEXAGON_OPFUSION` | ggml's default, on. vla.cpp forced it to `0` before llama.cpp `v1.0.0` (see below) |
 | `GGML_OPENCL_ADRENO_XMEM_GEMM` | Defaults to `0` here (see below); set to `1` to trade precision for speed |
 
 Each process prints which ops the accelerator gave to the CPU, once per op type, and a summary when it exits:
@@ -157,7 +157,7 @@ The engine drives one backend per model through `gallocr`, with no scheduler. Th
 - Runs it rejects are copied to host memory, computed on a CPU backend, and copied back.
 - Weights that a CPU op reads are copied once and kept.
 
-No arch's call sites changed, and CUDA, Metal, SYCL and OpenVINO builds do not compile the wrapper at all. The Hexagon- and OpenCL-specific graph changes (`fa_kv`, `gelu`, the default weight dtype and flash attention) sit behind the same build flags and reduce to the old calls elsewhere. SmolVLA's CPU BF16 output was checked bit-identical before and after them. The other archs were not re-checked against a pre-change build, because the unmodified tree does not build on Windows.
+No arch's call sites changed, and CUDA, Metal, SYCL and OpenVINO builds do not compile the wrapper at all. The Hexagon- and OpenCL-specific graph changes (`fa_kv`, `gelu_erf`, the default weight dtype and flash attention) sit behind the same build flags and reduce to the old calls elsewhere. SmolVLA's CPU BF16 output was checked bit-identical before and after them. The other archs were not re-checked against a pre-change build, because the unmodified tree does not build on Windows.
 
 The wrapper is also where Hexagon's wrong kernels are refused (next section). Forcing every op through the CPU path (`GGML_HEXAGON_OPFILTER=.*`) reproduces a pure-CPU run bit for bit.
 
@@ -167,11 +167,11 @@ Each issue below was found by moving op families to the CPU with `GGML_HEXAGON_O
 
 | Issue | Seen on | Error on the NPU | After the fix | Where fixed |
 |---|---|---:|---:|---|
-| Unary `GELU` runs `x*sigmoid(1.702x)`, which is GELU_QUICK. Upstream maps both ops to one kernel. | SmolVLA (SigLIP) | 1.9 | 1.5e-3 | `vla::gelu()` builds the tanh form exactly as `x*sigmoid(2c(x+0.044715x³))` from ops the NPU gets right. The wrapper refuses any remaining `GGML_UNARY_OP_GELU`. |
+| Unary `GELU` runs `x*sigmoid(1.702x)`, which is GELU_QUICK. Upstream maps both ops to one kernel. | SmolVLA (SigLIP) | 1.9 | 1.5e-3 | Fixed upstream in `v1.0.0`. Before it, `vla::gelu()` built the tanh form exactly as `x*sigmoid(2c(x+0.044715x³))` from ops the NPU gets right, and the wrapper refused any remaining `GGML_UNARY_OP_GELU`. |
 | Binary op with `src1` broadcast over one dimension but not a higher one, e.g. `[64,12,261,2] * [64,1,261,1]` | TurboVLA (RoPE), Octo | 0.72 | 6.0e-4 | Wrapper sends these to the CPU |
 | `IM2COL` accepts any geometry, but is right only for patch embeddings (kernel = stride > 1, no padding) | Octo (stride-2 pad-1 stem, 1x1 projection) | 1.05 | 5.2e-4 | Wrapper sends other geometries to the CPU; SigLIP's 16x16/16 stays on the NPU |
 | An F32→F16 `CPY` computed on the NPU reads back wrong on the host, though the NPU's own consumers see it correctly | SmolVLA with FA forced to CPU | 1.2 | 1.7e-3 | A copy that feeds a CPU op runs on the CPU too |
-| Op fusion (MUL_MAT+ADD, RMS_NORM+MUL) | SmolVLA | 1.2e-2 | 1.6e-3 | `GGML_HEXAGON_OPFUSION` defaults to 0 |
+| Op fusion (MUL_MAT+ADD, RMS_NORM+MUL) | SmolVLA | 1.2e-2 | 1.6e-3 | Exact upstream since `v1.0.0`, where it stays on. Before it, vla.cpp defaulted `GGML_HEXAGON_OPFUSION` to 0 |
 
 Two further changes keep work on the NPU:
 
